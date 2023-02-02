@@ -117,7 +117,7 @@ defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
 defaults write com.apple.dock autohide -bool true
 defaults write com.apple.dock autohide-delay -float 0
 defaults write com.apple.dock autohide-time-modifier -float "0.5"
-defaults write com.apple.dock "tilesize" -int "36" && killall Dock
+defaults write com.apple.dock "tilesize" -int "36"
 
 #"Setting email addresses to copy as 'foo@example.com' instead of 'Foo Bar <foo@example.com>' in Mail.app"
 defaults write com.apple.mail AddressesIncludeNameOnPasteboard -bool false
@@ -155,7 +155,7 @@ defaults write com.apple.Safari WebKitDeveloperExtrasEnabledPreferenceKey -bool 
 defaults write com.apple.Safari "com.apple.Safari.ContentPageGroupIdentifier.WebKit2DeveloperExtrasEnabled" -bool true
 
 # Safari Show Full URL
-defaults write com.apple.safari "ShowFullURLInSmartSearchField" -bool "true" && killall Safar
+defaults write com.apple.safari "ShowFullURLInSmartSearchField" -bool "true"
 
 #"Adding a context menu item for showing the Web Inspector in web views"
 defaults write NSGlobalDomain WebKitDeveloperExtras -bool true
