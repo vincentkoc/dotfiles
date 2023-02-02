@@ -1,17 +1,20 @@
 #!/bin/bash
+
+set -euo pipefail
+
+#
+# natilius - 🐚 Automated One-Click Mac Developer Enviroment
+# author: @koconder
+#
 # Insparation
 # https://gist.github.com/bradp/bea76b16d3325f5c47d4
 # https://gist.github.com/vraravam/5e28ca1720c9dddacdc0e6db61e093fe
 
-# http://redsymbol.net/articles/unofficial-bash-strict-mode/
-#set -euo pipefail
-# `set -eu` causes an 'unbound variable' error in case SUDO_USER is not set
-
-####
+############################
 #
 # Config
 #
-####
+############################
 
 SUDO_USER=$(whoami)
 TIMESTAMP=$(date +%s)
@@ -131,34 +134,39 @@ CASKS=(
     vlc
     zoom
 )
-####
+
+############################
 #
 # Start Setup
 #
-####
+############################
 
 echo -e "\033[0;33m"
 cat << "EOF"
-              ________
-          ,o88~~88888888o,
-        ,~~?8P  88888     8,
-       d  d88 d88 d8_88     b
-      d  d888888888          b
-      8,?88888888  d8.b o.   8
-      8~88888888~ ~^8888\ db 8
-      ?  888888          ,888P
-       ?  `8888b,_      d888P
-        `   8888888b   ,888'
-          ~-?8888888 _.P-~ 
-            ~~  ~~  ~~
-        __ _| |_| | __ _ ___ 
-       / _` | __| |/ _` / __|
-      | (_| | |_| | (_| \__ \
-       \__,_|\__|_|\__,_|___/
+ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀ 
+ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣴⣶⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀ 
+ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⣾⣿⣿⣿⠀⢸⣿⣿⣿⣿⣶⣶⣤⣀⠀⠀⠀⠀⠀ 
+ ⠀⠀⠀⠀⠀⢀⣴⡇⢀⣾⣿⣿⣿⣿⣿⠀⣾⣿⣿⣿⣿⣿⣿⣿⠿⠓⠀⠀⠀⠀ 
+ ⠀⠀⠀⠀⣰⣿⣿⡀⢸⣿⣿⣿⣿⣿⣿⠀⣿⣿⣿⣿⣿⣿⠟⠁⣠⣄⠀⠀⠀⠀ 
+ ⠀⠀⠀⢠⣿⣿⣿⣇⠀⢿⣿⣿⣿⣿⣿⠀⢻⣿⣿⣿⡿⢃⣠⣾⣿⣿⣧⡀⠀⠀ 
+ ⠀⠀⠀⢸⣿⣿⣿⣿⣆⠘⢿⣿⡿⠛⢉⠀⠀⠉⠙⠛⣠⣿⣿⣿⣿⣿⣿⣷⠀⠀ 
+ ⠀⠀⠠⣾⣿⣿⣿⣿⣿⣧⠈⠋⢀⣴⣧⠀⣿⡏⢠⡀⢸⣿⣿⣿⣿⣿⣿⣿⡇⠀ 
+ ⠀⠀⣀⠙⢿⣿⣿⣿⣿⣿⠇⢠⣿⣿⣿⡄⠹⠃⠼⠃⠈⠉⠛⠛⠛⠛⠛⠻⠇⠀ 
+ ⠀⢸⡟⢠⣤⠉⠛⠿⢿⣿⠀⢸⣿⡿⠋⣠⣤⣄⠀⣾⣿⣿⣶⣶⣶⣦⡄⠀⠀⠀ 
+ ⠀⠸⠀⣾⠏⣸⣷⠂⣠⣤⠀⠘⢁⣴⣾⣿⣿⣿⡆⠘⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀ 
+ ⠀⠀⠀⠛⠀⣿⡟⠀⢻⣿⡄⠸⣿⣿⣿⣿⣿⣿⣿⡀⠘⣿⣿⣿⣿⠟⠀⠀⠀⠀ 
+ ⠀⠀⠀⠀⠀⣿⠇⠀⠀⢻⡿⠀⠈⠻⣿⣿⣿⣿⣿⡇⠀⢹⣿⠿⠋⠀⠀⠀⠀⠀ 
+ ⠀⠀⠀⠀⠀⠋⠀⠀⠀⡘⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠁⠀⠀⠀⠀⠀⠀  
+                   _ _ _            
+              _   (_) (_)           
+  ____   ____| |_  _| |_ _   _  ___ 
+ |  _ \ / _  |  _)| | | | | | |/___)
+ | | | ( ( | | |__| | | | |_| |___ |
+ |_| |_|\_||_|\___)_|_|_|\____(___/ 
+                                   
+ Welcome to natilius
 
- Welcome to atlas
-
- atlas is an automated script to help speed up
+ natilius is an automated script to help speed up
  development on a mac machine by scafholding 
  all your key development apps, settings, dotfiles
  configration and have you up and running in no
@@ -169,26 +177,26 @@ cat << "EOF"
  assumes the iCloud as the primary location for
  dotfiles and configration.
 
- Starting atlas...
+ Starting natilius...
 
 EOF
 
-###
+############################
 #
 # Helper Functions
 #
-####
+############################
 
 # Set UUID for plists
 if [[ `ioreg -rd1 -c IOPlatformExpertDevice | grep -i "UUID" | cut -c27-50` != "00000000-0000-1000-8000-" ]]; then
     macUUID=`ioreg -rd1 -c IOPlatformExpertDevice | grep -i "UUID" | cut -c27-62`
 fi
 
-####
+############################
 #
 # Check enviroment (Login, iCloud)
 #
-####
+############################
 echo -e "\033[0;36mLogging enabled...\033[0m"
 echo -e "\033[0;33m[ ?? ]\033[0m \033[0;36mLog file printing to [$LOGFILE]\033[0m"
 echo -e
@@ -211,11 +219,11 @@ echo -e
 echo -e "\033[0;36mClosing System Preferences pane if open...\033[0m"
 osascript -e 'tell application "System Preferences" to quit'
 
-####
+############################
 #
 # Setup enviroment
 #
-####
+############################
 echo -e
 echo -e "\033[0;36mSetting up custom home directories...\033[0m"
 for a in "${DIRS[@]}";
@@ -353,7 +361,6 @@ sudo defaults write /Library/Preferences/com.apple.loginwindow GuestEnabled -boo
 # Battery Bar
 #defaults write com.apple.menuextra.battery ShowTime -string "YES"
 defaults write com.apple.menuextra.battery ShowPercent -string "YES"
-
 #Disable the sound effects on boot
 sudo nvram SystemAudioVolume=" "
 
