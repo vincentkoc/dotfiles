@@ -226,12 +226,21 @@ defaults write com.apple.menuextra.clock "DateFormat" -string "\"EEE d MMM HH:mm
 defaults write com.apple.controlcenter "NSStatusItem Visible WiFi" -bool false
 
 # Show Path Bar
-defaults write com.apple.finder "ShowPathbar" -bool "true" && killall Finder
+defaults write com.apple.finder "ShowPathbar" -bool "true"
 
-killall Finder
-# # Kill affected applications
-# for app in Finder Dock Mail Safari iTunes iCal Address\ Book SystemUIServer; do killall "$app" > /dev/null 2>&1; done
-# echo "Done. Note that some of these changes require a logout/restart to take effect."
+# Kill affected applications
+KILLAPPS=(
+    Finder
+    Dock
+    Mail
+    Safari
+    iTunes
+    iCal
+    Address\ Book
+    SystemUIServer
+
+)
+killall ${KILLAPPS[@]}
 
 # echo "Setting up Touch ID for sudo..."
 # read -p "Press [Enter] key after this..."
