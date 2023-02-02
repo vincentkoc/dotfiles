@@ -173,6 +173,17 @@ cat << "EOF"
 
 EOF
 
+###
+#
+# Helper Functions
+#
+####
+
+# Set UUID for plists
+if [[ `ioreg -rd1 -c IOPlatformExpertDevice | grep -i "UUID" | cut -c27-50` != "00000000-0000-1000-8000-" ]]; then
+    macUUID=`ioreg -rd1 -c IOPlatformExpertDevice | grep -i "UUID" | cut -c27-62`
+fi
+
 ####
 #
 # Check enviroment (Login, iCloud)
@@ -210,47 +221,60 @@ echo -e "\033[0;36mSetting up custom home directories...\033[0m"
 for a in "${DIRS[@]}";
 do mkdir -p "[$a]" && echo -e "\033[0;32m[ ✓✓ ]\033[0m \033[0;36mCreated folder if missing [$a]\033[0m"
 done
-exit 0
 
-# Ask for the administrator password upfront
 
-# Keep-alive: update existing `sudo` time stamp until `.macos` has finished
-while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
-
-# Set UUID for plists
-if [[ `ioreg -rd1 -c IOPlatformExpertDevice | grep -i "UUID" | cut -c27-50` != "00000000-0000-1000-8000-" ]]; then
-    macUUID=`ioreg -rd1 -c IOPlatformExpertDevice | grep -i "UUID" | cut -c27-62`
-fi
-
-#Reveal system info (IP address, hostname, OS version, etc.) when clicking the clock in the login screen
-sudo defaults write /Library/Preferences/com.apple.loginwindow AdminHostInfo HostName
-
-#"Scroll direction not natural"
-defaults write -g com.apple.swipescrolldirection -bool NO
-
+echo -e "\033[0;36mUpdating preferences (Finder)...\033[0m"
 #"Expanding the save panel by default"
 defaults write NSGlobalDomain NSNavPanelExpandedStateForSaveMode -bool true
 defaults write NSGlobalDomain PMPrintingExpandedStateForPrint -bool true
 defaults write NSGlobalDomain PMPrintingExpandedStateForPrint2 -bool true
-
 # Disable the “reopen windows when logging back in” option
 # This works, although the checkbox will still appear to be checked,
 # and the command needs to be entered again for every restart.
 defaults write com.apple.loginwindow TALLogoutSavesState -bool false
 defaults write com.apple.loginwindow LoginwindowLaunchesRelaunchApps -bool false
+# Show status bar in Finder
+defaults write com.apple.finder ShowStatusBar -bool true
+#"Allow text selection in Quick Look"
+defaults write com.apple.finder QLEnableTextSelection -bool TRUE
+# Smaller sidebar icons
+defaults write NSGlobalDomain "NSTableViewDefaultSizeMode" -int "1"
+# Show the ~/Library folder
+chflags nohidden ~/Library
+#"Use column view in all Finder windows by default"
+defaults write com.apple.finder FXPreferredViewStyle -string "clmv"
+# Folders Ontop
+defaults write com.apple.finder "_FXSortFoldersFirst" -bool "true"
+defaults write com.apple.finder "_FXSortFoldersFirstOnDesktop" -bool "true"
+# Search Scope set to current folder
+defaults write com.apple.finder "FXDefaultSearchScope" -string "SCcf"
+#"Showing all filename extensions in Finder by default"
+defaults write NSGlobalDomain AppleShowAllExtensions -bool true
+defaults write com.apple.Finder AppleShowAllFiles 1
+#"Avoiding the creation of .DS_Store files on network volumes"
+defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
+#"Enabling snap-to-grid for icons on the desktop and in other icon views"
+/usr/libexec/PlistBuddy -c "Set :DesktopViewSettings:IconViewSettings:arrangeBy grid" ~/Library/Preferences/com.apple.finder.plist
+/usr/libexec/PlistBuddy -c "Set :FK_StandardViewSettings:IconViewSettings:arrangeBy grid" ~/Library/Preferences/com.apple.finder.plist
+/usr/libexec/PlistBuddy -c "Set :StandardViewSettings:IconViewSettings:arrangeBy grid" ~/Library/Preferences/com.apple.finder.plist
 
-# Enable full keyboard access for all controls (e.g. enable Tab in modal dialogs)
-defaults write NSGlobalDomain AppleKeyboardUIMode -int 3
-
+#Reveal system info (IP address, hostname, OS version, etc.) when clicking the clock in the login screen
+sudo defaults write /Library/Preferences/com.apple.loginwindow AdminHostInfo HostName
 # Require password immediately after sleep or screen saver begins
 defaults write com.apple.screensaver askForPassword -int 1
 defaults write com.apple.screensaver askForPasswordDelay -int 0
 
-# Show status bar in Finder
-defaults write com.apple.finder ShowStatusBar -bool true
 
-#"Allow text selection in Quick Look"
-defaults write com.apple.finder QLEnableTextSelection -bool TRUE
+
+#"Scroll direction not natural"
+defaults write -g com.apple.swipescrolldirection -bool NO
+# Enable full keyboard access for all controls (e.g. enable Tab in modal dialogs)
+defaults write NSGlobalDomain AppleKeyboardUIMode -int 3
+
+
+
+
+
 
 #"Automatically quit printer app once the print jobs complete"
 defaults write com.apple.print.PrintingPrefs "Quit When Finished" -bool true
@@ -267,33 +291,7 @@ defaults write com.apple.finder ShowExternalHardDrivesOnDesktop -bool true
 #"Disabling the warning when changing a file extension"
 defaults write com.apple.finder FXEnableExtensionChangeWarning -bool false
 
-# Smaller sidebar icons
-defaults write NSGlobalDomain "NSTableViewDefaultSizeMode" -int "1"
 
-# Show the ~/Library folder
-chflags nohidden ~/Library
-
-#"Use column view in all Finder windows by default"
-defaults write com.apple.finder FXPreferredViewStyle -string "clmv"
-
-# Folders Ontop
-defaults write com.apple.finder "_FXSortFoldersFirst" -bool "true"
-defaults write com.apple.finder "_FXSortFoldersFirstOnDesktop" -bool "true"
-
-# Search Scope set to current folder
-defaults write com.apple.finder "FXDefaultSearchScope" -string "SCcf"
-
-#"Showing all filename extensions in Finder by default"
-defaults write NSGlobalDomain AppleShowAllExtensions -bool true
-defaults write com.apple.Finder AppleShowAllFiles 1
-
-#"Avoiding the creation of .DS_Store files on network volumes"
-defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
-
-#"Enabling snap-to-grid for icons on the desktop and in other icon views"
-/usr/libexec/PlistBuddy -c "Set :DesktopViewSettings:IconViewSettings:arrangeBy grid" ~/Library/Preferences/com.apple.finder.plist
-/usr/libexec/PlistBuddy -c "Set :FK_StandardViewSettings:IconViewSettings:arrangeBy grid" ~/Library/Preferences/com.apple.finder.plist
-/usr/libexec/PlistBuddy -c "Set :StandardViewSettings:IconViewSettings:arrangeBy grid" ~/Library/Preferences/com.apple.finder.plist
 
 #"Setting Dock to auto-hide and removing the auto-hiding delay"
 defaults write com.apple.dock autohide -bool true
