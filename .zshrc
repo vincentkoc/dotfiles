@@ -1,12 +1,29 @@
 ######
 #
-# pyenv and homebrew
+# homebrew
+#
+######
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+######
+#
+# pyenv (python)
 #
 ######
 
 export PYENV_ROOT="$(pyenv root)"
-export PATH="$PYENV_ROOT/shims:/usr/local/sbin:$PATH"
-eval "$(pyenv init -)"
+export PATH="$PYENV_ROOT/shims:$PATH"
+eval "$(pyenv init - --no-rehash)"
+
+######
+#
+# nodenv (nodejs)
+#
+######
+export NODENV_ROOT="$(nodenv root)"
+export PATH="$NODENV_ROOT/shims:$PATH"
+eval "$(nodenv init -)"
 
 ######
 #
