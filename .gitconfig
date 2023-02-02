@@ -8,3 +8,5 @@
 	email = vincentkoc@ieee.org
 [init]
 	defaultBranch = master
+[core]
+	editor = subl -n -w
