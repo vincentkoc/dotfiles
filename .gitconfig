@@ -7,7 +7,7 @@
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
 [init]
-	defaultBranch = master
+	defaultBranch = main
 [core]
 	editor = subl -n -w
 	excludesfile = /Users/vincentkoc/.gitignore_global
