@@ -281,6 +281,15 @@ brew tap homebrew/cask-fonts
 # Install Mac OS App Store Apps
 # echo "Installing Mac App Store Apps..."
 # brew install mas
+#
+## 441258766   Magnet        (2.11.0)
+## 937984704   Amphetamine   (5.2.2)
+## 1564015476  ShellHistory  (2.0.0)
+## 975937182   Fantastical   (3.7.6)
+## 639968404   Parcel        (7.6.6)
+#
+#
+# https://apps.apple.com/us/app/shellhistory/id1564015476
 # https://apps.apple.com/au/app/magnet/id441258766?mt=12
 # https://apps.apple.com/us/app/amphetamine/id937984704?mt=12
 # https://apps.apple.com/us/app/parcel-delivery-tracking/id639968404?mt=12
