@@ -10,3 +10,4 @@
 	defaultBranch = master
 [core]
 	editor = subl -n -w
+	excludesfile = /Users/vincentkoc/.gitignore_global
