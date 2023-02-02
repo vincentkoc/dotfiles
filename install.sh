@@ -355,6 +355,7 @@ defaults -currentHost write com.apple.screensaver moduleDict -dict path -string 
 # Install Homebrew casks
 CASKS=(
     aerial
+    airbuddy
     alfred
     amazon-chime
     brave-browser
