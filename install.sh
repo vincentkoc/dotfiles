@@ -5,14 +5,17 @@
 
 # http://redsymbol.net/articles/unofficial-bash-strict-mode/
 #set -euo pipefail
-
 # `set -eu` causes an 'unbound variable' error in case SUDO_USER is not set
+
+####
+#
+# Config
+#
+####
+
 SUDO_USER=$(whoami)
-
-# Log file
-timestamp=$(date +%s)
-logFile="./my-mac-setup-$timestamp.log"
-
+TIMESTAMP=$(date +%s)
+LOGFILE="./atlas-setup-$TIMESTAMP.log"
 DIRS=(
     ~/.mackup
     ~/.nvm
@@ -23,6 +26,141 @@ DIRS=(
     ~/GIT/_Stj
     ~/GIT/_Airbyte
 )
+KILLAPPS=(
+    Finder
+    Dock
+    Mail
+    Safari
+    iTunes
+    iCal
+    Address\ Book
+    SystemUIServer
+
+)
+PACKAGES=(
+    awscli
+    ca-certificates
+    coreutils
+    curl
+    docker-compose
+    git
+    github/gh/gh
+    git-lfs
+    go
+    gpg
+    gradle
+    helm
+    htop
+    jq
+    kubectl
+    kubernetes-cli
+    kubernetes-helm
+    lynx
+    make
+    mackup
+    minikube
+    neovim
+    nmap
+    node
+    nodenv
+    npm
+    nvm
+    openssl
+    pre-commit
+    pyenv
+    pyenv-virtualenv
+    pipenv
+    rbenv
+    readline
+    speedtest-cli
+    sqlite3
+    terraform
+    terraformer
+    tldr
+    tmux
+    trash
+    tree
+    vim
+    watch
+    wget
+    xz
+    yamllint
+    zlib
+)
+CASKS=(
+    aerial
+    airbuddy
+    alfred
+    amazon-chime
+    brave-browser
+    charles
+    cheatsheet
+    datagrip
+    discord
+    docker
+    dropbox
+    espanso
+    firefox
+    font-fira-code
+    github
+    gpg-suite
+    iterm2
+    keybase
+    keycastr
+    keyboard-maestro
+    lastpass
+    logseq
+    loom
+    mamp
+    microsoft-office
+    miro
+    mysqlworkbench
+    netnewswire
+    notion
+    obsidian
+    onyx
+    postman
+    profilecreator
+    rescuetime
+    slack
+    spotify
+    sublime-text
+    the-unarchiver
+    transmit
+    visual-studio-code
+    vlc
+    zoom
+)
+####
+#
+# Start Setup
+#
+####
+
+echo -e "\033[0;33m"
+cat << "EOF"
+              ________
+          ,o88~~88888888o,
+        ,~~?8P  88888     8,
+       d  d88 d88 d8_88     b
+      d  d888888888          b
+      8,?88888888  d8.b o.   8
+      8~88888888~ ~^8888\ db 8
+      ?  888888          ,888P
+       ?  `8888b,_      d888P
+        `   8888888b   ,888'
+          ~-?8888888 _.P-~ 
+            ~~  ~~  ~~
+        __ _| |_| | __ _ ___ 
+       / _` | __| |/ _` / __|
+      | (_| | |_| | (_| \__ \
+       \__,_|\__|_|\__,_|___/
+
+EOF
+echo -e "\033[0m"
+
+
+
 mkdir -p ${DIRS[@]}
 
 # Close any open System Preferences panes, to prevent them from overriding
@@ -229,17 +367,7 @@ defaults write com.apple.controlcenter "NSStatusItem Visible WiFi" -bool false
 defaults write com.apple.finder "ShowPathbar" -bool "true"
 
 # Kill affected applications
-KILLAPPS=(
-    Finder
-    Dock
-    Mail
-    Safari
-    iTunes
-    iCal
-    Address\ Book
-    SystemUIServer
 
-)
 killall ${KILLAPPS[@]}
 
 # echo "Setting up Touch ID for sudo..."
@@ -311,56 +439,7 @@ brew install --cask adoptopenjdk
 brew install --cask adoptopenjdk11
 
 # Install Homebrew packages
-PACKAGES=(
-    awscli
-    ca-certificates
-    coreutils
-    curl
-    docker-compose
-    git
-    github/gh/gh
-    git-lfs
-    go
-    gpg
-    gradle
-    helm
-    htop
-    jq
-    kubectl
-    kubernetes-cli
-    kubernetes-helm
-    lynx
-    make
-    mackup
-    minikube
-    neovim
-    nmap
-    node
-    nodenv
-    npm
-    nvm
-    openssl
-    pre-commit
-    pyenv
-    pyenv-virtualenv
-    pipenv
-    rbenv
-    readline
-    speedtest-cli
-    sqlite3
-    terraform
-    terraformer
-    tldr
-    tmux
-    trash
-    tree
-    vim
-    watch
-    wget
-    xz
-    yamllint
-    zlib
-)
+
 echo "Installing packages..."
 brew install ${PACKAGES[@]}
 
@@ -371,50 +450,7 @@ defaults -currentHost write com.apple.screensaver
 defaults -currentHost write com.apple.screensaver moduleDict -dict path -string "/Users/$SUDO_USER/Library/Screen Savers/Aerial.saver" moduleName -string "Aerial" type -int 0 
 
 # Install Homebrew casks
-CASKS=(
-    aerial
-    airbuddy
-    alfred
-    amazon-chime
-    brave-browser
-    charles
-    cheatsheet
-    datagrip
-    discord
-    docker
-    dropbox
-    espanso
-    firefox
-    font-fira-code
-    github
-    gpg-suite
-    iterm2
-    keybase
-    keycastr
-    keyboard-maestro
-    lastpass
-    logseq
-    loom
-    mamp
-    microsoft-office
-    miro
-    mysqlworkbench
-    netnewswire
-    notion
-    obsidian
-    onyx
-    postman
-    profilecreator
-    rescuetime
-    slack
-    spotify
-    sublime-text
-    the-unarchiver
-    transmit
-    visual-studio-code
-    vlc
-    zoom
-)
+
 echo "Installing cask apps..."
 sudo -u $SUDO_USER brew install --appdir="/Applications" --cask ${CASKS[@]}
 
