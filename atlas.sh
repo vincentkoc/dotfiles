@@ -172,24 +172,45 @@ cat << "EOF"
  Starting atlas...
 
 EOF
+
+####
+#
+# Check enviroment (Login, iCloud)
+#
+####
+echo -e "\033[0;36mLogging enabled...\033[0m"
+echo -e "\033[0;33m[ ?? ]\033[0m \033[0;36mLog file printing to [$LOGFILE]\033[0m"
+echo -e
+
 echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
 sudo -v
+echo -e "\033[0;32m[ ✓✓ ]\033[0m \033[0;36mPassword validated\033[0m"
 
+echo -e
 echo -e "\033[0;36mChecking to see if iCloud drive has been mounted...\033[0m"
-if [ -d "~/Library/Mobile\ Documents/com~apple~CloudDocs/" ] 
-then
-    echo "Directory /path/to/dir exists." 
+
+if [ -d ~/Library/Mobile\ Documents/com~apple~CloudDocs/ ]; then
+    echo -e "\033[0;32m[ ✓✓ ]\033[0m \033[0;36miCloud Drive is located\033[0m"
 else
-    echo "Error: Directory /path/to/dir does not exists."
+    echo -e "\033[0;31mError iCloud Drive not setup [~/Library/Mobile\ Documents/com~apple~CloudDocs/]... Exiting\033[0m"
+    exit 0
 fi
 
-
-echo -e "\033[0;36mSetting up directories...\033[0m"
-mkdir -p ${DIRS[@]} && 
-
-# Close any open System Preferences panes, to prevent them from overriding
-# settings we're about to change
+echo -e 
+echo -e "\033[0;36mClosing System Preferences pane if open...\033[0m"
 osascript -e 'tell application "System Preferences" to quit'
+
+####
+#
+# Setup enviroment
+#
+####
+echo -e
+echo -e "\033[0;36mSetting up custom home directories...\033[0m"
+for a in "${DIRS[@]}";
+do mkdir -p "[$a]" && echo -e "\033[0;32m[ ✓✓ ]\033[0m \033[0;36mCreated folder if missing [$a]\033[0m"
+done
+exit 0
 
 # Ask for the administrator password upfront
 
