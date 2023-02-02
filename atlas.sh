@@ -156,19 +156,42 @@ cat << "EOF"
       | (_| | |_| | (_| \__ \
        \__,_|\__|_|\__,_|___/
 
+ Welcome to atlas
+
+ atlas is an automated script to help speed up
+ development on a mac machine by scafholding 
+ all your key development apps, settings, dotfiles
+ configration and have you up and running in no
+ time. Developed by Vincent Koc (@koconder)
+
+ To update some of the "Defaults" feel free to
+ modify this script to your liking. This script
+ assumes the iCloud as the primary location for
+ dotfiles and configration.
+
+ Starting atlas...
+
 EOF
-echo -e "\033[0m"
+echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
+sudo -v
+
+echo -e "\033[0;36mChecking to see if iCloud drive has been mounted...\033[0m"
+if [ -d "~/Library/Mobile\ Documents/com~apple~CloudDocs/" ] 
+then
+    echo "Directory /path/to/dir exists." 
+else
+    echo "Error: Directory /path/to/dir does not exists."
+fi
 
 
-
-mkdir -p ${DIRS[@]}
+echo -e "\033[0;36mSetting up directories...\033[0m"
+mkdir -p ${DIRS[@]} && 
 
 # Close any open System Preferences panes, to prevent them from overriding
 # settings we're about to change
 osascript -e 'tell application "System Preferences" to quit'
 
 # Ask for the administrator password upfront
-sudo -v
 
 # Keep-alive: update existing `sudo` time stamp until `.macos` has finished
 while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
