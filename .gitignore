@@ -5,6 +5,7 @@
 .gnupg/trustdb.gpg
 .yarnrc
 Library/Quicklook/
+Library/Application Support/Clay/
 Library/Application Support/espanso/match/custom/email.yml
 Library/Preferences/com.apple.Music.plist
 Library/Preferences/org.videolan.vlc.plist
