@@ -4,8 +4,8 @@
 # Shell
 #
 
-	# Make sublime the default editor.
-	export EDITOR=subl
+	# Make set default editor based on a cascading list of apps
+	export EDITOR=$(command -v subl || command -v code || command -v nvim || command -v vim || command -v vi)
 	export VISUAL="${EDITOR}"
 	# Prefer US English and use UTF-8.
 	export LANG='en_US.UTF-8'
