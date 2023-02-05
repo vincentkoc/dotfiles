@@ -78,6 +78,8 @@
 #
 [url "git@github.com:"]
     insteadOf = "gh:"
+    insteadOf = https://github.com/
+    insteadOf = http://github.com/
     pushInsteadOf = "github:"
     pushInsteadOf = "git://github.com/"
 
@@ -91,3 +93,10 @@
 
 [url "git://gist.github.com/"]
     insteadOf = "gist:"
+
+[url "gl:"]
+	insteadOf = https://gitlab.com/
+	insteadOf = http://gitlab.com/
+	insteadOf = git://gitlab.com/
+	insteadOf = git@gitlab.com:
+	insteadOf = gitlab.com:
