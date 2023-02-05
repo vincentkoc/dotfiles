@@ -1,0 +1,10 @@
+matches:
+  # Work and Personal email and contact information
+  # Used for emails, calendaly, etc
+
+  - trigger: ":myie"
+    replace: "vincentkoc@ieee.org"
+
+  # This document has many rules omitted from git, customise to your liking
+  # I use a number of emails depending on use-case for privacy reasons
+  # These emails are hidden from this public git repo.
