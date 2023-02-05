@@ -2,6 +2,7 @@
 .DS_Store
 
 # secrets
+.gnupg/gpg.conf
 .gnupg/trustdb.gpg
 .yarnrc
 Library/Quicklook/
@@ -10,4 +11,3 @@ Library/Application Support/espanso/match/custom/email.yml
 Library/Preferences/com.apple.Music.plist
 Library/Preferences/org.videolan.vlc.plist
 Library/Preferences/com.lwouis.alt-tab-macos.plist
-.gnupg/gpg.conf
