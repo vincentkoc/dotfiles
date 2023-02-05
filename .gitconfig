@@ -2,8 +2,17 @@
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
 
+[core]
+	editor = subl -n -w
+	excludesfile = ~/.gitignore_global
+    pager = "diff-so-fancy | less --tabs=4 -RFX"
+
+[diff-so-fancy]
+    markEmptyLines = false
+    first-run = false
+
 [github]
-  user = koconder
+	user = koconder
 
 [filter "lfs"]
 	required = true
@@ -12,14 +21,10 @@
 	process = git-lfs filter-process
 
 [color]
-  ui = true
+	ui = true
 
 [init]
 	defaultBranch = main
 
-[core]
-	editor = subl -n -w
-	excludesfile = ~/.gitignore_global
-
 [advice]
-  statusHints = false
+	statusHints = false
