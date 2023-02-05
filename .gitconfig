@@ -1,13 +1,25 @@
+[user]
+	name = Vincent Koc
+	email = vincentkoc@ieee.org
+
+[github]
+  user = koconder
+
 [filter "lfs"]
 	required = true
 	clean = git-lfs clean -- %f
 	smudge = git-lfs smudge -- %f
 	process = git-lfs filter-process
-[user]
-	name = Vincent Koc
-	email = vincentkoc@ieee.org
+
+[color]
+  ui = true
+
 [init]
 	defaultBranch = main
+
 [core]
 	editor = subl -n -w
 	excludesfile = ~/.gitignore_global
+
+[advice]
+  statusHints = false
