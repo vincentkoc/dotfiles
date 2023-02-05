@@ -82,6 +82,8 @@ __pycache__
 # Secrets and Security
 *.key
 *.pem
+*.cer
+*.gpg
 
 # IDEs
 .idea
