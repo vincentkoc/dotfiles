@@ -7,16 +7,16 @@
 	# Make sublime the default editor.
 	export EDITOR=subl
 	export VISUAL="${EDITOR}"
-
 	# Prefer US English and use UTF-8.
 	export LANG='en_US.UTF-8'
 	export LC_ALL='en_US.UTF-8'
-
 	# Avoid issues with `gpg` as installed via Homebrew.
 	# https://stackoverflow.com/a/42265848/96656
 	if [[ $OSTYPE == 'darwin'* ]]; then
 		export GPG_TTY=$(tty)
 	fi
+	# Don’t clear the screen after quitting a manual page.
+	export MANPAGER='less -X'
 
 #
 # Bash
@@ -27,16 +27,8 @@
 	export HISTFILESIZE="${HISTSIZE}"
 	# Omit duplicates and commands that begin with a space from history.
 	export HISTCONTROL='ignoreboth'
-
-#
-# Manuals (man) pages
-#
-
-	# Highlight section titles in manual pages.
-	# export LESS_TERMCAP_md="${yellow}"
-
-	# Don’t clear the screen after quitting a manual page.
-	export MANPAGER='less -X'
+	# Hide the “default interactive shell is now zsh” warning on macOS.
+	export BASH_SILENCE_DEPRECATION_WARNING=1
 
 #
 # Node
