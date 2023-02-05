@@ -2,6 +2,14 @@
 	# set name, email and gpg signature on commits
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
+	signingkey = FB4C24AE87080A95
+
+[commit]
+	# sign commits with gpg keys
+	gpgsign = true
+
+[gpg]
+	program=gpg
 
 [credential]
 	# use keychain credentials if possible
