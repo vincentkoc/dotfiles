@@ -7,6 +7,9 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	# homebrew
 	export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
+	# gpg
+	export GPG_TTY=$(tty)
+
 	# pyenv (python)
 	export PYENV_ROOT="$(pyenv root)"
 	export PATH="$PYENV_ROOT/shims:$PATH"
@@ -36,4 +39,3 @@ fi
 
 #
 # Unix and Generic Configs
-#
