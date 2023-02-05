@@ -1,33 +1,57 @@
 [user]
+	# set name, email and gpg signature on commits
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
 
 [credential]
+	# use keychain credentials if possible
     helper = osxkeychain
 
 [core]
+	# Sets editor to sublime
 	editor = subl -n -w
+	# Sets global excludes
 	excludesfile = ~/.gitignore_global
+	# Improves diff used by git in CLI
     pager = "diff-so-fancy | less --tabs=4 -RFX"
 
+[diff]
+	# Detect copies as well as renames
+	renames = copies
+
+[help]
+	# Automatically correct and execute mistyped commands
+	autocorrect = 1
+
+[merge]
+	# Include summaries of merged commits in newly created merge commit messages
+    log = true
+
 [diff-so-fancy]
+	# skip empty lines
     markEmptyLines = false
+    # hides garbage messaging
     first-run = false
 
 [github]
+	# set github username
 	user = koconder
 
 [filter "lfs"]
+	# setup and allow for large files in git
 	required = true
 	clean = git-lfs clean -- %f
 	smudge = git-lfs smudge -- %f
 	process = git-lfs filter-process
 
 [color]
+	# allow for pretty/colour based output
 	ui = true
 
 [init]
+	# set default branch to main instead of master
 	defaultBranch = main
 
 [advice]
+	# stop hints showing up in cli
 	statusHints = false
