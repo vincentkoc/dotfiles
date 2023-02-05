@@ -37,6 +37,10 @@
 	# set github username
 	user = koconder
 
+[hub]
+	# force https for github
+	protocol = https
+
 [filter "lfs"]
 	# setup and allow for large files in git
 	required = true
@@ -46,6 +50,11 @@
 
 [color]
 	# allow for pretty/colour based output
+	status = auto
+	diff = auto
+	branch = auto
+	interactive = auto
+	grep = auto
 	ui = true
 
 [init]
