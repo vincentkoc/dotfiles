@@ -10,3 +10,4 @@ Library/Application Support/espanso/match/custom/email.yml
 Library/Preferences/com.apple.Music.plist
 Library/Preferences/org.videolan.vlc.plist
 Library/Preferences/com.lwouis.alt-tab-macos.plist
+.gnupg/gpg.conf
