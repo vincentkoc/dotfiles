@@ -1,5 +1,8 @@
-.gnupg/trustdb.gpg
+# project
 .DS_Store
-Library/Quicklook/
+
+# secrets
+.gnupg/trustdb.gpg
 .yarnrc
+Library/Quicklook/
 Library/Application Support/espanso/match/custom/email.yml
