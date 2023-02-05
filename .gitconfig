@@ -2,6 +2,9 @@
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
 
+[credential]
+    helper = osxkeychain
+
 [core]
 	editor = subl -n -w
 	excludesfile = ~/.gitignore_global
