@@ -6,3 +6,13 @@ defscrollback 32000
 
 # Always start `screen` with UTF-8 enabled (`screen -U`)
 defutf8 on
+
+# Autodetach session on hangup instead of terminating screen completely
+autodetach on
+
+# Turn on visual bell
+vbell off
+vbell_msg "bell: window ~%"
+
+# Enable xterm mouse scrolling
+termcapinfo xterm* ti@:te@
