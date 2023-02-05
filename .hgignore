@@ -11,6 +11,7 @@ Thumbs.db
 
 # Folder view configuration files
 .DS_Store
+.DS_Store?
 ._.DS_Store
 **/.DS_Store
 **/._.DS_Store
@@ -22,6 +23,7 @@ Desktop.ini
 
 # Other OS temporary crap
 *.tmp
+*.log
 
 # Compiled files
 *.pyc
