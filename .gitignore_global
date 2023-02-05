@@ -13,6 +13,9 @@ Desktop.ini
 .Spotlight-V100
 .Trashes
 
+# Other OS temporary crap
+*.tmp
+
 # Compiled files
 *.pyc
 
