@@ -1,8 +1,13 @@
 [user]
-	# set name, email and gpg signature on commits
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
 	signingkey = FB4C24AE87080A95
+	# # set name, email and gpg signature on commits
+	# # values are set using ~/.extra/user.sh
+	#
+	# name = ""
+	# email = ""
+	# signingkey = ""
 
 [commit]
 	# sign commits with gpg keys
@@ -78,8 +83,8 @@
 #
 [url "git@github.com:"]
     insteadOf = "gh:"
-    # insteadOf = https://github.com/
-    # insteadOf = http://github.com/
+    insteadOf = https://github.com/
+    insteadOf = http://github.com/
     pushInsteadOf = "github:"
     pushInsteadOf = "git://github.com/"
 
