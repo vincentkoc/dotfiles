@@ -1,4 +1,7 @@
 {
+	"[python]": {
+        "editor.formatOnType": true
+    },
     "todo-tree.tree.showScanModeButton": false,
     "todo-tree.general.tags": [
         "BUG",
@@ -105,7 +108,7 @@
         "markdown": true
     },
     "workbench.iconTheme": "material-icon-theme",
-    "workbench.colorTheme": "Tokyo Night Storm",
+    "workbench.colorTheme": "Tokyo Night",
     "powermode.enabled": false,
     "cSpell.userWords": [
         "acryl",
@@ -220,14 +223,18 @@
     },
     "snyk.advanced.cliPath": "/Users/vincentkoc/Library/Application Support/snyk-ls/snyk-macos",
     "snyk.trustedFolders": [
-        "/Users/vincentkoc/Git/_Airbyte/"
-        "/Users/vincentkoc/Git/_Hipages/",
-        "/Users/vincentkoc/Git/_Stj/"
+        "/Users/vincentkoc/Git/"
     ],
     "snyk.advanced.organization": "data-to3",
     "snyk.yesTelemetry": false,
     "snyk.yesCrashReport": false,
     "workbench.startupEditor": "none",
     "editor.guides.bracketPairs": true,
-    "editor.stickyScroll.enabled": true
+    "editor.stickyScroll.enabled": true,
+	"editor.fontFamily": "Dank Mono, Menlo, Monaco, 'Courier New', monospace",
+	"editor.fontLigatures": true,
+	"telemetry.telemetryLevel": "off",
+	"enableTelemetry": false,
+	"gitlens.telemetry.enabled": false,
+	"snyk.yesTelemetry": false
 }
