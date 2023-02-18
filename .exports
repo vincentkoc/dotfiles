@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 #
 # Shell
 #
@@ -17,6 +18,9 @@
 	fi
 	# Don’t clear the screen after quitting a manual page.
 	export MANPAGER='less -X'
+	# Enable colour where possible
+	export CLICOLOR=1
+	export GREP_OPTIONS='--color=auto'
 
 #
 # Bash
@@ -27,6 +31,8 @@
 	export HISTFILESIZE="${HISTSIZE}"
 	# Omit duplicates and commands that begin with a space from history.
 	export HISTCONTROL='ignoreboth'
+	# Add timestamp to bash history
+	export HISTTIMEFORMAT="%d/%m/%y %T "
 	# Hide the “default interactive shell is now zsh” warning on macOS.
 	export BASH_SILENCE_DEPRECATION_WARNING=1
 
