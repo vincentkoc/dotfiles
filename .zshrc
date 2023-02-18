@@ -1,7 +1,7 @@
 #
 # Load dotfiles pre-ENV
 #
-for file in ~/.{path,bash_prompt,aliases,functions}; do
+for file in ~/.{path,bash_prompt,aliases,functions,exports}; do
 	[ -r "$file" ] && [ -f "$file" ] && source "$file";
 done;
 unset file;
@@ -11,11 +11,6 @@ unset file;
 #
 
 if [[ $OSTYPE == 'darwin'* ]]; then
-
-	# homebrew
-	export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
-	eval "$(/opt/homebrew/bin/brew shellenv)"
-
 	# gpg
 	export GPG_TTY=$(tty)
 
@@ -28,6 +23,12 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	export NODENV_ROOT="$(nodenv root)"
 	export PATH="$NODENV_ROOT/shims:$PATH"
 	eval "$(nodenv init -)"
+
+	# rbenv (ruby)
+	eval "$(rbenv init - zsh)"
+
+	# java (jenv)
+	eval "$(jenv init -)"
 
 	# Shell History
 	if [ -d /Applications/ShellHistory.app ]; then
@@ -49,7 +50,7 @@ fi
 #
 # Load dotfiles post-ENV
 #
-for file in ~/.{exports,extra,extra/user.sh}; do
+for file in ~/.{extra,extra/user.sh}; do
 	[ -r "$file" ] && [ -f "$file" ] && source "$file";
 done;
 unset file;
