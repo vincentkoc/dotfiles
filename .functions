@@ -1,0 +1,37 @@
+# Always list directory contents upon 'cd'
+cd() { builtin cd "$@"; ll; }
+
+# mcd: Makes new Dir and jumps inside
+mcd () { mkdir -p "$1" && cd "$1"; }
+
+# trash: Moves a file to the MacOS trash
+trash () { command mv "$@" ~/.Trash ; }
+
+# ql: Opens any file in MacOS Quicklook Preview
+ql () { qlmanage -p "$*" >& /dev/null; }
+
+# cleands: Recursively delete .DS_Store files
+cleands () {find . -type f -name '*.DS_Store' -ls -delete}
+
+# To create a ZIP archive of a folder
+zipf () { zip -r "$1".zip "$1" ; }
+
+# 'Cd's to frontmost window of MacOS Finder
+cdf () {
+    currFolderPath=$( /usr/bin/osascript <<EOT
+        tell application "Finder"
+            try
+        set currFolder to (folder of the front window as alias)
+            on error
+        set currFolder to (path to desktop folder as alias)
+            end try
+            POSIX path of currFolder
+        end tell
+EOT
+    )
+    echo "cd to \"$currFolderPath\""
+    cd "$currFolderPath"
+}
+
+# Search for a file using MacOS Spotlight's metadata
+spotlight () { mdfind "kMDItemDisplayName == '$@'wc"; }
