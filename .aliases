@@ -5,6 +5,9 @@
 # Part of koconder/dotfiles
 #
 
+# Enable aliases to be sudo’ed
+alias sudo='sudo '
+
 # Preferred Options and Replacements
 alias man='tldr'
 alias dig='dog'
@@ -24,11 +27,14 @@ alias .3='cd ../../../'
 alias .4='cd ../../../../'
 alias .5='cd ../../../../../'
 alias .6='cd ../../../../../../'
-alias --='cd -' #previous folder
+# alias --="cd -" #previous folder
+
+# Open Current Path in Finder
+alias f='open -a Finder ./'
 
 # Quick Folder Shortcuts
 alias dl="cd ~/Downloads"
-alias dt="cd ~/Desktop"
+alias desk="cd ~/Desktop/"
 alias g="cd ~/GIT"
 alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
 
@@ -38,39 +44,35 @@ alias fgrep='fgrep --color=auto'
 alias egrep='egrep --color=auto'
 alias phpunit='phpunit --colors'
 
-# Enable aliases to be sudo’ed
-alias sudo='sudo '
+# Run Last as Sudo
+alias fuck='sudo $(history -p \!\!)'
+
+# Terminal Tweaks
+alias c='clear'
+alias h='history'
+alias j='jobs -l'
+
+# Print PATH's
+alias path='echo -e ${PATH//:/\\n}'
+
+# Set EDITOR as edit command
+alias edit='"${EDITOR}"'
+
 
 alias ls='exa --git'
 alias ll='exa -FGlha --git'
-alias fuck='sudo $(history -p \!\!)'        # Run last command as sudo
-alias                           # Preferred 'cp' implementation
-                           # Preferred 'mv' implementation
-                     # Preferred 'mkdir' implementation
 #alias ll='ls -FGlAhp'                       # Preferred 'ls' implementation
-                              # Default to VIM instead of VI
-alias edit='subl'                           # edit:         Opens any file in sublime editor
-alias f='open -a Finder ./'                 # f:            Opens current directory in MacOS Finder
-                              # ~:            Go Home
-alias c='clear'                             # c:            Clear terminal display
-alias path='echo -e ${PATH//:/\\n}'         # path:         Echo all executable Paths
-alias show_options='shopt'                  # Show_options: display bash options settings
 alias fix_stty='stty sane'                  # fix_stty:     Restore terminal settings when screwed up
-alias cic='set completion-ignore-case On'   # cic:          Make tab-completion case-insensitive
 alias DT='tee ~/Desktop/terminalOut.txt'    # DT:           Pipe content to file on MacOS Desktop
-alias h='history'
-alias j='jobs -l'
 alias top='htop'
 alias htop='sudo htop'
 alias running='htop'
-
 alias lr='ls -R | grep ":$" | sed -e '\''s/:$//'\'' -e '\''s/[^-][^\/]*\//--/g'\'' -e '\''s/^/   /'\'' -e '\''s/-/|/'\'' | less' # lr:  Full Recursive Directory Listing
 #alias rm='rm -i --preserve-root' # do not delete / or prompt if deleting more than 3 files at a time #
 #alias chown='chown --preserve-root' # Parenting changing perms on / #
 #alias chmod='chmod --preserve-root' # Parenting changing perms on / #
 #alias chgrp='chgrp --preserve-root' # Parenting changing perms on / #
 alias kp="ps auxwww" # the "kp" alias ("que pasa"), in honor of tony p.
-alias desk="cd ~/Desktop/"
 alias myip='curl icanhazip.com'                     # myip:         Public facing IP Address
 alias netCons='lsof -i'                             # netCons:      Show all open TCP/IP sockets
 alias flushDNS='dscacheutil -flushcache && sudo killall -HUP mDNSResponder'            # flushDNS:     Flush out the DNS Cache
@@ -81,7 +83,6 @@ alias ipInfo0='ipconfig getpacket en0'              # ipInfo0:      Get info on 
 alias ipInfo1='ipconfig getpacket en1'              # ipInfo1:      Get info on connections for en1
 alias openPorts='sudo lsof -i | grep LISTEN'        # openPorts:    All listening connections
 alias showBlocked='sudo ipfw list'                  # showBlocked:  All ipfw rules inc/ blocked IPs
-
 alias myssh='cd ~/Dropbox/_System/SSH/'
 alias myhostedit='sudo vim /etc/hosts'
 alias myhostclear='sudo dscacheutil -flushcache ; sudo killall -HUP mDNSResponder'
