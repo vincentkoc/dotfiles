@@ -21,6 +21,13 @@ alias dt="cd ~/Desktop"
 alias g="cd ~/GIT"
 alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
 
+# Colour Output
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+
+# Enable aliases to be sudo’ed
+alias sudo='sudo '
 
 alias ls='exa --git'
 alias ll='exa -FGlha --git'
