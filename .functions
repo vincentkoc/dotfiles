@@ -105,6 +105,11 @@ function up () {
         rustup update
     fi
 
+    # Ruby
+    if [[ $(command -v gem) == "" ]]; then
+        gem update --system
+    fi
+
     # UpdateDB
     if [[ $(command -v updatedb) == "" ]]; then
         updatedb 2> /dev/null || true
