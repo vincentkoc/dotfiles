@@ -5,7 +5,18 @@
 # Part of koconder/dotfiles
 #
 
+# Preferred Options and Replacements
+alias man='tldr'
+alias dig='dog'
+alias domain='dig +trace'
+alias cp='cp -iv'
+alias mv='mv -iv'
+alias mkdir='mkdir -pv'
+alias vi='vim'
+alias ping='gping'
+
 # Easier navigation
+alias ~="cd ~"
 alias cd..='cd ../'
 alias ..='cd ../'
 alias ...='cd ../../'
@@ -25,25 +36,22 @@ alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
 alias grep='grep --color=auto'
 alias fgrep='fgrep --color=auto'
 alias egrep='egrep --color=auto'
+alias phpunit='phpunit --colors'
 
 # Enable aliases to be sudo’ed
 alias sudo='sudo '
 
 alias ls='exa --git'
 alias ll='exa -FGlha --git'
-alias man='tldr'
-alias dig='dog'
-alias domain='dig +trace'
-alias phpunit='phpunit --colors'			# PHP Unit https://stackoverflow.com/questions/28510488/how-to-configure-phpunit-in-mamp-with-phar#36583692
 alias fuck='sudo $(history -p \!\!)'        # Run last command as sudo
-alias cp='cp -iv'                           # Preferred 'cp' implementation
-alias mv='mv -iv'                           # Preferred 'mv' implementation
-alias mkdir='mkdir -pv'                     # Preferred 'mkdir' implementation
+alias                           # Preferred 'cp' implementation
+                           # Preferred 'mv' implementation
+                     # Preferred 'mkdir' implementation
 #alias ll='ls -FGlAhp'                       # Preferred 'ls' implementation
-alias vi='vim'                              # Default to VIM instead of VI
+                              # Default to VIM instead of VI
 alias edit='subl'                           # edit:         Opens any file in sublime editor
 alias f='open -a Finder ./'                 # f:            Opens current directory in MacOS Finder
-alias ~="cd ~"                              # ~:            Go Home
+                              # ~:            Go Home
 alias c='clear'                             # c:            Clear terminal display
 alias path='echo -e ${PATH//:/\\n}'         # path:         Echo all executable Paths
 alias show_options='shopt'                  # Show_options: display bash options settings
@@ -55,7 +63,7 @@ alias j='jobs -l'
 alias top='htop'
 alias htop='sudo htop'
 alias running='htop'
-alias ping='gping'
+
 alias lr='ls -R | grep ":$" | sed -e '\''s/:$//'\'' -e '\''s/[^-][^\/]*\//--/g'\'' -e '\''s/^/   /'\'' -e '\''s/-/|/'\'' | less' # lr:  Full Recursive Directory Listing
 #alias rm='rm -i --preserve-root' # do not delete / or prompt if deleting more than 3 files at a time #
 #alias chown='chown --preserve-root' # Parenting changing perms on / #
