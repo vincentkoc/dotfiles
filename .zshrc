@@ -14,6 +14,7 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 
 	# homebrew
 	export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
+	eval "$(/opt/homebrew/bin/brew shellenv)"
 
 	# gpg
 	export GPG_TTY=$(tty)
