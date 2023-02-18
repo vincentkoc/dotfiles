@@ -1,7 +1,7 @@
 #
-# Load dotfiles
+# Load dotfiles pre-ENV
 #
-for file in ~/.{path,bash_prompt,exports,aliases,functions,extra,extra/user.sh}; do
+for file in ~/.{path,bash_prompt,aliases,functions}; do
 	[ -r "$file" ] && [ -f "$file" ] && source "$file";
 done;
 unset file;
@@ -45,6 +45,14 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 		precmd_functions=(__shhist_prompt $precmd_functions)
 	fi
 fi
+
+#
+# Load dotfiles post-ENV
+#
+for file in ~/.{exports,extra,extra/user.sh}; do
+	[ -r "$file" ] && [ -f "$file" ] && source "$file";
+done;
+unset file;
 
 #
 # Unix and Generic Configs
