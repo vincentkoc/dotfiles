@@ -13,3 +13,4 @@ Library/Preferences/com.apple.Music.plist
 Library/Preferences/org.videolan.vlc.plist
 Library/Preferences/com.lwouis.alt-tab-macos.plist
 Library/Application Support/Sublime Text/Packages/User/WakaTime.sublime-settings
+.wakatime.cfg
