@@ -5,6 +5,23 @@
 # Part of koconder/dotfiles
 #
 
+# Mac Specific
+if [[ "$OSTYPE" == "darwin"* ]]; then
+	# Setup PHP
+	alias php=/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin/php
+
+	# UpdateDB
+	alias updatedb="sudo /usr/libexec/locate.updatedb"
+
+	# Preferred 'ls' implementation
+	alias ls='exa --git'
+	alias ll='exa -FGlha --git'
+else
+	# Preferred 'ls' implementation
+	alias ll='ls -FGlAhp'
+fi
+
+
 # Enable aliases to be sudo’ed
 alias sudo='sudo '
 
@@ -59,35 +76,35 @@ alias path='echo -e ${PATH//:/\\n}'
 # Set EDITOR as edit command
 alias edit='"${EDITOR}"'
 
-# Grab IP
+# Networking
 alias myip='digs myip.opendns.com @resolver1.opendns.com'
+alias localip="ipconfig getifaddr en0"
 
-#
-# Mac Specific
-#
-if [[ "$OSTYPE" == "darwin"* ]]; then
-	# Setup PHP
-	alias php=/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin/php
+# macOS has no `md5sum`, so use `md5` as a fallback
+command -v md5sum > /dev/null || alias md5sum="md5"
 
-	# UpdateDB
-	alias updatedb="sudo /usr/libexec/locate.updatedb"
-fi
+# macOS has no `sha1sum`, so use `shasum` as a fallback
+command -v sha1sum > /dev/null || alias sha1sum="shasum"
 
-alias ls='exa --git'
-alias ll='exa -FGlha --git'
-#alias ll='ls -FGlAhp'                       # Preferred 'ls' implementation
+# Empty the Trash on all mounted volumes and the main HDD.
+# Also, clear Apple’s System Logs to improve shell startup speed.
+# Finally, clear download history from quarantine. https://mths.be/bum
+alias emptytrash="sudo rm -rfv /Volumes/*/.Trashes; sudo rm -rfv ~/.Trash; sudo rm -rfv /private/var/log/asl/*.asl; sqlite3 ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV* 'delete from LSQuarantineEvent'"
+
+# URL-encode strings
+alias urlencode='python -c "import sys, urllib as ul; print ul.quote_plus(sys.argv[1]);"'
+
 alias fix_stty='stty sane'                  # fix_stty:     Restore terminal settings when screwed up
 alias DT='tee ~/Desktop/terminalOut.txt'    # DT:           Pipe content to file on MacOS Desktop
 alias top='htop'
 alias htop='sudo htop'
 alias running='htop'
-alias lr='ls -R | grep ":$" | sed -e '\''s/:$//'\'' -e '\''s/[^-][^\/]*\//--/g'\'' -e '\''s/^/   /'\'' -e '\''s/-/|/'\'' | less' # lr:  Full Recursive Directory Listing
 #alias rm='rm -i --preserve-root' # do not delete / or prompt if deleting more than 3 files at a time #
 #alias chown='chown --preserve-root' # Parenting changing perms on / #
 #alias chmod='chmod --preserve-root' # Parenting changing perms on / #
 #alias chgrp='chgrp --preserve-root' # Parenting changing perms on / #
 alias kp="ps auxwww" # the "kp" alias ("que pasa"), in honor of tony p.
-#alias myip='curl icanhazip.com'                     # myip:         Public facing IP Address
+#alias myip='curl -s icanhazip.com | tail -n1'                     # myip:         Public facing IP Address
 alias netCons='lsof -i'                             # netCons:      Show all open TCP/IP sockets
 alias flushDNS='dscacheutil -flushcache && sudo killall -HUP mDNSResponder'            # flushDNS:     Flush out the DNS Cache
 alias lsock='sudo /usr/sbin/lsof -i -P'             # lsock:        Display open sockets
