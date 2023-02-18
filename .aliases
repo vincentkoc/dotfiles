@@ -11,6 +11,7 @@ alias sudo='sudo '
 # Preferred Options and Replacements
 alias man='tldr'
 alias dig='dog'
+alias digs='dog -1'
 alias domain='dig +trace'
 alias cp='cp -iv'
 alias mv='mv -iv'
@@ -58,6 +59,9 @@ alias path='echo -e ${PATH//:/\\n}'
 # Set EDITOR as edit command
 alias edit='"${EDITOR}"'
 
+# Grab IP
+alias myip='digs myip.opendns.com @resolver1.opendns.com'
+
 #
 # Mac Specific
 #
@@ -65,7 +69,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	# Setup PHP
 	alias php=/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin/php
 
-	
+	# UpdateDB
+	alias updatedb="sudo /usr/libexec/locate.updatedb"
 fi
 
 alias ls='exa --git'
@@ -82,7 +87,7 @@ alias lr='ls -R | grep ":$" | sed -e '\''s/:$//'\'' -e '\''s/[^-][^\/]*\//--/g'\
 #alias chmod='chmod --preserve-root' # Parenting changing perms on / #
 #alias chgrp='chgrp --preserve-root' # Parenting changing perms on / #
 alias kp="ps auxwww" # the "kp" alias ("que pasa"), in honor of tony p.
-alias myip='curl icanhazip.com'                     # myip:         Public facing IP Address
+#alias myip='curl icanhazip.com'                     # myip:         Public facing IP Address
 alias netCons='lsof -i'                             # netCons:      Show all open TCP/IP sockets
 alias flushDNS='dscacheutil -flushcache && sudo killall -HUP mDNSResponder'            # flushDNS:     Flush out the DNS Cache
 alias lsock='sudo /usr/sbin/lsof -i -P'             # lsock:        Display open sockets
