@@ -1,5 +1,13 @@
 #!/bin/bash
 
+#
+# Homebrew
+#
+if [[ $OSTYPE == 'darwin'* ]]; then
+	# homebrew
+	export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
+	eval "$(/opt/homebrew/bin/brew shellenv)"
+fi
 
 #
 # Shell
@@ -66,6 +74,11 @@
 
 	# Make Python use UTF-8 encoding for output to stdin, stdout, and stderr.
 	export PYTHONIOENCODING='UTF-8'
+
+#
+# Java
+#
+	export PATH="$HOME/.jenv/bin:$PATH"
 
 #
 # PHP (MAMP)
