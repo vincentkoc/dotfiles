@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Always list directory contents upon 'cd'
 cd() { builtin cd "$@"; ll; }
 
@@ -35,6 +37,12 @@ EOT
 
 # Search for a file using MacOS Spotlight's metadata
 spotlight () { mdfind "kMDItemDisplayName == '$@'wc"; }
+
+# Ruby Librariesw
+# https://gorails.com/setup/osx/10.14-mojave
+function rubydoctor () {
+    curl -fsSL https://github.com/rbenv/rbenv-installer/raw/main/bin/rbenv-doctor | bash
+}
 
 # Global updater
 function up () {
