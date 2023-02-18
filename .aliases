@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 #
 # Aliases File
@@ -58,6 +58,15 @@ alias path='echo -e ${PATH//:/\\n}'
 # Set EDITOR as edit command
 alias edit='"${EDITOR}"'
 
+#
+# Mac Specific
+#
+if [[ "$OSTYPE" == "darwin"* ]]; then
+	# Setup PHP
+	alias php=/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin/php
+
+	
+fi
 
 alias ls='exa --git'
 alias ll='exa -FGlha --git'
