@@ -16,3 +16,10 @@ Library/Application Support/Sublime Text/Packages/User/WakaTime.sublime-settings
 .wakatime.cfg
 *.otf
 *.ttf
+*.gpg.conf
+Library/Preferences/com.xk72.charles.config
+Library/Preferences/com.surteesstudios.Bartender.plist
+Library/Preferences/com.spotify.client.plist
+Library/Preferences/com.panic.Transmit.plist
+Library/Preferences/com.kapeli.dashdoc.plist
+Library/Preferences/com.crowdcafe.windowmagnet.plist
