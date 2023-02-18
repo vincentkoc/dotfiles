@@ -35,3 +35,37 @@ EOT
 
 # Search for a file using MacOS Spotlight's metadata
 spotlight () { mdfind "kMDItemDisplayName == '$@'wc"; }
+
+# Global updater
+function up () {
+	# Password for Sudo
+	echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
+	sudo -v
+
+    # Composer
+    if [ -e "/usr/local/bin/composer" ] ; then
+      composerupdate
+    fi
+
+    # Homebrew
+    if [ -e "/usr/local/bin/brew" ] || [ -e "/opt/homebrew/bin/brew" ]  ; then
+      brew update
+      brew upgrade
+      brew cask upgrade
+      brew cleanup
+      brew doctor
+      brew missing
+    fi
+
+    # NPM
+    if [ -e "/usr/local/bin/npm" ]  || [ -e "/opt/homebrew/bin/npm" ] ; then
+      npm update -g
+    fi
+
+    # Ruby Gems
+    if [ -e "/usr/bin/gem" ] || [ -e "~/.rbenv/shims/gem" ] ; then
+      sudo gem update --system
+      sudo gem update -n /usr/local/bin
+      sudo gem cleanup
+    fi
+}
