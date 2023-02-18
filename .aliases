@@ -1,5 +1,29 @@
-alias ls='exa'
-alias ll='exa -FGlh'
+#!/usr/bin/env bash
+
+#
+# Aliases File
+# Part of koconder/dotfiles
+#
+
+# Easier navigation
+alias cd..='cd ../'
+alias ..='cd ../'
+alias ...='cd ../../'
+alias .3='cd ../../../'
+alias .4='cd ../../../../'
+alias .5='cd ../../../../../'
+alias .6='cd ../../../../../../'
+alias --='cd -' #previous folder
+
+# Quick Folder Shortcuts
+alias dl="cd ~/Downloads"
+alias dt="cd ~/Desktop"
+alias g="cd ~/GIT"
+alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
+
+
+alias ls='exa --git'
+alias ll='exa -FGlha --git'
 alias man='tldr'
 alias dig='dog'
 alias domain='dig +trace'
@@ -9,13 +33,6 @@ alias cp='cp -iv'                           # Preferred 'cp' implementation
 alias mv='mv -iv'                           # Preferred 'mv' implementation
 alias mkdir='mkdir -pv'                     # Preferred 'mkdir' implementation
 #alias ll='ls -FGlAhp'                       # Preferred 'ls' implementation
-alias cd..='cd ../'                         # Go back 1 directory level (for fast typers)
-alias ..='cd ../'                           # Go back 1 directory level
-alias ...='cd ../../'                       # Go back 2 directory levels
-alias .3='cd ../../../'                     # Go back 3 directory levels
-alias .4='cd ../../../../'                  # Go back 4 directory levels
-alias .5='cd ../../../../../'               # Go back 5 directory levels
-alias .6='cd ../../../../../../'            # Go back 6 directory levels
 alias vi='vim'                              # Default to VIM instead of VI
 alias edit='subl'                           # edit:         Opens any file in sublime editor
 alias f='open -a Finder ./'                 # f:            Opens current directory in MacOS Finder
