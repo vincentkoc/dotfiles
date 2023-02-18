@@ -95,8 +95,15 @@ function up () {
 		sudo gem cleanup
     fi
 
+    # Python
+    if [[ $(command -v pip) == "" ]]; then
+        pip install --upgrade "pip" "setuptools"
+    fi
+
     # UpdateDB
-    updatedb 2> /dev/null || true
+    if [[ $(command -v updatedb) == "" ]]; then
+        updatedb 2> /dev/null || true
+    fi
 }
 
 # Normalize `open` across Linux, macOS, and Windows.
