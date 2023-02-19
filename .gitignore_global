@@ -9,10 +9,25 @@ Thumbs.db
 **/.DS_Store
 **/._.DS_Store
 Desktop.ini
+.directory
+.AppleDouble
+.LSOverride
 
-# Files that might appear on external disks
+# Temporary volume files
 .Spotlight-V100
+.DocumentRevisions-V100
+.fseventsd
 .Trashes
+.Trash-*
+.AppleDB
+.AppleDesktop
+.fuse_hidden*
+
+# Vim
+.netrwhist
+Session.vim
+[._]*.sw[a-z]
+[._]sw[a-z]
 
 # Other OS temporary crap
 *.tmp
