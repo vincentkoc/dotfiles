@@ -1,3 +1,6 @@
+set nocompatible
+filetype plugin indent on
+
 call plug#begin()
 " The default plugin directory will be as follows:
 "   - Vim (Linux/macOS): '~/.vim/plugged'
@@ -9,6 +12,16 @@ call plug#begin()
 
 " Make sure you use single quotes
 Plug 'folke/tokyonight.nvim', { 'branch': 'main' }
+Plug 'nvim-lua/plenary.nvim'
+Plug 'nvim-telescope/telescope.nvim', { 'tag': '0.1.1' }
+Plug 'vim-pandoc/vim-pandoc-syntax'
+Plug 'chrisbra/vim-diff-enhanced'
+Plug 'samoshkin/vim-mergetool'
+Plug 'tpope/vim-fugitive'
+Plug 'junegunn/gv.vim'
+Plug 'tmux-plugins/vim-tmux-focus-events'
+Plug 'vim-airline/vim-airline'
+Plug 'vim-airline/vim-airline-themes'
 
 " Initialize plugin system
 " - Automatically executes `filetype plugin indent on` and `syntax enable`.
@@ -20,3 +33,6 @@ call plug#end()
 " Vim Script
 colorscheme tokyonight
 colorscheme tokyonight-night
+
+let g:mergetool_layout = 'mr'
+let g:mergetool_prefer_revision = 'local'
