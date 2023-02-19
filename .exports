@@ -12,6 +12,8 @@ fi
 #
 # Shell
 #
+	# Add our custom binaries
+	export PATH="$HOME/bin:$PATH"
 
 	# Make set default editor based on a cascading list of apps
 	export EDITOR=$(command -v subl || command -v code || command -v nvim || command -v vim || command -v vi)
