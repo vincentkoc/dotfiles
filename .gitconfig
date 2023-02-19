@@ -83,8 +83,8 @@
 #
 [url "git@github.com:"]
     insteadOf = "gh:"
-    # insteadOf = https://github.com/
-    # insteadOf = http://github.com/
+    insteadOf = https://github.com/
+    insteadOf = http://github.com/
     pushInsteadOf = "github:"
     pushInsteadOf = "git://github.com/"
 
