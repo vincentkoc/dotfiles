@@ -44,6 +44,14 @@ fi
 	fi
 
 #
+# Linux
+#
+	# hidpi for gtk apps
+	export GDK_SCALE=1.5
+	export GDK_DPI_SCALE=0.5
+	export QT_DEVICE_PIXEL_RATIO=1.5
+
+#
 # Bash
 #
 
@@ -56,6 +64,8 @@ fi
 	export HISTTIMEFORMAT="%d/%m/%y %T "
 	# Hide the “default interactive shell is now zsh” warning on macOS.
 	export BASH_SILENCE_DEPRECATION_WARNING=1
+	# Make some commands not show up in history
+	export HISTIGNORE=" *:ls:cd:cd -:pwd:exit:date:* --help:* -h:pony:pony add *:pony update *:pony save *:pony ls:pony ls *";
 
 #
 # Node
