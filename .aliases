@@ -5,6 +5,9 @@
 # Part of koconder/dotfiles
 #
 
+# Enable aliases to be sudo’ed
+alias sudo='sudo '
+
 # Mac Specific
 if [[ "$OSTYPE" == "darwin"* ]]; then
 	# Setup PHP
@@ -19,95 +22,135 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 
 	# Editor
 	alias vim='nvim'
+
+	# Open Current Path in Finder
+	alias f='open -a Finder ./'
+
+	# Fallback for Mac OS
+	command -v md5sum > /dev/null || alias md5sum="md5"
+	command -v sha1sum > /dev/null || alias sha1sum="shasum"
+
+	# Pipe content to file on MacOS Desktop
+	alias loghome='tee ~/Desktop/logfile_$(date +"%Y%m%d_%H%M%S").txt'
+
 else
 	# Preferred 'ls' implementation
 	alias ll='ls -FGlAhp'
+
+	# Pipe content to file in Home drive
+	alias loghome='tee $HOME/logfile_$(date +"%Y%m%d_%H%M%S").txt'
+
 fi
 
+#
+# Adjustments
+#
 
-# Enable aliases to be sudo’ed
-alias sudo='sudo '
+	# Preferred Options and Replacements
+	alias man='tldr'
+	alias dig='dog'
+	alias digs='dog -1'
+	alias domain='dig +trace'
+	alias cp='cp -iv'
+	alias mv='mv -iv'
+	alias mkdir='mkdir -pv'
+	alias vi='vim'
+	alias ping='gping'
 
-# Preferred Options and Replacements
-alias man='tldr'
-alias dig='dog'
-alias digs='dog -1'
-alias domain='dig +trace'
-alias cp='cp -iv'
-alias mv='mv -iv'
-alias mkdir='mkdir -pv'
-alias vi='vim'
-alias ping='gping'
+	# Easier navigation
+	alias ~="cd ~"
+	alias cd..='cd ../'
+	alias ..='cd ../'
+	alias ...='cd ../../'
+	alias .3='cd ../../../'
+	alias .4='cd ../../../../'
+	alias .5='cd ../../../../../'
+	alias .6='cd ../../../../../../'
+	# alias --="cd -" #previous folder
 
-# Easier navigation
-alias ~="cd ~"
-alias cd..='cd ../'
-alias ..='cd ../'
-alias ...='cd ../../'
-alias .3='cd ../../../'
-alias .4='cd ../../../../'
-alias .5='cd ../../../../../'
-alias .6='cd ../../../../../../'
-# alias --="cd -" #previous folder
+	# Quick Folder Shortcuts
+	alias dl="cd ~/Downloads"
+	alias desk="cd ~/Desktop/"
+	alias g="cd ~/GIT"
+	alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
 
-# Open Current Path in Finder
-alias f='open -a Finder ./'
+	# Colour Output
+	alias grep='grep --color=auto'
+	alias fgrep='fgrep --color=auto'
+	alias egrep='egrep --color=auto'
+	alias phpunit='phpunit --colors'
 
-# Quick Folder Shortcuts
-alias dl="cd ~/Downloads"
-alias desk="cd ~/Desktop/"
-alias g="cd ~/GIT"
-alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
+	# Git
+	alias gl='git pull --prune'
+	alias glog="git log --graph --pretty=format:'%Cred%h%Creset %an: %s - %Creset %C(yellow)%d%Creset %Cgreen(%cr)%Creset' --abbrev-commit --date=relative"
+	alias gp='git push origin HEAD'
+	alias gd='git diff --color | sed "s/^\([^-+ ]*\)[-+ ]/\\1/" | less -r'
+	alias gc='git commit'
+	alias gca='git commit -a'
+	alias gco='git checkout'
 
-# Colour Output
-alias grep='grep --color=auto'
-alias fgrep='fgrep --color=auto'
-alias egrep='egrep --color=auto'
-alias phpunit='phpunit --colors'
+#
+# Terminal
+#
 
-# Run Last as Sudo
-alias fuck='sudo $(history -p \!\!)'
+	# Run Last as Sudo
+	alias fuck='sudo $(history -p \!\!)'
 
-# Terminal Tweaks
-alias c='clear'
-alias h='history'
-alias j='jobs -l'
+	# Restore terminal settings when screwed up
+	alias fix_stty='stty sane'
 
-# Print PATH's
-alias path='echo -e ${PATH//:/\\n}'
+	# Terminal Tweaks
+	alias c='clear'
+	alias h='history'
+	alias j='jobs -l'
 
-# Set EDITOR as edit command
-alias edit='"${EDITOR}"'
+	# Print PATH's
+	alias path='echo -e ${PATH//:/\\n}'
+
+	# Set EDITOR as edit command
+	alias edit='"${EDITOR}"'
+
+	# chmod
+	alias chmodx='chmod +x'
+
+	# tasks
+	alias top='htop'
+	alias htop='sudo htop'
+	alias running='htop'
+
+	# the "kp" alias ("que pasa")
+	alias kp="ps auxwww"
+
+#
+# Network
+#
+
+	# Print ip's
+	alias myip='digs myip.opendns.com @resolver1.opendns.com'
+	alias localip="ipconfig getifaddr en0"
+
+#
+# Utilities
+#
+	# Empty the Trash on all mounted volumes and the main HDD.
+	# Also, clear Apple’s System Logs to improve shell startup speed.
+	# Finally, clear download history from quarantine. https://mths.be/bum
+	alias emptytrash="sudo rm -rfv /Volumes/*/.Trashes; sudo rm -rfv ~/.Trash; sudo rm -rfv /private/var/log/asl/*.asl; sqlite3 ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV* 'delete from LSQuarantineEvent'"
+
+	# URL-encode strings
+	alias urlencode='python -c "import sys, urllib as ul; print ul.quote_plus(sys.argv[1]);"'
+
+	# weather
+	alias weather='curl https://wttr.in/ -A "ReqBin Curl Client/1.0"'
+	alias moon='curl https://wttr.in/moon -A "ReqBin Curl Client/1.0"'
+
+	# date
+	alias today='date +"%Y/%m/%d"'
+	alias fancydate='date +"It is %r %Z on %A, %B %d, %Y."'
+	alias timestamp='date +"%Y%m%d_%H%M%S"'
+
 
 # Networking
-alias myip='digs myip.opendns.com @resolver1.opendns.com'
-alias localip="ipconfig getifaddr en0"
-
-# macOS has no `md5sum`, so use `md5` as a fallback
-command -v md5sum > /dev/null || alias md5sum="md5"
-
-# macOS has no `sha1sum`, so use `shasum` as a fallback
-command -v sha1sum > /dev/null || alias sha1sum="shasum"
-
-# Empty the Trash on all mounted volumes and the main HDD.
-# Also, clear Apple’s System Logs to improve shell startup speed.
-# Finally, clear download history from quarantine. https://mths.be/bum
-alias emptytrash="sudo rm -rfv /Volumes/*/.Trashes; sudo rm -rfv ~/.Trash; sudo rm -rfv /private/var/log/asl/*.asl; sqlite3 ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV* 'delete from LSQuarantineEvent'"
-
-# URL-encode strings
-alias urlencode='python -c "import sys, urllib as ul; print ul.quote_plus(sys.argv[1]);"'
-
-alias fix_stty='stty sane'                  # fix_stty:     Restore terminal settings when screwed up
-alias DT='tee ~/Desktop/terminalOut.txt'    # DT:           Pipe content to file on MacOS Desktop
-alias top='htop'
-alias htop='sudo htop'
-alias running='htop'
-#alias rm='rm -i --preserve-root' # do not delete / or prompt if deleting more than 3 files at a time #
-#alias chown='chown --preserve-root' # Parenting changing perms on / #
-#alias chmod='chmod --preserve-root' # Parenting changing perms on / #
-#alias chgrp='chgrp --preserve-root' # Parenting changing perms on / #
-alias kp="ps auxwww" # the "kp" alias ("que pasa"), in honor of tony p.
-#alias myip='curl -s icanhazip.com | tail -n1'                     # myip:         Public facing IP Address
 alias netCons='lsof -i'                             # netCons:      Show all open TCP/IP sockets
 alias flushDNS='dscacheutil -flushcache && sudo killall -HUP mDNSResponder'            # flushDNS:     Flush out the DNS Cache
 alias lsock='sudo /usr/sbin/lsof -i -P'             # lsock:        Display open sockets
