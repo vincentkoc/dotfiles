@@ -69,7 +69,7 @@ function up () {
 
     # Composer
     if [ -e "/usr/local/bin/composer" ] ; then
-      composerupdate
+		composerupdate
     fi
 
     # Homebrew
@@ -84,7 +84,7 @@ function up () {
 
     # NPM
     if [ -e "/usr/local/bin/npm" ]  || [ -e "/opt/homebrew/bin/npm" ] ; then
-    	npm install npm -g
+		npm install npm -g
 		npm update -g
     fi
 
