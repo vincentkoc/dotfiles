@@ -96,7 +96,7 @@
     "workbench.editorAssociations": {
         "*.ipynb": "jupyter.notebook.ipynb"
     },
-    "ManageVulnerableCodeHighlight": "Don't Highlight",
+    "ManageVulnerableCodeHighlight": "Highlight All Issues",
     "editor.inlineSuggest.enabled": true,
     "bracket-pair-colorizer-2.depreciation-notice": false,
     "appService.showSavePrompt": false,
