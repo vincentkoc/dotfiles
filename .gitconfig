@@ -14,7 +14,9 @@
 	gpgsign = true
 
 [gpg]
-	program=gpg
+	# git config --global gpg.program "$(which gpg)"
+	# TODO: fix gpg alias for github client
+	program = /opt/homebrew/bin/gpg
 
 [credential]
 	# use keychain credentials if possible
