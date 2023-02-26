@@ -36,13 +36,13 @@ fi
 
 	# Variables for Shell
 	if [ -n "$ZSH_VERSION" ]; then
-	    # assume Zsh
+		# assume Zsh
 	elif [ -n "$BASH_VERSION" ]; then
-	    alias which='type -all' # which: Find executables
-	    shopt -s histappend # Save Bash History regardless of window
-	    shopt -s nocaseglob # Case insenstive tab completion
-	    shopt -s cdspell # Autocorrect typos in path names when using `cd`
-	    export PS1="\n\[\033[33m\][\u@\[\033[1;31m\]\h]\]\033[0m in :\w \n\033[1;34m\][\d \t]\[\`if [[ \$? = "0" ]]; then echo '\e[0;32m > \e[0m'; else echo '\e[0;31m > \e[0m' ; fi\`\]\033[0m"
+		alias which='type -all' # which: Find executables
+		shopt -s histappend # Save Bash History regardless of window
+		shopt -s nocaseglob # Case insenstive tab completion
+		shopt -s cdspell # Autocorrect typos in path names when using `cd`
+		export PS1="\n\[\033[33m\][\u@\[\033[1;31m\]\h]\]\033[0m in :\w \n\033[1;34m\][\d \t]\[\`if [[ \$? = "0" ]]; then echo '\e[0;32m > \e[0m'; else echo '\e[0;31m > \e[0m' ; fi\`\]\033[0m"
 	fi
 
 #
