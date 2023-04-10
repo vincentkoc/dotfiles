@@ -1,0 +1,4 @@
+#!/bin/sh
+
+# taken from https://stackoverflow.com/questions/39494631/gpg-failed-to-sign-the-data-fatal-failed-to-write-commit-object-git-2-10-0
+echo "test" | gpg --clearsign  # on linux it's gpg2 but brew stays as gpg
