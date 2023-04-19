@@ -45,6 +45,13 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 		# integrating prompt function in prompt
 		precmd_functions=(__shhist_prompt $precmd_functions)
 	fi
+
+	# ZSH Autocomplete
+	if type brew &>/dev/null; then
+		FPATH=$(brew --prefix)/share/zsh-completions:$FPATH
+		autoload -Uz compinit
+		compinit
+	fi
 fi
 
 #
@@ -57,3 +64,5 @@ unset file;
 
 #
 # Unix and Generic Configs
+export PATH="/opt/homebrew/opt/postgresql@13/bin:$PATH"
+export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
