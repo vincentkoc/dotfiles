@@ -1,4 +1,6 @@
 #!/bin/sh
 
+# Used to check gpg is working, sometimes with 1password gpg agent fails and we cant sign git commits
+# Use this to quickly validate gpg is working and able to sign
 # taken from https://stackoverflow.com/questions/39494631/gpg-failed-to-sign-the-data-fatal-failed-to-write-commit-object-git-2-10-0
 echo "test" | gpg --clearsign  # on linux it's gpg2 but brew stays as gpg
