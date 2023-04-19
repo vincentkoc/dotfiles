@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Quick SSH
+# Used to quickly connect to SSH services
+# Supporting 1password CLI for SSH Keys and root login passwords
+
+# Load hosts from a separate file
+if [ -e "../.extra/quick_ssh_hosts.sh" ]; then
+  source "../.extra/quick_ssh_hosts.sh"
+else
+  echo "Error: quick_ssh_hosts.sh not found"
+  echo "We need a file with host configurations"
+  exit 1
+fi
+
+# Function to get the password from 1Password
+function get_password() {
+    local alias=$1
+    # Replace 'op_account' with your 1Password account name
+    # Replace 'item_name_prefix' with the prefix of the item names stored in 1Password
+    op get item "item_name_prefix-$alias" --account op_account --fields password | tr -d '\n'
+}
+
+# Function to connect to a host using its alias
+function quicksshconnect() {
+    local alias=$1
+    local host_info=${hosts[$alias]}
+
+    if [[ -z $host_info ]]; then
+        echo "Host alias not found: $alias"
+        return 1
+    fi
+
+    local user=$(echo $host_info | cut -d: -f1)
+    local port=$(echo $host_info | cut -d: -f2)
+    local hostname=$(echo $host_info | cut -d: -f3)
+    local password=$(echo $host_info | cut -d: -f4)
+
+    # Need to fetch password from vault
+    # If password is == $1password then it will go and get the login information from vault
+    # TODO: Support keybase CLI
+    if [ "$password" == "\$1password" ]; then
+      # Run your command here
+      echo "Fetching password from 1password vault"
+      local password=$(get_password $alias)
+    fi
+
+    echo "Connecting to $alias: $user@$hostname (Port: $port)"
+    #We should not use sshpass and opt to use ssh and read password via secure clipboard TTY entry
+    #https://gist.github.com/justinline/e11ac0f08f267502b9e96362457d03c6
+    #sshpass -p "$password" ssh -p $port $user@$hostname
+
+    if [ -n "$password" ]
+        then
+            echo $password | xclip -selection clipboard
+            echo "Password was copied - clipboard will be wiped in 30 seconds"
+            # encapsulated with "&" as a background process fucntion
+            # So we can clear the clipboard in the background and avoid waiting
+            (
+              sleep 30
+              echo "" | xclip -selection clipboard
+              echo "Clipboard reset."
+            ) &
+    fi
+}
+
+# Main script
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <host-alias>"
+    echo "Available quickssh host aliases:"
+    for key in "${!quickssh_hosts[@]}"; do
+        echo "  - $key"
+    done
+else
+    quicksshconnect $1
+fi
