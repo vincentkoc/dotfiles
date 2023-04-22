@@ -80,12 +80,39 @@ function quicksshconnect() {
 }
 
 # Main script
+while getopts "hl:d:" option; do
+    case $option in
+        h)
+            echo "Usage: $0 [-l local_port] [-d destination_port] <host-alias>"
+            echo "Available host aliases:"
+            for key in "${!hosts[@]}"; do
+                echo "  - $key"
+            done
+            exit 0
+            ;;
+        l)
+            local_port=$OPTARG
+            ;;
+        d)
+            destination_port=$OPTARG
+            ;;
+        *)
+            echo "Invalid option"
+            exit 1
+            ;;
+    esac
+done
+
+shift $((OPTIND-1))
+host_alias=$1
+
 if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 <host-alias>"
+    echo "Usage: $0 [-l local_port] [-d destination_port] <host-alias>"
     echo "Available quickssh host aliases:"
-    for key in "${!quickssh_hosts[@]}"; do
+    for key in "${quickssh_hosts[@]}"; do
         echo "  - $key"
     done
+    echo " "
 else
     quicksshconnect $1
 fi
