@@ -4,6 +4,10 @@
 # Used to quickly connect to SSH services
 # Supporting 1password CLI for SSH Keys and root login passwords
 
+echo -e "\\033[48;5;95;38;5;214m- Let's ssh to the moon 🌙 -\\033[0m"
+echo "quickssh is a helper tool to speed up SSH connections.."
+echo " "
+
 # Load hosts from a separate file
 if [ -e "../.extra/quick_ssh_hosts.sh" ]; then
   source "../.extra/quick_ssh_hosts.sh"
