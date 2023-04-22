@@ -49,6 +49,7 @@ function get_password() {
 }
 
 # Function to connect to a host using its alias
+# Function to connect to a host using its alias
 function quicksshconnect() {
     local alias=$1
     local host_info_var="quickssh_hosts_${alias}"
@@ -66,79 +67,57 @@ function quicksshconnect() {
 
     # Set default port if not provided
     if [ -z "$port" ]; then
-        local port=22
+        port=22
     fi
 
-    # Need to fetch password from vault
-    # If password is == $1password then it will go and get the login information from vault
-    # TODO: Support keybase CLI
+    # Get password from 1Password if needed
     if [ "$password" == "\$1password" ]; then
-        # Run your command here
         echo "Fetching password from 1password vault"
-        local password=$(get_password $alias)
-        # Check password
+        password=$(get_password $alias)
         if [ -z "$password" ]; then
             echo "Issue locating password for item (ssh_$alias) in 1password... exiting!"
             return 1
         fi
     fi
 
-    #We should not use sshpass and opt to use ssh and read password via secure clipboard TTY entry
-    #https://gist.github.com/justinline/e11ac0f08f267502b9e96362457d03c6
-    #sshpass -p "$password" ssh -p $port $user@$hostname
-
-    if [ -n "$password" ]
-        then
-            echo $password | xclip -selection clipboard
-            echo "Password was copied - clipboard will be wiped in 30 seconds"
-            # encapsulated with "&" as a background process fucntion
-            # So we can clear the clipboard in the background and avoid waiting
-            (
-              sleep 30
-              echo "" | xclip -selection clipboard
-              echo "Clipboard reset."
-            ) &
+    if [ -n "$password" ]; then
+        echo $password | xclip -selection clipboard
+        echo "Password was copied - clipboard will be wiped in 30 seconds"
+        (
+          sleep 30
+          echo "" | xclip -selection clipboard
+          echo "Clipboard reset."
+        ) &
     fi
 
-    # Run the connection
+    # Prepare connection command
+    local conn_prefix=""
+    local conn_suffix=""
     if [[ $use_mosh == "true" ]]; then
-        if [ -z "$user" ]; then
-            echo -e "\033[0;33m☎️  Connecting to $alias with Mosh: $hostname (Port: $port)\033[0m"
-            mosh --ssh="ssh -p $port" $hostname
-        else
-            echo -e "\033[0;33m☎️  Connecting to $alias with Mosh: $user@$hostname (Port: $port)\033[0m"
-            mosh --ssh="ssh -p $port" $user@$hostname
-        fi
-    elif [[ $use_tmux == "true" ]]; then
-        if [ -z "$user" ]; then
-            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Tmux: $hostname (Port: $port)\033[0m"
-            ssh -t -p $port $hostname 'tmux attach || tmux new-session'
-        else
-            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Tmux: $user@$hostname (Port: $port)\033[0m"
-            ssh -t -p $port $user@$hostname 'tmux attach || tmux new-session'
-        fi
-    elif [[ $use_screen == "true" ]]; then
-        if [ -z "$user" ]; then
-            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Screen: $hostname (Port: $port)\033[0m"
-            ssh -t -p $port $hostname 'screen -xRR'
-        else
-            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Screen: $user@$hostname (Port: $port)\033[0m"
-            ssh -t -p $port $user@$hostname 'screen -xRR'
-        fi
-    elif [[ -n $local_port ]] && [[ -n $destination_port ]]; then
-        echo -e "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port) with tunneling from local port $local_port to destination port $destination_port\033[0m"
-        if [ -z "$user" ]; then
-            ssh -p $port -L $local_port:localhost:$destination_port $hostname
-        else
-            ssh -p $port -L $local_port:localhost:$destination_port $user@$hostname
-        fi
+        conn_prefix="mosh --ssh=\"ssh -p $port\""
     else
-        echo -e "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port)\033[0m"
-        if [ -z "$user" ]; then
-            ssh -p $port $hostname
-        else
-            ssh -p $port $user@$hostname
+        conn_prefix="ssh -p $port"
+    fi
+
+    if [[ $use_tmux == "true" ]]; then
+        conn_suffix="'tmux attach || tmux new-session'"
+    elif [[ $use_screen == "true" ]]; then
+        conn_suffix="'screen -xRR'"
+    elif [[ -n $local_port ]] && [[ -n $destination_port ]]; then
+        if [[ $use_mosh == "true" ]]; then
+            echo "Port forwarding not supported with Mosh... exiting!"
+            return 1
         fi
+        conn_prefix+=" -L $local_port:localhost:$destination_port"
+    fi
+
+    # Connect
+    if [ -z "$user" ]; then
+        echo "\033[0;33m☎️  Connecting to $alias: $hostname (Port: $port)\033[0m"
+        eval "$conn_prefix $hostname $conn_suffix"
+    else
+        echo "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port)\033[0m"
+        eval "$conn_prefix $user@$hostname $conn_suffix"
     fi
 }
 
@@ -146,35 +125,15 @@ function quicksshconnect() {
 use_mosh=false
 use_tmux=false
 use_screen=false
-while getopts ":mhl:d:" option; do
+while getopts ":mstl:d:" option; do
     case $option in
-        m)
-            use_mosh=true
-            ;;
-        s)
-            use_screen=true
-            ;;
-        t)
-            use_tmux=true
-            ;;
-        h)
-            echo "Usage: $0 [-l local_port] [-d destination_port] <host-alias>"
-            echo "Available host aliases:"
-            for key in "${!hosts[@]}"; do
-                echo "  - $key"
-            done
-            exit 0
-            ;;
-        l)
-            local_port=$OPTARG
-            ;;
-        d)
-            destination_port=$OPTARG
-            ;;
-        *)
-            echo "Invalid option"
-            exit 1
-            ;;
+        m) use_mosh=true ;;
+        s) use_screen=true ;;
+        t) use_tmux=true ;;
+        l) local_port=$OPTARG ;;
+        d) destination_port=$OPTARG ;;
+        *) echo "Invalid option"
+           exit 1;;
     esac
 done
 
