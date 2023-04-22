@@ -45,9 +45,14 @@ function quicksshconnect() {
     # If password is == $1password then it will go and get the login information from vault
     # TODO: Support keybase CLI
     if [ "$password" == "\$1password" ]; then
-      # Run your command here
-      echo "Fetching password from 1password vault"
-      local password=$(get_password $alias)
+        # Run your command here
+        echo "Fetching password from 1password vault"
+        local password=$(get_password $alias)
+        # Check password
+        if [ -z "$password" ]; then
+            echo "Issue locating password for item (ssh_$alias) in 1password... exiting!"
+            return 1
+        fi
     fi
 
     echo "Connecting to $alias: $user@$hostname (Port: $port)"
