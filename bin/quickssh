@@ -143,8 +143,20 @@ function quicksshconnect() {
 }
 
 # Main script
-while getopts "hl:d:" option; do
+use_mosh=false
+use_tmux=false
+use_screen=false
+while getopts ":mhl:d:" option; do
     case $option in
+        m)
+            use_mosh=true
+            ;;
+        s)
+            use_screen=true
+            ;;
+        t)
+            use_tmux=true
+            ;;
         h)
             echo "Usage: $0 [-l local_port] [-d destination_port] <host-alias>"
             echo "Available host aliases:"
@@ -170,12 +182,14 @@ shift $((OPTIND-1))
 host_alias=$1
 
 if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 [-l local_port] [-d destination_port] <host-alias>"
+    echo "Usage: quickssh [-m] [-s] [-t] [-l local_port] [-d destination_port] <host-alias>"
+    echo "  -m: Use Mosh instead of SSH"
+    echo "  -s: Use Screen with SSH"
+    echo "  -t: Use Tmux with SSH"
     echo "Available quickssh host aliases:"
     for key in "${quickssh_hosts[@]}"; do
         echo "  - $key"
     done
-    echo " "
 else
     quicksshconnect $1
 fi
