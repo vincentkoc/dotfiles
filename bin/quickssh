@@ -28,10 +28,11 @@ function get_password() {
 # Function to connect to a host using its alias
 function quicksshconnect() {
     local alias=$1
-    local host_info=${hosts[$alias]}
+    local host_info_var="quickssh_hosts_${alias}"
+    local host_info=${!host_info_var}
 
     if [[ -z $host_info ]]; then
-        echo "Host alias not found: $alias"
+        echo "Host alias not found ($alias)... exiting!"
         return 1
     fi
 
