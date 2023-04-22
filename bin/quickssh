@@ -4,8 +4,31 @@
 # Used to quickly connect to SSH services
 # Supporting 1password CLI for SSH Keys and root login passwords
 
-echo -e "\\033[48;5;95;38;5;214m- Let's ssh to the moon 🌙 -\\033[0m"
-echo "quickssh is a helper tool to speed up SSH connections.."
+# For Mosh:
+# Ensure that you have Mosh installed on both your local machine
+# and the remote host to use this feature. You can install Mosh
+# using the package manager for your system:
+#     For Ubuntu/Debian: sudo apt-get install mosh
+#     For CentOS/RHEL: sudo yum install mosh
+#     For Fedora: sudo dnf install mosh
+#     For macOS: brew install mosh
+#     For Arch Linux: sudo pacman -S mosh
+# Also, make sure the necessary UDP ports (usually 60000-61000)
+# are open on the remote host's firewall.
+
+echo -e "\033[0;33m"
+cat << "EOF"
+              _      _            _     
+   __ _ _   _(_) ___| | _____ ___| |__  
+  / _` | | | | |/ __| |/ / __/ __| '_ \ 
+ | (_| | |_| | | (__|   <\__ \__ \ | | |
+  \__, |\__,_|_|\___|_|\_\___/___/_| |_|
+     |_|                                
+
+EOF
+
+echo "  quickssh the SSH swiss army knife."
+echo -e "\033[0m"
 echo " "
 
 # Load hosts from a separate file
