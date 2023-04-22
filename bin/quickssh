@@ -83,7 +83,6 @@ function quicksshconnect() {
         fi
     fi
 
-    echo "Connecting to $alias: $user@$hostname (Port: $port)"
     #We should not use sshpass and opt to use ssh and read password via secure clipboard TTY entry
     #https://gist.github.com/justinline/e11ac0f08f267502b9e96362457d03c6
     #sshpass -p "$password" ssh -p $port $user@$hostname
@@ -102,7 +101,45 @@ function quicksshconnect() {
     fi
 
     # Run the connection
-    ssh -p $port $user@$hostname
+    if [[ $use_mosh == "true" ]]; then
+        if [ -z "$user" ]; then
+            echo -e "\033[0;33m☎️  Connecting to $alias with Mosh: $hostname (Port: $port)\033[0m"
+            mosh --ssh="ssh -p $port" $hostname
+        else
+            echo -e "\033[0;33m☎️  Connecting to $alias with Mosh: $user@$hostname (Port: $port)\033[0m"
+            mosh --ssh="ssh -p $port" $user@$hostname
+        fi
+    elif [[ $use_tmux == "true" ]]; then
+        if [ -z "$user" ]; then
+            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Tmux: $hostname (Port: $port)\033[0m"
+            ssh -t -p $port $hostname 'tmux attach || tmux new-session'
+        else
+            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Tmux: $user@$hostname (Port: $port)\033[0m"
+            ssh -t -p $port $user@$hostname 'tmux attach || tmux new-session'
+        fi
+    elif [[ $use_screen == "true" ]]; then
+        if [ -z "$user" ]; then
+            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Screen: $hostname (Port: $port)\033[0m"
+            ssh -t -p $port $hostname 'screen -xRR'
+        else
+            echo -e "\033[0;33m☎️  Connecting to $alias with SSH and Screen: $user@$hostname (Port: $port)\033[0m"
+            ssh -t -p $port $user@$hostname 'screen -xRR'
+        fi
+    elif [[ -n $local_port ]] && [[ -n $destination_port ]]; then
+        echo -e "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port) with tunneling from local port $local_port to destination port $destination_port\033[0m"
+        if [ -z "$user" ]; then
+            ssh -p $port -L $local_port:localhost:$destination_port $hostname
+        else
+            ssh -p $port -L $local_port:localhost:$destination_port $user@$hostname
+        fi
+    else
+        echo -e "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port)\033[0m"
+        if [ -z "$user" ]; then
+            ssh -p $port $hostname
+        else
+            ssh -p $port $user@$hostname
+        fi
+    fi
 }
 
 # Main script
