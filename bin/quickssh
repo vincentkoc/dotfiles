@@ -41,6 +41,11 @@ function quicksshconnect() {
     local port=$(echo $host_info | cut -d: -f3)
     local password=$(echo $host_info | cut -d: -f4)
 
+    # Set default port if not provided
+    if [ -z "$port" ]; then
+        local port=22
+    fi
+
     # Need to fetch password from vault
     # If password is == $1password then it will go and get the login information from vault
     # TODO: Support keybase CLI
