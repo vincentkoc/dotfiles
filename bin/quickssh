@@ -36,8 +36,8 @@ function quicksshconnect() {
     fi
 
     local user=$(echo $host_info | cut -d: -f1)
-    local port=$(echo $host_info | cut -d: -f2)
-    local hostname=$(echo $host_info | cut -d: -f3)
+    local hostname=$(echo $host_info | cut -d: -f2)
+    local port=$(echo $host_info | cut -d: -f3)
     local password=$(echo $host_info | cut -d: -f4)
 
     # Need to fetch password from vault
