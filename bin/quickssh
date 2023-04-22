@@ -113,10 +113,10 @@ function quicksshconnect() {
 
     # Connect
     if [ -z "$user" ]; then
-        echo "\033[0;33m☎️  Connecting to $alias: $hostname (Port: $port)\033[0m"
+        echo -e "\033[0;33m☎️  Connecting to $alias: $hostname (Port: $port)\033[0m"
         eval "$conn_prefix $hostname $conn_suffix"
     else
-        echo "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port)\033[0m"
+        echo -e "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port)\033[0m"
         eval "$conn_prefix $user@$hostname $conn_suffix"
     fi
 }
