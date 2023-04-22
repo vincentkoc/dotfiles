@@ -4,11 +4,17 @@
 # Homebrew
 #
 if [[ $OSTYPE == 'darwin'* ]]; then
+	export EXTRASPATH="/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.extra"
+
 	# homebrew
 	export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
 	eval "$(/opt/homebrew/bin/brew shellenv)"
 
 	# export PATH="/opt/homebrew/opt/postgresql@13/bin:$PATH"
+else
+	# Fallback for Unix
+	export EXTRASPATH="~/dotfiles/.extra"
+
 fi
 
 #
