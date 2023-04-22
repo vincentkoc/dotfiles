@@ -22,7 +22,7 @@ function get_password() {
     local alias=$1
     # Replace 'op_account' with your 1Password account name
     # Replace 'item_name_prefix' with the prefix of the item names stored in 1Password
-    op get item "item_name_prefix-$alias" --account op_account --fields password | tr -d '\n'
+    op item get "ssh_$alias" --account op_account --fields password | tr -d '\n'
 }
 
 # Function to connect to a host using its alias
