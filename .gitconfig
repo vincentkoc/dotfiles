@@ -59,9 +59,9 @@
 [filter "lfs"]
 	# setup and allow for large files in git
 	required = true
-	clean = git-lfs clean -- %f
-	smudge = git-lfs smudge -- %f
-	process = git-lfs filter-process
+	clean = /opt/homebrew/bin/git-lfs clean -- %f
+	smudge = /opt/homebrew/bin/git-lfs smudge -- %f
+	process = /opt/homebrew/bin/git-lfs filter-process
 
 [color]
 	# allow for pretty/colour based output
