@@ -1,4 +1,20 @@
 #
+# Oh-my-zsh
+#
+export ZSH="$HOME/.oh-my-zsh"
+ZSH_THEME="spaceship"
+ENABLE_CORRECTION="true"
+fpath=($ZSH/custom/completions $fpath)
+plugins=(
+	git
+	z
+	kubectl
+	dirhistory
+	zsh-autosuggestions
+)
+source $ZSH/oh-my-zsh.sh
+
+#
 # Load dotfiles pre-ENV
 #
 for file in ~/.{path,bash_prompt,aliases,functions,exports}; do
