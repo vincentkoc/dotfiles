@@ -33,6 +33,11 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	# Pipe content to file on MacOS Desktop
 	alias loghome='tee ~/Desktop/logfile_$(date +"%Y%m%d_%H%M%S").txt'
 
+	# Kubernetes
+	alias k='kubectl'
+	alias kx='kubectx'
+	alias kn='kubens'
+
 else
 	# Preferred 'ls' implementation
 	alias ll='ls -FGlAhp'
