@@ -75,3 +75,5 @@ unset file;
 # Unix and Generic Configs
 export PATH="/opt/homebrew/opt/postgresql@13/bin:$PATH"
 export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+
+[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
