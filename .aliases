@@ -17,8 +17,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	alias updatedb="sudo /usr/libexec/locate.updatedb"
 
 	# Preferred 'ls' implementation
-	alias ls='exa --git'
-	alias ll='exa -FGlha --git'
+	alias ls='exa -lh --git'
+	alias ll='exa -Flha --git'
 
 	# Editor
 	alias vim='nvim'
