@@ -5,7 +5,6 @@ for file in ~/.{path,bash_prompt,aliases,functions,exports}; do
 	[ -r "$file" ] && [ -f "$file" ] && source "$file";
 done;
 unset file;
-eval "$($HOME/bin/system-colour.py)"
 
 # If not running interactively, don't do anything
 [ -z "$PS1" ] && return
@@ -13,7 +12,8 @@ eval "$($HOME/bin/system-colour.py)"
 #
 # Shell Stuff
 #
-PROMPT="%F{36}%K{$SYSTEM_COLOUR_BG}%F{$SYSTEM_COLOUR_FG}%n@%M%k%f %F{blue}%~ %(?.%F{green}.%F{red})%#%f "
+#eval "$($HOME/bin/system-colour.py)"
+#PROMPT="%F{36}%K{$SYSTEM_COLOUR_BG}%F{$SYSTEM_COLOUR_FG}%n@%M%k%f %F{blue}%~ %(?.%F{green}.%F{red})%#%f "
 
 #
 # Mac Specific
