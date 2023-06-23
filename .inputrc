@@ -40,7 +40,7 @@ set convert-meta off
 "\e[3;3~": kill-word
 
 # Enable coloured output
-colored-stats
+# colored-stats
 
 # Show symlinks
 set mark-symlinked-directories On
