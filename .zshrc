@@ -38,7 +38,7 @@ unset file;
 
 if [[ $OSTYPE == 'darwin'* ]]; then
 	# Architecture flag for M1 Native
-	export ARCHFLAGS="-arch x86_64"
+	# export ARCHFLAGS="-arch x86_64"
 
 	# gpg
 	export GPG_TTY=$(tty)
