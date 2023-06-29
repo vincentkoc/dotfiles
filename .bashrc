@@ -1,4 +1,2 @@
-
-. "$HOME/.cargo/env"
-
-[ -f ~/.fzf.bash ] && source ~/.fzf.bash
+# . "$HOME/.cargo/env"
+# [ -f ~/.fzf.bash ] && source ~/.fzf.bash
