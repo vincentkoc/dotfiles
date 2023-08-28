@@ -1,0 +1,55 @@
+{
+  "generalHeading": null,
+  "hidePluginProps": true,
+  "widgetsCalendarHeading": null,
+  "widgetsCalendarEnabled": "journals",
+  "widgetsCalendarWidth": "380px",
+  "widgetsWeatherHeading": null,
+  "widgetsWeatherEnabled": "journals",
+  "widgetsWeatherID": "7QOWaH4IPGGaAr4puql2",
+  "widgetsQuoteHeading": null,
+  "widgetsQuoteEnabled": "journals",
+  "widgetsQuoteTag": "#quote",
+  "widgetsQuoteMaxWidth": "48ch",
+  "widgetsQuoteSize": "100%",
+  "widgetsCustomHeading": null,
+  "widgetsCustomEnabled": "everywhere",
+  "widgetsCustomCode": "<iframe id=\"banner-widgets-pomo\" src=\"https://pomofocus.io/app\"></iframe>",
+  "journalHeading": null,
+  "defaultJournalBanner": "https://images.unsplash.com/photo-1646026371686-79950ceb6daa?ixlib=rb-1.2.1&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1034&q=80",
+  "journalBannerHeight": "280px",
+  "journalBannerAlign": "50%",
+  "defaultJournalIcon": "📅",
+  "journalIconWidth": "50px",
+  "pageHeading": null,
+  "defaultPageBanner": "https://wallpaperaccess.com/full/1146672.jpg",
+  "pageBannerHeight": "280px",
+  "pageBannerAlign": "50%",
+  "defaultPageIcon": "📄",
+  "pageIconWidth": "40px",
+  "advancedHeading": null,
+  "customPropsConfig": {
+    "pageType": {
+      "evrgrn": {
+        "pageIcon": "🌳",
+        "banner": "https://images.unsplash.com/photo-1502082553048-f009c37129b9?ixlib=rb-1.2.1&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1170&q=80",
+        "bannerHeight": "200px",
+        "bannerAlign": "50%"
+      },
+      "seed": {
+        "pageIcon": "🌱",
+        "banner": "https://images.unsplash.com/photo-1631949454967-6c6d07fb59cd?ixlib=rb-1.2.1&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1170&q=80",
+        "bannerHeight": "200px",
+        "bannerAlign": "50%"
+      }
+    },
+    "anotherCamalCasedPropName": {}
+  },
+  "additional": {
+    "quoteWidget": {
+      "cleanupRegExps_before": [],
+      "cleanupRegExps_after": []
+    }
+  },
+  "disabled": false
+}

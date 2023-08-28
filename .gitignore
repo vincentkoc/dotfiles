@@ -26,3 +26,4 @@ Library/Preferences/com.crowdcafe.windowmagnet.plist
 .wget-hsts
 .kube/config
 .logseq/plugins/
+.logseq/settings/logseq-calendars-plugin.json
