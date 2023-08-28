@@ -25,3 +25,4 @@ Library/Preferences/com.kapeli.dashdoc.plist
 Library/Preferences/com.crowdcafe.windowmagnet.plist
 .wget-hsts
 .kube/config
+.logseq/plugins/
