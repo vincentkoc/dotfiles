@@ -37,6 +37,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	alias k='kubectl'
 	alias kx='kubectx'
 	alias kn='kubens'
+	alias kpf='k get pods | fzf'
+	alias ks='stern -n engineering'
 
 else
 	# Preferred 'ls' implementation
