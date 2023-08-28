@@ -184,13 +184,13 @@
         "workpace",
         "xcom"
     ],
-    "terminal.integrated.fontFamily": "MesloLGS NF",
     "files.associations": {
         "*.rmd": "markdown",
         "*.tf": "terraform",
         "*.md": "markdown",
         "*.sh": "shellscript",
-        "**/*.sql": "jinja-sql"
+        "**/*.sql": "jinja-sql",
+        "*.sql": "jinja-sql"
     },
     "terminal.external.osxExec": "iTerm.app",
     "terminal.integrated.fontSize": 12,
@@ -198,7 +198,8 @@
     "readable.enableAutoComplete": true,
     "vs-kubernetes": {
         "vscode-kubernetes.helm-path.mac": "/opt/homebrew/bin/helm",
-        "vscode-kubernetes.minikube-path.mac": "/opt/homebrew/bin/minikube"
+        "vscode-kubernetes.minikube-path.mac": "/Users/vincentkoc/.vs-kubernetes/tools/minikube/darwin-arm64/minikube",
+        "vs-kubernetes.minikube-show-information-expiration": "2023-08-05T04:21:10.496Z"
     },
     "githubPullRequests.pullBranch": "never",
     "snyk.yesWelcomeNotification": false,
@@ -223,7 +224,15 @@
     },
     "snyk.advanced.cliPath": "/Users/vincentkoc/Library/Application Support/snyk-ls/snyk-macos",
     "snyk.trustedFolders": [
-        "/Users/vincentkoc/Git/"
+        "/Users/vincentkoc/Git/",
+        "/Users/vincentkoc/GIT/_Airbyte/legolas",
+        "/Users/vincentkoc/GIT/_Airbyte/legolas",
+        "/Users/vincentkoc/GIT/_Hipages/datadex",
+        "/Users/vincentkoc/GIT/_Hipages/airflow",
+        "/Users/vincentkoc/GIT/_Hipages/trench",
+        "/Users/vincentkoc/GIT/_Apps/solstice",
+        "/Users/vincentkoc/GIT/_Hipages/hip-new",
+        "/Users/vincentkoc/GIT/_Hipages/infra-man"
     ],
     "snyk.advanced.organization": "data-to3",
     "snyk.yesTelemetry": false,
@@ -236,5 +245,13 @@
 	"telemetry.telemetryLevel": "off",
 	"enableTelemetry": false,
 	"gitlens.telemetry.enabled": false,
-	"snyk.yesTelemetry": false
+    "snyk.yesTelemetry": false,
+    "python.analysis.extraPaths": [
+        "utils",
+        "utils/src",
+        "utils/src/hipdbcl"
+    ],
+    "terminal.integrated.defaultProfile.osx": "zsh",
+    "terminal.integrated.fontFamily": "Fira Code",
+    "git.confirmSync": false
 }
