@@ -13,6 +13,8 @@ Library/Preferences/com.apple.Music.plist
 Library/Preferences/org.videolan.vlc.plist
 Library/Preferences/com.lwouis.alt-tab-macos.plist
 Library/Application Support/Sublime Text/Packages/User/WakaTime.sublime-settings
+Library/Application Support/Keyboard Maestro/
+Library/Application Support/MySQL/
 .wakatime.cfg
 *.otf
 *.ttf
@@ -23,6 +25,7 @@ Library/Preferences/com.spotify.client.plist
 Library/Preferences/com.panic.Transmit.plist
 Library/Preferences/com.kapeli.dashdoc.plist
 Library/Preferences/com.crowdcafe.windowmagnet.plist
+Library/Application Support/Charles/
 .wget-hsts
 .kube/config
 .logseq/plugins/
