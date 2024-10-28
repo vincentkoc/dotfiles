@@ -17,8 +17,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	alias updatedb="sudo /usr/libexec/locate.updatedb"
 
 	# Preferred 'ls' implementation
-	alias ls='exa -lh --git'
-	alias ll='exa -Flha --git'
+	alias ls='eza -lh --git --icons'
+	alias ll='eza -lha --git --icons'
 
 	# Editor
 	alias vim='nvim'
@@ -55,8 +55,8 @@ fi
 
 	# Preferred Options and Replacements
 	alias man='tldr'
-	alias dig='dog'
-	alias digs='dog -1'
+	# alias dig='dog'
+	# alias digs='dog -1'
 	alias domain='dig +trace'
 	alias cp='cp -iv'
 	alias mv='mv -iv'
@@ -134,7 +134,7 @@ fi
 #
 
 	# Print ip's
-	alias myip='digs myip.opendns.com @resolver1.opendns.com'
+	alias myip='dig myip.opendns.com @resolver1.opendns.com'
 	alias localip="ipconfig getifaddr en0"
 
 #
