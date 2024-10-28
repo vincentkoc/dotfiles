@@ -34,3 +34,15 @@ Library/Application Support/Charles/
 .logseq/graphs/*
 .jupyter/*
 .ssh/authorized_keys
+Library/Preferences/com.apple.Music.eq.plist
+Library/Preferences/com.apple.symbolichotkeys.plist
+Library/Preferences/com.apple.Terminal.plist
+Library/Preferences/com.DanPristupov.Fork.plist
+Library/Preferences/com.googlecode.iterm2.plist
+Library/Preferences/org.videolan.vlc/vlcrc
+Library/Preferences/us.zoom.Transcode.plist
+Library/Preferences/us.zoom.xos.plist
+Library/Preferences/us.zoom.ZoomAutoUpdater.plist
+Library/Preferences/ZoomChat.plist
+Library/Group Containers/com.apple.PreviewLegacySignaturesConversion/Library/Preferences/com.apple.PreviewLegacySignaturesConversion.plist
+Library/Application Support/Dash/library.dash
