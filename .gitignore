@@ -46,3 +46,6 @@ Library/Preferences/us.zoom.ZoomAutoUpdater.plist
 Library/Preferences/ZoomChat.plist
 Library/Group Containers/com.apple.PreviewLegacySignaturesConversion/Library/Preferences/com.apple.PreviewLegacySignaturesConversion.plist
 Library/Application Support/Dash/library.dash
+.netrc
+.aws/credentials
+.aws/config
