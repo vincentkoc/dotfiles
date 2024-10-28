@@ -3,9 +3,12 @@
   "defaultExpansionLevel": 1,
   "defaultHeadingType": "h",
   "showTags": false,
+  "openShortcut": "",
   "hideBackTop": false,
   "hideGoDown": false,
   "noPageJump": false,
-  "noAutoGoToTop": false,
-  "disabled": false
+  "pageScrollBehavior": "top",
+  "maxScrollTryCount": 20,
+  "disabled": false,
+  "noAutoGoToTop": false
 }

@@ -1,5 +1,6 @@
 {
   "theme": "auto",
+  "enableBlurBackground": false,
   "nodeAnchorEnabled": false,
   "nodeAnchorIcon": "🟢",
   "autofitEnabled": true,
@@ -7,6 +8,8 @@
   "syncCollapsedState": false,
   "colorFreezeLevel": "0",
   "disableShortcuts": false,
+  "enableRenderImage": false,
+  "maxRenderImageSize": "100",
   "disabled": false,
   "keyBindings": {
     "openMarkmap": "ctrl+m ctrl+m",

@@ -5,5 +5,5 @@
   "parseSingleWordAsTag": false,
   "parseAsTags": false,
   "pagesToIgnore": "@,a,b,c,card,now,later,todo,doing,done,wait,waiting,canceled,cancelled,started,in-progress,dream,dreams,work,back,Dreams,Dream,book,books,future,things,project,Things,day,like,session,projects,Projects,Areas,areas",
-  "disabled": false
+  "disabled": true
 }

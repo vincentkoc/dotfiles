@@ -1,14 +1,14 @@
-{:logseq-tabs {:version "v1.19.1", :repo "pengx17/logseq-plugin-tabs", :effect true, :theme false}
+{:logseq-tabs {:version "v1.19.4", :repo "pengx17/logseq-plugin-tabs", :effect true, :theme false}
  :logseq-bullet-threading {:version "v1.1.4", :repo "pengx17/logseq-plugin-bullet-threading", :effect false, :theme false}
  :logseq-journals-calendar {:version "v0.10.10", :repo "xyhp915/logseq-journals-calendar", :effect false, :theme false}
- :logseq-mark-map {:version "v0.3.17", :repo "vipzhicheng/logseq-plugin-mark-map", :effect false, :theme false}
- :logseq-link-preview {:version "v2.2.10", :repo "pengx17/logseq-plugin-link-preview", :effect true, :theme false}
- :logseq-tocgen {:version "v2.8.0", :repo "sethyuan/logseq-plugin-tocgen", :effect true, :theme false}
+ :logseq-mark-map {:version "v0.4.3", :repo "vipzhicheng/logseq-plugin-mark-map", :effect false, :theme false}
+ :logseq-link-preview {:version "v2.3.0", :repo "pengx17/logseq-plugin-link-preview", :effect true, :theme false}
+ :logseq-tocgen {:version "v2.13.0", :repo "sethyuan/logseq-plugin-tocgen", :effect true, :theme false}
  :logseq-calendars-plugin {:version "2.2.2", :repo "sawhney17/logseq-calendars-plugin", :effect true, :theme false}
  :logseq-awesome-links {:version "v1.15.16", :repo "yoyurec/logseq-awesome-links", :effect true, :theme false}
  :logseq-toc-plugin {:version "1.5.6", :repo "hkgnp/logseq-toc-plugin", :effect false, :theme false}
  :logseq-banners-plugin {:version "v3.4.11", :repo "yoyurec/logseq-banners-plugin", :effect true, :theme false}
  :logseq-copy-code-plugin {:version "v.1.2.0", :repo "vyleung/logseq-copy-code-plugin", :effect true, :theme false}
  :logseq-todo-exploder {:version "1.0.3", :repo "sawhney17/logseq-todo-exploder", :effect true, :theme false}
- :logseq-open-in-code {:version "v0.0.5", :repo "rebornix/logseq-open-in-code", :effect true, :theme false}
- :logseq-automatic-linker {:version "1.5.0", :repo "sawhney17/logseq-automatic-linker", :effect false, :theme false}}
+ :logseq-open-in-code {:version "v0.0.7", :repo "rebornix/logseq-open-in-code", :effect true, :theme false}
+ :logseq-automatic-linker {:version "1.5.5", :repo "sawhney17/logseq-automatic-linker", :effect false, :theme false}}

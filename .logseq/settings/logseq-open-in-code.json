@@ -1,4 +1,8 @@
 {
   "distro": "stable",
+  "window": "stable",
+  "key_open_line": "mod+alt+o",
+  "key_open_page": "mod+o",
+  "key_open_graph": "mod+shift+o",
   "disabled": false
 }
