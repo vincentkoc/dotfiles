@@ -108,7 +108,7 @@
         "markdown": true
     },
     "workbench.iconTheme": "material-icon-theme",
-    "workbench.colorTheme": "Tokyo Night",
+    "workbench.colorTheme": "Visual Studio Light",
     "powermode.enabled": false,
     "cSpell.userWords": [
         "acryl",
@@ -147,6 +147,7 @@
         "keyspace",
         "koconder",
         "Kubernetes",
+        "langchain",
         "lcov",
         "liststrs",
         "lkml",
@@ -190,7 +191,21 @@
         "*.md": "markdown",
         "*.sh": "shellscript",
         "**/*.sql": "jinja-sql",
-        "*.sql": "jinja-sql"
+        "*.sql": "jinja-sql",
+        "utils.h": "c",
+        "ff.h": "c",
+        "functional": "c",
+        "ring_buffer.h": "c",
+        "stdbool.h": "c",
+        "mic.h": "c",
+        "storage.h": "c",
+        "i2s.h": "c",
+        "stdio.h": "c",
+        "sdcard.h": "c",
+        "nrfy_gpio.h": "c",
+        "btutils.h": "c",
+        "speaker.h": "c",
+        "math.h": "c"
     },
     "terminal.external.osxExec": "iTerm.app",
     "terminal.integrated.fontSize": 12,
@@ -232,7 +247,12 @@
         "/Users/vincentkoc/GIT/_Hipages/trench",
         "/Users/vincentkoc/GIT/_Apps/solstice",
         "/Users/vincentkoc/GIT/_Hipages/hip-new",
-        "/Users/vincentkoc/GIT/_Hipages/infra-man"
+        "/Users/vincentkoc/GIT/_Hipages/infra-man",
+        "/Users/vincentkoc/GIT/_Apps/hipay",
+        "/Users/vincentkoc/GIT/_Perso/Omi",
+        "/Users/vincentkoc/GIT/_Perso/timesaver",
+        "/Users/vincentkoc/GIT/_Perso/cohere-toolkit",
+        "/Users/vincentkoc/GIT/_Perso/natilius"
     ],
     "snyk.advanced.organization": "data-to3",
     "snyk.yesTelemetry": false,
@@ -253,5 +273,13 @@
     ],
     "terminal.integrated.defaultProfile.osx": "zsh",
     "terminal.integrated.fontFamily": "Fira Code",
-    "git.confirmSync": false
+    "git.confirmSync": false,
+    "editor.accessibilitySupport": "off",
+    "github.copilot.editor.enableAutoCompletions": true,
+    "snyk.folderConfigs": null,
+    "cmake.configureOnOpen": true,
+    "cmake.pinnedCommands": [
+        "workbench.action.tasks.configureTaskRunner",
+        "workbench.action.tasks.runTask"
+    ]
 }
