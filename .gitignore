@@ -49,3 +49,5 @@ Library/Application Support/Dash/library.dash
 .netrc
 .aws/credentials
 .aws/config
+/Library/Application Support/Adobe
+/Library/Application Support/Airflow
