@@ -16,7 +16,8 @@
 [gpg]
 	# git config --global gpg.program "$(which gpg)"
 	# TODO: fix gpg alias for github client
-	program = /opt/homebrew/bin/gpg
+	# program = /opt/homebrew/bin/gpg
+	program = /usr/local/MacGPG2/bin/gpg
 
 [credential]
 	# use keychain credentials if possible
@@ -59,9 +60,9 @@
 [filter "lfs"]
 	# setup and allow for large files in git
 	required = true
-	clean = /opt/homebrew/bin/git-lfs clean -- %f
-	smudge = /opt/homebrew/bin/git-lfs smudge -- %f
-	process = /opt/homebrew/bin/git-lfs filter-process
+	clean = /usr/local/bin/git-lfs clean -- %f
+	smudge = /usr/local/bin/git-lfs smudge -- %f
+	process = /usr/local/bin/git-lfs filter-process
 
 [color]
 	# allow for pretty/colour based output
