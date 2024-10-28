@@ -33,3 +33,4 @@ Library/Application Support/Charles/
 .ssh/authorized_keys
 .logseq/graphs/*
 .jupyter/*
+.ssh/authorized_keys
