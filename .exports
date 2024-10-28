@@ -8,7 +8,7 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 
 	# homebrew
 	export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
-	eval "$(/opt/homebrew/bin/brew shellenv)"
+	eval "$(/usr/local/bin/brew shellenv)"
 
 	# export PATH="/opt/homebrew/opt/postgresql@13/bin:$PATH"
 else
