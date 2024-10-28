@@ -32,3 +32,4 @@ Library/Application Support/Charles/
 .logseq/settings/logseq-calendars-plugin.json
 .ssh/authorized_keys
 .logseq/graphs/*
+.jupyter/*
