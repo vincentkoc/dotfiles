@@ -51,3 +51,4 @@ Library/Application Support/Dash/library.dash
 .aws/config
 /Library/Application Support/Adobe
 /Library/Application Support/Airflow
+.ssh/authorized_keys
