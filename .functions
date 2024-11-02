@@ -59,60 +59,216 @@ kiaf () { killall -9 "$@"; }
 
 # Global updater
 function up () {
-	# Password for Sudo
-	echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
-	sudo -v
+    # Password for Sudo
+    echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
+    sudo -v
 
-	# Mac Updates
-	sudo softwareupdate -i -a
+    # Keep sudo alive
+    while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
-    # Composer
-    if [ -e "/usr/local/bin/composer" ] ; then
-		composerupdate
+    echo -e "\n🔄 Starting system update...\n"
+
+    # Track failures
+    declare -a failed_updates=()
+
+    # Mac Updates
+    if [ "$(uname)" == "Darwin" ]; then
+        echo "📱 Checking for macOS updates..."
+        if sudo softwareupdate -i -a; then
+            echo "✅ macOS updates complete"
+        else
+            failed_updates+=("macOS")
+        fi
     fi
 
     # Homebrew
-    if [ -e "/usr/local/bin/brew" ] || [ -e "/opt/homebrew/bin/brew" ]  ; then
-		brew update
-		brew upgrade
-		brew cask upgrade
-		brew cleanup
-		brew doctor
-		brew missing
+    if command -v brew &> /dev/null; then
+        echo "🍺 Updating Homebrew packages..."
+        if { brew update && \
+				brew upgrade && \
+				brew upgrade --cask && \
+				brew cleanup && \
+				brew doctor && \
+				brew missing; }; then
+            echo "✅ Homebrew updates complete"
+        else
+            failed_updates+=("Homebrew")
+        fi
     fi
 
     # NPM
-    if [ -e "/usr/local/bin/npm" ]  || [ -e "/opt/homebrew/bin/npm" ] ; then
-		npm install npm -g
-		npm update -g
+    if command -v npm &> /dev/null; then
+        echo "📦 Updating NPM..."
+        if { npm install -g npm@latest && \
+		npm update -g; }; then
+            echo "✅ NPM updates complete"
+        else
+            failed_updates+=("NPM")
+        fi
+    fi
+
+    # PNPM
+    if command -v pnpm &> /dev/null; then
+        echo "📦 Updating PNPM..."
+        if pnpm update -g; then
+            echo "✅ PNPM updates complete"
+        else
+            failed_updates+=("PNPM")
+        fi
+    fi
+
+    # Yarn
+    if command -v yarn &> /dev/null; then
+        echo "🧶 Updating Yarn..."
+        if { yarn set version latest && \
+				yarn global upgrade; }; then
+            echo "✅ Yarn updates complete"
+        else
+            failed_updates+=("Yarn")
+        fi
+    fi
+
+    # Python pip
+    if command -v pip &> /dev/null; then
+        echo "🐍 Updating Python packages..."
+        if { pip install --upgrade pip setuptools wheel && \
+				pip list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip install -U; }; then
+            echo "✅ Python packages updated"
+        else
+            failed_updates+=("Python pip")
+        fi
+    fi
+
+    # Python pip3
+    if command -v pip3 &> /dev/null; then
+        echo "🐍 Updating Python3 packages..."
+        if { pip3 install --upgrade pip setuptools wheel && \
+				pip3 list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip3 install -U; }; then
+            echo "✅ Python3 packages updated"
+        else
+            failed_updates+=("Python pip3")
+        fi
     fi
 
     # Ruby Gems
-    if [ -e "/usr/bin/gem" ] || [ -e "~/.rbenv/shims/gem" ] ; then
-		sudo gem update --system
-		sudo gem update -n /usr/local/bin
-		sudo gem cleanup
-    fi
-
-    # Python
-    if [[ $(command -v pip) == "" ]]; then
-        pip install --upgrade "pip" "setuptools"
+    if command -v gem &> /dev/null; then
+        echo "💎 Updating Ruby Gems..."
+        if { sudo gem update --system && \
+				sudo gem update && \
+				sudo gem cleanup; }; then
+            echo "✅ Ruby Gems updated"
+        else
+            failed_updates+=("Ruby Gems")
+        fi
     fi
 
     # Rust
-    if [[ $(command -v rustup) == "" ]]; then
-        rustup update
+    if command -v rustup &> /dev/null; then
+        echo "🦀 Updating Rust..."
+        if rustup update; then
+            echo "✅ Rust updated"
+        else
+            failed_updates+=("Rust")
+        fi
     fi
 
-    # Ruby
-    if [[ $(command -v gem) == "" ]]; then
-        gem update --system
+    # Cargo
+    if command -v cargo &> /dev/null; then
+        echo "📦 Updating Cargo packages..."
+        if cargo install-update -a; then
+            echo "✅ Cargo packages updated"
+        else
+            failed_updates+=("Cargo")
+        fi
     fi
 
-    # UpdateDB
-    if [[ $(command -v updatedb) == "" ]]; then
-        updatedb 2> /dev/null || true
+    # Composer
+    if command -v composer &> /dev/null; then
+        echo "🎼 Updating Composer packages..."
+        if { composer self-update && \
+				composer global update; }; then
+            echo "✅ Composer packages updated"
+        else
+            failed_updates+=("Composer")
+        fi
     fi
+
+    # Go packages
+    if command -v go &> /dev/null; then
+        echo "🐹 Updating Go packages..."
+        if go get -u all; then
+            echo "✅ Go packages updated"
+        else
+            failed_updates+=("Go")
+        fi
+    fi
+
+    # Deno
+    if command -v deno &> /dev/null; then
+        echo "🦕 Updating Deno..."
+        if deno upgrade; then
+            echo "✅ Deno updated"
+        else
+            failed_updates+=("Deno")
+        fi
+    fi
+
+    # Bun
+    if command -v bun &> /dev/null; then
+        echo "🥟 Updating Bun..."
+        if bun upgrade; then
+            echo "✅ Bun updated"
+        else
+            failed_updates+=("Bun")
+        fi
+    fi
+
+    # Flutter
+    if command -v flutter &> /dev/null; then
+        echo "📱 Updating Flutter..."
+        if { flutter upgrade && \
+				flutter pub get; }; then
+            echo "✅ Flutter updated"
+        else
+            failed_updates+=("Flutter")
+        fi
+    fi
+
+    # Update locate database
+    if command -v updatedb &> /dev/null; then
+        echo "🔍 Updating locate database..."
+        if sudo updatedb 2> /dev/null; then
+            echo "✅ Locate database updated"
+        else
+            failed_updates+=("updatedb")
+        fi
+    fi
+
+    # Final status report
+    echo -e "\n📋 Update Summary:"
+    if [ ${#failed_updates[@]} -eq 0 ]; then
+        echo -e "\n✅ All updates completed successfully!\n"
+    else
+        echo -e "\n⚠️  The following updates had issues:"
+        printf '%s\n' "${failed_updates[@]}"
+        echo -e "\nAll other updates completed successfully.\n"
+    fi
+
+    # Optional: Clean up system
+    echo "🧹 Cleaning up system..."
+    if [ "$(uname)" == "Darwin" ]; then
+        sudo rm -rf /private/var/log/asl/*.asl
+        sudo rm -rf ~/Library/Caches/*
+        sudo rm -rf ~/Library/Logs/*
+    fi
+
+    # Clear DNS cache
+    if [ "$(uname)" == "Darwin" ]; then
+        sudo dscacheutil -flushcache
+        sudo killall -HUP mDNSResponder
+    fi
+
+    echo -e "\n✨ System update and cleanup complete!\n"
 }
 
 # Normalize `open` across Linux, macOS, and Windows.
