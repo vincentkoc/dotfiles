@@ -29,13 +29,11 @@ if [[ $IS_MACOS == true ]]; then
 fi
 
 #
-# Shell
+# Development Paths
 #
-	# Add our custom binaries
-	export PATH="$HOME/bin:$PATH"
 
-	# Dart
-	export PATH="$PATH":"$HOME/.pub-cache/bin"
+# Base PATH
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 	# Make set default editor based on a cascading list of apps
 	export EDITOR=$(command -v subl || command -v code || command -v nvim || command -v vim || command -v vi)
