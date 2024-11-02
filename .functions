@@ -51,6 +51,11 @@ ii() {
     echo
 }
 
+# kia: Gracefully terminate all processes matching given name
+kia () { killall "$@"; }
+
+# kiaf: Force kill all processes matching given name (using SIGKILL)
+kiaf () { killall -9 "$@"; }
 
 # Global updater
 function up () {
