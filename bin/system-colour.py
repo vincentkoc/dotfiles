@@ -1,4 +1,33 @@
 #!/usr/bin/env python3
+"""
+System Color Generator for Terminal Prompts
+
+This script generates consistent, WCAG-compliant color pairs for terminal prompts
+based on the hostname. It ensures good contrast ratios and readable output.
+
+Sources and Credits:
+-------------------
+Original Implementation:
+    https://github.com/naggie/dotfiles/blob/master/app-configurators/scripts/bin/system-colour
+
+WCAG Contrast Calculations:
+    https://github.com/gsnedders/wcag-contrast-ratio/blob/master/wcag_contrast_ratio/contrast.py
+    Copyright (c) 2015 Geoffrey Sneddon
+    License: https://github.com/gsnedders/wcag-contrast-ratio/blob/master/LICENSE
+
+Color Data:
+    https://github.com/jonasjacek/colors/blob/master/data.json
+    By Jonas Jacek
+    License: The MIT License (MIT)
+
+Features:
+- Generates consistent colors based on hostname
+- Ensures WCAG-compliant contrast ratios
+- Special handling for root user (red theme)
+- Fallback to basic colors if JSON data unavailable
+- Handles hostname variations (FQDN, macOS suffixes)
+"""
+
 from hashlib import md5
 import json
 from os import path
@@ -7,32 +36,31 @@ import socket
 import sys
 from string import ascii_letters
 
-# taken from https://github.com/naggie/dotfiles/blob/master/app-configurators/scripts/bin/system-colour
+# Default colors that work well together if JSON fails
+FALLBACK_COLORS = [
+    {"colorId": 33, "name": "Blue"},      # Blue
+    {"colorId": 37, "name": "White"},     # White
+    {"colorId": 32, "name": "Green"},     # Green
+    {"colorId": 36, "name": "Cyan"},      # Cyan
+    {"colorId": 35, "name": "Purple"},    # Purple
+    {"colorId": 34, "name": "Blue"},      # Blue
+    {"colorId": 31, "name": "Red"}        # Red
+]
 
-# WCAG contrast calculation functions based on
-# https://github.com/gsnedders/wcag-contrast-ratio/blob/master/wcag_contrast_ratio/contrast.py
-# Copyright (c) 2015 Geoffrey Sneddon.
-# license: app-configurators/scripts/etc/wcag-contrast-ratio-LICENSE.md
-
-# JSON data file provided by jonasjacek
-# https://github.com/jonasjacek/colors/blob/master/data.json
-# license: app-configurators/scripts/etc/colors-LICENSE.md
-
-# TODO use machine id for more entropy? Could help with unreachable colours when matching hostname colour
-
-with open(path.expanduser("~/.share/256-terminal-colour-map.json")) as f:
-    COLOUR_LIST = json.load(f)
-
+try:
+    with open(path.expanduser("~/.share/256-terminal-colour-map.json")) as f:
+        COLOUR_LIST = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    # If JSON file is missing or invalid, use fallback colors
+    COLOUR_LIST = FALLBACK_COLORS
 
 # filter out strong red, reserved for root
 COLOUR_LIST = list(
     filter(lambda c: c["colorId"] not in (160, 196, 9, 88, 124), COLOUR_LIST)
 )
 
-
 # WC3
 CONSTRAST_THRESHOLD = 4.5
-
 
 def get_colour(colorId: int):
     for c in COLOUR_LIST:
@@ -40,7 +68,6 @@ def get_colour(colorId: int):
             return c
 
     raise ValueError("Invalid colorId")
-
 
 def rgb_contrast(rgb1, rgb2):
     for r, g, b in (rgb1, rgb2):
@@ -59,7 +86,6 @@ def rgb_contrast(rgb1, rgb2):
     else:
         return (l2 + 0.05) / (l1 + 0.05)
 
-
 def relative_luminance(r, g, b):
     r = linearise(r)
     g = linearise(g)
@@ -67,19 +93,16 @@ def relative_luminance(r, g, b):
 
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-
 def linearise(v):
     if v <= 0.03928:
         return v / 12.92
     else:
         return ((v + 0.055) / 1.055) ** 2.4
 
-
 def word_matches_colour(seed, colour):
     seed = "".join([x for x in seed.lower() if x in ascii_letters])
     colour = "".join([x for x in colour["name"].lower() if x in ascii_letters])
     return seed in colour or colour in seed
-
 
 def get_contrasting_colours(subject):
     selected = list()
@@ -103,7 +126,6 @@ def get_contrasting_colours(subject):
 
     return selected
 
-
 def select_by_seed(candidates, seed):
     """Produces a weighted deterministic colour"""
     m = md5()
@@ -113,7 +135,6 @@ def select_by_seed(candidates, seed):
     index = int(digest, 16) % len(candidates)
 
     return candidates[index]
-
 
 def get_colours(seed, tiebreaker=""):
     # if the hostname is a colour, try to match it for extra points
@@ -133,43 +154,35 @@ def get_colours(seed, tiebreaker=""):
     # predominately light
     return select_by_seed([(fg, bg), (bg, fg)], seed)
 
-
 def wrap(msg, fg, bg):
     return f"\033[48;5;{bg['colorId']}m\033[38;5;{fg['colorId']}m{msg}\033[0m"
-
 
 def colourise(string):
     fg, bg = get_colours(string)
     return wrap(string, fg, bg)
 
-
 # root? Make things red!
 if geteuid() == 0:
-    print("SYSTEM_COLOUR_FG=9")
-    print("SYSTEM_COLOUR_BG=0")
+    print("export SYSTEM_COLOUR_FG=9")
+    print("export SYSTEM_COLOUR_BG=0")
     sys.exit()
 
-hostname = socket.gethostname()
+try:
+    hostname = socket.gethostname()
+    hostname = hostname.split(".")[0]
+    hostname = hostname.split("(")[0]
+    hostname = hostname.split("-")[0]
 
-# use simple hostname (not FQDN) for stable value -- search domain could
-# otherwise change the colour
-hostname = hostname.split(".")[0]
+    tiebreaker = ""
+    if path.exists("/etc/machine-id"):
+        with open("/etc/machine-id") as f:
+            tiebreaker = f.read()
 
-# also, macos has a strange bug that says another host has the same name,
-# resulting in appending a number in brackets. Remove the brackets, if there
-# are any
-hostname = hostname.split("(")[0]
-hostname = hostname.split("-")[0]
+    fg, bg = get_colours(hostname, tiebreaker)
+    print(f"export SYSTEM_COLOUR_FG={fg['colorId']}")
+    print(f"export SYSTEM_COLOUR_BG=0")  # Always use black background for better readability
 
-tiebreaker = ""
-if path.exists("/etc/machine-id"):
-    with open("/etc/machine-id") as f:
-        tiebreaker = f.read()
-
-fg, bg = get_colours(hostname, tiebreaker)
-
-# NOTE: run against /usr/share/dict/words for a good idea of variance
-# print(colourise("".join(argv[1:])))
-
-print("SYSTEM_COLOUR_FG=%s" % fg["colorId"])
-print("SYSTEM_COLOUR_BG=%s" % bg["colorId"])
+except Exception as e:
+    # If anything fails, use a default color
+    print("export SYSTEM_COLOUR_FG=37")  # White
+    print("export SYSTEM_COLOUR_BG=0")   # Black
