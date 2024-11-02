@@ -38,12 +38,6 @@ EOT
 # Search for a file using MacOS Spotlight's metadata
 spotlight () { mdfind "kMDItemDisplayName == '$@'wc"; }
 
-# Ruby Librariesw
-# https://gorails.com/setup/osx/10.14-mojave
-function rubydoctor () {
-    curl -fsSL https://github.com/rbenv/rbenv-installer/raw/main/bin/rbenv-doctor | bash
-}
-
 # Useful information
 ii() {
     echo -e "\nYou are logged on ${RED}$HOST"
