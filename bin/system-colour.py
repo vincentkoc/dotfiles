@@ -20,7 +20,7 @@ from string import ascii_letters
 
 # TODO use machine id for more entropy? Could help with unreachable colours when matching hostname colour
 
-with open(path.expanduser("~/share/256-terminal-colour-map.json")) as f:
+with open(path.expanduser("~/.share/256-terminal-colour-map.json")) as f:
     COLOUR_LIST = json.load(f)
 
 
