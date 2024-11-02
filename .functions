@@ -183,3 +183,148 @@ repo() {
 
     open "$url" &> /dev/null || (echo "Using $(type open) to open URL failed." && exit 1);
 }
+
+# Run diagnostics on all available package managers and development tools
+function doctor() {
+    echo -e "\n🏥 Starting system diagnostics...\n"
+
+    # Track issues
+    declare -a found_issues=()
+
+    # Homebrew
+    if command -v brew &> /dev/null; then
+        echo "🍺 Running Homebrew diagnostics..."
+        if ! brew doctor; then
+            found_issues+=("Homebrew")
+        fi
+        if ! brew missing; then
+            found_issues+=("Homebrew missing dependencies")
+        fi
+    fi
+
+    # Ruby environment
+    if command -v rbenv &> /dev/null; then
+        echo "💎 Checking Ruby environment..."
+        if ! curl -fsSL https://github.com/rbenv/rbenv-installer/raw/main/bin/rbenv-doctor | bash; then
+            found_issues+=("Ruby/rbenv")
+        fi
+    fi
+
+    # Node environment
+    if command -v npm &> /dev/null; then
+        echo "📦 Checking NPM..."
+        if ! npm doctor; then
+            found_issues+=("NPM")
+        fi
+    fi
+
+    # Yarn
+    if command -v yarn &> /dev/null; then
+        echo "🧶 Checking Yarn..."
+        if ! yarn doctor; then
+            found_issues+=("Yarn")
+        fi
+    fi
+
+    # PNPM
+    if command -v pnpm &> /dev/null; then
+        echo "📦 Checking PNPM..."
+        if ! pnpm doctor; then
+            found_issues+=("PNPM")
+        fi
+    fi
+
+    # Python environment
+    if command -v pip &> /dev/null; then
+        echo "🐍 Checking pip..."
+        if ! pip check; then
+            found_issues+=("Python pip dependencies")
+        fi
+    fi
+
+    # Flutter
+    if command -v flutter &> /dev/null; then
+        echo "📱 Checking Flutter..."
+        if ! flutter doctor; then
+            found_issues+=("Flutter")
+        fi
+    fi
+
+    # Git
+    if command -v git &> /dev/null; then
+        echo "🌿 Checking Git configuration..."
+        if ! git fsck; then
+            found_issues+=("Git repository integrity")
+        fi
+    fi
+
+    # Docker
+    if command -v docker &> /dev/null; then
+        echo "🐳 Checking Docker..."
+        if ! docker info > /dev/null 2>&1; then
+            found_issues+=("Docker")
+        fi
+    fi
+
+    # Composer
+    if command -v composer &> /dev/null; then
+        echo "🎼 Checking Composer..."
+        if ! composer diagnose; then
+            found_issues+=("Composer")
+        fi
+    fi
+
+    # System integrity (macOS only)
+    if [ "$(uname)" == "Darwin" ]; then
+        echo "🍎 Checking macOS system integrity..."
+        if ! system_profiler SPSoftwareDataType > /dev/null; then
+            found_issues+=("macOS System")
+        fi
+
+        echo "🔍 Verifying system integrity..."
+        if ! sudo verify_system > /dev/null 2>&1; then
+            found_issues+=("macOS System Integrity")
+        fi
+    fi
+
+    # Disk health (macOS only)
+    if [ "$(uname)" == "Darwin" ]; then
+        echo "💽 Checking disk health..."
+        if ! diskutil verifyVolume / > /dev/null 2>&1; then
+            found_issues+=("Disk health")
+        fi
+    fi
+
+    # Network diagnostics
+    echo "🌐 Checking network connectivity..."
+    if ! ping -c 1 8.8.8.8 > /dev/null 2>&1; then
+        found_issues+=("Network connectivity")
+    fi
+
+    # DNS resolution
+    if ! nslookup github.com > /dev/null 2>&1; then
+        found_issues+=("DNS resolution")
+    fi
+
+    # Final report
+    echo -e "\n📋 Diagnostic Summary:"
+    if [ ${#found_issues[@]} -eq 0 ]; then
+        echo -e "\n✅ All systems are running normally!\n"
+    else
+        echo -e "\n⚠️  Issues were found in the following systems:"
+        printf '%s\n' "${found_issues[@]}"
+        echo -e "\nPlease review the output above for detailed information about each issue.\n"
+    fi
+
+    # Suggestions for fixes
+    if [ ${#found_issues[@]} -gt 0 ]; then
+        echo "🔧 Suggested fixes:"
+        echo "1. For Homebrew issues: 'brew doctor'"
+        echo "2. For Ruby issues: 'rbenv doctor'"
+        echo "3. For Node issues: 'npm doctor'"
+        echo "4. For Flutter issues: 'flutter doctor'"
+        echo "5. For disk issues: 'diskutil repairVolume /'"
+        echo "6. For package manager issues: Try running 'up' to update all packages"
+        echo -e "\n"
+    fi
+}
