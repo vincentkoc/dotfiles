@@ -1,20 +1,31 @@
 #!/bin/bash
 
 #
-# Homebrew
+# System Detection and Base Paths
 #
 if [[ $OSTYPE == 'darwin'* ]]; then
-	export EXTRASPATH="/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.extra"
-
-	# homebrew
-	export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:$PATH"
-	eval "$(/usr/local/bin/brew shellenv)"
-
-	# export PATH="/opt/homebrew/opt/postgresql@13/bin:$PATH"
+    export EXTRASPATH="/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.extra"
+    export IS_MACOS=true
 else
-	# Fallback for Unix
-	export EXTRASPATH="~/dotfiles/.extra"
+    export EXTRASPATH="~/dotfiles/.extra"
+    export IS_MACOS=false
+fi
 
+#
+# Package Managers
+#
+
+# Homebrew
+if [[ $IS_MACOS == true ]]; then
+    # M1/Intel Mac detection
+    if [[ $(uname -m) == 'arm64' ]]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    else
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    export HOMEBREW_NO_ANALYTICS=1
+    export HOMEBREW_NO_INSECURE_REDIRECT=1
+    export HOMEBREW_CASK_OPTS="--appdir=/Applications"
 fi
 
 #
