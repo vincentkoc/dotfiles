@@ -6,6 +6,7 @@
 	"installed_packages":
 	[
 		"A File Icon",
+		"AsciiDoc",
 		"BracketHighlighter",
 		"Color Highlighter",
 		"Enki Theme",
@@ -13,6 +14,7 @@
 		"GitGutter",
 		"Package Control",
 		"SideBarEnhancements",
+		"TodoReview",
 		"TrailingSpaces",
 	],
 }

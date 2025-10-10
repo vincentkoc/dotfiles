@@ -15,7 +15,7 @@
 	"overlay_scroll_bars": "enabled",
 	"line_padding_bottom": 1,
 	"line_padding_top": 1,
-	"bold_folder_labels": true, // or remove this line if you set it to true for Material Theme
+	"bold_folder_labels": false, // or remove this line if you set it to true for Material Theme
 	"always_show_minimap_viewport": true,
 	"indent_guide_options": ["draw_normal", "draw_active"],
 	"font_options": ["gray_antialias", "subpixel_antialias"], // for retina Mac & Windows
@@ -27,8 +27,8 @@
 	"enki_theme_disable_tree_indicator": false, // Disable active file indicator
 	/*"enki_theme_panel_separator": true,*/ // Panel Separator
 	"enki_theme_tabs_separator": false, // Add separator in between tabs
-	"enki_theme_tree_headings": false, // Show sidebar tree headings
-	"bold_folder_labels": false,
+	/*"enki_theme_tree_headings": false,*/ // Show sidebar tree headings
+	/*"bold_folder_labels": false,*/
 	"font_size": 11,
 	"tab_size": 3,
 	"sidebar_on_right": true,
