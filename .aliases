@@ -10,15 +10,25 @@ alias sudo='sudo '
 
 # Mac Specific
 if [[ "$OSTYPE" == "darwin"* ]]; then
-	# Setup PHP
-	alias php=/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin/php
+    # Setup PHP
+    if [[ -z "${MAMP_LATEST_PHP:-}" && -d "/Applications/MAMP/bin/php" ]]; then
+        MAMP_LATEST_PHP=$(ls /Applications/MAMP/bin/php/ 2>/dev/null | sort -V | tail -1)
+    fi
+    if [[ -n "${MAMP_LATEST_PHP:-}" ]]; then
+        alias php="/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin/php"
+    fi
 
-	# UpdateDB
-	alias updatedb="sudo /usr/libexec/locate.updatedb"
+    # UpdateDB
+    alias updatedb="sudo /usr/libexec/locate.updatedb"
 
-	# Preferred 'ls' implementation
-	alias ls='eza -lh --git --icons'
-	alias ll='eza -lha --git --icons'
+    # Preferred 'ls' implementation with graceful fallback
+    if command -v eza >/dev/null 2>&1; then
+        alias ls='eza -lh --git'
+        alias ll='eza -lha --git'
+    else
+        alias ls='ls -FGh'
+        alias ll='ls -FGlAhp'
+    fi
 
 	# Editor
 	alias vim='nvim'
@@ -38,11 +48,18 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	alias kx='kubectx'
 	alias kn='kubens'
 	alias kpf='k get pods | fzf'
-	alias ks='stern -n engineering'
-
+	alias ks='stern -n dev'
+	function klogs() {
+	  POD=$(k get pods --no-headers | fzf | awk '{print $1}')
+	  [ -n "$POD" ] && kubectl logs -f "$POD"
+	}
 else
-	# Preferred 'ls' implementation
-	alias ll='ls -FGlAhp'
+    # Preferred 'ls' implementation
+    if command -v eza >/dev/null 2>&1; then
+        alias ll='eza -lha --git'
+    else
+        alias ll='ls -FGlAhp'
+    fi
 
 	# Pipe content to file in Home drive
 	alias loghome='tee $HOME/logfile_$(date +"%Y%m%d_%H%M%S").txt'
@@ -146,7 +163,7 @@ fi
 	alias emptytrash="sudo rm -rfv /Volumes/*/.Trashes; sudo rm -rfv ~/.Trash; sudo rm -rfv /private/var/log/asl/*.asl; sqlite3 ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV* 'delete from LSQuarantineEvent'"
 
 	# URL-encode strings
-	alias urlencode='python -c "import sys, urllib as ul; print ul.quote_plus(sys.argv[1]);"'
+    alias urlencode='python3 -c "import sys; from urllib.parse import quote_plus; print(quote_plus(sys.argv[1]))"'
 
 	# weather
 	alias weather='curl https://wttr.in/ -A "ReqBin Curl Client/1.0"'
