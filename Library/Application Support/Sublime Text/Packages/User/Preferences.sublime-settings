@@ -1,3 +1,35 @@
 {
-	"theme": "Enki-Theme.sublime-theme"
+	"theme": "Enki-Theme.sublime-theme",
+    "color_scheme": "Packages/Enki Theme/scheme/Enki-Tokyo-Night.tmTheme",
+	"ignored_packages":
+	[
+		"Vintage",
+	],
+	"index_files": false,
+	"enki_theme_accent_bluegray": true, // or white for Light theme
+	"enki_theme_panel_separator": true,
+	"enki_theme_small_statusbar": true,
+	"enki_theme_small_tab": true,
+	"enki_theme_tabs_autowidth": true,
+	"enki_theme_tree_headings": false,
+	"overlay_scroll_bars": "enabled",
+	"line_padding_bottom": 1,
+	"line_padding_top": 1,
+	"bold_folder_labels": true, // or remove this line if you set it to true for Material Theme
+	"always_show_minimap_viewport": true,
+	"indent_guide_options": ["draw_normal", "draw_active"],
+	"font_options": ["gray_antialias", "subpixel_antialias"], // for retina Mac & Windows
+	"enki_theme_bold_tab": false, // Bold tab labels
+	"enki_theme_compact_panel": true, // Compact panel
+	"enki_theme_compact_sidebar": true, // Compact side bar
+	"enki_theme_disable_fileicons": false, // Disable file icons
+	"enki_theme_disable_folder_animation": true, // Disable folder animation
+	"enki_theme_disable_tree_indicator": false, // Disable active file indicator
+	/*"enki_theme_panel_separator": true,*/ // Panel Separator
+	"enki_theme_tabs_separator": false, // Add separator in between tabs
+	"enki_theme_tree_headings": false, // Show sidebar tree headings
+	"bold_folder_labels": false,
+	"font_size": 11,
+	"tab_size": 3,
+	"sidebar_on_right": true,
 }

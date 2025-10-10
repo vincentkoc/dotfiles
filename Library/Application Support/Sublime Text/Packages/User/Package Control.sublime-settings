@@ -1,0 +1,18 @@
+{
+	"bootstrapped": true,
+	"in_process_packages":
+	[
+	],
+	"installed_packages":
+	[
+		"A File Icon",
+		"BracketHighlighter",
+		"Color Highlighter",
+		"Enki Theme",
+		"FileIcons",
+		"GitGutter",
+		"Package Control",
+		"SideBarEnhancements",
+		"TrailingSpaces",
+	],
+}
