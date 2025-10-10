@@ -17,18 +17,22 @@ fi
 
 # Homebrew
 if [[ $IS_MACOS == true ]]; then
-    # M1/Intel Mac detection and Homebrew initialization
-    if [[ -f "/opt/homebrew/bin/brew" ]]; then
+    if command -v brew >/dev/null 2>&1; then
+        eval "$(brew shellenv)"
+    elif [[ -x /opt/homebrew/bin/brew ]]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [[ -f "/usr/local/bin/brew" ]]; then
+    elif [[ -x /usr/local/bin/brew ]]; then
         eval "$(/usr/local/bin/brew shellenv)"
-    else
-        echo "⚠️  Homebrew not found in standard locations"
+    elif [[ -z "${DOTFILES_SUPPRESS_BREW_PROMPT:-}" ]]; then
+        printf 'Homebrew not detected; install from https://brew.sh for full tooling support\n' >&2
+        export DOTFILES_SUPPRESS_BREW_PROMPT=1
     fi
 
-    export HOMEBREW_NO_ANALYTICS=1
-    export HOMEBREW_NO_INSECURE_REDIRECT=1
-    export HOMEBREW_CASK_OPTS="--appdir=/Applications"
+    if command -v brew >/dev/null 2>&1; then
+        export HOMEBREW_NO_ANALYTICS=1
+        export HOMEBREW_NO_INSECURE_REDIRECT=1
+        export HOMEBREW_CASK_OPTS="--appdir=/Applications"
+    fi
 fi
 
 #
@@ -46,14 +50,18 @@ export PATH="$PATH":"$HOME/.pub-cache/bin"
 
 # Java
 export PATH="$HOME/.jenv/bin:$PATH"
-if command -v jenv 1>/dev/null 2>&1; then
+if command -v jenv >/dev/null 2>&1; then
     eval "$(jenv init -)"
 fi
 
 # PHP (MAMP)
-if [[ $IS_MACOS == true ]] && [ -d "/Applications/MAMP" ]; then
-    MAMP_LATEST_PHP=$(ls /Applications/MAMP/bin/php/ | sort -n | tail -1)
-    export PATH="/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin:$PATH"
+if [[ $IS_MACOS == true ]] && [[ -d "/Applications/MAMP/bin/php" ]]; then
+    if [[ -z "${MAMP_LATEST_PHP:-}" ]]; then
+        MAMP_LATEST_PHP=$(ls /Applications/MAMP/bin/php/ 2>/dev/null | sort -V | tail -1)
+    fi
+    if [[ -n "$MAMP_LATEST_PHP" ]]; then
+        export PATH="/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin:$PATH"
+    fi
 fi
 
 # Rust
@@ -83,12 +91,10 @@ export LC_CTYPE='en_US.UTF-8'
 
 # Don't clear the screen after quitting a manual page
 export MANPAGER='less -X'
-export BLOCK_SIZE="'1"
 export PAGER='less'
 
 # Enable colour support
 export CLICOLOR=1
-export GREP_OPTIONS='--color=auto'
 export LSCOLORS='ExGxBxDxCxEgEdxbxgxcxd'
 
 # Improved `ls` colors
@@ -143,7 +149,9 @@ export PYTHONDONTWRITEBYTECODE=1  # Prevent Python from writing .pyc files
 export VIRTUAL_ENV_DISABLE_PROMPT=1  # Custom virtual env prompt handling
 
 # Ruby
-export RUBY_CONFIGURE_OPTS="--with-openssl-dir=$(brew --prefix openssl@1.1)"
+if command -v brew >/dev/null 2>&1 && brew ls --versions openssl@1.1 >/dev/null 2>&1; then
+    export RUBY_CONFIGURE_OPTS="--with-openssl-dir=$(brew --prefix openssl@1.1)"
+fi
 
 #
 # GUI Applications
@@ -171,8 +179,8 @@ export LESS_TERMCAP_ue=$'\E[0m'
 export LESS_TERMCAP_us=$'\E[01;32m'
 
 
-# FZF
-export FZF_DEFAULT_OPTS="--height 40% --layout=reverse --border"
+# FZF tuned for Tokyo Night palette
+export FZF_DEFAULT_OPTS="--height 40% --layout=reverse --border --preview-window=border-left --color=bg+:#1f2335,bg:#1a1b26,spinner:#bb9af7,hl:#ff9e64,fg:#c0caf5,header:#ff9e64,info:#7aa2f7,pointer:#7dcfff,marker:#9ece6a,prompt:#7aa2f7"
 
 # Git
 export GIT_PS1_SHOWDIRTYSTATE=1
@@ -183,12 +191,19 @@ export GIT_PS1_SHOWUNTRACKEDFILES=1
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
 
+# Cursor CLI support (installed via app bundle)
+if [[ $IS_MACOS == true ]] && [[ -d /Applications/Cursor.app/Contents/MacOS ]]; then
+    export PATH="/Applications/Cursor.app/Contents/MacOS:$PATH"
+fi
+
 # Go
 export GOPATH=$HOME/go
 export PATH=$PATH:$GOPATH/bin
 
 # Java
-export JAVA_HOME=$(/usr/libexec/java_home)
+if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+    export JAVA_HOME=$(/usr/libexec/java_home 2>/dev/null)
+fi
 export GRADLE_USER_HOME=$HOME/.gradle
 
 # Android
