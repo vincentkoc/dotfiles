@@ -1,7 +1,14 @@
 #!/bin/bash
 
 # Always list directory contents upon 'cd'
-cd() { builtin cd "$@"; ll; }
+cd() {
+    builtin cd "$@" || return
+    if command -v ll >/dev/null 2>&1; then
+        ll
+    else
+        ls -lah
+    fi
+}
 
 # mcd: Makes new Dir and jumps inside
 mcd () { mkdir -p "$1" && cd "$1"; }
@@ -58,7 +65,7 @@ kia () { killall "$@"; }
 kiaf () { killall -9 "$@"; }
 
 # Global updater
-function up () {
+up() {
     # Password for Sudo
     echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
     sudo -v
@@ -72,7 +79,7 @@ function up () {
     declare -a failed_updates=()
 
     # Mac Updates
-    if [ "$(uname)" == "Darwin" ]; then
+    if [ "$(uname)" = "Darwin" ]; then
         echo "📱 Checking for macOS updates..."
         if sudo softwareupdate -i -a; then
             echo "✅ macOS updates complete"
@@ -84,12 +91,12 @@ function up () {
     # Homebrew
     if command -v brew &> /dev/null; then
         echo "🍺 Updating Homebrew packages..."
-        if { brew update && \
-				brew upgrade && \
-				brew upgrade --cask && \
-				brew cleanup && \
-				brew doctor && \
-				brew missing; }; then
+        if brew update && \
+           brew upgrade && \
+           brew upgrade --cask && \
+           brew cleanup && \
+           brew doctor && \
+           brew missing; then
             echo "✅ Homebrew updates complete"
         else
             failed_updates+=("Homebrew")
@@ -99,8 +106,8 @@ function up () {
     # NPM
     if command -v npm &> /dev/null; then
         echo "📦 Updating NPM..."
-        if { npm install -g npm@latest && \
-		npm update -g; }; then
+        if npm install -g npm@latest && \
+           npm update -g; then
             echo "✅ NPM updates complete"
         else
             failed_updates+=("NPM")
@@ -120,8 +127,8 @@ function up () {
     # Yarn
     if command -v yarn &> /dev/null; then
         echo "🧶 Updating Yarn..."
-        if { yarn set version latest && \
-				yarn global upgrade; }; then
+        if yarn set version latest && \
+           yarn global upgrade; then
             echo "✅ Yarn updates complete"
         else
             failed_updates+=("Yarn")
@@ -131,8 +138,8 @@ function up () {
     # Python pip
     if command -v pip &> /dev/null; then
         echo "🐍 Updating Python packages..."
-        if { pip install --upgrade pip setuptools wheel && \
-				pip list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip install -U; }; then
+        if pip install --upgrade pip setuptools wheel && \
+           pip list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip install -U; then
             echo "✅ Python packages updated"
         else
             failed_updates+=("Python pip")
@@ -142,8 +149,8 @@ function up () {
     # Python pip3
     if command -v pip3 &> /dev/null; then
         echo "🐍 Updating Python3 packages..."
-        if { pip3 install --upgrade pip setuptools wheel && \
-				pip3 list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip3 install -U; }; then
+        if pip3 install --upgrade pip setuptools wheel && \
+           pip3 list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip3 install -U; then
             echo "✅ Python3 packages updated"
         else
             failed_updates+=("Python pip3")
@@ -153,9 +160,9 @@ function up () {
     # Ruby Gems
     if command -v gem &> /dev/null; then
         echo "💎 Updating Ruby Gems..."
-        if { sudo gem update --system && \
-				sudo gem update && \
-				sudo gem cleanup; }; then
+        if sudo gem update --system && \
+           sudo gem update && \
+           sudo gem cleanup; then
             echo "✅ Ruby Gems updated"
         else
             failed_updates+=("Ruby Gems")
@@ -185,8 +192,8 @@ function up () {
     # Composer
     if command -v composer &> /dev/null; then
         echo "🎼 Updating Composer packages..."
-        if { composer self-update && \
-				composer global update; }; then
+        if composer self-update && \
+           composer global update; then
             echo "✅ Composer packages updated"
         else
             failed_updates+=("Composer")
@@ -226,8 +233,8 @@ function up () {
     # Flutter
     if command -v flutter &> /dev/null; then
         echo "📱 Updating Flutter..."
-        if { flutter upgrade && \
-				flutter pub get; }; then
+        if flutter upgrade && \
+           flutter pub get; then
             echo "✅ Flutter updated"
         else
             failed_updates+=("Flutter")
@@ -266,14 +273,14 @@ function up () {
 
     # Optional: Clean up system
     echo "🧹 Cleaning up system..."
-    if [ "$(uname)" == "Darwin" ]; then
+    if [ "$(uname)" = "Darwin" ]; then
         sudo rm -rf /private/var/log/asl/*.asl
         sudo rm -rf ~/Library/Caches/*
         sudo rm -rf ~/Library/Logs/*
     fi
 
     # Clear DNS cache
-    if [ "$(uname)" == "Darwin" ]; then
+    if [ "$(uname)" = "Darwin" ]; then
         sudo dscacheutil -flushcache
         sudo killall -HUP mDNSResponder
     fi
