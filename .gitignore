@@ -52,3 +52,4 @@ Library/Application Support/Dash/library.dash
 /Library/Application Support/Adobe
 /Library/Application Support/Airflow
 .ssh/authorized_keys
+*ca-bundle
