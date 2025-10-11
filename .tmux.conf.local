@@ -59,23 +59,23 @@ tmux_conf_24b_colour=auto
 tmux_conf_theme=enabled
 
 # default theme
-tmux_conf_theme_colour_1="#080808"    # dark gray
-tmux_conf_theme_colour_2="#303030"    # gray
-tmux_conf_theme_colour_3="#8a8a8a"    # light gray
-tmux_conf_theme_colour_4="#00afff"    # light blue
-tmux_conf_theme_colour_5="#ffff00"    # yellow
-tmux_conf_theme_colour_6="#080808"    # dark gray
-tmux_conf_theme_colour_7="#e4e4e4"    # white
-tmux_conf_theme_colour_8="#080808"    # dark gray
-tmux_conf_theme_colour_9="#ffff00"    # yellow
-tmux_conf_theme_colour_10="#ff00af"   # pink
-tmux_conf_theme_colour_11="#5fff00"   # green
-tmux_conf_theme_colour_12="#8a8a8a"   # light gray
-tmux_conf_theme_colour_13="#e4e4e4"   # white
-tmux_conf_theme_colour_14="#080808"   # dark gray
-tmux_conf_theme_colour_15="#080808"   # dark gray
-tmux_conf_theme_colour_16="#d70000"   # red
-tmux_conf_theme_colour_17="#e4e4e4"   # white
+tmux_conf_theme_colour_1="#1a1b26"    # tokyo night background
+tmux_conf_theme_colour_2="#16161e"    # subtle background
+tmux_conf_theme_colour_3="#565f89"    # muted foreground
+tmux_conf_theme_colour_4="#7aa2f7"    # accent blue
+tmux_conf_theme_colour_5="#ff9e64"    # orange highlight
+tmux_conf_theme_colour_6="#15161e"    # pane fill
+tmux_conf_theme_colour_7="#c0caf5"    # primary foreground
+tmux_conf_theme_colour_8="#1f2335"    # status background alt
+tmux_conf_theme_colour_9="#ff9e64"    # warning accent
+tmux_conf_theme_colour_10="#bb9af7"   # magenta accent
+tmux_conf_theme_colour_11="#9ece6a"   # success green
+tmux_conf_theme_colour_12="#565f89"   # dim text
+tmux_conf_theme_colour_13="#c0caf5"   # bright text
+tmux_conf_theme_colour_14="#1a1b26"   # background
+tmux_conf_theme_colour_15="#1a1b26"   # background
+tmux_conf_theme_colour_16="#f7768e"   # error red
+tmux_conf_theme_colour_17="#c0caf5"   # foreground
 
 # default theme (ansi)
 #tmux_conf_theme_colour_1="colour0"
@@ -114,7 +114,7 @@ tmux_conf_theme_focused_pane_bg="$tmux_conf_theme_colour_2"
 tmux_conf_theme_pane_border_style=thin
 
 # pane borders colours:
-tmux_conf_theme_pane_border="$tmux_conf_theme_colour_2"
+tmux_conf_theme_pane_border="#292e42"
 tmux_conf_theme_pane_active_border="$tmux_conf_theme_colour_4"
 %if #{>=:#{version},3.2}
 tmux_conf_theme_pane_active_border="#{?pane_in_mode,$tmux_conf_theme_colour_9,#{?synchronize-panes,$tmux_conf_theme_colour_16,$tmux_conf_theme_colour_4}}"
@@ -126,17 +126,17 @@ tmux_conf_theme_pane_active_indicator="$tmux_conf_theme_colour_4"
 
 # status line style
 tmux_conf_theme_message_fg="$tmux_conf_theme_colour_1"
-tmux_conf_theme_message_bg="$tmux_conf_theme_colour_5"
+tmux_conf_theme_message_bg="$tmux_conf_theme_colour_4"
 tmux_conf_theme_message_attr="bold"
 
 # status line command style (<prefix> : Escape)
-tmux_conf_theme_message_command_fg="$tmux_conf_theme_colour_5"
+tmux_conf_theme_message_command_fg="$tmux_conf_theme_colour_4"
 tmux_conf_theme_message_command_bg="$tmux_conf_theme_colour_1"
 tmux_conf_theme_message_command_attr="bold"
 
 # window modes style
 tmux_conf_theme_mode_fg="$tmux_conf_theme_colour_1"
-tmux_conf_theme_mode_bg="$tmux_conf_theme_colour_5"
+tmux_conf_theme_mode_bg="$tmux_conf_theme_colour_4"
 tmux_conf_theme_mode_attr="bold"
 
 # status line style

@@ -108,7 +108,6 @@
         "markdown": true
     },
     "workbench.iconTheme": "material-icon-theme",
-    "workbench.colorTheme": "Noir Panda",
     "powermode.enabled": false,
     "cSpell.userWords": [
         "acryl",
@@ -272,7 +271,7 @@
         "utils/src/hipdbcl"
     ],
     "terminal.integrated.defaultProfile.osx": "zsh",
-    "terminal.integrated.fontFamily": "Fira Code",
+    "terminal.integrated.fontFamily": "MesloLGS Nerd Font",
     "git.confirmSync": false,
     "editor.accessibilitySupport": "off",
     "github.copilot.editor.enableAutoCompletions": true,

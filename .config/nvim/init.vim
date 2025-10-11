@@ -1,4 +1,5 @@
 set nocompatible
+set termguicolors
 filetype plugin indent on
 
 call plug#begin()
@@ -30,8 +31,15 @@ call plug#end()
 "   filetype indent off   " Disable file-type-specific indentation
 "   syntax off            " Disable syntax highlighting
 
-" Vim Script
-colorscheme tokyonight
+" Tokyonight configuration
+let g:tokyonight_style = "night"
+let g:tokyonight_terminal_colors = 1
+let g:tokyonight_transparent = 0
+let g:tokyonight_italic_keywords = 1
+let g:tokyonight_italic_functions = 1
+let g:tokyonight_sidebars = ["qf", "help", "terminal"]
+
+" Apply colorscheme
 colorscheme tokyonight-night
 
 let g:mergetool_layout = 'mr'

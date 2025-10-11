@@ -107,8 +107,8 @@
         "plaintext": true,
         "markdown": true
     },
+    "workbench.colorTheme": "Tokyo Night",
     "workbench.iconTheme": "material-icon-theme",
-    "workbench.colorTheme": "Visual Studio Light",
     "powermode.enabled": false,
     "cSpell.userWords": [
         "acryl",
@@ -276,10 +276,16 @@
     "git.confirmSync": false,
     "editor.accessibilitySupport": "off",
     "github.copilot.editor.enableAutoCompletions": true,
-    "snyk.folderConfigs": null,
+    "snyk.folderConfigs": [
+        {
+            "folderPath": "",
+            "baseBranch": ""
+        }
+    ],
     "cmake.configureOnOpen": true,
     "cmake.pinnedCommands": [
         "workbench.action.tasks.configureTaskRunner",
         "workbench.action.tasks.runTask"
-    ]
+    ],
+    "editor.inlineSuggest.syntaxHighlightingEnabled": true
 }
