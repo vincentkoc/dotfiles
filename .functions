@@ -3,6 +3,9 @@
 # Always list directory contents upon 'cd'
 cd() {
     builtin cd "$@" || return
+    if [[ -n "${DOTFILES_CD_SKIP_LISTING:-}" ]]; then
+        return
+    fi
     if command -v ll >/dev/null 2>&1; then
         ll
     else

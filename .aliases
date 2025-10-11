@@ -21,17 +21,24 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # UpdateDB
     alias updatedb="sudo /usr/libexec/locate.updatedb"
 
-    # Preferred 'ls' implementation with graceful fallback
+    # Preferred 'ls' implementation with icon toggle
     if command -v eza >/dev/null 2>&1; then
-        alias ls='eza -lh --git'
-        alias ll='eza -lha --git'
+        if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
+            alias ls='eza -lh --git'
+            alias ll='eza -lha --git'
+        else
+            alias ls='eza -lh --git --icons'
+            alias ll='eza -lha --git --icons'
+        fi
     else
         alias ls='ls -FGh'
         alias ll='ls -FGlAhp'
     fi
 
 	# Editor
-	alias vim='nvim'
+	if command -v nvim >/dev/null 2>&1; then
+		alias vim='nvim'
+	fi
 
 	# Open Current Path in Finder
 	alias f='open -a Finder ./'
@@ -56,7 +63,11 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 else
     # Preferred 'ls' implementation
     if command -v eza >/dev/null 2>&1; then
-        alias ll='eza -lha --git'
+        if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
+            alias ll='eza -lha --git'
+        else
+            alias ll='eza -lha --git --icons'
+        fi
     else
         alias ll='ls -FGlAhp'
     fi
@@ -71,7 +82,9 @@ fi
 #
 
 	# Preferred Options and Replacements
-	alias man='tldr'
+	if command -v tldr >/dev/null 2>&1; then
+		alias man='tldr'
+	fi
 	# alias dig='dog'
 	# alias digs='dog -1'
 	alias domain='dig +trace'
@@ -79,7 +92,9 @@ fi
 	alias mv='mv -iv'
 	alias mkdir='mkdir -pv'
 	alias vi='vim'
-	alias ping='gping'
+	if command -v gping >/dev/null 2>&1; then
+		alias ping='gping'
+	fi
 
 	# Easier navigation
 	alias ~="cd ~"
@@ -139,9 +154,13 @@ fi
 	alias chmodx='chmod +x'
 
 	# tasks
-	alias top='htop'
-	alias htop='sudo htop'
-	alias running='htop'
+	if command -v htop >/dev/null 2>&1; then
+		alias top='htop'
+		if command -v sudo >/dev/null 2>&1; then
+			alias htop='sudo htop'
+		fi
+		alias running='htop'
+	fi
 
 	# the "kp" alias ("que pasa")
 	alias kp="ps auxwww"

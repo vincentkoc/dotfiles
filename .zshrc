@@ -1,6 +1,11 @@
 #
 # Oh-my-zsh
 #
+
+# Bootstrap environment before loading oh-my-zsh so PATH + theme variables exist early
+if [[ -r ~/.exports ]]; then
+	source ~/.exports
+fi
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME="spaceship"
 ENABLE_CORRECTION="true"
@@ -38,7 +43,7 @@ source $ZSH/oh-my-zsh.sh
 #
 # Load dotfiles pre-ENV
 #
-for file in ~/.{path,bash_prompt,aliases,functions,exports}; do
+for file in ~/.{path,bash_prompt,aliases,functions}; do
 	[ -r "$file" ] && [ -f "$file" ] && source "$file";
 done;
 unset file;
