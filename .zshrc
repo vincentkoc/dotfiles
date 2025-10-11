@@ -2,13 +2,70 @@
 # Oh-my-zsh
 #
 
+# Profiling support (run `zprof` after startup when investigating)
+if [[ -n "$DOTFILES_ZSH_PROFILE" ]]; then
+  zmodload zsh/zprof
+fi
+
 # Bootstrap environment before loading oh-my-zsh so PATH + theme variables exist early
 if [[ -r ~/.exports ]]; then
 	source ~/.exports
 fi
+
+# Tokyo Night palette shared across terminals, prompt, and tooling
+typeset -gx TOKYONIGHT_BG="#1a1b26"
+typeset -gx TOKYONIGHT_BG_DARK="#16161e"
+typeset -gx TOKYONIGHT_BG_DIM="#1f2335"
+typeset -gx TOKYONIGHT_BG_HIGHLIGHT="#292e42"
+typeset -gx TOKYONIGHT_FG="#c0caf5"
+typeset -gx TOKYONIGHT_FG_DIM="#a9b1d6"
+typeset -gx TOKYONIGHT_BLUE="#7aa2f7"
+typeset -gx TOKYONIGHT_CYAN="#7dcfff"
+typeset -gx TOKYONIGHT_MAGENTA="#bb9af7"
+typeset -gx TOKYONIGHT_PURPLE="#9d7cd8"
+typeset -gx TOKYONIGHT_GREEN="#9ece6a"
+typeset -gx TOKYONIGHT_ORANGE="#ff9e64"
+typeset -gx TOKYONIGHT_RED="#f7768e"
+typeset -gx TOKYONIGHT_YELLOW="#e0af68"
+
+autoload -Uz colors && colors
+setopt prompt_subst
+
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME="spaceship"
 ENABLE_CORRECTION="true"
+
+# Spaceship prompt tuned for Tokyo Night palette
+SPACESHIP_PROMPT_ORDER=(dir git package python node docker exit_code char)
+SPACESHIP_DIR_TRUNC=3
+SPACESHIP_DIR_COLOR="cyan"
+SPACESHIP_PACKAGE_SHOW=true
+SPACESHIP_PACKAGE_PREFIX="pkg "
+SPACESHIP_PYTHON_SHOW=true
+SPACESHIP_PYTHON_SYMBOL="py"
+SPACESHIP_NODE_SHOW_VERSION=true
+SPACESHIP_NODE_SYMBOL="node"
+SPACESHIP_KUBECTL_SHOW=false
+SPACESHIP_GIT_BRANCH_COLOR="magenta"
+SPACESHIP_GIT_STATUS_COLOR="yellow"
+SPACESHIP_EXEC_TIME_SHOW=false
+SPACESHIP_CHAR_PREFIX=""
+SPACESHIP_CHAR_SYMBOL=">"
+SPACESHIP_CHAR_COLOR_SUCCESS="green"
+SPACESHIP_CHAR_COLOR_FAILURE="red"
+SPACESHIP_CHAR_SUFFIX=" "
+
+SPACESHIP_PROMPT_SEPARATE_LINE=false
+SPACESHIP_PROMPT_ADD_NEWLINE=true
+SPACESHIP_CLIPBOARD_SHOW=false
+
+# Right prompt for host only
+SPACESHIP_RPROMPT_ORDER=(host)
+SPACESHIP_TIME_SHOW=false
+SPACESHIP_HOST_SHOW="always"
+SPACESHIP_HOST_PREFIX=""
+SPACESHIP_HOST_SUFFIX=""
+SPACESHIP_HOST_COLOR="242"
 
 # Add more useful plugins
 plugins=(
@@ -25,8 +82,6 @@ plugins=(
 	rust
 	golang
 	vscode
-	fzf
-	history-substring-search
 	colored-man-pages
 	command-not-found
 	# zsh-interactive-cd
@@ -36,6 +91,13 @@ plugins=(
 DISABLE_AUTO_UPDATE="true"
 COMPLETION_WAITING_DOTS="true"
 ZSH_DISABLE_COMPFIX="true"
+
+ZSH_AUTOSUGGEST_USE_ASYNC=0
+ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=20
+ZSH_AUTOSUGGEST_STRATEGY=(history)
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=#565f89,bold"
+HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_FOUND="bg=#9ece6a,fg=#1a1b26"
+HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_NOT_FOUND="bg=#f7768e,fg=#1a1b26"
 
 fpath=($ZSH/custom/completions $fpath)
 source $ZSH/oh-my-zsh.sh
@@ -62,27 +124,45 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 
 	# Version Managers - Lazy Loading
 	# Python - pyenv
-	if command -v pyenv &> /dev/null; then
-		export PYENV_ROOT="$(pyenv root)"
+	if command -v pyenv >/dev/null 2>&1; then
+		export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
 		path=("$PYENV_ROOT/shims" $path)
-		eval "$(pyenv init - --no-rehash)"
+		pyenv() {
+			unset -f pyenv
+			eval "$(command pyenv init - --no-rehash)"
+			pyenv "$@"
+		}
 	fi
 
 	# Node.js - nodenv
-	if command -v nodenv &> /dev/null; then
-		export NODENV_ROOT="$(nodenv root)"
+	if command -v nodenv >/dev/null 2>&1; then
+		export NODENV_ROOT="${NODENV_ROOT:-$HOME/.nodenv}"
 		path=("$NODENV_ROOT/shims" $path)
-		eval "$(nodenv init -)"
+		nodenv() {
+			unset -f nodenv
+			eval "$(command nodenv init -)"
+			nodenv "$@"
+		}
 	fi
 
 	# Ruby - rbenv
-	if command -v rbenv &> /dev/null; then
-		eval "$(rbenv init -)"
+	if command -v rbenv >/dev/null 2>&1; then
+		rbenv() {
+			unset -f rbenv
+			eval "$(command rbenv init -)"
+			rbenv "$@"
+		}
 	fi
 
 	# Java - jenv
-	if command -v jenv &> /dev/null; then
-		eval "$(jenv init -)"
+	if command -v jenv >/dev/null 2>&1; then
+		export JENV_ROOT="${JENV_ROOT:-$HOME/.jenv}"
+		path=("$JENV_ROOT/bin" $path)
+		jenv() {
+			unset -f jenv
+			eval "$(command jenv init -)"
+			jenv "$@"
+		}
 	fi
 
 	# ZSH Autocomplete
@@ -92,26 +172,50 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 
 		# Only regenerate completions once per day
 		autoload -Uz compinit
-		if [ $(date +'%j') != $(stat -f '%Sm' -t '%j' ~/.zcompdump) ]; then
-			compinit
+		zcompdump="${ZDOTDIR:-$HOME}/.zcompdump"
+		if [[ -f "$zcompdump" ]]; then
+			dump_mtime=""
+			if dump_mtime=$(stat -f '%m' "$zcompdump" 2>/dev/null); then
+				:
+			elif dump_mtime=$(stat -c '%Y' "$zcompdump" 2>/dev/null); then
+				:
+			fi
+			if [[ -n "$dump_mtime" && $(( $(date +%s) - dump_mtime )) -lt 86400 ]]; then
+				compinit -C
+			else
+				compinit
+			fi
 		else
-			compinit -C
+			compinit
 		fi
 	fi
 
 	# Better history search
-	bindkey '^[[A' history-substring-search-up
-	bindkey '^[[B' history-substring-search-down
+	bindkey '^[[A' history-beginning-search-backward
+	bindkey '^[[B' history-beginning-search-forward
+	bindkey '^[[1;5A' history-beginning-search-backward
+	bindkey '^[[1;5B' history-beginning-search-forward
+	# Cursor movement shortcuts (Ctrl+Arrow)
+	bindkey '^[[1;5C' forward-word
+	bindkey '^[[1;5D' backward-word
+	bindkey '^[[1;5H' beginning-of-line
+	bindkey '^[[1;5F' end-of-line
+	bindkey '^[^?' backward-kill-word      # Option+Backspace
+	bindkey '^[3~' kill-word               # Option+Delete
+	bindkey '^[^H' backward-kill-word      # Alternate Option+Backspace code
+	# Delete entire command (Ctrl+U or mapped Cmd+Backspace)
+	bindkey '^U' backward-kill-line
+	bindkey '^[[3;9~' backward-kill-line
 fi
 
-#
-# System Color Prompt
-#
-if [ -f "$HOME/bin/system-colour.py" ]; then
-	eval "$($HOME/bin/system-colour.py)"
-	# Custom prompt with system color
-	PROMPT='%F{36}%K{$SYSTEM_COLOUR_BG}%F{$SYSTEM_COLOUR_FG}%n@%M%k%f %F{blue}%~ %(?.%F{green}.%F{red})%#%f '
-fi
+# #
+# # System Color Prompt
+# #
+# if [ -f "$HOME/bin/system-colour.py" ]; then
+# 	eval "$($HOME/bin/system-colour.py)"
+# 	# Custom prompt with system color
+# 	PROMPT='%F{36}%K{$SYSTEM_COLOUR_BG}%F{$SYSTEM_COLOUR_FG}%n@%M%k%f %F{blue}%~ %(?.%F{green}.%F{red})%#%f '
+# fi
 
 #
 # Load dotfiles post-ENV
@@ -124,17 +228,33 @@ unset file;
 #
 # Path additions
 #
-path=(
-	"/opt/homebrew/opt/postgresql@13/bin"
-	"/opt/homebrew/opt/llvm/bin"
-	$path
-)
+if [[ -d /opt/homebrew/opt/postgresql@13/bin ]]; then
+	path=(
+		"/opt/homebrew/opt/postgresql@13/bin"
+		$path
+	)
+fi
+
+if [[ -d /opt/homebrew/opt/llvm/bin ]]; then
+	path=(
+		"/opt/homebrew/opt/llvm/bin"
+		$path
+	)
+fi
 typeset -U path # Remove duplicates from PATH
 
 # FZF Configuration
-[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
-export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
-export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+if [ -f ~/.fzf.zsh ]; then
+	source ~/.fzf.zsh
+fi
+
+if command -v fd >/dev/null 2>&1; then
+	export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+	export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+elif command -v rg >/dev/null 2>&1; then
+	export FZF_DEFAULT_COMMAND='rg --files --hidden --follow --glob "!.git"'
+	export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+fi
 
 # Better command history
 setopt EXTENDED_HISTORY          # Write the history file in the ':start:elapsed;command' format.
@@ -156,8 +276,43 @@ setopt PUSHD_SILENT           # Do not print the directory stack after pushd or 
 zstyle ':completion:*' menu select
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' # Case insensitive completion
 zstyle ':completion:*' special-dirs true
-zstyle ':completion:*' list-colors ''
+if [[ -n "${LS_COLORS:-}" ]]; then
+	zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
+fi
 zstyle ':completion:*:*:kill:*:processes' list-colors '=(#b) #([0-9]#) ([0-9a-z-]#)*=01;34=0=01'
 
 # Load syntax highlighting (should be last)
-source /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh 2>/dev/null || true
+typeset -gA ZSH_HIGHLIGHT_STYLES
+ZSH_HIGHLIGHT_STYLES[comment]='fg=#565f89'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=#9ece6a'
+ZSH_HIGHLIGHT_STYLES[command]='fg=#7aa2f7'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=#7dcfff'
+ZSH_HIGHLIGHT_STYLES[function]='fg=#bb9af7'
+ZSH_HIGHLIGHT_STYLES[path]='fg=#ff9e64'
+ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=#c0caf5'
+ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=#c0caf5'
+if [[ -z "${ZSH_HIGHLIGHTING_SOURCE:-}" ]]; then
+    if [[ -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        ZSH_HIGHLIGHTING_SOURCE=/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    elif [[ -f /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        ZSH_HIGHLIGHTING_SOURCE=/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    elif command -v brew >/dev/null 2>&1; then
+        _brew_prefix=$(brew --prefix 2>/dev/null || true)
+        if [[ -n "$_brew_prefix" && -f "$_brew_prefix/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
+            ZSH_HIGHLIGHTING_SOURCE="$_brew_prefix/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+        fi
+        unset _brew_prefix
+    fi
+fi
+[[ -n "$ZSH_HIGHLIGHTING_SOURCE" ]] && source "$ZSH_HIGHLIGHTING_SOURCE" 2>/dev/null || true
+unset ZSH_HIGHLIGHTING_SOURCE
+
+if [[ $OSTYPE == 'darwin'* ]] && [[ -d /Applications/screenpipe.app/Contents/MacOS ]]; then
+	export PATH="$PATH:/Applications/screenpipe.app/Contents/MacOS"
+fi
+
+# Completion helpers
+if (( $+commands[make] )) && [[ -z ${functions[_make]+x} ]]; then
+	autoload -Uz _make
+	compdef _make make gmake
+fi
