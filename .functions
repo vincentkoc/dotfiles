@@ -23,7 +23,7 @@ trash () { command mv "$@" ~/.Trash ; }
 ql () { qlmanage -p "$*" >& /dev/null; }
 
 # cleands: Recursively delete .DS_Store files
-cleands () {find . -type f -name '*.DS_Store' -ls -delete}
+cleands () { find . -type f -name '*.DS_Store' -ls -delete; }
 
 # To create a ZIP archive of a folder
 zipf () { zip -r "$1".zip "$1" ; }
@@ -130,8 +130,34 @@ up() {
     # Yarn
     if command -v yarn &> /dev/null; then
         echo "🧶 Updating Yarn..."
-        if yarn set version latest && \
-           yarn global upgrade; then
+        local yarn_update_success=true
+        local yarn_version
+        yarn_version=$(yarn --version 2>/dev/null)
+
+        if [[ $yarn_version == 1.* ]]; then
+            if command -v npm &> /dev/null; then
+                if ! npm install -g yarn@latest --no-audit --no-fund; then
+                    yarn_update_success=false
+                fi
+            else
+                yarn_update_success=false
+            fi
+            if $yarn_update_success; then
+                if ! yarn global upgrade; then
+                    yarn_update_success=false
+                fi
+            fi
+        else
+            if command -v corepack &> /dev/null; then
+                if ! COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare yarn@stable --activate; then
+                    yarn_update_success=false
+                fi
+            else
+                yarn_update_success=false
+            fi
+        fi
+
+        if $yarn_update_success; then
             echo "✅ Yarn updates complete"
         else
             failed_updates+=("Yarn")
@@ -141,8 +167,50 @@ up() {
     # Python pip
     if command -v pip &> /dev/null; then
         echo "🐍 Updating Python packages..."
-        if pip install --upgrade pip setuptools wheel && \
-           pip list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip install -U; then
+        local pip_update_success=true
+        if ! pip install --upgrade pip setuptools wheel; then
+            pip_update_success=false
+        fi
+        if $pip_update_success; then
+            local pip_python
+            pip_python=$(command -v python3 || command -v python || true)
+            if [[ -z "$pip_python" ]]; then
+                pip_update_success=false
+            else
+                local outdated_json
+                if outdated_json=$(pip list --outdated --format=json 2>/dev/null); then
+                    if [[ "$outdated_json" != "[]" ]]; then
+                        local pip_outdated_packages
+                        if pip_outdated_packages=$("$pip_python" -c 'import json, sys
+try:
+    data = sys.stdin.read()
+    if not data.strip():
+        sys.exit(0)
+    entries = json.loads(data)
+except Exception:
+    sys.exit(1)
+names = [item.get("name") for item in entries if isinstance(item, dict) and item.get("name")]
+sys.stdout.write("\n".join(names))
+' <<< "$outdated_json"); then
+                            if [[ -n "$pip_outdated_packages" ]]; then
+                                while IFS= read -r pkg; do
+                                    [[ -z "$pkg" ]] && continue
+                                    if ! pip install -U "$pkg"; then
+                                        pip_update_success=false
+                                        break
+                                    fi
+                                done <<< "$pip_outdated_packages"
+                            fi
+                        else
+                            pip_update_success=false
+                        fi
+                    fi
+                else
+                    pip_update_success=false
+                fi
+            fi
+        fi
+        if $pip_update_success; then
             echo "✅ Python packages updated"
         else
             failed_updates+=("Python pip")
@@ -152,8 +220,50 @@ up() {
     # Python pip3
     if command -v pip3 &> /dev/null; then
         echo "🐍 Updating Python3 packages..."
-        if pip3 install --upgrade pip setuptools wheel && \
-           pip3 list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip3 install -U; then
+        local pip3_update_success=true
+        if ! pip3 install --upgrade pip setuptools wheel; then
+            pip3_update_success=false
+        fi
+        if $pip3_update_success; then
+            local pip3_python
+            pip3_python=$(command -v python3 || command -v python || true)
+            if [[ -z "$pip3_python" ]]; then
+                pip3_update_success=false
+            else
+                local outdated3_json
+                if outdated3_json=$(pip3 list --outdated --format=json 2>/dev/null); then
+                    if [[ "$outdated3_json" != "[]" ]]; then
+                        local pip3_outdated_packages
+                        if pip3_outdated_packages=$("$pip3_python" -c 'import json, sys
+try:
+    data = sys.stdin.read()
+    if not data.strip():
+        sys.exit(0)
+    entries = json.loads(data)
+except Exception:
+    sys.exit(1)
+names = [item.get("name") for item in entries if isinstance(item, dict) and item.get("name")]
+sys.stdout.write("\n".join(names))
+' <<< "$outdated3_json"); then
+                            if [[ -n "$pip3_outdated_packages" ]]; then
+                                while IFS= read -r pkg; do
+                                    [[ -z "$pkg" ]] && continue
+                                    if ! pip3 install -U "$pkg"; then
+                                        pip3_update_success=false
+                                        break
+                                    fi
+                                done <<< "$pip3_outdated_packages"
+                            fi
+                        else
+                            pip3_update_success=false
+                        fi
+                    fi
+                else
+                    pip3_update_success=false
+                fi
+            fi
+        fi
+        if $pip3_update_success; then
             echo "✅ Python3 packages updated"
         else
             failed_updates+=("Python pip3")
@@ -163,8 +273,8 @@ up() {
     # Ruby Gems
     if command -v gem &> /dev/null; then
         echo "💎 Updating Ruby Gems..."
-        if sudo gem update --system && \
-           sudo gem update && \
+        if sudo gem update --system --no-document && \
+           sudo gem update --no-document && \
            sudo gem cleanup; then
             echo "✅ Ruby Gems updated"
         else
@@ -402,7 +512,24 @@ function doctor() {
     # Yarn
     if command -v yarn &> /dev/null; then
         echo "🧶 Checking Yarn..."
-        if ! yarn doctor; then
+        local yarn_ok=true
+        if ! yarn --version > /dev/null 2>&1; then
+            if command -v corepack &> /dev/null; then
+                if env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare yarn@stable --activate > /dev/null 2>&1; then
+                    yarn --version > /dev/null 2>&1 || yarn_ok=false
+                else
+                    yarn_ok=false
+                fi
+            else
+                yarn_ok=false
+            fi
+        fi
+        if $yarn_ok && yarn help doctor > /dev/null 2>&1; then
+            if ! env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn doctor > /dev/null 2>&1; then
+                yarn_ok=false
+            fi
+        fi
+        if ! $yarn_ok; then
             found_issues+=("Yarn")
         fi
     fi
@@ -410,7 +537,24 @@ function doctor() {
     # PNPM
     if command -v pnpm &> /dev/null; then
         echo "📦 Checking PNPM..."
-        if ! pnpm doctor; then
+        local pnpm_ok=true
+        if ! env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version > /dev/null 2>&1; then
+            if command -v corepack &> /dev/null; then
+                if env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare pnpm@latest --activate > /dev/null 2>&1; then
+                    env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version > /dev/null 2>&1 || pnpm_ok=false
+                else
+                    pnpm_ok=false
+                fi
+            else
+                pnpm_ok=false
+            fi
+        fi
+        if $pnpm_ok && command -v pnpm &> /dev/null; then
+            if ! env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm doctor > /dev/null 2>&1; then
+                pnpm_ok=false
+            fi
+        fi
+        if ! $pnpm_ok; then
             found_issues+=("PNPM")
         fi
     fi
@@ -434,8 +578,12 @@ function doctor() {
     # Git
     if command -v git &> /dev/null; then
         echo "🌿 Checking Git configuration..."
-        if ! git fsck; then
-            found_issues+=("Git repository integrity")
+        if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+            if ! git fsck > /dev/null 2>&1; then
+                found_issues+=("Git repository integrity")
+            fi
+        else
+            echo "Skipping git fsck (not inside a repository)."
         fi
     fi
 
@@ -462,14 +610,20 @@ function doctor() {
             found_issues+=("macOS System")
         fi
 
-        echo "🔍 Verifying system integrity..."
-        if ! sudo verify_system > /dev/null 2>&1; then
-            found_issues+=("macOS System Integrity")
+        if command -v verify_system > /dev/null 2>&1; then
+            echo "🔍 Verifying system integrity..."
+            if sudo -n true 2>/dev/null; then
+                if ! sudo verify_system > /dev/null 2>&1; then
+                    found_issues+=("macOS System Integrity")
+                fi
+            else
+                echo "Skipping verify_system (sudo password required)."
+            fi
         fi
     fi
 
     # Disk health (macOS only)
-    if [ "$(uname)" == "Darwin" ]; then
+    if [ "$(uname)" == "Darwin" ] && command -v diskutil > /dev/null 2>&1; then
         echo "💽 Checking disk health..."
         if ! diskutil verifyVolume / > /dev/null 2>&1; then
             found_issues+=("Disk health")
