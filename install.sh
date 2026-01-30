@@ -45,22 +45,16 @@ install_zsh_plugins() {
 
 # Install fzf
 install_fzf() {
-    if [[ -f "$HOME/.fzf.zsh" ]]; then
-        success "fzf already configured"
-    elif [[ -d "$HOME/.fzf" ]]; then
-        info "Running fzf install script..."
-        "$HOME/.fzf/install" --key-bindings --completion --no-update-rc
-        success "fzf configured"
+    if command -v fzf &>/dev/null; then
+        success "fzf already installed"
     elif command -v brew &>/dev/null; then
         info "Installing fzf via brew..."
         brew install fzf
-        "$(brew --prefix)/opt/fzf/install" --key-bindings --completion --no-update-rc
-        success "fzf installed and configured"
+        success "fzf installed"
     else
         info "Installing fzf from git..."
         git clone --depth 1 https://github.com/junegunn/fzf.git "$HOME/.fzf"
-        "$HOME/.fzf/install" --key-bindings --completion --no-update-rc
-        success "fzf installed and configured"
+        success "fzf installed"
     fi
 }
 
