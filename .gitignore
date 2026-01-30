@@ -53,3 +53,10 @@ Library/Application Support/Dash/library.dash
 /Library/Application Support/Airflow
 .ssh/authorized_keys
 *ca-bundle
+.codex/auth.json
+Library/Preferences/.GlobalPreferences.plist
+Library/Preferences/com.adobe.Photoshop.plist
+Library/Preferences/com.apple.symbolichotkeys.plist
+Library/Preferences/com.apple.Terminal.plist
+.factory/auth.json
+.codex/config.toml
