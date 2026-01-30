@@ -1,0 +1,22 @@
+[
+    {
+        "key": "ctrl+enter",
+        "command": "workbench.action.terminal.sendSequence",
+        "when": "terminalFocus",
+        "args": {
+            "text": "\\\r\n"
+        }
+    },
+    {
+        "key": "shift+enter",
+        "command": "workbench.action.terminal.sendSequence",
+        "when": "terminalFocus",
+        "args": {
+            "text": "\\\r\n"
+        }
+    },
+    {
+        "key": "cmd+i",
+        "command": "composerMode.agent"
+    }
+]
