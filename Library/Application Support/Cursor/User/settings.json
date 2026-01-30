@@ -307,5 +307,6 @@
     "cursor.composer.shouldChimeAfterChatFinishes": true,
     "workbench.colorTheme": "Tokyo Night",
     "terminal.integrated.fontLigatures.enabled": true,
-    "cursor.composer.queueMessageDefaultBehavior": "queue"
+    "cursor.composer.queueMessageDefaultBehavior": "queue",
+    "application.shellEnvironmentResolutionTimeout": 15
 }
