@@ -98,8 +98,7 @@ up() {
            brew upgrade && \
            brew upgrade --cask && \
            brew cleanup && \
-           brew doctor && \
-           brew missing; then
+           brew doctor; then
             echo "✅ Homebrew updates complete"
         else
             failed_updates+=("Homebrew")
@@ -487,9 +486,6 @@ function doctor() {
         echo "🍺 Running Homebrew diagnostics..."
         if ! brew doctor; then
             found_issues+=("Homebrew")
-        fi
-        if ! brew missing; then
-            found_issues+=("Homebrew missing dependencies")
         fi
     fi
 

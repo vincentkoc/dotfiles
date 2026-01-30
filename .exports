@@ -170,11 +170,9 @@ export NODE_REPL_HISTORY=~/.node_history
 export NODE_REPL_HISTORY_SIZE='32768'
 export NODE_REPL_MODE='sloppy'
 export NODE_OPTIONS='--max-old-space-size=4096'
+# nodenv paths - lazy loading handled in .zshrc
 path_prepend "$HOME/.nodenv/bin"
 path_prepend "$HOME/.nodenv/shims"
-if command -v nodenv >/dev/null 2>&1; then
-    eval "$(nodenv init -)"
-fi
 
 # pnpm
 export PNPM_HOME="$HOME/Library/pnpm"

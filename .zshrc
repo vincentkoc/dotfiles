@@ -90,9 +90,8 @@ plugins=(
 # Performance improvements
 DISABLE_AUTO_UPDATE="true"
 COMPLETION_WAITING_DOTS="true"
-ZSH_DISABLE_COMPFIX="true"
 
-ZSH_AUTOSUGGEST_USE_ASYNC=0
+ZSH_AUTOSUGGEST_USE_ASYNC=1
 ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=20
 ZSH_AUTOSUGGEST_STRATEGY=(history)
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=#565f89,bold"
@@ -105,7 +104,7 @@ source $ZSH/oh-my-zsh.sh
 #
 # Load dotfiles pre-ENV
 #
-for file in ~/.{path,bash_prompt,aliases,functions}; do
+for file in ~/.{aliases,functions}; do
 	[ -r "$file" ] && [ -f "$file" ] && source "$file";
 done;
 unset file;

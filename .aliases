@@ -208,6 +208,7 @@ alias ipInfo0='ipconfig getpacket en0'              # ipInfo0:      Get info on 
 alias ipInfo1='ipconfig getpacket en1'              # ipInfo1:      Get info on connections for en1
 alias openPorts='sudo lsof -i | grep LISTEN'        # openPorts:    All listening connections
 alias showBlocked='sudo ipfw list'                  # showBlocked:  All ipfw rules inc/ blocked IPs
-alias myssh='cd ~/Dropbox/_System/SSH/'
+# SSH folder (if Dropbox is set up)
+[[ -d ~/Dropbox/_System/SSH ]] && alias myssh='cd ~/Dropbox/_System/SSH/'
 alias myhostedit='sudo vim /etc/hosts'
 alias myhostclear='sudo dscacheutil -flushcache ; sudo killall -HUP mDNSResponder'

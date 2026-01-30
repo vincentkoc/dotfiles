@@ -1,5 +1,6 @@
 # project
 .DS_Store
+**/.DS_Store
 
 # secrets
 .extra
@@ -47,6 +48,7 @@ Library/Preferences/ZoomChat.plist
 Library/Group Containers/com.apple.PreviewLegacySignaturesConversion/Library/Preferences/com.apple.PreviewLegacySignaturesConversion.plist
 Library/Application Support/Dash/library.dash
 .netrc
+.netrc.gpg
 .aws/credentials
 .aws/config
 /Library/Application Support/Adobe
@@ -60,3 +62,5 @@ Library/Preferences/com.apple.symbolichotkeys.plist
 Library/Preferences/com.apple.Terminal.plist
 .factory/auth.json
 .codex/config.toml
+.claude/settings.local.json
+Library/Application Support/BraveSoftware/Brave-Browser/Default/Preferences
