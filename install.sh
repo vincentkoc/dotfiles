@@ -17,6 +17,18 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Check for Homebrew (macOS)
+check_homebrew() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &>/dev/null; then
+            success "Homebrew found"
+        else
+            warn "Homebrew not found - some installs may fail"
+            info "Install from: https://brew.sh"
+        fi
+    fi
+}
+
 # Install Oh My Zsh
 install_oh_my_zsh() {
     if [[ -d "$HOME/.oh-my-zsh" ]]; then
@@ -106,6 +118,10 @@ main() {
     echo "╚═══════════════════════════════════════════╝"
     echo ""
 
+    # Check prerequisites
+    check_homebrew
+    echo ""
+
     # Install dependencies
     info "Installing dependencies..."
     echo ""
@@ -116,13 +132,6 @@ main() {
     install_fzf
     install_vim_plug
     install_vim_theme
-
-    echo ""
-
-    # Install vim plugins
-    info "Installing vim plugins..."
-    vim +PlugInstall +qall 2>/dev/null || true
-    success "Vim plugins installed"
 
     echo ""
     success "Installation complete!"
