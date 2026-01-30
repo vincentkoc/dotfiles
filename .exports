@@ -176,6 +176,10 @@ if command -v nodenv >/dev/null 2>&1; then
     eval "$(nodenv init -)"
 fi
 
+# pnpm
+export PNPM_HOME="$HOME/Library/pnpm"
+path_prepend "$PNPM_HOME"
+
 # Python
 export PYTHONIOENCODING='UTF-8'
 export PYTHONDONTWRITEBYTECODE=1  # Prevent Python from writing .pyc files
