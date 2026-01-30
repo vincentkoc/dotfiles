@@ -2,6 +2,7 @@
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
 	signingkey = FB4C24AE87080A95
+	# signingkey = FB4C24AE87080A95
 	# # set name, email and gpg signature on commits
 	# # values are set using ~/.extra/user.sh
 	#
@@ -11,13 +12,13 @@
 
 [commit]
 	# sign commits with gpg keys
-	gpgsign = true
+	# gpgsign = true
 
 [gpg]
 	# git config --global gpg.program "$(which gpg)"
 	# TODO: fix gpg alias for github client
 	# program = /opt/homebrew/bin/gpg
-	program = /usr/local/MacGPG2/bin/gpg
+	# program = /usr/local/MacGPG2/bin/gpg
 
 [credential]
 	# use keychain credentials if possible
@@ -60,9 +61,9 @@
 [filter "lfs"]
 	# setup and allow for large files in git
 	required = true
-	clean = /usr/local/bin/git-lfs clean -- %f
-	smudge = /usr/local/bin/git-lfs smudge -- %f
-	process = /usr/local/bin/git-lfs filter-process
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
 
 [color]
 	# allow for pretty/colour based output
@@ -81,15 +82,15 @@
 	# stop hints showing up in cli
 	statusHints = false
 
-#
-# URL shorthands
-#
-[url "git@github.com:"]
-    insteadOf = "gh:"
-    insteadOf = https://github.com/
-    insteadOf = http://github.com/
-    pushInsteadOf = "github:"
-    pushInsteadOf = "git://github.com/"
+# #
+# # URL shorthands
+# #
+# [url "git@github.com:"]
+#     insteadOf = "gh:"
+#     insteadOf = https://github.com/
+#     insteadOf = http://github.com/
+#     pushInsteadOf = "github:"
+#     pushInsteadOf = "git://github.com/"
 
 [url "git://github.com/"]
     insteadOf = "github:"
@@ -108,3 +109,7 @@
 	insteadOf = git://gitlab.com/
 	insteadOf = git@gitlab.com:
 	insteadOf = gitlab.com:
+[lfs "customtransfer.xet"]
+	path = git-xet
+	args = transfer
+	concurrent = true
