@@ -112,6 +112,7 @@ fi
 	alias desk="cd ~/Desktop/"
 	alias g="cd ~/GIT"
 	alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
+	alias dotfiles="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles"
 
 	# Colour Output
 	alias grep='grep --color=auto'
