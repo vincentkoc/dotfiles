@@ -1,7 +1,26 @@
 # dotfiles
 
-This is my collection of dotfiles.
+Personal dotfiles managed with [Mackup](https://github.com/lra/mackup).
 
-Some things are based on works from others:
-* tmux: https://github.com/gpakosz/.tmux
-* neovim: https://github.com/NvChad/NvChad & https://github.com/nyoom-engineering/nyoom.nvim
+## Install
+
+```bash
+./install.sh      # Install dependencies
+mackup restore    # Symlink configs
+```
+
+> For full macOS setup (apps, system prefs, Homebrew), see [natilius](https://github.com/vincentkoc/natilius).
+
+## Structure
+
+```
+.zshrc / .exports / .aliases / .functions   # Shell
+.vimrc / .tmux.conf                         # Editors
+.mackup/                                    # Mackup app configs
+install.sh                                  # Dependency installer
+```
+
+## Credits
+
+- tmux: [gpakosz/.tmux](https://github.com/gpakosz/.tmux)
+- neovim: [NvChad](https://github.com/NvChad/NvChad) & [nyoom.nvim](https://github.com/nyoom-engineering/nyoom.nvim)
