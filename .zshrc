@@ -59,10 +59,15 @@ SPACESHIP_PROMPT_SEPARATE_LINE=false
 SPACESHIP_PROMPT_ADD_NEWLINE=true
 SPACESHIP_CLIPBOARD_SHOW=false
 
-# Right prompt for host only
-SPACESHIP_RPROMPT_ORDER=(host)
+# Right prompt for host only (hide in tmux since tmux shows it)
+if [[ -n "$TMUX" ]]; then
+    SPACESHIP_RPROMPT_ORDER=()
+    SPACESHIP_HOST_SHOW=false
+else
+    SPACESHIP_RPROMPT_ORDER=(host)
+    SPACESHIP_HOST_SHOW="always"
+fi
 SPACESHIP_TIME_SHOW=false
-SPACESHIP_HOST_SHOW="always"
 SPACESHIP_HOST_PREFIX=""
 SPACESHIP_HOST_SUFFIX=""
 SPACESHIP_HOST_COLOR="242"
