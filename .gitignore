@@ -2,6 +2,48 @@
 .DS_Store
 **/.DS_Store
 
+# Python
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/.eggs/
+
+# Node.js
+**/node_modules/
+**/.npm/
+**/.pnpm-store/
+**/.yarn/
+
+# Build/Dist
+**/dist/
+**/build/
+**/.next/
+**/.nuxt/
+**/.output/
+**/.turbo/
+
+# Cache
+**/.cache/
+**/.parcel-cache/
+
+# IDE
+**/.idea/
+**/*.swp
+**/*.swo
+
+# Misc dev
+**/.terraform/
+**/vendor/
+**/target/
+**/coverage/
+**/.coverage
+
 # secrets
 .extra
 .gnupg/gpg.conf
