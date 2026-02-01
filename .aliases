@@ -231,7 +231,7 @@ fi
 	alias emptytrash="sudo rm -rfv /Volumes/*/.Trashes; sudo rm -rfv ~/.Trash; sudo rm -rfv /private/var/log/asl/*.asl; sqlite3 ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV* 'delete from LSQuarantineEvent'"
 
 	# iCloud - exclude dev folders from sync
-	alias icloud-ignore='$HOME/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/icloud-ignore.sh'
+	alias icloud-ignore='$HOME/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/bin/icloud-ignore.sh'
 
 	# URL-encode strings
     alias urlencode='python3 -c "import sys; from urllib.parse import quote_plus; print(quote_plus(sys.argv[1]))"'
