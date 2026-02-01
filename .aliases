@@ -24,15 +24,15 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # Preferred 'ls' implementation with icon toggle
     if command -v eza >/dev/null 2>&1; then
         if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
-            alias ls='eza -lh --git'
-            alias ll='eza -lha --git'
+            alias ls='eza -lh --git --no-user'
+            alias ll='eza -lha --git --no-user'
         else
-            alias ls='eza -lh --git --icons'
-            alias ll='eza -lha --git --icons'
+            alias ls='eza -lh --git --icons --no-user'
+            alias ll='eza -lha --git --icons --no-user'
         fi
     else
         alias ls='ls -FGh'
-        alias ll='ls -FGlAhp'
+        alias ll='ls -FGgoAhp'
     fi
 
 	# Editor
@@ -64,19 +64,26 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	  [ -n "$POD" ] && kubectl logs -f "$POD"
 	}
 else
-    # Preferred 'ls' implementation
+    # Preferred 'ls' implementation (Linux)
     if command -v eza >/dev/null 2>&1; then
         if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
-            alias ll='eza -lha --git'
+            alias ls='eza -lh --git --no-user'
+            alias ll='eza -lha --git --no-user'
         else
-            alias ll='eza -lha --git --icons'
+            alias ls='eza -lh --git --icons --no-user'
+            alias ll='eza -lha --git --icons --no-user'
         fi
     else
-        alias ll='ls -FGlAhp'
+        alias ls='ls --color=auto -Fh'
+        alias ll='ls --color=auto -FgoAhp'
     fi
 
 	# Pipe content to file in Home drive
 	alias loghome='tee $HOME/logfile_$(date +"%Y%m%d_%H%M%S").txt'
+
+	# Linux alternatives for macOS commands
+	alias localip="hostname -I | awk '{print \$1}'"
+	alias flushdns='sudo systemd-resolve --flush-caches 2>/dev/null || sudo resolvectl flush-caches 2>/dev/null || echo "DNS flush not available"'
 
 fi
 
@@ -117,6 +124,20 @@ fi
 	alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
 	alias dotfiles="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles"
 
+	# Python venv
+	alias venv='source .venv/bin/activate'
+	alias mkvenv='python3 -m venv .venv && source .venv/bin/activate'
+
+	# Docker
+	alias d='docker'
+	alias dc='docker compose'
+
+	# Terraform
+	alias tf='terraform'
+
+	# Tree view (eza)
+	command -v eza >/dev/null 2>&1 && alias tree='eza --tree'
+
 	# Colour Output
 	alias grep='grep --color=auto'
 	alias fgrep='fgrep --color=auto'
@@ -124,13 +145,18 @@ fi
 	alias phpunit='phpunit --colors'
 
 	# Git
+	alias ga='git add'
+	alias gs='git status'
 	alias gl='git pull --prune'
 	alias glog="git log --graph --pretty=format:'%Cred%h%Creset %an: %s - %Creset %C(yellow)%d%Creset %Cgreen(%cr)%Creset' --abbrev-commit --date=relative"
 	alias gp='git push origin HEAD'
-	alias gd='git diff --color | sed "s/^\([^-+ ]*\)[-+ ]/\\1/" | less -r'
+	alias gd='git diff'
 	alias gc='git commit'
 	alias gca='git commit -a'
+	alias gcm='git commit -m'
 	alias gco='git checkout'
+	alias gb='git branch'
+	alias gf='git fetch'
 	alias stash="git stash -u"
 	alias pop="git stash pop"
 #
@@ -147,6 +173,16 @@ fi
 	alias c='clear'
 	alias h='history'
 	alias j='jobs -l'
+
+	# History search
+	alias hs='history | grep'
+	hf() {
+		if [[ -n "$1" ]]; then
+			history | grep "$1" | fzf --tac --no-sort
+		else
+			history | fzf --tac --no-sort
+		fi
+	}
 
 	# Print PATH's
 	alias path='echo -e ${PATH//:/\\n}'
@@ -198,17 +234,54 @@ fi
 	alias timestamp='date +"%Y%m%d_%H%M%S"'
 
 
-# Networking
-alias netCons='lsof -i'                             # netCons:      Show all open TCP/IP sockets
-alias flushDNS='dscacheutil -flushcache && sudo killall -HUP mDNSResponder'            # flushDNS:     Flush out the DNS Cache
-alias lsock='sudo /usr/sbin/lsof -i -P'             # lsock:        Display open sockets
-alias lsockU='sudo /usr/sbin/lsof -nP | grep UDP'   # lsockU:       Display only open UDP sockets
-alias lsockT='sudo /usr/sbin/lsof -nP | grep TCP'   # lsockT:       Display only open TCP sockets
-alias ipInfo0='ipconfig getpacket en0'              # ipInfo0:      Get info on connections for en0
-alias ipInfo1='ipconfig getpacket en1'              # ipInfo1:      Get info on connections for en1
+# Networking (cross-platform)
+alias netcons='lsof -i'                             # netcons:      Show all open TCP/IP sockets
+alias lsock='sudo lsof -i -P'                       # lsock:        Display open sockets
+alias lsockU='sudo lsof -nP | grep UDP'             # lsockU:       Display only open UDP sockets
+alias lsockT='sudo lsof -nP | grep TCP'             # lsockT:       Display only open TCP sockets
 alias openPorts='sudo lsof -i | grep LISTEN'        # openPorts:    All listening connections
-alias showBlocked='sudo ipfw list'                  # showBlocked:  All ipfw rules inc/ blocked IPs
+alias ports='netstat -tulanp 2>/dev/null || lsof -i -P | grep LISTEN'  # ports: Show listening ports
+alias myhostedit='sudo vim /etc/hosts'
+
+# Networking (macOS-specific)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    alias flushdns='dscacheutil -flushcache && sudo killall -HUP mDNSResponder'
+    alias localip='ipconfig getifaddr en0'
+    alias ipinfo0='ipconfig getpacket en0'
+    alias ipinfo1='ipconfig getpacket en1'
+fi
+
 # SSH folder (if Dropbox is set up)
 [[ -d ~/Dropbox/_System/SSH ]] && alias myssh='cd ~/Dropbox/_System/SSH/'
-alias myhostedit='sudo vim /etc/hosts'
-alias myhostclear='sudo dscacheutil -flushcache ; sudo killall -HUP mDNSResponder'
+
+# Aliases cheatsheet
+help-aliases() {
+    cat <<'EOF'
+┌───────────────────────────────────────────────────────────────────────────┐
+│                            ALIASES CHEATSHEET                             │
+├───────────────────┬───────────────────┬───────────────────┬───────────────┤
+│ NAVIGATION        │ FILES             │ GIT               │ CONTAINERS    │
+├───────────────────┼───────────────────┼───────────────────┼───────────────┤
+│ ..    up 1        │ ls    list        │ gs    status      │ d     docker  │
+│ ...   up 2        │ ll    list all    │ ga    add         │ dc    compose │
+│ .3    up 3        │ f     Finder      │ gc    commit      │ k     kubectl │
+│ ~     home        │ tree  tree view   │ gcm   commit -m   │ kx    kubectx │
+│ dl    Downloads   │ edit  $EDITOR     │ gd    diff        │ kn    kubens  │
+│ desk  Desktop     │ chmodx chmod +x   │ gl    pull        │ klogs fzf log │
+│ g     ~/GIT       │                   │ gp    push        │ tf    terrafrm│
+│ i     iCloud      │ PYTHON            │ gco   checkout    │               │
+│ dotfiles  cd      │ ─────────────     │ gb    branch      │ NETWORK       │
+│                   │ venv    activate  │ gf    fetch       │ ────────────-─│
+│ TERMINAL          │ mkvenv  create    │ glog  log graph   │ myip    extrnl│
+│ ─────────────     │                   │ stash stash -u    │ localip local │
+│ c     clear       │ UTILS             │ pop   stash pop   │ flushdns flush│
+│ h     history     │ ─────────────     │                   │ ports   listng│
+│ hs    hist+grep   │ today   YYYY/MM/DD│                   │ weather wttr  │
+│ hf    hist+fzf    │ timestamp YMD_HMS │                   │ netcons socket│
+│ path  show $PATH  │ urlencode encode  │                   │               │
+│ kp    ps aux      │ emptytrash clear  │                   │               │
+└───────────────────┴───────────────────┴───────────────────┴───────────────┘
+EOF
+}
+alias halp='help-aliases'
+alias cheat='help-aliases'
