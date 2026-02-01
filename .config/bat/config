@@ -1,6 +1,6 @@
 # bat configuration
-# Use a dark theme that complements Tokyo Night
---theme="Nord"
+# Tokyo Night theme
+--theme="tokyonight_night"
 
 # Show line numbers
 --style="numbers,changes,header"
