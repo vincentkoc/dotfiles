@@ -134,6 +134,52 @@ install_vim_theme() {
     fi
 }
 
+# Setup openclaw symlinks (legacy clawdbot compatibility)
+setup_openclaw_symlinks() {
+    local dotfiles_dir
+    if [[ "$(uname)" == "Darwin" ]]; then
+        dotfiles_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
+    else
+        dotfiles_dir="$HOME/.dotfiles"
+    fi
+
+    # Symlink ~/.openclaw to dotfiles
+    if [[ -d "$dotfiles_dir/.openclaw" ]]; then
+        if [[ -L "$HOME/.openclaw" ]]; then
+            success "~/.openclaw symlink exists"
+        elif [[ -d "$HOME/.openclaw" ]]; then
+            warn "~/.openclaw is a directory - skipping (backup and remove manually if needed)"
+        else
+            ln -sf "$dotfiles_dir/.openclaw" "$HOME/.openclaw"
+            success "~/.openclaw symlinked"
+        fi
+
+        # Legacy: symlink ~/.clawdbot to .openclaw
+        if [[ -L "$HOME/.clawdbot" ]]; then
+            success "~/.clawdbot legacy symlink exists"
+        elif [[ -d "$HOME/.clawdbot" ]]; then
+            warn "~/.clawdbot is a directory - skipping (backup and remove manually if needed)"
+        else
+            ln -sf "$dotfiles_dir/.openclaw" "$HOME/.clawdbot"
+            success "~/.clawdbot -> .openclaw legacy symlink created"
+        fi
+    else
+        warn ".openclaw not found in dotfiles - skipping symlinks"
+    fi
+
+    # Symlink ~/clawd to dotfiles
+    if [[ -d "$dotfiles_dir/clawd" ]]; then
+        if [[ -L "$HOME/clawd" ]]; then
+            success "~/clawd symlink exists"
+        elif [[ -d "$HOME/clawd" ]]; then
+            warn "~/clawd is a directory - skipping (backup and remove manually if needed)"
+        else
+            ln -sf "$dotfiles_dir/clawd" "$HOME/clawd"
+            success "~/clawd symlinked"
+        fi
+    fi
+}
+
 main() {
     echo ""
     echo "╔═══════════════════════════════════════════╗"
@@ -156,6 +202,7 @@ main() {
     install_vim_plug
     install_vim_theme
     install_nvim_plugins
+    setup_openclaw_symlinks
 
     echo ""
     success "Installation complete!"

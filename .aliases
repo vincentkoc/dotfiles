@@ -63,6 +63,10 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	  POD=$(k get pods --no-headers | fzf | awk '{print $1}')
 	  [ -n "$POD" ] && kubectl logs -f "$POD"
 	}
+
+	# AI Tools
+	alias clawdbot='openclaw'
+	alias claw='openclaw'
 else
     # Preferred 'ls' implementation (Linux)
     if command -v eza >/dev/null 2>&1; then
