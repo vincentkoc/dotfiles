@@ -85,16 +85,39 @@ install_spaceship_theme() {
     fi
 }
 
-# Install vim-plug
+# Install vim-plug for vim and neovim
 install_vim_plug() {
-    local plug_file="$HOME/.vim/autoload/plug.vim"
-    if [[ -f "$plug_file" ]]; then
-        success "vim-plug already installed"
+    # vim-plug for vim
+    local vim_plug="$HOME/.vim/autoload/plug.vim"
+    if [[ -f "$vim_plug" ]]; then
+        success "vim-plug (vim) already installed"
     else
-        info "Installing vim-plug..."
-        curl -fLo "$plug_file" --create-dirs \
+        info "Installing vim-plug for vim..."
+        curl -fLo "$vim_plug" --create-dirs \
             https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
-        success "vim-plug installed"
+        success "vim-plug (vim) installed"
+    fi
+
+    # vim-plug for neovim
+    local nvim_plug="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/autoload/plug.vim"
+    if [[ -f "$nvim_plug" ]]; then
+        success "vim-plug (neovim) already installed"
+    else
+        info "Installing vim-plug for neovim..."
+        curl -fLo "$nvim_plug" --create-dirs \
+            https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
+        success "vim-plug (neovim) installed"
+    fi
+}
+
+# Install neovim plugins
+install_nvim_plugins() {
+    if command -v nvim &>/dev/null; then
+        info "Installing neovim plugins..."
+        nvim --headless +PlugInstall +qall 2>/dev/null || true
+        success "Neovim plugins installed"
+    else
+        warn "Neovim not found - skipping plugin install"
     fi
 }
 
@@ -132,6 +155,7 @@ main() {
     install_fzf
     install_vim_plug
     install_vim_theme
+    install_nvim_plugins
 
     echo ""
     success "Installation complete!"
