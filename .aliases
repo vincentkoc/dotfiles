@@ -160,6 +160,7 @@ fi
 	alias gco='git checkout'
 	alias gb='git branch'
 	alias gf='git fetch'
+	alias lg='lazygit'
 	alias stash="git stash -u"
 	alias pop="git stash pop"
 #
