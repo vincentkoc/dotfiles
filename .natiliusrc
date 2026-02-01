@@ -159,6 +159,7 @@ BREWPACKAGES=(
     "vim"
     "neovim"
     "tmux"
+    "tree-sitter"
     "reattach-to-user-namespace"
 
     # Security & Encryption
