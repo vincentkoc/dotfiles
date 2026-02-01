@@ -1,0 +1,15 @@
+# bat configuration
+# Use a dark theme that complements Tokyo Night
+--theme="Nord"
+
+# Show line numbers
+--style="numbers,changes,header"
+
+# Use italic text
+--italic-text=always
+
+# Set tab width
+--tabs=4
+
+# Enable paging
+--paging=auto

@@ -221,6 +221,12 @@ export LESS_TERMCAP_us=$'\E[01;32m'
 # FZF tuned for Tokyo Night palette
 export FZF_DEFAULT_OPTS="--height 40% --layout=reverse --border --preview-window=border-left --color=bg+:#1f2335,bg:#1a1b26,spinner:#bb9af7,hl:#ff9e64,fg:#c0caf5,header:#ff9e64,info:#7aa2f7,pointer:#7dcfff,marker:#9ece6a,prompt:#7aa2f7"
 
+# ripgrep config
+export RIPGREP_CONFIG_PATH="$HOME/.ripgreprc"
+
+# bat config
+export BAT_CONFIG_PATH="$HOME/.config/bat/config"
+
 # Git
 export GIT_PS1_SHOWDIRTYSTATE=1
 export GIT_PS1_SHOWSTASHSTATE=1

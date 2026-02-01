@@ -1,0 +1,37 @@
+# ripgrep configuration
+
+# Smart case (case-insensitive if all lowercase)
+--smart-case
+
+# Follow symlinks
+--follow
+
+# Add line numbers
+--line-number
+
+# Show column number
+--column
+
+# Highlight matches
+--color=auto
+
+# Search hidden files (but respect .gitignore)
+--hidden
+
+# Ignore common directories
+--glob=!.git/*
+--glob=!node_modules/*
+--glob=!.venv/*
+--glob=!__pycache__/*
+--glob=!*.pyc
+--glob=!.DS_Store
+--glob=!.cache/*
+--glob=!dist/*
+--glob=!build/*
+--glob=!coverage/*
+--glob=!.next/*
+--glob=!.nuxt/*
+
+# Max columns before truncating
+--max-columns=200
+--max-columns-preview

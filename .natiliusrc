@@ -150,6 +150,7 @@ BREWPACKAGES=(
     "peco"
     "tealdeer"
     "zsh-completions"
+    "direnv"
 
     # Editors & Terminal
     "vim"
