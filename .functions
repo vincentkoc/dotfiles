@@ -422,6 +422,14 @@ sys.stdout.write("\n".join(names))
         sudo killall -HUP mDNSResponder
     fi
 
+    # Mole cleanup (macOS only)
+    if [ "$(uname)" = "Darwin" ] && command -v mole &> /dev/null; then
+        echo "🐾 Running Mole clean..."
+        if ! mole clean; then
+            failed_updates+=("Mole")
+        fi
+    fi
+
     echo -e "\n✨ System update and cleanup complete!\n"
 }
 
@@ -660,6 +668,37 @@ function doctor() {
     # DNS resolution
     if ! nslookup github.com > /dev/null 2>&1; then
         found_issues+=("DNS resolution")
+    fi
+
+    # Mole cleanup (macOS only)
+    if [ "$(uname)" == "Darwin" ] && command -v mole &> /dev/null; then
+        echo "🐾 Running Mole clean..."
+        if ! mole clean; then
+            found_issues+=("Mole clean")
+        fi
+    fi
+
+    # iCloud sync health (macOS only)
+    if [ "$(uname)" == "Darwin" ]; then
+        local icloud_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+        if [[ -d "$icloud_dir" ]]; then
+            echo "☁️  Checking iCloud sync health..."
+            local bad_folders=0
+            local patterns=(".venv" "venv" "__pycache__" "node_modules" ".next" "dist" "build" ".cache")
+            for pattern in "${patterns[@]}"; do
+                local count=$(find "$icloud_dir" -maxdepth 4 -type d -name "$pattern" 2>/dev/null | wc -l | tr -d ' ')
+                if [[ "$count" -gt 0 ]]; then
+                    echo "   ⚠️  Found $count '$pattern' folder(s) syncing to iCloud"
+                    bad_folders=$((bad_folders + count))
+                fi
+            done
+            if [[ "$bad_folders" -gt 0 ]]; then
+                found_issues+=("iCloud syncing dev folders")
+                echo "   💡 Run 'icloud-ignore' to exclude dev folders from sync"
+            else
+                echo "   ✅ No dev folders detected in iCloud (shallow scan)"
+            fi
+        fi
     fi
 
     # Final report
