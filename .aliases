@@ -215,7 +215,7 @@ fi
 #
 
 	# Print ip's
-	alias myip='dig myip.opendns.com @resolver1.opendns.com'
+	alias myip='curl -s https://api.ipify.org && echo'
 	alias localip="ipconfig getifaddr en0"
 
 #
