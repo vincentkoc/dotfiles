@@ -251,6 +251,7 @@ BREWPACKAGES=(
     "huggingface/tap/git-xet"
 
     # AI Tools
+    "codex"
     "gemini-cli"
 
     # Python Tools
@@ -362,9 +363,6 @@ BREWCASKS=(
     "ngrok"
     "mactex"
     "android-platform-tools"
-
-    # AI Tools
-    "codex"
 
     # Java Runtimes
     "temurin"
