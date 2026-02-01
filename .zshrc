@@ -325,3 +325,8 @@ if (( $+commands[make] )) && [[ -z ${functions[_make]+x} ]]; then
 	autoload -Uz _make
 	compdef _make make gmake
 fi
+
+# direnv hook (auto-load .envrc)
+if command -v direnv >/dev/null 2>&1; then
+    eval "$(direnv hook zsh)"
+fi
