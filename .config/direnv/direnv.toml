@@ -1,0 +1,7 @@
+[global]
+# Warn when .envrc takes more than this duration to load
+warn_timeout = "5s"
+
+# Whitelist directories (auto-allow)
+[whitelist]
+prefix = ["~/GIT"]
