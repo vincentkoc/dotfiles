@@ -173,17 +173,33 @@ if nvimtree then
     }
 end
 
--- Treesitter
-local treesitter = safe_require('nvim-treesitter.configs')
-if treesitter then
-    treesitter.setup {
-        ensure_installed = { "lua", "vim", "python", "javascript", "typescript", "json", "yaml", "markdown", "bash" },
-        highlight = { enable = true },
-        indent = { enable = true },
-    }
-end
+-- Treesitter (disabled - using vim syntax instead)
+-- To enable: uncomment and run :TSInstall python lua etc
+-- local treesitter = safe_require('nvim-treesitter.configs')
+-- if treesitter then
+--     treesitter.setup {
+--         ensure_installed = { "lua", "vim", "vimdoc", "python", "javascript", "typescript", "json", "yaml", "markdown", "bash" },
+--         sync_install = false,
+--         auto_install = false,
+--         highlight = { enable = true },
+--         indent = { enable = true },
+--     }
+-- end
 
 -- Indent blankline
 local ibl = safe_require('ibl')
 if ibl then ibl.setup() end
+
+-- Tokyo Night highlight tweaks
+vim.api.nvim_create_autocmd("ColorScheme", {
+    pattern = "tokyonight*",
+    callback = function()
+        vim.api.nvim_set_hl(0, "Boolean", { fg = "#ff9e64" })
+        vim.api.nvim_set_hl(0, "pythonBoolean", { fg = "#ff9e64" })
+        vim.api.nvim_set_hl(0, "Constant", { fg = "#ff9e64" })
+    end
+})
+vim.api.nvim_set_hl(0, "Boolean", { fg = "#ff9e64" })
+vim.api.nvim_set_hl(0, "pythonBoolean", { fg = "#ff9e64" })
+vim.api.nvim_set_hl(0, "Constant", { fg = "#ff9e64" })
 EOF
