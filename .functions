@@ -644,14 +644,14 @@ function doctor() {
         fi
     fi
 
-    # Network diagnostics
+    # Network diagnostics (with timeout)
     echo "🌐 Checking network connectivity..."
-    if ! ping -c 1 8.8.8.8 > /dev/null 2>&1; then
+    if ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
         found_issues+=("Network connectivity")
     fi
 
-    # DNS resolution
-    if ! nslookup github.com > /dev/null 2>&1; then
+    # DNS resolution (with timeout)
+    if ! timeout 3 nslookup github.com > /dev/null 2>&1 && ! host -W 2 github.com > /dev/null 2>&1; then
         found_issues+=("DNS resolution")
     fi
 
