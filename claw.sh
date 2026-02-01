@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # OpenClaw setup script - handles migration from clawdbot to openclaw
+# Also manages runtime state (moves off iCloud to avoid SQLite/cron issues)
 #
 
 set -e
@@ -23,6 +24,18 @@ if [[ "$(uname)" == "Darwin" ]]; then
 else
     DOTFILES_DIR="$HOME/.dotfiles"
 fi
+
+# OpenClaw runtime state (mutable) should NOT live on iCloud Drive.
+# We keep config in dotfiles/.openclaw but move hot state to local disk and symlink back.
+OPENCLAW_LOCAL_STATE_BASE="${OPENCLAW_LOCAL_STATE_BASE:-$HOME/.openclaw_state}"
+OPENCLAW_ICLOUD_STATE_DIR="$DOTFILES_DIR/.openclaw"
+OPENCLAW_BACKUP_DIR="$DOTFILES_DIR/.openclaw_backups"
+
+ensure_dir() {
+    local d="$1"
+    mkdir -p "$d"
+    chmod 700 "$d" 2>/dev/null || true
+}
 
 # Setup config directory symlinks
 setup_config_symlinks() {
@@ -131,19 +144,174 @@ setup_node_modules_symlink() {
     info "node_modules: $node_modules"
 }
 
+# Move mutable gateway state off iCloud Drive and symlink it back.
+# This addresses cron.list timeouts + SQLite 'readonly database' issues.
+move_state_off_icloud() {
+    info "Moving OpenClaw runtime state off iCloud (cron + memory)..."
+
+    if [[ ! -d "$OPENCLAW_ICLOUD_STATE_DIR" ]]; then
+        warn "iCloud state dir not found: $OPENCLAW_ICLOUD_STATE_DIR"
+        return
+    fi
+
+    ensure_dir "$OPENCLAW_LOCAL_STATE_BASE"
+
+    for sub in cron memory; do
+        local src="$OPENCLAW_ICLOUD_STATE_DIR/$sub"
+        local dst="$OPENCLAW_LOCAL_STATE_BASE/$sub"
+
+        # If already a symlink, assume done.
+        if [[ -L "$src" ]]; then
+            success "$src already symlinked"
+            continue
+        fi
+
+        # If destination doesn't exist, create.
+        if [[ ! -d "$dst" ]]; then
+            ensure_dir "$dst"
+        fi
+
+        # If source exists as a real dir, move contents to local.
+        if [[ -d "$src" ]]; then
+            local backup="$OPENCLAW_ICLOUD_STATE_DIR/${sub}.bak.$(date +%Y%m%d_%H%M%S)"
+            info "Backing up $src -> $backup"
+            cp -R "$src" "$backup"
+
+            info "Moving contents to local state: $dst"
+            cp -R "$src/"* "$dst/" 2>/dev/null || true
+            rm -rf "$src"
+        fi
+
+        # Create symlink back.
+        ln -sfn "$dst" "$src"
+        success "Symlinked $src -> $dst"
+    done
+
+    info ""
+    info "NOTE: Restart the gateway after this so it reopens the DB from local disk."
+}
+
+# Run backup immediately
+backup_state_now() {
+    local backup_script="$DOTFILES_DIR/bin/openclaw-state-backup.sh"
+    if [[ ! -x "$backup_script" ]]; then
+        warn "Backup script not found or not executable: $backup_script"
+        warn "Expected it at dotfiles/bin/openclaw-state-backup.sh"
+        return 1
+    fi
+    "$backup_script"
+}
+
+# Print crontab entry for manual install
+print_backup_crontab() {
+    local backup_script="$DOTFILES_DIR/bin/openclaw-state-backup.sh"
+    cat <<EOF
+# OpenClaw state backup (cron + memory) -> iCloud dotfiles
+# Install with: crontab -e
+# Runs 3x/day at 7:15, 12:15, 18:15
+15 7,12,18 * * * "$backup_script" >> "$OPENCLAW_BACKUP_DIR/backup.log" 2>&1
+EOF
+}
+
+# Install/update crontab automatically
+install_backup_crontab() {
+    info "Installing crontab entries for OpenClaw state backups (3x/day)..."
+
+    local backup_script="$DOTFILES_DIR/bin/openclaw-state-backup.sh"
+    if [[ ! -x "$backup_script" ]]; then
+        error "Missing backup script: $backup_script"
+        return 1
+    fi
+
+    ensure_dir "$OPENCLAW_BACKUP_DIR"
+
+    local marker_begin="# BEGIN OPENCLAW STATE BACKUP"
+    local marker_end="# END OPENCLAW STATE BACKUP"
+
+    local current
+    current="$(crontab -l 2>/dev/null || true)"
+
+    # Remove any existing block
+    local cleaned
+    cleaned="$(printf "%s\n" "$current" | awk -v b="$marker_begin" -v e="$marker_end" '
+        $0==b {skip=1; next}
+        $0==e {skip=0; next}
+        skip!=1 {print}
+    ')"
+
+    local block
+    block=$(cat <<EOF
+$marker_begin
+15 7,12,18 * * * "$backup_script" >> "$OPENCLAW_BACKUP_DIR/backup.log" 2>&1
+$marker_end
+EOF
+)
+
+    printf "%s\n\n%s\n" "$cleaned" "$block" | crontab -
+    success "Crontab installed/updated."
+    info "Verify with: crontab -l"
+}
+
+# Show usage
+usage() {
+    cat <<EOF
+Usage: ./claw.sh <command>
+
+Commands:
+  setup                    Set up symlinks (config + node_modules)
+  move-state-off-icloud    Migrate cron+memory state to local disk + symlink back
+  backup-state-now         Run one backup immediately
+  print-backup-crontab     Print the crontab lines (for manual install)
+  install-backup-crontab   Install/update crontab block automatically
+  help                     Show this help
+
+Paths:
+  Local state dir:  $OPENCLAW_LOCAL_STATE_BASE
+  iCloud state dir: $OPENCLAW_ICLOUD_STATE_DIR
+  Backups dir:      $OPENCLAW_BACKUP_DIR
+EOF
+}
+
 main() {
+    local cmd="${1:-setup}"
+
     echo ""
     echo "╔═══════════════════════════════════════════╗"
     echo "║         OpenClaw Setup                    ║"
     echo "╚═══════════════════════════════════════════╝"
     echo ""
 
-    setup_config_symlinks
-    echo ""
-    setup_node_modules_symlink
+    case "$cmd" in
+        setup)
+            setup_config_symlinks
+            echo ""
+            setup_node_modules_symlink
+            ;;
+        move-state-off-icloud)
+            move_state_off_icloud
+            ;;
+        backup-state-now)
+            backup_state_now
+            ;;
+        print-backup-crontab)
+            print_backup_crontab
+            ;;
+        install-backup-crontab)
+            install_backup_crontab
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            error "Unknown command: $cmd"
+            echo ""
+            usage
+            return 2
+            ;;
+    esac
 
     echo ""
-    success "OpenClaw setup complete!"
+    success "Done."
 }
 
 main "$@"
