@@ -141,6 +141,12 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	if command -v nodenv >/dev/null 2>&1; then
 		export NODENV_ROOT="${NODENV_ROOT:-$HOME/.nodenv}"
 		path=("$NODENV_ROOT/shims" $path)
+		# Add active node version bin to PATH (for npm global packages)
+		if [[ -f "$NODENV_ROOT/version" ]]; then
+			_nodenv_ver=$(< "$NODENV_ROOT/version")
+			[[ -d "$NODENV_ROOT/versions/$_nodenv_ver/bin" ]] && path=("$NODENV_ROOT/versions/$_nodenv_ver/bin" $path)
+			unset _nodenv_ver
+		fi
 		nodenv() {
 			unset -f nodenv
 			eval "$(command nodenv init -)"
