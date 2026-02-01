@@ -135,6 +135,9 @@ fi
 	# Terraform
 	alias tf='terraform'
 
+	# Homebrew
+	alias brewdump='brew bundle dump --file=~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/Brewfile --force && echo "Brewfile updated"'
+
 	# Tree view (eza)
 	command -v eza >/dev/null 2>&1 && alias tree='eza --tree'
 
