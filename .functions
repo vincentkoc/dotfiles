@@ -538,27 +538,12 @@ function doctor() {
         fi
     fi
 
-    # Yarn
+    # Yarn (just version check - yarn doctor is too slow)
     if command -v yarn &> /dev/null; then
         echo "🧶 Checking Yarn..."
-        local yarn_ok=true
-        if ! yarn --version > /dev/null 2>&1; then
-            if command -v corepack &> /dev/null; then
-                if env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack prepare yarn@stable --activate > /dev/null 2>&1; then
-                    yarn --version > /dev/null 2>&1 || yarn_ok=false
-                else
-                    yarn_ok=false
-                fi
-            else
-                yarn_ok=false
-            fi
-        fi
-        if $yarn_ok && yarn help doctor > /dev/null 2>&1; then
-            if ! env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn doctor > /dev/null 2>&1; then
-                yarn_ok=false
-            fi
-        fi
-        if ! $yarn_ok; then
+        if yarn --version > /dev/null 2>&1; then
+            echo "   ✅ Yarn $(yarn --version 2>/dev/null)"
+        else
             found_issues+=("Yarn")
         fi
     fi
@@ -633,7 +618,7 @@ function doctor() {
     fi
 
     # System integrity (macOS only)
-    if [ "$(uname)" == "Darwin" ]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
         echo "🍎 Checking macOS system integrity..."
         if ! system_profiler SPSoftwareDataType > /dev/null; then
             found_issues+=("macOS System")
@@ -652,7 +637,7 @@ function doctor() {
     fi
 
     # Disk health (macOS only)
-    if [ "$(uname)" == "Darwin" ] && command -v diskutil > /dev/null 2>&1; then
+    if [[ "$(uname)" == "Darwin" ]] && command -v diskutil &> /dev/null; then
         echo "💽 Checking disk health..."
         if ! diskutil verifyVolume / > /dev/null 2>&1; then
             found_issues+=("Disk health")
@@ -671,7 +656,7 @@ function doctor() {
     fi
 
     # Mole cleanup (macOS only)
-    if [ "$(uname)" == "Darwin" ] && command -v mole &> /dev/null; then
+    if [[ "$(uname)" == "Darwin" ]] && command -v mole &> /dev/null; then
         echo "🐾 Running Mole clean..."
         if ! mole clean; then
             found_issues+=("Mole clean")
@@ -679,7 +664,7 @@ function doctor() {
     fi
 
     # iCloud sync health (macOS only)
-    if [ "$(uname)" == "Darwin" ]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
         local icloud_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
         if [[ -d "$icloud_dir" ]]; then
             echo "☁️  Checking iCloud sync health..."

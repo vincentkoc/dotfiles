@@ -210,7 +210,7 @@ BREWPACKAGES=(
     "mole"
 
     # Infrastructure as Code
-    "terraform"
+    "opentofu"
     "terraformer"
     "tflint"
     "tfsec"

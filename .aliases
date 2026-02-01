@@ -136,8 +136,12 @@ fi
 	alias d='docker'
 	alias dc='docker compose'
 
-	# Terraform
-	alias tf='terraform'
+	# Terraform/OpenTofu - tf shortcut (tfswitch manages the actual binaries)
+	if command -v tofu >/dev/null 2>&1; then
+		alias tf='tofu'
+	elif command -v terraform >/dev/null 2>&1; then
+		alias tf='terraform'
+	fi
 
 	# Homebrew
 	alias brewdump='brew bundle dump --file=~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/Brewfile --force && echo "Brewfile updated"'
