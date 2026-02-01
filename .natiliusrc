@@ -1,0 +1,537 @@
+#!/bin/bash
+# shellcheck disable=SC2034,SC2088,SC2148
+# Natilius Example Configuration (Full)
+#
+# Copy to ~/.natiliusrc before running natilius.
+# This is a full-featured example mirroring the base style but enabling all modules.
+
+# ============================================================================
+# CORE SETTINGS
+# ============================================================================
+COUNTRYCODE="us"
+SKIP_UPDATE_CHECK=false
+NATILIUS_INSTALL_OHMYZSH=true
+
+# ============================================================================
+# ENABLED MODULES (Full)
+# ============================================================================
+ENABLED_MODULES=(
+    "system/system_update"
+    "system/directories"
+    "system/security"
+    "preferences/mac_preferences"
+    "preferences/system_preferences"
+    "applications/homebrew"
+    "applications/apps"
+    "applications/espanso"
+    "dev_environments/java"
+    "dev_environments/ruby"
+    "dev_environments/python"
+    "dev_environments/node"
+    "dev_environments/rust"
+    "dev_environments/go"
+    "dev_environments/php"
+    "dev_environments/flutter"
+    "ide/ide_setup"
+    "dotfiles"
+    "system/cleanup"
+)
+
+# ============================================================================
+# ENTERPRISE / MDM SETTINGS
+# ============================================================================
+ENTERPRISE_MODE=false
+RESPECT_MDM_POLICIES=true
+JAMF_RECON_ON_COMPLETE=false
+
+# ============================================================================
+# CLEANUP SETTINGS
+# ============================================================================
+USE_MOLE_CLEANUP=true
+
+# ============================================================================
+# LANGUAGE VERSIONS
+# ============================================================================
+JDKVER="20"
+PYTHONVER="3.13.0"
+RUBYVER="3.4.2"
+NODEVER="22.20.0"
+GOVER="1.20.0"
+PHPVER="8.1.0"
+FLUTTER_CHANNEL="stable"
+
+# ============================================================================
+# IDE CONFIGURATION
+# ============================================================================
+INSTALL_VSCODE=true
+INSTALL_CURSOR=false
+INSTALL_JETBRAINS=true
+INSTALL_SUBLIME=false
+INSTALL_ZED=false
+
+# ============================================================================
+# DIRECTORIES
+# ============================================================================
+DIRS=(
+    "~/.mackup"
+    "~/.config"
+    "~/GIT"
+    "~/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
+)
+
+DIRSTOEXCLUDEFROMTIMEMACHINE=(
+    "~/.mackup"
+    "~/GIT"
+    "~/Dropbox"
+    "~/.gnupg"
+    "~/.ssh"
+    "~/.config"
+    "~/.aws"
+    "~/.bun"
+    "~/.cache"
+    "~/.cursor/worktrees"
+    "~/.factory/sessions"
+    "~/.ollama/models"
+    "~/.npm"
+    "~/.cargo"
+    "~/.local/share/pnpm"
+    "~/.pyenv"
+    "~/.rbenv"
+    "~/.rustup"
+    "~/.nodenv"
+    "~/go"
+)
+
+# ============================================================================
+# HOMEBREW TAPS
+# ============================================================================
+BREWTAPS=(
+    "homebrew/cask"
+    "adoptopenjdk/openjdk"
+    "github/gh"
+    "r-lib/rig"
+    "rfidresearchgroup/proxmark3"
+    "mongodb/brew"
+    "warrensbox/tap"
+    "derailed/popeye"
+    "huggingface/tap"
+    "supabase/tap"
+    "vincentkoc/tap"
+)
+
+# ============================================================================
+# HOMEBREW PACKAGES
+# ============================================================================
+BREWPACKAGES=(
+    # Version Control
+    "git"
+    "gh"
+    "git-lfs"
+    "git-xet"
+    "tig"
+    "diff-so-fancy"
+
+    # Shell Essentials
+    "coreutils"
+    "curl"
+    "wget"
+    "jq"
+    "jc"
+    "fzf"
+    "bat"
+    "eza"
+    "fd"
+    "ripgrep"
+    "ack"
+    "tree"
+    "htop"
+    "procs"
+    "zoxide"
+    "peco"
+    "tealdeer"
+    "zsh-completions"
+
+    # Editors & Terminal
+    "vim"
+    "neovim"
+    "tmux"
+    "reattach-to-user-namespace"
+
+    # Security & Encryption
+    "gpg"
+    "pinentry"
+    "pinentry-mac"
+    "openssl@3"
+    "openssh"
+    "ca-certificates"
+    "keychain"
+    "libfido2"
+    "ykman"
+    "nmap"
+    "shellcheck"
+
+    # Media & Preview
+    "ffmpeg"
+    "imagemagick"
+    "poppler"
+    "p7zip"
+    "resvg"
+    "yt-dlp"
+    "hexyl"
+
+    # Networking & Remote
+    "mosh"
+    "httpie"
+    "gping"
+    "speedtest-cli"
+    "telnet"
+    "lynx"
+    "croc"
+
+    # Containers & Kubernetes
+    "docker-compose"
+    "kubectl"
+    "kubernetes-cli"
+    "kubectx"
+    "helm"
+    "minikube"
+    "ctop"
+    "derailed/popeye/popeye"
+    "podman"
+    "stern"
+
+    # Backend Services
+    "supabase/tap/supabase"
+    "mole"
+
+    # Infrastructure as Code
+    "terraform"
+    "terraformer"
+    "tflint"
+    "tfsec"
+    "warrensbox/tap/tfswitch"
+
+    # Cloud CLIs
+    "awscli"
+
+    # Language Version Managers
+    "nodenv"
+    "node"
+    "pyenv"
+    "pyenv-virtualenv"
+    "pipenv"
+    "rbenv"
+    "rbenv-default-gems"
+    "jenv"
+    "go"
+    "rustup"
+
+    # Build Tools & Code Quality
+    "make"
+    "gradle"
+    "maven"
+    "cmake"
+    "pre-commit"
+    "yamllint"
+    "tokei"
+    "icdiff"
+    "bfg"
+    "fswatch"
+    "bats-core"
+    "golangci-lint"
+
+    # Data & ML
+    "apache-spark"
+    "scala"
+    "huggingface-cli"
+    "huggingface/tap/git-xet"
+
+    # AI Tools
+    "gemini-cli"
+
+    # Python Tools
+    "uv"
+    "pipdeptree"
+
+    # Databases
+    "sqlite"
+    "sqlite3"
+    "readline"
+
+    # Utilities
+    "mackup"
+    "mas"
+    "trash"
+    "watch"
+    "glow"
+    "gum"
+    "vhs"
+    "espanso"
+    "xz"
+    "zlib"
+    "vincentkoc/tap/natilius"
+
+    # Fonts
+    "font-fira-code"
+    "font-fira-code-nerd-font"
+    "font-fira-mono-nerd-font"
+    "font-fira-sans"
+    "font-hack-nerd-font"
+    "font-jetbrains-mono-nerd-font"
+    "font-meslo-lg-nerd-font"
+    "font-roboto"
+    "font-source-sans-pro"
+    "font-ubuntu"
+    "font-newsreader"
+    "font-0xproto-nerd-font"
+    "font-3270-nerd-font"
+    "font-adwaita-mono-nerd-font"
+    "font-agave-nerd-font"
+    "font-anonymice-nerd-font"
+    "font-arimo-nerd-font"
+    "font-atkynson-mono-nerd-font"
+    "font-aurulent-sans-mono-nerd-font"
+    "font-bigblue-terminal-nerd-font"
+    "font-bitstream-vera-sans-mono-nerd-font"
+    "font-blex-mono-nerd-font"
+    "font-caskaydia-cove-nerd-font"
+    "font-caskaydia-mono-nerd-font"
+    "font-code-new-roman-nerd-font"
+    "font-comic-shanns-mono-nerd-font"
+    "font-commit-mono-nerd-font"
+    "font-cousine-nerd-font"
+    "font-d2coding-nerd-font"
+    "font-daddy-time-mono-nerd-font"
+    "font-dejavu-sans-mono-nerd-font"
+    "font-departure-mono-nerd-font"
+    "font-droid-sans-mono-nerd-font"
+    "font-envy-code-r-nerd-font"
+    "font-fantasque-sans-mono-nerd-font"
+    "font-geist-mono-nerd-font"
+    "font-go-mono-nerd-font"
+    "font-gohufont-nerd-font"
+    "font-hasklug-nerd-font"
+    "font-heavy-data-nerd-font"
+    "font-hurmit-nerd-font"
+    "font-im-writing-nerd-font"
+    "font-inconsolata-go-nerd-font"
+    "font-inconsolata-lgc-nerd-font"
+    "font-inconsolata-nerd-font"
+)
+
+# ============================================================================
+# HOMEBREW CASKS
+# ============================================================================
+BREWCASKS=(
+    # Security & Privacy
+    "1password"
+    "1password-cli"
+    "gpg-suite"
+    "keybase"
+    "muzzle"
+
+    # Browsers
+    "google-chrome"
+    "brave-browser"
+    "firefox"
+
+    # Productivity & System
+    "raycast"
+    "alfred"
+    "alt-tab"
+    "bartender"
+    "cheatsheet"
+    "keyboard-maestro"
+    "betterdisplay"
+    "stats"
+    "onyx"
+    "pika"
+
+    # Terminal & Development
+    "iterm2"
+    "itermai"
+    "docker-desktop"
+    "visual-studio-code"
+    "sublime-text"
+    "sublime-merge"
+    "xquartz"
+    "ngrok"
+    "mactex"
+    "android-platform-tools"
+
+    # AI Tools
+    "codex"
+
+    # Java Runtimes
+    "temurin"
+    "microsoft-openjdk@21"
+    "microsoft-openjdk@25"
+
+    # Git Clients (choose one)
+    "github"
+
+    # Database Tools (choose one)
+    "tableplus"
+    "mysqlworkbench"
+
+    # API & Network Debug
+    "charles"
+    "tailscale-app"
+    "tripmode"
+
+    # File Management & Transfer
+    "transmit"
+    "the-unarchiver"
+    "dropbox"
+
+    # Image & Video
+    "balenaetcher"
+    "imageoptim"
+    "kap"
+    "keycastr"
+
+    # Communication
+    "slack"
+    "zoom"
+    "discord"
+    "amazon-chime"
+    "loom"
+    "miro"
+
+    # Notes & Knowledge
+    "notion"
+    "obsidian"
+    "logseq"
+
+    # Media & Entertainment
+    "spotify"
+    "vlc"
+    "aerial"
+    "netnewswire"
+
+    # Office & Business
+    "microsoft-office"
+
+    # Hardware & Devices
+    "airbuddy"
+    "rfidresearchgroup/proxmark3/proxmark3"
+
+    # Development Languages
+    "mamp"
+    "rig"
+
+    # Text Expansion
+    "espanso"
+
+    # Other
+    "clay"
+    "rescuetime"
+)
+
+# ============================================================================
+# MAC APP STORE (App IDs)
+# ============================================================================
+APPSTORE=(
+    # Productivity
+    "441258766"   # Magnet
+    "937984704"   # Amphetamine
+    "1564015476"  # Shell History
+    "975937182"   # Fantastical
+    "639968404"   # Parcel Classic
+    "1246781916"  # Kerberos Ticket Autorenewal
+    "1484348796"  # Endel
+    "1423210932"  # Flow
+    "1039633667"  # Irvue
+    "585829637"   # Todoist
+    "1608529689"  # Nautomate
+    "1378123825"  # Negative
+
+    # Communication
+    "803453959"   # Slack
+    "310633997"   # WhatsApp
+    "1475387142"  # Tailscale
+
+    # Microsoft Office
+    "462058435"   # Microsoft Excel
+    "462062816"   # Microsoft PowerPoint
+    "462054704"   # Microsoft Word
+
+    # Travel & Utilities
+    "1358823008"  # Flighty
+    "1668083311"  # Whisper Transcription
+)
+
+# ============================================================================
+# GLOBAL PACKAGES
+# ============================================================================
+GLOBAL_NODE_PACKAGES=(
+    "eslint"
+    "prettier"
+    "typescript"
+    "ts-node"
+    "yarn"
+    "pnpm"
+    "gatsby"
+)
+
+GLOBAL_PYTHON_PACKAGES=(
+    "pip"
+    "virtualenv"
+    "setuptools"
+    "wheel"
+    "numpy"
+    "pandas"
+    "scipy"
+    "matplotlib"
+    "seaborn"
+    "scikit-learn"
+    "requests"
+    "beautifulsoup4"
+    "flask"
+    "pre-commit"
+    "flake8"
+    "isort"
+    "coverage"
+    "regex"
+    "cython"
+    "Jinja2"
+    "six"
+    "tabula"
+    "dbt-core"
+    "PyYAML"
+    "sqlfluff"
+)
+
+GLOBAL_PHP_PACKAGES=(
+    "phpunit/phpunit"
+    "laravel/installer"
+)
+
+PEAR_PACKAGES=(
+    "pear/Archive_Tar"
+    "pear/Console_Getopt"
+    "pear/DB"
+    "pear/HTTP_Request2"
+    "pear/Log"
+    "pear/Mail"
+    "pear/MDB2"
+    "pear/Net_SMTP"
+    "pear/Net_Socket"
+    "pear/PEAR"
+    "pear/Structures_Graph"
+    "pear/XML_Util"
+)
+
+# ============================================================================
+# APPS TO RESTART AFTER SETUP
+# ============================================================================
+KILLAPPS=(
+    "Address Book"
+    "Dock"
+    "Finder"
+    "Mail"
+    "iCal"
+    "iTunes"
+    "Safari"
+    "SystemUIServer"
+)
