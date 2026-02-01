@@ -82,10 +82,10 @@ scan_and_ignore() {
     info "Scanning: $search_dir"
 
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-        # Find matching directories (max depth 5 to avoid going too deep)
+        # Find matching directories (max depth 10)
         while IFS= read -r -d '' found; do
             ignore_path "$found"
-        done < <(find "$search_dir" -maxdepth 5 -type d -name "$pattern" -print0 2>/dev/null)
+        done < <(find "$search_dir" -maxdepth 10 -type d -name "$pattern" -print0 2>/dev/null)
     done
 }
 
