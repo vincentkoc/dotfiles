@@ -75,8 +75,6 @@ plugins=(
 	dirhistory
 	zsh-autosuggestions
 	docker
-	brew
-	macos
 	npm
 	pip
 	rust
@@ -84,8 +82,9 @@ plugins=(
 	vscode
 	colored-man-pages
 	command-not-found
-	# zsh-interactive-cd
 )
+# macOS-only plugins
+[[ "$OSTYPE" == "darwin"* ]] && plugins+=(brew macos)
 
 # Performance improvements
 DISABLE_AUTO_UPDATE="true"
@@ -291,7 +290,13 @@ ZSH_HIGHLIGHT_STYLES[path]='fg=#ff9e64'
 ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=#c0caf5'
 ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=#c0caf5'
 if [[ -z "${ZSH_HIGHLIGHTING_SOURCE:-}" ]]; then
-    if [[ -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+    # Linux paths (apt/dnf/pacman)
+    if [[ -f /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        ZSH_HIGHLIGHTING_SOURCE=/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    elif [[ -f /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        ZSH_HIGHLIGHTING_SOURCE=/usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    # macOS Homebrew paths
+    elif [[ -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
         ZSH_HIGHLIGHTING_SOURCE=/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
     elif [[ -f /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
         ZSH_HIGHLIGHTING_SOURCE=/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh

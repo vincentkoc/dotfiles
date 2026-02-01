@@ -16,11 +16,29 @@ cd() {
 # mcd: Makes new Dir and jumps inside
 mcd () { mkdir -p "$1" && cd "$1"; }
 
-# trash: Moves a file to the MacOS trash
-trash () { command mv "$@" ~/.Trash ; }
+# trash: Moves a file to trash (cross-platform)
+trash() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        command mv "$@" ~/.Trash
+    else
+        # Linux: use XDG trash or trash-cli if available
+        if command -v trash-put >/dev/null 2>&1; then
+            trash-put "$@"
+        else
+            mkdir -p ~/.local/share/Trash/files
+            mv "$@" ~/.local/share/Trash/files/
+        fi
+    fi
+}
 
-# ql: Opens any file in MacOS Quicklook Preview
-ql () { qlmanage -p "$*" >& /dev/null; }
+# ql: Opens file in preview (macOS Quicklook / Linux xdg-open)
+ql() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        qlmanage -p "$*" >& /dev/null
+    else
+        xdg-open "$@" >& /dev/null &
+    fi
+}
 
 # cleands: Recursively delete .DS_Store files
 cleands () { find . -type f -name '*.DS_Store' -ls -delete; }
@@ -28,8 +46,12 @@ cleands () { find . -type f -name '*.DS_Store' -ls -delete; }
 # To create a ZIP archive of a folder
 zipf () { zip -r "$1".zip "$1" ; }
 
-# 'Cd's to frontmost window of MacOS Finder
-cdf () {
+# 'Cd's to frontmost window of MacOS Finder (macOS only)
+cdf() {
+    if [[ "$OSTYPE" != "darwin"* ]]; then
+        echo "cdf: Only available on macOS"
+        return 1
+    fi
     currFolderPath=$( /usr/bin/osascript <<EOT
         tell application "Finder"
             try
@@ -45,8 +67,14 @@ EOT
     cd "$currFolderPath"
 }
 
-# Search for a file using MacOS Spotlight's metadata
-spotlight () { mdfind "kMDItemDisplayName == '$@'wc"; }
+# Search for a file (macOS Spotlight / Linux locate+find)
+spotlight() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        mdfind "kMDItemDisplayName == '$@'wc"
+    else
+        locate -i "$@" 2>/dev/null || find / -iname "*$@*" 2>/dev/null | head -20
+    fi
+}
 
 # Useful information
 ii() {
@@ -55,9 +83,10 @@ ii() {
     echo -e "\n${RED}Users logged on:$NC " ; w -h
     echo -e "\n${RED}Current date :$NC " ; date
     echo -e "\n${RED}Machine stats :$NC " ; uptime
-    echo -e "\n${RED}Current network location :$NC " ; scselect
-    echo -e "\n${RED}Public facing IP Address :$NC " ;myip
-    #echo -e "\n${RED}DNS Configuration:$NC " ; scutil --dns
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo -e "\n${RED}Current network location :$NC " ; scselect
+    fi
+    echo -e "\n${RED}Public facing IP Address :$NC " ; myip
     echo
 }
 
@@ -686,7 +715,12 @@ extract () {
 targz() {
     local tmpFile="${1%/}.tar"
     tar -cvf "${tmpFile}" --exclude=".DS_Store" "${1}" || return 1
-    size=$(stat -f"%z" "${tmpFile}" 2> /dev/null)
+    # BSD stat (macOS) vs GNU stat (Linux)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        size=$(stat -f"%z" "${tmpFile}" 2>/dev/null)
+    else
+        size=$(stat -c%s "${tmpFile}" 2>/dev/null)
+    fi
     gzip -9 "${tmpFile}" || return 1
     echo "Created archive $(du -h ${tmpFile}.gz)"
 }

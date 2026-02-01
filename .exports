@@ -4,10 +4,10 @@
 # System Detection and Base Paths
 #
 if [[ $OSTYPE == 'darwin'* ]]; then
-    export EXTRASPATH="/Users/$USER/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.extra"
+    export EXTRASPATH="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.extra"
     export IS_MACOS=true
 else
-    export EXTRASPATH="~/dotfiles/.extra"
+    export EXTRASPATH="$HOME/.dotfiles/.extra"
     export IS_MACOS=false
 fi
 
@@ -175,7 +175,11 @@ path_prepend "$HOME/.nodenv/bin"
 path_prepend "$HOME/.nodenv/shims"
 
 # pnpm
-export PNPM_HOME="$HOME/Library/pnpm"
+if [[ $IS_MACOS == true ]]; then
+    export PNPM_HOME="$HOME/Library/pnpm"
+else
+    export PNPM_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pnpm"
+fi
 path_prepend "$PNPM_HOME"
 
 # Python
