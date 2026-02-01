@@ -1,0 +1,75 @@
+# Tokyo Night theme for btop
+# Based on https://github.com/folke/tokyonight.nvim
+
+# Main background and foreground
+theme[main_bg]="#1a1b26"
+theme[main_fg]="#c0caf5"
+
+# Title color
+theme[title]="#c0caf5"
+
+# Highlight for selected/hovered
+theme[hi_fg]="#7aa2f7"
+
+# Color for selected item
+theme[selected_bg]="#292e42"
+theme[selected_fg]="#c0caf5"
+
+# Inactive/disabled text
+theme[inactive_fg]="#565f89"
+
+# Graphs
+theme[graph_text]="#a9b1d6"
+
+# Meter backgrounds
+theme[meter_bg]="#292e42"
+
+# Process box
+theme[proc_misc]="#7aa2f7"
+
+# CPU
+theme[cpu_box]="#7aa2f7"
+theme[cpu_start]="#9ece6a"
+theme[cpu_mid]="#e0af68"
+theme[cpu_end]="#f7768e"
+
+# Memory
+theme[mem_box]="#bb9af7"
+theme[mem_start]="#9ece6a"
+theme[mem_mid]="#e0af68"
+theme[mem_end]="#f7768e"
+
+# Swap
+theme[swap_start]="#7dcfff"
+theme[swap_mid]="#7aa2f7"
+theme[swap_end]="#bb9af7"
+
+# Network
+theme[net_box]="#9ece6a"
+theme[download_start]="#7dcfff"
+theme[download_mid]="#7aa2f7"
+theme[download_end]="#bb9af7"
+theme[upload_start]="#9ece6a"
+theme[upload_mid]="#e0af68"
+theme[upload_end]="#f7768e"
+
+# Processes
+theme[process_start]="#7dcfff"
+theme[process_mid]="#7aa2f7"
+theme[process_end]="#bb9af7"
+
+# Temps
+theme[temp_start]="#9ece6a"
+theme[temp_mid]="#e0af68"
+theme[temp_end]="#f7768e"
+
+# Disks
+theme[free_start]="#9ece6a"
+theme[free_mid]="#7aa2f7"
+theme[free_end]="#bb9af7"
+theme[used_start]="#e0af68"
+theme[used_mid]="#ff9e64"
+theme[used_end]="#f7768e"
+
+# Divider line
+theme[div_line]="#292e42"

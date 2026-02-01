@@ -197,12 +197,12 @@ fi
 	# chmod
 	alias chmodx='chmod +x'
 
-	# tasks
-	if command -v htop >/dev/null 2>&1; then
+	# tasks (cascade: btop → htop → top)
+	if command -v btop >/dev/null 2>&1; then
+		alias top='btop'
+		alias running='btop'
+	elif command -v htop >/dev/null 2>&1; then
 		alias top='htop'
-		if command -v sudo >/dev/null 2>&1; then
-			alias htop='sudo htop'
-		fi
 		alias running='htop'
 	fi
 
@@ -276,14 +276,14 @@ help-aliases() {
 │ i     iCloud      │ PYTHON            │ gco   checkout    │               │
 │ dotfiles  cd      │ ─────────────     │ gb    branch      │ NETWORK       │
 │                   │ venv    activate  │ gf    fetch       │ ────────────-─│
-│ TERMINAL          │ mkvenv  create    │ glog  log graph   │ myip    extrnl│
-│ ─────────────     │                   │ stash stash -u    │ localip local │
-│ c     clear       │ UTILS             │ pop   stash pop   │ flushdns flush│
-│ h     history     │ ─────────────     │                   │ ports   listng│
+│ TERMINAL          │ mkvenv  create    │ lg    lazygit     │ myip    extrnl│
+│ ─────────────     │                   │ glog  log graph   │ localip local │
+│ c     clear       │ UTILS             │ stash stash -u    │ flushdns flush│
+│ h     history     │ ─────────────     │ pop   stash pop   │ ports   listng│
 │ hs    hist+grep   │ today   YYYY/MM/DD│                   │ weather wttr  │
-│ hf    hist+fzf    │ timestamp YMD_HMS │                   │ netcons socket│
-│ path  show $PATH  │ urlencode encode  │                   │               │
-│ kp    ps aux      │ emptytrash clear  │                   │               │
+│ hf    hist+fzf    │ timestamp YMD_HMS │ SYSTEM            │ netcons socket│
+│ path  show $PATH  │ urlencode encode  │ ─────────────     │               │
+│ kp    ps aux      │ emptytrash clear  │ top   btop/htop   │               │
 └───────────────────┴───────────────────┴───────────────────┴───────────────┘
 EOF
 }

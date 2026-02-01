@@ -130,6 +130,7 @@ BREWPACKAGES=(
     "git-xet"
     "tig"
     "diff-so-fancy"
+    "lazygit"
 
     # Shell Essentials
     "coreutils"
@@ -145,11 +146,13 @@ BREWPACKAGES=(
     "ack"
     "tree"
     "htop"
+    "btop"
     "procs"
     "zoxide"
     "peco"
     "tealdeer"
     "zsh-completions"
+    "zsh-syntax-highlighting"
     "direnv"
 
     # Editors & Terminal
