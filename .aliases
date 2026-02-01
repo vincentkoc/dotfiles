@@ -146,6 +146,7 @@ fi
 	alias fgrep='fgrep --color=auto'
 	alias egrep='egrep --color=auto'
 	alias phpunit='phpunit --colors'
+	command -v bat >/dev/null 2>&1 && alias cat='bat --paging=never'
 
 	# Git
 	alias ga='git add'
