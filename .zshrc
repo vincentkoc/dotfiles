@@ -137,6 +137,12 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 		}
 	fi
 
+	# Fallback: alias python to python3 if python not available
+	if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+		alias python='python3'
+		alias pip='pip3'
+	fi
+
 	# Node.js - nodenv
 	if command -v nodenv >/dev/null 2>&1; then
 		export NODENV_ROOT="${NODENV_ROOT:-$HOME/.nodenv}"
