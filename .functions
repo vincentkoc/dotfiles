@@ -6,11 +6,7 @@ cd() {
     if [[ -n "${DOTFILES_CD_SKIP_LISTING:-}" ]]; then
         return
     fi
-    if command -v ll >/dev/null 2>&1; then
-        ll
-    else
-        ls -lah
-    fi
+    ls
 }
 
 # mcd: Makes new Dir and jumps inside
