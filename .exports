@@ -171,6 +171,7 @@ export NODE_REPL_HISTORY=~/.node_history
 export NODE_REPL_HISTORY_SIZE='32768'
 export NODE_REPL_MODE='sloppy'
 export NODE_OPTIONS='--max-old-space-size=4096'
+export NPM_CONFIG_FUND=false
 # nodenv paths - lazy loading handled in .zshrc
 path_prepend "$HOME/.nodenv/bin"
 path_prepend "$HOME/.nodenv/shims"
