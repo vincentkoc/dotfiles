@@ -12,6 +12,19 @@ if [[ -r ~/.exports ]]; then
 	source ~/.exports
 fi
 
+# Load dotfiles .env early (auto-export all vars). Use KEY=VALUE (no "export" needed).
+if [[ "$(uname)" == "Darwin" ]]; then
+	DOTFILES_ENV="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.env"
+else
+	DOTFILES_ENV="$HOME/.dotfiles/.env"
+fi
+if [[ -r "$DOTFILES_ENV" ]]; then
+	set -a
+	source "$DOTFILES_ENV"
+	set +a
+fi
+unset DOTFILES_ENV
+
 # Tokyo Night palette shared across terminals, prompt, and tooling
 typeset -gx TOKYONIGHT_BG="#1a1b26"
 typeset -gx TOKYONIGHT_BG_DARK="#16161e"

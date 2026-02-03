@@ -106,3 +106,4 @@ Library/Preferences/com.apple.Terminal.plist
 .codex/config.toml
 .claude/settings.local.json
 Library/Application Support/BraveSoftware/Brave-Browser/Default/Preferences
+.env
