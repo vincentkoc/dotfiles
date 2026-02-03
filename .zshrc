@@ -113,6 +113,22 @@ for file in ~/.{aliases,functions}; do
 done;
 unset file;
 
+# Force pip to follow the active python (venv-safe)
+unalias pip pip3 2>/dev/null
+pip() {
+	local py
+	if command -v python >/dev/null 2>&1; then
+		py=python
+	elif command -v python3 >/dev/null 2>&1; then
+		py=python3
+	else
+		echo "pip: python not found" >&2
+		return 127
+	fi
+	"$py" -m pip "$@"
+}
+alias pip3='pip'
+
 # If not running interactively, don't do anything
 [ -z "$PS1" ] && return
 

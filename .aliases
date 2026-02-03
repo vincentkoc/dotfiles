@@ -130,7 +130,7 @@ fi
 
 	# Python venv
 	alias venv='source .venv/bin/activate'
-	alias mkvenv='python3 -m venv .venv && source .venv/bin/activate'
+	alias mkvenv='python -m venv .venv && source .venv/bin/activate'
 
 	# Docker
 	alias d='docker'
