@@ -30,11 +30,108 @@ fi
 OPENCLAW_LOCAL_STATE_BASE="${OPENCLAW_LOCAL_STATE_BASE:-$HOME/.openclaw_state}"
 OPENCLAW_ICLOUD_STATE_DIR="$DOTFILES_DIR/.openclaw"
 OPENCLAW_BACKUP_DIR="$DOTFILES_DIR/.openclaw_backups"
+OPENCLAW_ALLOW_GIT_NOSYNC="${OPENCLAW_ALLOW_GIT_NOSYNC:-0}"
 
 ensure_dir() {
     local d="$1"
     mkdir -p "$d"
     chmod 700 "$d" 2>/dev/null || true
+}
+
+# iCloud Drive: mark a path as "do not sync" by renaming to *.nosync
+mark_nosync_path() {
+    local p="$1"
+    if [[ ! -e "$p" ]]; then
+        warn "Not found: $p"
+        return
+    fi
+    if [[ "$p" == *.nosync ]]; then
+        success "Already nosync: $p"
+        return
+    fi
+    mv "$p" "${p}.nosync"
+    success "Marked nosync: ${p}.nosync"
+}
+
+mark_nosync_globs() {
+    local root="$1"
+    local pattern="$2"
+    local matches=()
+
+    while IFS= read -r -d '' d; do
+        matches+=("$d")
+    done < <(find "$root" -type d -name "$pattern" -print0 2>/dev/null || true)
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        info "No matches for $pattern under $root"
+        return
+    fi
+
+    for d in "${matches[@]}"; do
+        mark_nosync_path "$d"
+    done
+}
+
+# Mark OpenClaw/Clawd paths as nosync (no symlinks).
+mark_openclaw_nosync() {
+    info "Marking OpenClaw/Clawd paths as nosync (rename to *.nosync)..."
+
+    if [[ ! -d "$OPENCLAW_ICLOUD_STATE_DIR" ]]; then
+        warn "Missing: $OPENCLAW_ICLOUD_STATE_DIR"
+    fi
+
+    # .openclaw/workspace* (workspace, workspace-main, etc.)
+    if [[ -d "$OPENCLAW_ICLOUD_STATE_DIR" ]]; then
+        mark_nosync_globs "$OPENCLAW_ICLOUD_STATE_DIR" "workspace*"
+    fi
+
+    # .openclaw/logs
+    mark_nosync_path "$OPENCLAW_ICLOUD_STATE_DIR/logs"
+
+    # .openclaw/extensions/openclaw-supermemory
+    mark_nosync_path "$OPENCLAW_ICLOUD_STATE_DIR/extensions/openclaw-supermemory"
+
+    # .openclaw/agents/**/sessions (each sessions folder)
+    local agent_sessions=()
+    while IFS= read -r -d '' d; do
+        agent_sessions+=("$d")
+    done < <(find "$OPENCLAW_ICLOUD_STATE_DIR/agents" -mindepth 2 -maxdepth 2 -type d -name "sessions" -print0 2>/dev/null || true)
+    if [[ ${#agent_sessions[@]} -eq 0 ]]; then
+        info "No agent sessions folders under $OPENCLAW_ICLOUD_STATE_DIR/agents"
+    else
+        for d in "${agent_sessions[@]}"; do
+            mark_nosync_path "$d"
+        done
+    fi
+
+    # Any folder including ".bak" in .openclaw or clawd
+    for root in "$OPENCLAW_ICLOUD_STATE_DIR" "$DOTFILES_DIR/clawd"; do
+        if [[ -d "$root" ]]; then
+            mark_nosync_globs "$root" "*\.bak*"
+        fi
+    done
+
+    # __pycache__, .git, .venv, node_modules across .openclaw and clawd
+    for root in "$OPENCLAW_ICLOUD_STATE_DIR" "$DOTFILES_DIR/clawd"; do
+        if [[ ! -d "$root" ]]; then
+            continue
+        fi
+
+        # Skip .git by default to avoid breaking repos.
+        local names=( "__pycache__" ".venv" "node_modules" )
+        local n
+        for n in "${names[@]}"; do
+            mark_nosync_globs "$root" "$n"
+        done
+
+        if [[ "$OPENCLAW_ALLOW_GIT_NOSYNC" == "1" ]]; then
+            mark_nosync_globs "$root" ".git"
+        else
+            warn "Skipping .git under $root (set OPENCLAW_ALLOW_GIT_NOSYNC=1 to rename)"
+        fi
+    done
+
+    success "Nosync marking completed."
 }
 
 # Setup config directory symlinks
@@ -260,6 +357,7 @@ Usage: ./claw.sh <command>
 Commands:
   setup                    Set up symlinks (config + node_modules)
   move-state-off-icloud    Migrate cron+memory state to local disk + symlink back
+  mark-nosync              Rename selected paths to *.nosync (no iCloud sync)
   backup-state-now         Run one backup immediately
   print-backup-crontab     Print the crontab lines (for manual install)
   install-backup-crontab   Install/update crontab block automatically
@@ -289,6 +387,9 @@ main() {
             ;;
         move-state-off-icloud)
             move_state_off_icloud
+            ;;
+        mark-nosync)
+            mark_openclaw_nosync
             ;;
         backup-state-now)
             backup_state_now
