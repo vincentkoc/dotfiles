@@ -40,6 +40,16 @@
 	# Automatically correct and execute mistyped commands
 	autocorrect = 1
 
+[alias]
+	wtl = worktree list
+	wta = worktree add
+	wtr = worktree remove
+	wtp = worktree prune
+
+[extensions]
+	# Allow per-worktree local config via .git/worktrees/<name>/config.worktree
+	worktreeConfig = true
+
 [merge]
 	# Include summaries of merged commits in newly created merge commit messages
     log = true

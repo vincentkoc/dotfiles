@@ -507,6 +507,288 @@ repo() {
     open "$url" &> /dev/null || (echo "Using $(type open) to open URL failed." && exit 1);
 }
 
+# Return a stable slug for the current repo (prefer owner/repo from origin URL).
+_gwt_repo_slug() {
+    local top origin cleaned slug
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+    origin=$(git config --get remote.origin.url 2>/dev/null || true)
+
+    if [[ -n "$origin" ]]; then
+        cleaned=${origin%.git}
+        cleaned=${cleaned#ssh://}
+        cleaned=${cleaned#git@}
+        cleaned=${cleaned#https://}
+        cleaned=${cleaned#http://}
+        cleaned=${cleaned#*:*@}
+        cleaned=${cleaned#*:}
+        cleaned=${cleaned#*/}
+        slug=$(printf '%s' "$cleaned" | tr -s '/' '-' | tr -cd '[:alnum:]._-')
+    fi
+
+    if [[ -z "$slug" ]]; then
+        slug=$(basename "$top")
+    fi
+
+    printf '%s\n' "$slug"
+}
+
+# Resolve a target (path, branch, or folder name) to a concrete worktree path.
+_gwt_find_path() {
+    local target="$1"
+    local line path branch short_branch wt_list git_bin sed_bin
+
+    git_bin="$(command -v git 2>/dev/null)"
+    sed_bin="$(command -v sed 2>/dev/null)"
+    if [[ -z "$git_bin" || -z "$sed_bin" ]]; then
+        echo "gwt: required commands not found (git/sed)"
+        return 1
+    fi
+
+    if [[ -d "$target" ]]; then
+        printf '%s\n' "$target"
+        return 0
+    fi
+
+    wt_list=$("$git_bin" worktree list)
+
+    while IFS= read -r line; do
+        path=${line%% *}
+        branch=$(printf '%s\n' "$line" | "$sed_bin" -n 's/.*\[\(.*\)\].*/\1/p')
+        short_branch=${branch#refs/heads/}
+
+        if [[ "$path" == */"$target" || "$branch" == "$target" || "$short_branch" == "$target" || "$(basename "$path")" == "$target" ]]; then
+            printf '%s\n' "$path"
+            return 0
+        fi
+    done <<< "$wt_list"
+
+    return 1
+}
+
+# Build an fzf-friendly worktree table sorted by most recent commit timestamp.
+_gwt_fzf_table() {
+    local git_bin sort_bin
+    local path branch epoch human
+
+    git_bin="$(command -v git 2>/dev/null)"
+    sort_bin="$(command -v sort 2>/dev/null)"
+    if [[ -z "$git_bin" || -z "$sort_bin" ]]; then
+        echo "gwt: required commands not found (git/sort)"
+        return 1
+    fi
+
+    path=""
+    branch=""
+    while IFS=' ' read -r key rest; do
+        case "$key" in
+            worktree)
+                if [[ -n "$path" ]]; then
+                    if [[ "$OSTYPE" == "darwin"* ]]; then
+                        epoch=$(stat -f "%m" "$path" 2>/dev/null || echo 0)
+                    else
+                        epoch=$(stat -c "%Y" "$path" 2>/dev/null || echo 0)
+                    fi
+                    [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=0
+
+                    if [[ "$epoch" -gt 0 ]]; then
+                        if [[ "$OSTYPE" == "darwin"* ]]; then
+                            human=$(date -r "$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "-")
+                        else
+                            human=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "-")
+                        fi
+                    else
+                        human="-"
+                    fi
+
+                    [[ -n "$branch" ]] || branch="detached"
+                    printf '%s\t%s\t%s\t%s\n' "$epoch" "$path" "$human" "$branch"
+                fi
+                path="$rest"
+                branch=""
+                ;;
+            branch)
+                branch=${rest#refs/heads/}
+                ;;
+            detached)
+                branch="detached"
+                ;;
+        esac
+    done < <("$git_bin" worktree list --porcelain)
+
+    if [[ -n "$path" ]]; then
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            epoch=$(stat -f "%m" "$path" 2>/dev/null || echo 0)
+        else
+            epoch=$(stat -c "%Y" "$path" 2>/dev/null || echo 0)
+        fi
+        [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=0
+
+        if [[ "$epoch" -gt 0 ]]; then
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                human=$(date -r "$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "-")
+            else
+                human=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "-")
+            fi
+        else
+            human="-"
+        fi
+
+        [[ -n "$branch" ]] || branch="detached"
+        printf '%s\t%s\t%s\t%s\n' "$epoch" "$path" "$human" "$branch"
+    fi | "$sort_bin" -t$'\t' -k1,1nr
+}
+
+# gwt: opinionated wrapper around `git worktree`.
+# oh-my-zsh git plugin defines `gwt` alias; remove it so the function can load cleanly.
+unalias gwt 2>/dev/null
+gwt() {
+    if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+        echo "gwt: not inside a git repository"
+        return 1
+    fi
+
+    local subcommand="$1"
+    shift || true
+
+    case "$subcommand" in
+        ""|help|-h|--help)
+            cat <<'EOF'
+Usage: gwt <command> [args]
+
+Commands:
+  gwt new <branch> [start-point]   Create/add worktree under ~/.cursor/worktrees
+  gwt ls                            List worktrees
+  gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
+  gwt rm <branch|name|path> [--force] Remove a worktree safely
+  gwt prune                         Prune stale worktree metadata
+  gwt root                          Print configured worktree root
+EOF
+            ;;
+        root)
+            printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.cursor/worktrees}"
+            ;;
+        ls|list)
+            if [[ "$1" == "--raw" ]]; then
+                git worktree list
+            else
+                _gwt_fzf_table | awk -F'\t' 'BEGIN { printf "%-70s  %-16s  %s\n", "PATH", "LAST MOD", "BRANCH" } { printf "%-70s  %-16s  %s\n", $2, $3, $4 }'
+            fi
+            ;;
+        new|add)
+            local branch="$1"
+            local start_point="$2"
+            local root repo_slug branch_slug worktree_parent worktree_path
+
+            if [[ -z "$branch" ]]; then
+                echo "Usage: gwt new <branch> [start-point]"
+                return 1
+            fi
+
+            root="${DOTFILES_WORKTREES_ROOT:-$HOME/.cursor/worktrees}"
+            repo_slug=$(_gwt_repo_slug) || return 1
+            branch_slug=$(printf '%s' "$branch" | tr '/' '-' | tr -cd '[:alnum:]._-')
+            [[ -z "$branch_slug" ]] && branch_slug="$branch"
+
+            worktree_parent="$root/$repo_slug"
+            worktree_path="$worktree_parent/$branch_slug"
+            mkdir -p "$worktree_parent" || return 1
+
+            if [[ -d "$worktree_path" ]]; then
+                echo "gwt: worktree already exists at $worktree_path"
+                cd "$worktree_path" || return 1
+                return 0
+            fi
+
+            if git show-ref --verify --quiet "refs/heads/$branch"; then
+                git worktree add "$worktree_path" "$branch" || return 1
+            else
+                git worktree add -b "$branch" "$worktree_path" "${start_point:-HEAD}" || return 1
+            fi
+
+            cd "$worktree_path" || return 1
+            ;;
+        cd)
+            local target="$1"
+            local selected target_path
+
+            if [[ -z "$target" ]]; then
+                if command -v fzf > /dev/null 2>&1; then
+                    selected=$(_gwt_fzf_table | fzf \
+                        --delimiter=$'\t' \
+                        --with-nth=2,3,4 \
+                        --prompt='worktree> ' \
+                        --header=$'PATH\tLAST MOD\tBRANCH')
+                    [[ -z "$selected" ]] && return 1
+                    target=$(printf '%s\n' "$selected" | cut -f2)
+                else
+                    echo "Usage: gwt cd <branch|name|path> (install fzf for interactive picker)"
+                    return 1
+                fi
+            fi
+
+            if ! target_path=$(_gwt_find_path "$target"); then
+                echo "gwt: no matching worktree found for '$target'"
+                return 1
+            fi
+
+            cd "$target_path" || return 1
+            ;;
+        rm|remove)
+            local target=""
+            local force_remove=false
+            local arg target_path main_worktree
+
+            for arg in "$@"; do
+                case "$arg" in
+                    --force|-f) force_remove=true ;;
+                    *) target="$arg" ;;
+                esac
+            done
+
+            if [[ -z "$target" ]]; then
+                echo "Usage: gwt rm <branch|name|path> [--force]"
+                return 1
+            fi
+
+            if ! target_path=$(_gwt_find_path "$target"); then
+                echo "gwt: no matching worktree found for '$target'"
+                return 1
+            fi
+
+            main_worktree=$(git worktree list | head -n 1 | awk '{print $1}')
+            if [[ "$target_path" == "$main_worktree" ]]; then
+                echo "gwt: refusing to remove the main worktree ($target_path)"
+                return 1
+            fi
+
+            if [[ "$(pwd)/" == "$target_path/"* ]]; then
+                echo "gwt: cannot remove the worktree you are currently in"
+                return 1
+            fi
+
+            if ! $force_remove && [[ -n "$(git -C "$target_path" status --porcelain 2>/dev/null)" ]]; then
+                echo "gwt: worktree has uncommitted changes. Re-run with --force to remove."
+                return 1
+            fi
+
+            if $force_remove; then
+                git worktree remove --force "$target_path" || return 1
+            else
+                git worktree remove "$target_path" || return 1
+            fi
+
+            git worktree prune
+            ;;
+        prune)
+            git worktree prune
+            ;;
+        *)
+            echo "gwt: unknown command '$subcommand' (run 'gwt help')"
+            return 1
+            ;;
+    esac
+}
+
 # Run diagnostics on all available package managers and development tools
 function doctor() {
     echo -e "\n🏥 Starting system diagnostics...\n"
