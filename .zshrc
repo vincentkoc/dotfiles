@@ -145,6 +145,35 @@ alias pip3='pip'
 # If not running interactively, don't do anything
 [ -z "$PS1" ] && return
 
+# iTerm title: repo/branch context, including linked worktree name.
+if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
+	autoload -Uz add-zsh-hook
+
+	_dotfiles_iterm_title() {
+		local title cwd repo branch git_dir wt_name
+		cwd="${PWD/#$HOME/~}"
+		title="$cwd"
+
+		if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+			repo=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")
+			branch=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)
+			git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null)
+			if [[ "$git_dir" == *"/worktrees/"* ]]; then
+				wt_name=$(basename "$git_dir")
+				title="$repo:$branch [$wt_name] - $cwd"
+			else
+				title="$repo:$branch - $cwd"
+			fi
+		fi
+
+		# OSC 0 sets both window and tab title in iTerm.
+		print -Pn "\e]0;${title}\a"
+	}
+
+	add-zsh-hook chpwd _dotfiles_iterm_title
+	add-zsh-hook precmd _dotfiles_iterm_title
+fi
+
 #
 # Mac Specific
 #
