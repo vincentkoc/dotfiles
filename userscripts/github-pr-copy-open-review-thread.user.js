@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR - Copy Open Review Thread
 // @namespace    usermonkey.github.pr.copy.open.review
-// @version      1.1.0
+// @version      1.2.0
 // @description  Adds a per-thread copy button for open (unresolved) PR review conversations.
 // @match        https://github.com/*/*/pull/*
 // @grant        GM_setClipboard
@@ -11,9 +11,29 @@
   "use strict";
 
   const BTN_CLASS = "js-copy-open-thread-btn";
+  const COPY_ALL_BTN_CLASS = "js-copy-open-threads-btn";
 
   function norm(s) {
     return (s || "").replace(/\s+/g, " ").trim();
+  }
+
+  function normCode(s) {
+    return (s || "").replace(/\r\n?/g, "\n").trim();
+  }
+
+  function escapeCodeFence(s) {
+    return s.replace(/```/g, "``\\`");
+  }
+
+  function toAlphaPrefix(index) {
+    let n = index + 1;
+    let out = "";
+    while (n > 0) {
+      const rem = (n - 1) % 26;
+      out = String.fromCharCode(97 + rem) + out;
+      n = Math.floor((n - 1) / 26);
+    }
+    return `${out}/`;
   }
 
   function isDateLike(s) {
@@ -105,11 +125,11 @@
       threadRoot.querySelector(".blob-code-inner") ||
       threadRoot.querySelector(".js-file-line") ||
       threadRoot.closest("tr")?.querySelector(".blob-code-inner, .js-file-line");
-    const snippet = norm(snippetNode?.innerText || snippetNode?.textContent);
+    const snippet = normCode(snippetNode?.innerText || snippetNode?.textContent);
 
     return {
       line: line || "",
-      snippet: snippet ? snippet.slice(0, 220) : "",
+      snippet: snippet ? snippet.slice(0, 600) : "",
     };
   }
 
@@ -159,41 +179,65 @@
     return Promise.resolve();
   }
 
-  function buildPayload(threadRoot, resolveBtn) {
+  function getThreadRoot(resolveBtn) {
+    return (
+      resolveBtn.closest("[data-review-thread-id]") ||
+      resolveBtn.closest(".review-thread-component") ||
+      resolveBtn.closest(".js-line-comments-container") ||
+      resolveBtn.closest(".js-timeline-item") ||
+      resolveBtn.closest("details") ||
+      resolveBtn.closest("tr") ||
+      resolveBtn.parentElement
+    );
+  }
+
+  function getResolveButtons() {
+    return Array.from(document.querySelectorAll("button")).filter(
+      (b) => norm(b.textContent) === "Resolve conversation"
+    );
+  }
+
+  function buildPayload(threadRoot, resolveBtn, prefix = "") {
     const prTitle = getPrTitle();
     const threadTitle = getThreadTitle(threadRoot);
     const fileName = getFileNameFromThread(threadRoot, resolveBtn);
     const { line, snippet } = getLineAndSnippet(threadRoot);
     const comments = collectComments(threadRoot);
     const location = line ? `${fileName}:${line}` : fileName;
+    const cleanSnippet = snippet ? escapeCodeFence(snippet) : "";
 
     return [
-      `PR: ${prTitle}`,
+      `${prefix ? `${prefix} ` : ""}PR: ${prTitle}`,
       `Thread: ${threadTitle}`,
       `Location: ${location}`,
-      ...(snippet ? [`Snippet: ${snippet}`] : []),
+      "Code:",
+      "```",
+      ...(cleanSnippet ? [cleanSnippet] : ["(no code snippet found)"]),
+      "```",
       "Comments:",
       ...(comments.length ? comments.map((c, i) => `${i + 1}. ${c}`) : ["(no comments found)"]),
     ].join("\n");
   }
 
+  async function copyAllOpenThreads() {
+    const blocks = getResolveButtons()
+      .map((resolveBtn, i) => {
+        const threadRoot = getThreadRoot(resolveBtn);
+        return buildPayload(threadRoot, resolveBtn, toAlphaPrefix(i));
+      })
+      .filter(Boolean);
+
+    await copyText(blocks.length ? blocks.join("\n\n") : "(no open threads found)");
+  }
+
   function addButtons() {
-    const buttons = Array.from(document.querySelectorAll("button")).filter(
-      (b) => norm(b.textContent) === "Resolve conversation"
-    );
+    const buttons = getResolveButtons();
 
     for (const resolveBtn of buttons) {
       const actionArea = resolveBtn.parentElement;
       if (!actionArea || actionArea.querySelector(`.${BTN_CLASS}`)) continue;
 
-      const threadRoot =
-        resolveBtn.closest("[data-review-thread-id]") ||
-        resolveBtn.closest(".review-thread-component") ||
-        resolveBtn.closest(".js-line-comments-container") ||
-        resolveBtn.closest(".js-timeline-item") ||
-        resolveBtn.closest("details") ||
-        resolveBtn.closest("tr") ||
-        resolveBtn.parentElement;
+      const threadRoot = getThreadRoot(resolveBtn);
 
       const copyBtn = document.createElement("button");
       copyBtn.type = "button";
@@ -212,6 +256,29 @@
       });
 
       actionArea.insertBefore(copyBtn, resolveBtn);
+    }
+
+    if (!document.querySelector(`.${COPY_ALL_BTN_CLASS}`)) {
+      const host =
+        document.querySelector(".gh-header-actions") ||
+        document.querySelector(".pr-review-tools .d-flex") ||
+        document.querySelector("#partial-discussion-header");
+      if (host) {
+        const copyAllBtn = document.createElement("button");
+        copyAllBtn.type = "button";
+        copyAllBtn.className = `btn btn-sm ${COPY_ALL_BTN_CLASS}`;
+        copyAllBtn.textContent = "Copy all open threads";
+        copyAllBtn.style.marginLeft = "8px";
+        copyAllBtn.addEventListener("click", async () => {
+          const old = copyAllBtn.textContent;
+          await copyAllOpenThreads();
+          copyAllBtn.textContent = "Copied all";
+          setTimeout(() => {
+            copyAllBtn.textContent = old;
+          }, 1200);
+        });
+        host.appendChild(copyAllBtn);
+      }
     }
   }
 
