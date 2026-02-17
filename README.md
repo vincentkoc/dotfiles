@@ -17,6 +17,7 @@ mackup restore    # Symlink configs
 .zshrc / .exports / .aliases / .functions   # Shell
 .vimrc / .tmux.conf                         # Editors
 .mackup/                                    # Mackup app configs
+userscripts/                                # UserMonkey userscripts source
 install.sh                                  # Dependency installer
 ```
 
