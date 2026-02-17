@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub PR - Copy Open Review Thread
 // @namespace    usermonkey.github.pr.copy.open.review
-// @version      1.2.0
+// @version      1.3.0
 // @description  Adds a per-thread copy button for open (unresolved) PR review conversations.
 // @match        https://github.com/*/*/pull/*
 // @grant        GM_setClipboard
@@ -133,6 +133,42 @@
     };
   }
 
+  function getCodePreview(threadRoot) {
+    const lineNode =
+      threadRoot.querySelector("[data-line-number]") ||
+      threadRoot.closest("tr")?.querySelector("[data-line-number]");
+    const anchorRow = lineNode?.closest("tr");
+    if (!anchorRow) return "";
+
+    const table = anchorRow.closest("table");
+    if (!table) return "";
+    const rows = Array.from(table.querySelectorAll("tbody tr"));
+    const idx = rows.indexOf(anchorRow);
+    if (idx < 0) return "";
+
+    const start = Math.max(0, idx - 3);
+    const end = Math.min(rows.length - 1, idx + 3);
+    const out = [];
+
+    for (let i = start; i <= end; i += 1) {
+      const row = rows[i];
+      const numEl = row.querySelector("[data-line-number]");
+      const num = norm(numEl?.getAttribute("data-line-number"));
+      const codeEl = row.querySelector(".blob-code-inner, .js-file-line");
+      if (!num || !codeEl) continue;
+
+      const text = normCode(codeEl.innerText || codeEl.textContent);
+      const cls = row.className || "";
+      let sign = " ";
+      if (/addition/.test(cls) || codeEl.classList.contains("blob-code-addition")) sign = "+";
+      if (/deletion/.test(cls) || codeEl.classList.contains("blob-code-deletion")) sign = "-";
+
+      out.push(`${num} ${sign} ${text}`);
+    }
+
+    return out.join("\n");
+  }
+
   function collectComments(threadRoot) {
     const bodies = Array.from(
       threadRoot.querySelectorAll(".comment-body, .js-comment-body, .markdown-body")
@@ -202,9 +238,14 @@
     const threadTitle = getThreadTitle(threadRoot);
     const fileName = getFileNameFromThread(threadRoot, resolveBtn);
     const { line, snippet } = getLineAndSnippet(threadRoot);
+    const codePreview = getCodePreview(threadRoot);
     const comments = collectComments(threadRoot);
     const location = line ? `${fileName}:${line}` : fileName;
-    const cleanSnippet = snippet ? escapeCodeFence(snippet) : "";
+    const cleanSnippet = codePreview
+      ? escapeCodeFence(codePreview)
+      : snippet
+        ? escapeCodeFence(snippet)
+        : "";
 
     return [
       `${prefix ? `${prefix} ` : ""}PR: ${prTitle}`,
@@ -241,7 +282,8 @@
 
       const copyBtn = document.createElement("button");
       copyBtn.type = "button";
-      copyBtn.className = `btn btn-sm ${BTN_CLASS}`;
+      copyBtn.className = resolveBtn.className;
+      copyBtn.classList.add(BTN_CLASS);
       copyBtn.style.marginRight = "8px";
       copyBtn.textContent = "Copy thread";
 
@@ -256,19 +298,13 @@
       });
 
       actionArea.insertBefore(copyBtn, resolveBtn);
-    }
-
-    if (!document.querySelector(`.${COPY_ALL_BTN_CLASS}`)) {
-      const host =
-        document.querySelector(".gh-header-actions") ||
-        document.querySelector(".pr-review-tools .d-flex") ||
-        document.querySelector("#partial-discussion-header");
-      if (host) {
+      if (!document.querySelector(`.${COPY_ALL_BTN_CLASS}`)) {
         const copyAllBtn = document.createElement("button");
         copyAllBtn.type = "button";
-        copyAllBtn.className = `btn btn-sm ${COPY_ALL_BTN_CLASS}`;
+        copyAllBtn.className = resolveBtn.className;
+        copyAllBtn.classList.add(COPY_ALL_BTN_CLASS);
+        copyAllBtn.style.marginRight = "8px";
         copyAllBtn.textContent = "Copy all open threads";
-        copyAllBtn.style.marginLeft = "8px";
         copyAllBtn.addEventListener("click", async () => {
           const old = copyAllBtn.textContent;
           await copyAllOpenThreads();
@@ -277,7 +313,7 @@
             copyAllBtn.textContent = old;
           }, 1200);
         });
-        host.appendChild(copyAllBtn);
+        actionArea.insertBefore(copyAllBtn, copyBtn);
       }
     }
   }
