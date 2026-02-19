@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.1.0
+// @version      1.1.1
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -102,23 +102,6 @@
       severity: item.severity,
       state: item.state,
       searchBlob: item.searchBlob,
-    };
-  }
-
-  function itemFromData(data) {
-    const row = rowFromHtml(data.html);
-    if (!row) return null;
-    return {
-      row,
-      html: data.html,
-      title: data.title,
-      href: data.href,
-      ghsa: data.ghsa,
-      author: data.author,
-      dateMs: data.dateMs,
-      severity: data.severity,
-      state: data.state,
-      searchBlob: data.searchBlob,
     };
   }
 
@@ -342,6 +325,7 @@
         <button class="ghsa-reset" type="button">Reset</button>
       </div>
       <div class="ghsa-meta"></div>
+      <div class="ghsa-remote"></div>
     `;
     return root;
   }
@@ -394,15 +378,15 @@
 
     const terms = q ? q.split(/\s+/).filter(Boolean) : [];
 
-    let filtered = items.filter((it) => {
+    const matches = (it) => {
       if (state !== "all" && it.state !== state) return false;
       if (author !== "all" && it.author !== author) return false;
       if (!allowedSev.has(it.severity)) return false;
       if (!terms.length) return true;
       return terms.every((t) => it.searchBlob.includes(t));
-    });
+    };
 
-    filtered.sort((a, b) => {
+    const sorter = (a, b) => {
       if (sort === "date_asc") return a.dateMs - b.dateMs;
       if (sort === "date_desc") return b.dateMs - a.dateMs;
       if (sort === "severity_desc") return severityWeight(b.severity) - severityWeight(a.severity);
@@ -410,30 +394,60 @@
       if (sort === "title_asc") return a.title.localeCompare(b.title);
       if (sort === "title_desc") return b.title.localeCompare(a.title);
       return 0;
-    });
+    };
+
+    const filteredCurrent = items.filter(matches).sort(sorter);
+    const indexData = toolbar.__ghsaIndexData || items.map((i) => dataFromItem(i));
+    const filteredAll = indexData.filter(matches).sort(sorter);
 
     const list = getCanonicalList();
     if (list) {
       list.textContent = "";
-      for (const it of filtered) {
+      for (const it of filteredCurrent) {
         list.appendChild(it.row);
       }
     }
 
     const sevCounts = { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 };
-    for (const it of filtered) {
+    for (const it of filteredAll) {
       sevCounts[it.severity] = (sevCounts[it.severity] || 0) + 1;
     }
 
     const meta = toolbar.querySelector(".ghsa-meta");
     if (meta) {
       meta.textContent =
-        `Showing ${filtered.length}/${items.length}` +
+        `Showing ${filteredCurrent.length}/${items.length} on this page` +
+        ` | all pages: ${filteredAll.length}/${indexData.length}` +
         ` | critical:${sevCounts.critical || 0}` +
         ` high:${sevCounts.high || 0}` +
         ` moderate:${sevCounts.moderate || 0}` +
         ` low:${sevCounts.low || 0}` +
         ` unknown:${sevCounts.unknown || 0}`;
+    }
+
+    const keyOf = (it) => (it.ghsa || it.href || `${it.title}|${it.dateMs}`).toLowerCase();
+    const currentKeys = new Set(items.map(keyOf));
+    const remoteMatches = filteredAll.filter((it) => !currentKeys.has(keyOf(it)));
+    const remoteWrap = toolbar.querySelector(".ghsa-remote");
+    if (remoteWrap) {
+      if (!q || remoteMatches.length === 0) {
+        remoteWrap.textContent = "";
+      } else {
+        const preview = remoteMatches.slice(0, 20);
+        const totalMore = remoteMatches.length - preview.length;
+        remoteWrap.innerHTML = preview
+          .map((it) => {
+            const safeTitle = (it.title || "(untitled)").replace(/</g, "&lt;");
+            const safeGhsa = (it.ghsa || "").replace(/</g, "&lt;");
+            const safeAuthor = (it.author || "unknown").replace(/</g, "&lt;");
+            const safeSev = (it.severity || "unknown").replace(/</g, "&lt;");
+            return `<div><a href="${it.href}">${safeTitle}</a> <span class="color-fg-muted">(${safeGhsa} · ${safeSev} · ${safeAuthor})</span></div>`;
+          })
+          .join("");
+        if (totalMore > 0) {
+          remoteWrap.innerHTML += `<div class="color-fg-muted">...and ${totalMore} more results on other pages</div>`;
+        }
+      }
     }
   }
 
@@ -494,11 +508,10 @@
 
     hydrateAllPagesData(items)
       .then((data) => {
-        const hydratedItems = data.map(itemFromData).filter(Boolean);
-        if (!hydratedItems.length) return;
-        toolbar.__ghsaItems = hydratedItems;
-        fillAuthors(toolbar, hydratedItems);
-        apply(toolbar, hydratedItems);
+        if (!data.length) return;
+        toolbar.__ghsaIndexData = data;
+        fillAuthors(toolbar, items);
+        apply(toolbar, items);
       })
       .catch(() => {
         apply(toolbar, toolbar.__ghsaItems || items);
