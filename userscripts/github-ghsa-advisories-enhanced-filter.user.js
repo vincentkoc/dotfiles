@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.0.2
+// @version      1.0.3
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -12,6 +12,7 @@
 
   const ROOT_ID = "ghsa-enhanced-toolbar";
   const STYLE_ID = "ghsa-enhanced-style";
+  const LIST_ATTR = "data-ghsa-enhanced-list";
   const ADVISORIES_PATH_RE = /^\/[^/]+\/[^/]+\/security\/advisories(?:\/|$)/;
 
   function isAdvisoriesPage() {
@@ -82,8 +83,12 @@
     };
   }
 
+  function getCanonicalHost() {
+    return document.querySelector("#advisories .hx_Box--firstRowRounded0");
+  }
+
   function getCanonicalList() {
-    return document.querySelector("#advisories .hx_Box--firstRowRounded0 > ul");
+    return document.querySelector(`#advisories ul[${LIST_ATTR}='1']`);
   }
 
   function queryRows() {
@@ -91,8 +96,21 @@
   }
 
   function normalizeRowPlacement() {
-    const list = getCanonicalList();
-    if (!list) return;
+    const host = getCanonicalHost();
+    if (!host) return;
+
+    let list = getCanonicalList();
+    if (!list) {
+      list = document.createElement("ul");
+      list.setAttribute(LIST_ATTR, "1");
+      const firstExisting = host.querySelector("ul");
+      if (firstExisting) {
+        list.setAttribute("data-pjax", firstExisting.getAttribute("data-pjax") || "");
+        list.setAttribute("data-turbo-frame", firstExisting.getAttribute("data-turbo-frame") || "");
+      }
+      host.appendChild(list);
+    }
+
     const rows = queryRows();
     for (const row of rows) {
       if (row.parentElement !== list) {
@@ -157,7 +175,7 @@
       #${ROOT_ID} .ghsa-reset {
         margin-left: auto;
       }
-      #${ROOT_ID} .ghsa-hidden {
+      .ghsa-hidden {
         display: none !important;
       }
     `;
