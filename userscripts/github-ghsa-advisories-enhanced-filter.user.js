@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.1.1
+// @version      1.1.2
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -12,7 +12,6 @@
 
   const ROOT_ID = "ghsa-enhanced-toolbar";
   const STYLE_ID = "ghsa-enhanced-style";
-  const LIST_ATTR = "data-ghsa-enhanced-list";
   const ADVISORIES_PATH_RE = /^\/[^/]+\/[^/]+\/security\/advisories(?:\/|$)/;
   const HYDRATION_CACHE = new Map();
 
@@ -188,40 +187,8 @@
     return promise;
   }
 
-  function getCanonicalHost() {
-    return document.querySelector("#advisories .hx_Box--firstRowRounded0");
-  }
-
-  function getCanonicalList() {
-    return document.querySelector(`#advisories ul[${LIST_ATTR}='1']`);
-  }
-
   function queryRows() {
-    return Array.from(document.querySelectorAll("#advisories li.Box-row"));
-  }
-
-  function normalizeRowPlacement() {
-    const host = getCanonicalHost();
-    if (!host) return;
-
-    let list = getCanonicalList();
-    if (!list) {
-      list = document.createElement("ul");
-      list.setAttribute(LIST_ATTR, "1");
-      const firstExisting = host.querySelector("ul");
-      if (firstExisting) {
-        list.setAttribute("data-pjax", firstExisting.getAttribute("data-pjax") || "");
-        list.setAttribute("data-turbo-frame", firstExisting.getAttribute("data-turbo-frame") || "");
-      }
-      host.appendChild(list);
-    }
-
-    const rows = queryRows();
-    for (const row of rows) {
-      if (row.parentElement !== list) {
-        list.appendChild(row);
-      }
-    }
+    return Array.from(document.querySelectorAll("#advisories .hx_Box--firstRowRounded0 li.Box-row"));
   }
 
   function isReady() {
@@ -276,6 +243,13 @@
         margin-top: 8px;
         font-size: 12px;
         color: var(--fgColor-muted, #57606a);
+      }
+      #${ROOT_ID} .ghsa-remote {
+        margin-top: 8px;
+        font-size: 12px;
+      }
+      #${ROOT_ID} .ghsa-remote > div {
+        margin-top: 4px;
       }
       #${ROOT_ID} .ghsa-reset {
         margin-left: auto;
@@ -400,11 +374,12 @@
     const indexData = toolbar.__ghsaIndexData || items.map((i) => dataFromItem(i));
     const filteredAll = indexData.filter(matches).sort(sorter);
 
-    const list = getCanonicalList();
-    if (list) {
-      list.textContent = "";
-      for (const it of filteredCurrent) {
-        list.appendChild(it.row);
+    const visibleRows = new Set(filteredCurrent.map((it) => it.row));
+    for (const it of items) {
+      if (visibleRows.has(it.row)) {
+        it.row.classList.remove("ghsa-hidden");
+      } else {
+        it.row.classList.add("ghsa-hidden");
       }
     }
 
@@ -441,7 +416,8 @@
             const safeGhsa = (it.ghsa || "").replace(/</g, "&lt;");
             const safeAuthor = (it.author || "unknown").replace(/</g, "&lt;");
             const safeSev = (it.severity || "unknown").replace(/</g, "&lt;");
-            return `<div><a href="${it.href}">${safeTitle}</a> <span class="color-fg-muted">(${safeGhsa} · ${safeSev} · ${safeAuthor})</span></div>`;
+            const safeHref = it.href || "#";
+            return `<div><a href="${safeHref}">${safeTitle}</a> <span class="color-fg-muted">(${safeGhsa} · ${safeSev} · ${safeAuthor})</span></div>`;
           })
           .join("");
         if (totalMore > 0) {
@@ -492,7 +468,6 @@
     const toolbar = mountToolbar();
     if (!toolbar) return;
 
-    normalizeRowPlacement();
     const items = queryRows().map(parseRow);
     if (!items.length) return;
 
