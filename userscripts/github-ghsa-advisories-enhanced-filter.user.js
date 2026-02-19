@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.2.0
+// @version      1.2.1
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -46,9 +46,25 @@
   function detectState(row) {
     const iconWrap = row.querySelector(".tooltipped[aria-label]");
     const label = norm(iconWrap?.getAttribute("aria-label") || "").toLowerCase();
+    if (label.includes("triage")) return "triage";
     if (label.includes("published")) return "published";
     if (label.includes("draft")) return "draft";
     if (label.includes("closed")) return "closed";
+    return "unknown";
+  }
+
+  function detectSeverity(row) {
+    const labels = Array.from(row.querySelectorAll(".Label"));
+    for (const l of labels) {
+      const title = norm(l.getAttribute("title") || "").toLowerCase();
+      const text = norm(l.textContent || "").toLowerCase();
+      if (title.startsWith("severity:")) {
+        return title.replace("severity:", "").trim() || "unknown";
+      }
+      if (["critical", "high", "moderate", "medium", "low"].includes(text)) {
+        return text === "medium" ? "moderate" : text;
+      }
+    }
     return "unknown";
   }
 
@@ -65,8 +81,7 @@
     const relTime = row.querySelector("relative-time[datetime]");
     const dateMs = parseDateMs(relTime);
 
-    const sevText = norm(row.querySelector(".Label")?.textContent || "Unknown").toLowerCase();
-    const severity = sevText || "unknown";
+    const severity = detectSeverity(row);
 
     const state = detectState(row);
 
@@ -279,6 +294,7 @@
 
         <select class="ghsa-state" title="State filter">
           <option value="all">All states</option>
+          <option value="triage">Triage</option>
           <option value="published">Published</option>
           <option value="draft">Draft</option>
           <option value="closed">Closed</option>
