@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.0.1
+// @version      1.0.2
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -82,8 +82,23 @@
     };
   }
 
+  function getCanonicalList() {
+    return document.querySelector("#advisories .hx_Box--firstRowRounded0 > ul");
+  }
+
   function queryRows() {
-    return Array.from(document.querySelectorAll("#advisories .Box ul > li.Box-row"));
+    return Array.from(document.querySelectorAll("#advisories li.Box-row"));
+  }
+
+  function normalizeRowPlacement() {
+    const list = getCanonicalList();
+    if (!list) return;
+    const rows = queryRows();
+    for (const row of rows) {
+      if (row.parentElement !== list) {
+        list.appendChild(row);
+      }
+    }
   }
 
   function isReady() {
@@ -261,7 +276,7 @@
       it.row.classList.add("ghsa-hidden");
     }
 
-    const list = document.querySelector("#advisories .Box ul");
+    const list = getCanonicalList();
     if (list) {
       for (const it of filtered) {
         it.row.classList.remove("ghsa-hidden");
@@ -327,6 +342,7 @@
     const toolbar = mountToolbar();
     if (!toolbar) return;
 
+    normalizeRowPlacement();
     const items = queryRows().map(parseRow);
     if (!items.length) return;
 
