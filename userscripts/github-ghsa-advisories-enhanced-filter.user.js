@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.0.3
+// @version      1.1.0
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -14,6 +14,7 @@
   const STYLE_ID = "ghsa-enhanced-style";
   const LIST_ATTR = "data-ghsa-enhanced-list";
   const ADVISORIES_PATH_RE = /^\/[^/]+\/[^/]+\/security\/advisories(?:\/|$)/;
+  const HYDRATION_CACHE = new Map();
 
   function isAdvisoriesPage() {
     return ADVISORIES_PATH_RE.test(window.location.pathname);
@@ -72,6 +73,7 @@
 
     return {
       row,
+      html: row.outerHTML,
       title,
       href,
       ghsa,
@@ -81,6 +83,126 @@
       state,
       searchBlob: [title, ghsa, author, severity, state, href].join(" ").toLowerCase(),
     };
+  }
+
+  function rowFromHtml(html) {
+    const t = document.createElement("template");
+    t.innerHTML = (html || "").trim();
+    return t.content.firstElementChild;
+  }
+
+  function dataFromItem(item) {
+    return {
+      html: item.html || item.row?.outerHTML || "",
+      title: item.title,
+      href: item.href,
+      ghsa: item.ghsa,
+      author: item.author,
+      dateMs: item.dateMs,
+      severity: item.severity,
+      state: item.state,
+      searchBlob: item.searchBlob,
+    };
+  }
+
+  function itemFromData(data) {
+    const row = rowFromHtml(data.html);
+    if (!row) return null;
+    return {
+      row,
+      html: data.html,
+      title: data.title,
+      href: data.href,
+      ghsa: data.ghsa,
+      author: data.author,
+      dateMs: data.dateMs,
+      severity: data.severity,
+      state: data.state,
+      searchBlob: data.searchBlob,
+    };
+  }
+
+  function dedupeData(items) {
+    const out = [];
+    const seen = new Set();
+    for (const it of items) {
+      const key = (it.ghsa || it.href || `${it.title}|${it.dateMs}`).toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(it);
+    }
+    return out;
+  }
+
+  function getScopeKey() {
+    const u = new URL(window.location.href);
+    const page = u.searchParams.get("page");
+    if (page) u.searchParams.delete("page");
+    return `${u.origin}${u.pathname}?${u.searchParams.toString()}`;
+  }
+
+  function getTotalPages(doc) {
+    const n = Number(
+      doc.querySelector(".paginate-container .pagination em.current[data-total-pages]")?.getAttribute(
+        "data-total-pages"
+      ) || "1"
+    );
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }
+
+  function buildPageUrl(pageNum) {
+    const u = new URL(window.location.href);
+    u.searchParams.set("page", String(pageNum));
+    return u.toString();
+  }
+
+  function parseItemsFromHtml(html) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const rows = Array.from(doc.querySelectorAll("#advisories li.Box-row"));
+    return rows
+      .map((r) => {
+        const parsed = parseRow(r);
+        return dataFromItem(parsed);
+      })
+      .filter((i) => i.ghsa || i.href || i.title);
+  }
+
+  async function hydrateAllPagesData(currentItems) {
+    const scopeKey = getScopeKey();
+    const cached = HYDRATION_CACHE.get(scopeKey);
+    if (cached?.data) return cached.data;
+    if (cached?.promise) return cached.promise;
+
+    const currentData = currentItems.map(dataFromItem);
+    const totalPages = getTotalPages(document);
+    if (totalPages <= 1) {
+      const onePage = dedupeData(currentData);
+      HYDRATION_CACHE.set(scopeKey, { data: onePage });
+      return onePage;
+    }
+
+    const currentPage = Number(new URL(window.location.href).searchParams.get("page") || "1");
+    const pageNumbers = [];
+    for (let p = 1; p <= totalPages; p += 1) {
+      if (p !== currentPage) pageNumbers.push(p);
+    }
+
+    const promise = (async () => {
+      const fetched = await Promise.all(
+        pageNumbers.map(async (p) => {
+          const res = await fetch(buildPageUrl(p), { credentials: "same-origin" });
+          if (!res.ok) return [];
+          const text = await res.text();
+          return parseItemsFromHtml(text);
+        })
+      );
+      const merged = dedupeData(currentData.concat(fetched.flat()));
+      HYDRATION_CACHE.set(scopeKey, { data: merged });
+      return merged;
+    })();
+
+    HYDRATION_CACHE.set(scopeKey, { promise });
+    return promise;
   }
 
   function getCanonicalHost() {
@@ -290,14 +412,10 @@
       return 0;
     });
 
-    for (const it of items) {
-      it.row.classList.add("ghsa-hidden");
-    }
-
     const list = getCanonicalList();
     if (list) {
+      list.textContent = "";
       for (const it of filtered) {
-        it.row.classList.remove("ghsa-hidden");
         list.appendChild(it.row);
       }
     }
@@ -368,6 +486,23 @@
     fillAuthors(toolbar, items);
     bind(toolbar);
     apply(toolbar, items);
+
+    const meta = toolbar.querySelector(".ghsa-meta");
+    if (meta) {
+      meta.textContent = "Loading all advisory pages...";
+    }
+
+    hydrateAllPagesData(items)
+      .then((data) => {
+        const hydratedItems = data.map(itemFromData).filter(Boolean);
+        if (!hydratedItems.length) return;
+        toolbar.__ghsaItems = hydratedItems;
+        fillAuthors(toolbar, hydratedItems);
+        apply(toolbar, hydratedItems);
+      })
+      .catch(() => {
+        apply(toolbar, toolbar.__ghsaItems || items);
+      });
   }
 
   let debounceId = 0;
