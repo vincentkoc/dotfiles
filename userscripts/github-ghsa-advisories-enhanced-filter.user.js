@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.1.3
+// @version      1.2.0
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -82,12 +82,6 @@
       state,
       searchBlob: [title, ghsa, author, severity, state, href].join(" ").toLowerCase(),
     };
-  }
-
-  function rowFromHtml(html) {
-    const t = document.createElement("template");
-    t.innerHTML = (html || "").trim();
-    return t.content.firstElementChild;
   }
 
   function dataFromItem(item) {
@@ -257,6 +251,21 @@
       .ghsa-hidden {
         display: none !important;
       }
+      #ghsa-crosspage-results {
+        border: 1px solid var(--borderColor-default, #d0d7de);
+        border-radius: 6px;
+        margin-top: 12px;
+        padding: 10px;
+        background: var(--bgColor-muted, #f6f8fa);
+        font-size: 12px;
+      }
+      #ghsa-crosspage-results .ghsa-cross-title {
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      #ghsa-crosspage-results .ghsa-cross-item {
+        margin: 4px 0;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -316,6 +325,23 @@
     const toolbar = createToolbar();
     box.parentElement?.insertBefore(toolbar, box);
     return toolbar;
+  }
+
+  function mountCrossPagePanel() {
+    const advisoriesRoot = document.querySelector("#advisories");
+    if (!advisoriesRoot) return null;
+
+    const existing = document.getElementById("ghsa-crosspage-results");
+    if (existing) return existing;
+
+    const box = advisoriesRoot.querySelector(".Box");
+    if (!box) return null;
+
+    const panel = document.createElement("div");
+    panel.id = "ghsa-crosspage-results";
+    panel.style.display = "none";
+    box.insertAdjacentElement("afterend", panel);
+    return panel;
   }
 
   function fillAuthors(toolbar, items) {
@@ -397,6 +423,37 @@
         ` moderate:${sevCounts.moderate || 0}` +
         ` low:${sevCounts.low || 0}` +
         ` unknown:${sevCounts.unknown || 0}`;
+    }
+
+    const panel = mountCrossPagePanel();
+    if (panel) {
+      const keyOf = (it) => (it.ghsa || it.href || `${it.title}|${it.dateMs}`).toLowerCase();
+      const currentKeys = new Set(items.map(keyOf));
+      const remoteMatches = filteredAll.filter((it) => !currentKeys.has(keyOf(it)));
+
+      if (!q || remoteMatches.length === 0) {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+      } else {
+        const preview = remoteMatches.slice(0, 20);
+        const totalMore = remoteMatches.length - preview.length;
+        const rows = preview
+          .map((it) => {
+            const title = (it.title || "(untitled)").replace(/</g, "&lt;");
+            const ghsa = (it.ghsa || "").replace(/</g, "&lt;");
+            const sev = (it.severity || "unknown").replace(/</g, "&lt;");
+            const author = (it.author || "unknown").replace(/</g, "&lt;");
+            const href = it.href || "#";
+            return `<div class="ghsa-cross-item"><a href="${href}">${title}</a> <span class="color-fg-muted">(${ghsa} · ${sev} · ${author})</span></div>`;
+          })
+          .join("");
+
+        panel.style.display = "";
+        panel.innerHTML =
+          `<div class="ghsa-cross-title">Matches on other pages (${remoteMatches.length})</div>` +
+          rows +
+          (totalMore > 0 ? `<div class="color-fg-muted">...and ${totalMore} more</div>` : "");
+      }
     }
 
   }
