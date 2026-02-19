@@ -10,6 +10,7 @@ Source of truth for Firefox UserMonkey scripts.
 ## Current scripts
 
 - `github-pr-copy-open-review-thread.user.js`
+- `github-ghsa-advisories-enhanced-filter.user.js`
 
 ## Install in UserMonkey
 
