@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.0.0
+// @version      1.0.1
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
-// @match        https://github.com/*/*/security/advisories*
+// @match        https://github.com/*
 // @grant        none
 // ==/UserScript==
 
@@ -12,6 +12,11 @@
 
   const ROOT_ID = "ghsa-enhanced-toolbar";
   const STYLE_ID = "ghsa-enhanced-style";
+  const ADVISORIES_PATH_RE = /^\/[^/]+\/[^/]+\/security\/advisories(?:\/|$)/;
+
+  function isAdvisoriesPage() {
+    return ADVISORIES_PATH_RE.test(window.location.pathname);
+  }
 
   function norm(s) {
     return (s || "").replace(/\s+/g, " ").trim();
@@ -315,6 +320,7 @@
   }
 
   function render() {
+    if (!isAdvisoriesPage()) return;
     if (!isReady()) return;
 
     injectStyle();
@@ -342,7 +348,9 @@
     render();
     observer.observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener("turbo:load", scheduleRender);
+    window.addEventListener("turbo:render", scheduleRender);
     window.addEventListener("pjax:end", scheduleRender);
+    window.addEventListener("popstate", scheduleRender);
   }
 
   init();
