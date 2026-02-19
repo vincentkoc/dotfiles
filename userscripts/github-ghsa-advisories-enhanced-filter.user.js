@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub GHSA Advisories - Enhanced Filter
 // @namespace    usermonkey.github.ghsa.enhanced.filter
-// @version      1.1.2
+// @version      1.1.3
 // @description  Adds fast client-side search, filters, and sorting to GitHub repository Security Advisories list pages.
 // @match        https://github.com/*
 // @grant        none
@@ -299,7 +299,6 @@
         <button class="ghsa-reset" type="button">Reset</button>
       </div>
       <div class="ghsa-meta"></div>
-      <div class="ghsa-remote"></div>
     `;
     return root;
   }
@@ -400,31 +399,6 @@
         ` unknown:${sevCounts.unknown || 0}`;
     }
 
-    const keyOf = (it) => (it.ghsa || it.href || `${it.title}|${it.dateMs}`).toLowerCase();
-    const currentKeys = new Set(items.map(keyOf));
-    const remoteMatches = filteredAll.filter((it) => !currentKeys.has(keyOf(it)));
-    const remoteWrap = toolbar.querySelector(".ghsa-remote");
-    if (remoteWrap) {
-      if (!q || remoteMatches.length === 0) {
-        remoteWrap.textContent = "";
-      } else {
-        const preview = remoteMatches.slice(0, 20);
-        const totalMore = remoteMatches.length - preview.length;
-        remoteWrap.innerHTML = preview
-          .map((it) => {
-            const safeTitle = (it.title || "(untitled)").replace(/</g, "&lt;");
-            const safeGhsa = (it.ghsa || "").replace(/</g, "&lt;");
-            const safeAuthor = (it.author || "unknown").replace(/</g, "&lt;");
-            const safeSev = (it.severity || "unknown").replace(/</g, "&lt;");
-            const safeHref = it.href || "#";
-            return `<div><a href="${safeHref}">${safeTitle}</a> <span class="color-fg-muted">(${safeGhsa} · ${safeSev} · ${safeAuthor})</span></div>`;
-          })
-          .join("");
-        if (totalMore > 0) {
-          remoteWrap.innerHTML += `<div class="color-fg-muted">...and ${totalMore} more results on other pages</div>`;
-        }
-      }
-    }
   }
 
   function bind(toolbar) {
