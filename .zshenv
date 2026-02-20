@@ -6,6 +6,9 @@ if [[ -n "${CODEX_SANDBOX:-}" ]]; then
   mkdir -p "$FONTCONFIG_CACHE" "$MPLCONFIGDIR" 2>/dev/null || true
 fi
 
+export DISABLE_TELEMETRY=1
+export DO_NOT_TRACK=1
+
 # Load Rust environment if it has been bootstrapped
 if [ -f "$HOME/.cargo/env" ]; then
   . "$HOME/.cargo/env"

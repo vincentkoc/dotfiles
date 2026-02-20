@@ -3,6 +3,9 @@ if [ -f "$HOME/.cargo/env" ]; then
   . "$HOME/.cargo/env"
 fi
 
+export DISABLE_TELEMETRY=1
+export DO_NOT_TRACK=1
+
 # Ensure cache directories are writable in sandboxed/non-interactive environments
 if [ -z "${XDG_CACHE_HOME:-}" ]; then
   if [ -w "$HOME/.cache" ] || mkdir -p "$HOME/.cache" 2>/dev/null; then
