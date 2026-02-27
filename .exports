@@ -35,18 +35,24 @@ path_append() {
 
 # Homebrew
 if [[ $IS_MACOS == true ]]; then
-    if command -v brew >/dev/null 2>&1; then
-        eval "$(brew shellenv)"
-    elif [[ -x /opt/homebrew/bin/brew ]]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
+    if [[ -x /opt/homebrew/bin/brew ]]; then
+        export HOMEBREW_PREFIX="/opt/homebrew"
+        export HOMEBREW_CELLAR="/opt/homebrew/Cellar"
+        export HOMEBREW_REPOSITORY="/opt/homebrew"
+        path_prepend "/opt/homebrew/bin"
+        path_prepend "/opt/homebrew/sbin"
     elif [[ -x /usr/local/bin/brew ]]; then
-        eval "$(/usr/local/bin/brew shellenv)"
+        export HOMEBREW_PREFIX="/usr/local"
+        export HOMEBREW_CELLAR="/usr/local/Cellar"
+        export HOMEBREW_REPOSITORY="/usr/local/Homebrew"
+        path_prepend "/usr/local/bin"
+        path_prepend "/usr/local/sbin"
     elif [[ -z "${DOTFILES_SUPPRESS_BREW_PROMPT:-}" ]]; then
         printf 'Homebrew not detected; install from https://brew.sh for full tooling support\n' >&2
         export DOTFILES_SUPPRESS_BREW_PROMPT=1
     fi
 
-    if command -v brew >/dev/null 2>&1; then
+    if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
         export HOMEBREW_NO_ANALYTICS=1
         export HOMEBREW_NO_INSECURE_REDIRECT=1
         export HOMEBREW_NO_ENV_HINTS=1
@@ -75,9 +81,7 @@ path_append "$HOME/.pub-cache/bin"
 
 # Java
 path_prepend "$HOME/.jenv/bin"
-if command -v jenv >/dev/null 2>&1; then
-    eval "$(jenv init -)"
-fi
+# jenv is lazily initialized in .zshrc to keep shell startup fast.
 
 # Ruby (rbenv)
 path_prepend "$HOME/.rbenv/bin"
@@ -190,8 +194,10 @@ export PYTHONDONTWRITEBYTECODE=1  # Prevent Python from writing .pyc files
 export VIRTUAL_ENV_DISABLE_PROMPT=1  # Custom virtual env prompt handling
 
 # Ruby
-if command -v brew >/dev/null 2>&1 && brew ls --versions openssl@1.1 >/dev/null 2>&1; then
-    export RUBY_CONFIGURE_OPTS="--with-openssl-dir=$(brew --prefix openssl@1.1)"
+if [[ -d /opt/homebrew/opt/openssl@1.1 ]]; then
+    export RUBY_CONFIGURE_OPTS="--with-openssl-dir=/opt/homebrew/opt/openssl@1.1"
+elif [[ -d /usr/local/opt/openssl@1.1 ]]; then
+    export RUBY_CONFIGURE_OPTS="--with-openssl-dir=/usr/local/opt/openssl@1.1"
 fi
 
 #

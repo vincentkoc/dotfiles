@@ -71,6 +71,15 @@ SPACESHIP_CHAR_SUFFIX=" "
 SPACESHIP_PROMPT_SEPARATE_LINE=false
 SPACESHIP_PROMPT_ADD_NEWLINE=true
 SPACESHIP_CLIPBOARD_SHOW=false
+# Keep package section fast by skipping heavyweight managers in prompt rendering.
+SPACESHIP_PACKAGE_ORDER=(npm lerna cargo composer python dart)
+
+# Avoid remote Docker prompt probes on flaky links unless explicitly requested.
+if [[ -n "${DOCKER_HOST:-}" && "$DOCKER_HOST" == tcp://* ]] && [[ -z "${DOTFILES_FORCE_REMOTE_DOCKER_PROMPT:-}" ]]; then
+    SPACESHIP_DOCKER_SHOW=false
+    SPACESHIP_DOCKER_CONTEXT_SHOW=false
+    SPACESHIP_DOCKER_COMPOSE_SHOW=false
+fi
 
 # Right prompt for host only (hide in tmux since tmux shows it)
 if [[ -n "$TMUX" ]]; then
@@ -116,6 +125,17 @@ HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_FOUND="bg=#9ece6a,fg=#1a1b26"
 HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_NOT_FOUND="bg=#f7768e,fg=#1a1b26"
 
 fpath=($ZSH/custom/completions $fpath)
+# Add Homebrew completion paths before OMZ triggers compinit.
+if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
+	[[ -d "$HOMEBREW_PREFIX/share/zsh-completions" ]] && fpath=("$HOMEBREW_PREFIX/share/zsh-completions" $fpath)
+	[[ -d "$HOMEBREW_PREFIX/share/zsh/site-functions" ]] && fpath=("$HOMEBREW_PREFIX/share/zsh/site-functions" $fpath)
+elif [[ -d /opt/homebrew/share/zsh/site-functions ]] || [[ -d /opt/homebrew/share/zsh-completions ]]; then
+	[[ -d /opt/homebrew/share/zsh-completions ]] && fpath=(/opt/homebrew/share/zsh-completions $fpath)
+	[[ -d /opt/homebrew/share/zsh/site-functions ]] && fpath=(/opt/homebrew/share/zsh/site-functions $fpath)
+elif [[ -d /usr/local/share/zsh/site-functions ]] || [[ -d /usr/local/share/zsh-completions ]]; then
+	[[ -d /usr/local/share/zsh-completions ]] && fpath=(/usr/local/share/zsh-completions $fpath)
+	[[ -d /usr/local/share/zsh/site-functions ]] && fpath=(/usr/local/share/zsh/site-functions $fpath)
+fi
 source $ZSH/oh-my-zsh.sh
 
 #
@@ -238,31 +258,6 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 		}
 	fi
 
-	# ZSH Autocomplete
-	if type brew &>/dev/null; then
-		FPATH="$(brew --prefix)/share/zsh-completions:$FPATH"
-		FPATH="$(brew --prefix)/share/zsh/site-functions:$FPATH"
-
-		# Only regenerate completions once per day
-		autoload -Uz compinit
-		zcompdump="${ZDOTDIR:-$HOME}/.zcompdump"
-		if [[ -f "$zcompdump" ]]; then
-			dump_mtime=""
-			if dump_mtime=$(stat -f '%m' "$zcompdump" 2>/dev/null); then
-				:
-			elif dump_mtime=$(stat -c '%Y' "$zcompdump" 2>/dev/null); then
-				:
-			fi
-			if [[ -n "$dump_mtime" && $(( $(date +%s) - dump_mtime )) -lt 86400 ]]; then
-				compinit -C
-			else
-				compinit
-			fi
-		else
-			compinit
-		fi
-	fi
-
 	# Better history search
 	bindkey '^[[A' history-beginning-search-backward
 	bindkey '^[[B' history-beginning-search-forward
@@ -323,7 +318,6 @@ fi
 
 # OpenClaw completion
 if command -v openclaw >/dev/null 2>&1; then
-	source <(openclaw completion --shell zsh)
 fi
 
 if command -v fd >/dev/null 2>&1; then
@@ -380,12 +374,8 @@ if [[ -z "${ZSH_HIGHLIGHTING_SOURCE:-}" ]]; then
         ZSH_HIGHLIGHTING_SOURCE=/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
     elif [[ -f /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
         ZSH_HIGHLIGHTING_SOURCE=/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-    elif command -v brew >/dev/null 2>&1; then
-        _brew_prefix=$(brew --prefix 2>/dev/null || true)
-        if [[ -n "$_brew_prefix" && -f "$_brew_prefix/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
-            ZSH_HIGHLIGHTING_SOURCE="$_brew_prefix/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
-        fi
-        unset _brew_prefix
+    elif [[ -n "${HOMEBREW_PREFIX:-}" ]] && [[ -f "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
+        ZSH_HIGHLIGHTING_SOURCE="$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
     fi
 fi
 [[ -n "$ZSH_HIGHLIGHTING_SOURCE" ]] && source "$ZSH_HIGHLIGHTING_SOURCE" 2>/dev/null || true
@@ -405,3 +395,13 @@ fi
 if command -v direnv >/dev/null 2>&1; then
     eval "$(direnv hook zsh)"
 fi
+
+# bun completions
+[[ -s "$HOME/.bun/_bun" ]] && source "$HOME/.bun/_bun"
+
+# bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+
+# OpenClaw completion
+[[ -r "$HOME/.openclaw/completions/openclaw.zsh" ]] && source "$HOME/.openclaw/completions/openclaw.zsh"
