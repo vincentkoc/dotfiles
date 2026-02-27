@@ -115,6 +115,7 @@ plugins=(
 
 # Performance improvements
 DISABLE_AUTO_UPDATE="true"
+DISABLE_AUTO_TITLE="true"
 COMPLETION_WAITING_DOTS="true"
 
 ZSH_AUTOSUGGEST_USE_ASYNC=1
