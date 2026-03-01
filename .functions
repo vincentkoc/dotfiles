@@ -638,6 +638,43 @@ _gwt_fzf_table() {
     fi | "$sort_bin" -t$'\t' -k1,1nr
 }
 
+_gwt_default_start_point() {
+    local requested="$1"
+    if [[ -n "$requested" ]]; then
+        printf '%s\n' "$requested"
+        return 0
+    fi
+
+    local remote="origin"
+    local remote_head=""
+    if remote_head=$(git symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null); then
+        git fetch --quiet "$remote" "${remote_head#${remote}/}" >/dev/null 2>&1 || true
+        if git show-ref --verify --quiet "refs/remotes/$remote_head"; then
+            printf '%s\n' "$remote_head"
+            return 0
+        fi
+    fi
+
+    if git show-ref --verify --quiet "refs/remotes/$remote/main"; then
+        git fetch --quiet "$remote" main >/dev/null 2>&1 || true
+        printf '%s\n' "$remote/main"
+        return 0
+    fi
+
+    local upstream=""
+    if upstream=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null); then
+        local up_remote="${upstream%%/*}"
+        local up_branch="${upstream#*/}"
+        git fetch --quiet "$up_remote" "$up_branch" >/dev/null 2>&1 || true
+        if git show-ref --verify --quiet "refs/remotes/$upstream"; then
+            printf '%s\n' "$upstream"
+            return 0
+        fi
+    fi
+
+    printf 'HEAD\n'
+}
+
 # gwt: opinionated wrapper around `git worktree`.
 # oh-my-zsh git plugin defines `gwt` alias; remove it so the function can load cleanly.
 unalias gwt 2>/dev/null
@@ -656,7 +693,7 @@ gwt() {
 Usage: gwt <command> [args]
 
 Commands:
-  gwt new <branch> [start-point]   Create/add worktree under ~/.cursor/worktrees
+  gwt new <branch> [start-point]   Create/add worktree under ~/.codex/worktrees
   gwt ls                            List worktrees
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
@@ -665,7 +702,7 @@ Commands:
 EOF
             ;;
         root)
-            printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.cursor/worktrees}"
+            printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             ;;
         ls|list)
             if [[ "$1" == "--raw" ]]; then
@@ -684,7 +721,7 @@ EOF
                 return 1
             fi
 
-            root="${DOTFILES_WORKTREES_ROOT:-$HOME/.cursor/worktrees}"
+            root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             repo_slug=$(_gwt_repo_slug) || return 1
             branch_slug=$(printf '%s' "$branch" | tr '/' '-' | tr -cd '[:alnum:]._-')
             [[ -z "$branch_slug" ]] && branch_slug="$branch"
@@ -702,7 +739,9 @@ EOF
             if git show-ref --verify --quiet "refs/heads/$branch"; then
                 git worktree add "$worktree_path" "$branch" || return 1
             else
-                git worktree add -b "$branch" "$worktree_path" "${start_point:-HEAD}" || return 1
+                local resolved_start_point
+                resolved_start_point=$(_gwt_default_start_point "$start_point") || return 1
+                git worktree add -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
             fi
 
             cd "$worktree_path" || return 1
