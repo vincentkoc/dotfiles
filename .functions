@@ -675,6 +675,61 @@ _gwt_default_start_point() {
     printf 'HEAD\n'
 }
 
+_gwt_resolve_start_point() {
+    local requested="$1"
+    local candidate=""
+    local remote=""
+    local remote_branch=""
+    local seen="|"
+    local -a candidates
+
+    if [[ -z "$requested" ]]; then
+        _gwt_default_start_point ""
+        return $?
+    fi
+
+    candidates=("$requested")
+    if [[ "$requested" != */* && "$requested" != refs/* ]]; then
+        candidates+=("origin/$requested")
+    fi
+
+    case "$requested" in
+        main)
+            candidates+=("master" "origin/main" "origin/master")
+            ;;
+        master)
+            candidates+=("main" "origin/master" "origin/main")
+            ;;
+    esac
+
+    for candidate in "${candidates[@]}"; do
+        [[ -z "$candidate" ]] && continue
+        if [[ "$seen" == *"|$candidate|"* ]]; then
+            continue
+        fi
+        seen="${seen}${candidate}|"
+
+        if [[ "$candidate" == */* && "$candidate" != refs/* ]]; then
+            remote="${candidate%%/*}"
+            remote_branch="${candidate#*/}"
+            if [[ -n "$remote" && -n "$remote_branch" && "$remote" != "$candidate" ]]; then
+                git fetch --quiet "$remote" "$remote_branch" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+            if [[ "$candidate" != "$requested" ]]; then
+                echo "gwt: start-point '$requested' not found, using '$candidate'" >&2
+            fi
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    echo "gwt: start-point '$requested' is not a valid ref or commit" >&2
+    return 1
+}
+
 # gwt: opinionated wrapper around `git worktree`.
 # oh-my-zsh git plugin defines `gwt` alias; remove it so the function can load cleanly.
 unalias gwt 2>/dev/null
@@ -740,7 +795,7 @@ EOF
                 git worktree add "$worktree_path" "$branch" || return 1
             else
                 local resolved_start_point
-                resolved_start_point=$(_gwt_default_start_point "$start_point") || return 1
+                resolved_start_point=$(_gwt_resolve_start_point "$start_point") || return 1
                 git worktree add -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
             fi
 
