@@ -54,6 +54,7 @@ SPACESHIP_DIR_TRUNC=3
 SPACESHIP_DIR_COLOR="cyan"
 SPACESHIP_PACKAGE_SHOW=true
 SPACESHIP_PACKAGE_PREFIX="pkg "
+SPACESHIP_RUBY_SHOW=false
 SPACESHIP_PYTHON_SHOW=true
 SPACESHIP_PYTHON_SYMBOL="py"
 SPACESHIP_NODE_SHOW_VERSION=true
@@ -116,6 +117,7 @@ plugins=(
 # Performance improvements
 DISABLE_AUTO_UPDATE="true"
 DISABLE_AUTO_TITLE="true"
+ZSH_DISABLE_COMPFIX="true"
 COMPLETION_WAITING_DOTS="true"
 
 ZSH_AUTOSUGGEST_USE_ASYNC=1
@@ -126,6 +128,13 @@ HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_FOUND="bg=#9ece6a,fg=#1a1b26"
 HISTORY_SUBSTRING_SEARCH_HIGHLIGHT_NOT_FOUND="bg=#f7768e,fg=#1a1b26"
 
 fpath=($ZSH/custom/completions $fpath)
+# Ensure OMZ cache/completion paths are stable and writable.
+ZSH_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-zsh"
+[[ -d "$ZSH_CACHE_DIR/completions" ]] || mkdir -p "$ZSH_CACHE_DIR/completions" 2>/dev/null
+
+# Avoid invoking docker CLI for completion generation on every startup.
+zstyle ':omz:plugins:docker' legacy-completion yes
+
 # Add Homebrew completion paths before OMZ triggers compinit.
 if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
 	[[ -d "$HOMEBREW_PREFIX/share/zsh-completions" ]] && fpath=("$HOMEBREW_PREFIX/share/zsh-completions" $fpath)
@@ -354,7 +363,7 @@ if [[ -n "${LS_COLORS:-}" ]]; then
 fi
 zstyle ':completion:*:*:kill:*:processes' list-colors '=(#b) #([0-9]#) ([0-9a-z-]#)*=01;34=0=01'
 
-# Load syntax highlighting (should be last)
+# Load syntax highlighting (deferred until after first prompt)
 typeset -gA ZSH_HIGHLIGHT_STYLES
 ZSH_HIGHLIGHT_STYLES[comment]='fg=#565f89'
 ZSH_HIGHLIGHT_STYLES[alias]='fg=#9ece6a'
@@ -364,23 +373,41 @@ ZSH_HIGHLIGHT_STYLES[function]='fg=#bb9af7'
 ZSH_HIGHLIGHT_STYLES[path]='fg=#ff9e64'
 ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=#c0caf5'
 ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=#c0caf5'
-if [[ -z "${ZSH_HIGHLIGHTING_SOURCE:-}" ]]; then
-    # Linux paths (apt/dnf/pacman)
-    if [[ -f /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
-        ZSH_HIGHLIGHTING_SOURCE=/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-    elif [[ -f /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
-        ZSH_HIGHLIGHTING_SOURCE=/usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-    # macOS Homebrew paths
-    elif [[ -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
-        ZSH_HIGHLIGHTING_SOURCE=/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-    elif [[ -f /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
-        ZSH_HIGHLIGHTING_SOURCE=/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-    elif [[ -n "${HOMEBREW_PREFIX:-}" ]] && [[ -f "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
-        ZSH_HIGHLIGHTING_SOURCE="$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+_dotfiles_resolve_zsh_highlighting_source() {
+    if [[ -n "${ZSH_HIGHLIGHTING_SOURCE:-}" ]] && [[ -f "$ZSH_HIGHLIGHTING_SOURCE" ]]; then
+        printf '%s\n' "$ZSH_HIGHLIGHTING_SOURCE"
+        return
     fi
-fi
-[[ -n "$ZSH_HIGHLIGHTING_SOURCE" ]] && source "$ZSH_HIGHLIGHTING_SOURCE" 2>/dev/null || true
-unset ZSH_HIGHLIGHTING_SOURCE
+    if [[ -f /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        printf '%s\n' /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    elif [[ -f /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        printf '%s\n' /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    elif [[ -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        printf '%s\n' /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    elif [[ -f /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+        printf '%s\n' /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+    elif [[ -n "${HOMEBREW_PREFIX:-}" ]] && [[ -f "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
+        printf '%s\n' "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+    fi
+}
+
+_dotfiles_load_zsh_highlighting_deferred() {
+    if [[ -z "${_DOTFILES_HIGHLIGHT_DEFERRED_PROMPT_SEEN:-}" ]]; then
+        typeset -g _DOTFILES_HIGHLIGHT_DEFERRED_PROMPT_SEEN=1
+        return
+    fi
+
+    add-zsh-hook -d precmd _dotfiles_load_zsh_highlighting_deferred
+    local _dotfiles_highlighting_source
+    _dotfiles_highlighting_source="$(_dotfiles_resolve_zsh_highlighting_source)"
+    [[ -n "$_dotfiles_highlighting_source" ]] && source "$_dotfiles_highlighting_source" 2>/dev/null || true
+
+    unset _dotfiles_highlighting_source
+    unset -f _dotfiles_load_zsh_highlighting_deferred _dotfiles_resolve_zsh_highlighting_source
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _dotfiles_load_zsh_highlighting_deferred
 
 if [[ $OSTYPE == 'darwin'* ]] && [[ -d /Applications/screenpipe.app/Contents/MacOS ]]; then
 	export PATH="$PATH:/Applications/screenpipe.app/Contents/MacOS"
