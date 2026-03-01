@@ -6,6 +6,13 @@ if [[ -n "${CODEX_SANDBOX:-}" ]]; then
   mkdir -p "$FONTCONFIG_CACHE" "$MPLCONFIGDIR" 2>/dev/null || true
 fi
 
+# Codex command execution uses non-interactive, non-login shells.
+# Load shared functions so wrappers like `gwt` are available.
+if [[ -n "${CODEX_SHELL:-}" ]] && [[ -z "${DOTFILES_FUNCTIONS_LOADED:-}" ]] && [[ -r ~/.functions ]]; then
+  source ~/.functions
+  DOTFILES_FUNCTIONS_LOADED=1
+fi
+
 export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 
