@@ -188,6 +188,9 @@ else
 fi
 path_prepend "$PNPM_HOME"
 
+# Worktrees (default root used by gwt)
+export DOTFILES_WORKTREES_ROOT="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+
 # Python
 export PYTHONIOENCODING='UTF-8'
 export PYTHONDONTWRITEBYTECODE=1  # Prevent Python from writing .pyc files
