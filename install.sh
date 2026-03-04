@@ -17,6 +17,25 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+run_privileged() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif command -v sudo &>/dev/null; then
+        sudo "$@"
+    else
+        error "This step requires root privileges. Re-run as root or install sudo."
+        return 1
+    fi
+}
+
+dotfiles_dir() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
+    else
+        echo "$HOME/.dotfiles"
+    fi
+}
+
 # Check for Homebrew (macOS)
 check_homebrew() {
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -27,6 +46,116 @@ check_homebrew() {
             info "Install from: https://brew.sh"
         fi
     fi
+}
+
+# Install base dependencies on Linux
+install_linux_dependencies() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        return
+    fi
+
+    if command -v apt-get &>/dev/null; then
+        info "Installing Linux packages via apt..."
+        run_privileged apt-get update
+        run_privileged apt-get install -y zsh git curl locales ca-certificates
+    elif command -v dnf &>/dev/null; then
+        info "Installing Linux packages via dnf..."
+        run_privileged dnf install -y zsh git curl glibc-langpack-en ca-certificates
+    elif command -v yum &>/dev/null; then
+        info "Installing Linux packages via yum..."
+        run_privileged yum install -y zsh git curl glibc-langpack-en ca-certificates
+    elif command -v pacman &>/dev/null; then
+        info "Installing Linux packages via pacman..."
+        run_privileged pacman -Sy --noconfirm zsh git curl ca-certificates
+    elif command -v zypper &>/dev/null; then
+        info "Installing Linux packages via zypper..."
+        run_privileged zypper --non-interactive install zsh git curl glibc-locale ca-certificates
+    elif command -v apk &>/dev/null; then
+        info "Installing Linux packages via apk..."
+        run_privileged apk add --no-cache zsh git curl ca-certificates musl-locales
+    else
+        warn "No supported package manager found. Ensure zsh, git, and curl are installed."
+    fi
+}
+
+ensure_linux_locale() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        return
+    fi
+
+    if locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q '^en_us\.utf-\?8$'; then
+        success "en_US.UTF-8 locale already available"
+        return
+    fi
+
+    info "Configuring en_US.UTF-8 locale..."
+    if [[ -f /etc/locale.gen ]]; then
+        run_privileged sed -i 's/^[#[:space:]]*en_US.UTF-8[[:space:]]\+UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+    fi
+
+    if command -v locale-gen &>/dev/null; then
+        run_privileged locale-gen en_US.UTF-8 || run_privileged locale-gen
+    fi
+
+    if command -v update-locale &>/dev/null; then
+        run_privileged update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 || true
+    fi
+
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+    success "Locale setup completed"
+}
+
+link_dotfile() {
+    local src="$1"
+    local dest="$2"
+    local backup
+
+    if [[ ! -e "$src" ]]; then
+        warn "Missing source file: $src"
+        return
+    fi
+
+    if [[ -L "$dest" ]]; then
+        if [[ "$(readlink "$dest")" == "$src" ]]; then
+            success "$dest already symlinked"
+        else
+            ln -sfn "$src" "$dest"
+            success "Updated symlink: $dest"
+        fi
+        return
+    fi
+
+    if [[ -e "$dest" ]]; then
+        if cmp -s "$src" "$dest"; then
+            rm -f "$dest"
+            ln -s "$src" "$dest"
+            success "Replaced identical file with symlink: $dest"
+            return
+        fi
+
+        backup="${dest}.pre-dotfiles.$(date +%Y%m%d%H%M%S).bak"
+        mv "$dest" "$backup"
+        warn "Existing file backed up: $backup"
+    fi
+
+    ln -s "$src" "$dest"
+    success "Symlinked $dest"
+}
+
+setup_shell_symlinks() {
+    local df_dir
+    df_dir="$(dotfiles_dir)"
+
+    link_dotfile "$df_dir/.aliases" "$HOME/.aliases"
+    link_dotfile "$df_dir/.functions" "$HOME/.functions"
+    link_dotfile "$df_dir/.exports" "$HOME/.exports"
+    link_dotfile "$df_dir/.profile" "$HOME/.profile"
+    link_dotfile "$df_dir/.bashrc" "$HOME/.bashrc"
+    link_dotfile "$df_dir/.bash_profile" "$HOME/.bash_profile"
+    link_dotfile "$df_dir/.zshrc" "$HOME/.zshrc"
+    link_dotfile "$df_dir/.zshenv" "$HOME/.zshenv"
+    link_dotfile "$df_dir/.zprofile" "$HOME/.zprofile"
 }
 
 # Install Oh My Zsh
@@ -136,21 +265,17 @@ install_vim_theme() {
 
 # Setup openclaw symlinks (legacy clawdbot compatibility)
 setup_openclaw_symlinks() {
-    local dotfiles_dir
-    if [[ "$(uname)" == "Darwin" ]]; then
-        dotfiles_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
-    else
-        dotfiles_dir="$HOME/.dotfiles"
-    fi
+    local df_dir
+    df_dir="$(dotfiles_dir)"
 
     # Symlink ~/.openclaw to dotfiles
-    if [[ -d "$dotfiles_dir/.openclaw" ]]; then
+    if [[ -d "$df_dir/.openclaw" ]]; then
         if [[ -L "$HOME/.openclaw" ]]; then
             success "~/.openclaw symlink exists"
         elif [[ -d "$HOME/.openclaw" ]]; then
             warn "~/.openclaw is a directory - skipping (backup and remove manually if needed)"
         else
-            ln -sf "$dotfiles_dir/.openclaw" "$HOME/.openclaw"
+            ln -sf "$df_dir/.openclaw" "$HOME/.openclaw"
             success "~/.openclaw symlinked"
         fi
 
@@ -160,7 +285,7 @@ setup_openclaw_symlinks() {
         elif [[ -d "$HOME/.clawdbot" ]]; then
             warn "~/.clawdbot is a directory - skipping (backup and remove manually if needed)"
         else
-            ln -sf "$dotfiles_dir/.openclaw" "$HOME/.clawdbot"
+            ln -sf "$df_dir/.openclaw" "$HOME/.clawdbot"
             success "~/.clawdbot -> .openclaw legacy symlink created"
         fi
     else
@@ -168,13 +293,13 @@ setup_openclaw_symlinks() {
     fi
 
     # Symlink ~/clawd to dotfiles
-    if [[ -d "$dotfiles_dir/clawd" ]]; then
+    if [[ -d "$df_dir/clawd" ]]; then
         if [[ -L "$HOME/clawd" ]]; then
             success "~/clawd symlink exists"
         elif [[ -d "$HOME/clawd" ]]; then
             warn "~/clawd is a directory - skipping (backup and remove manually if needed)"
         else
-            ln -sf "$dotfiles_dir/clawd" "$HOME/clawd"
+            ln -sf "$df_dir/clawd" "$HOME/clawd"
             success "~/clawd symlinked"
         fi
     fi
@@ -195,6 +320,8 @@ main() {
     info "Installing dependencies..."
     echo ""
 
+    install_linux_dependencies
+    ensure_linux_locale
     install_oh_my_zsh
     install_zsh_plugins
     install_spaceship_theme
@@ -202,12 +329,16 @@ main() {
     install_vim_plug
     install_vim_theme
     install_nvim_plugins
+    setup_shell_symlinks
     setup_openclaw_symlinks
 
     echo ""
     success "Installation complete!"
     echo ""
     info "Restart your shell or run: source ~/.zshrc"
+    if command -v zsh &>/dev/null; then
+        info "To make zsh your default shell: chsh -s $(command -v zsh)"
+    fi
 }
 
 main "$@"
