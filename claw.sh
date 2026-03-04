@@ -59,6 +59,22 @@ ensure_dir() {
     chmod 700 "$d" 2>/dev/null || true
 }
 
+install_autosecure_script_fallback() {
+    local autosecure_tmp="/tmp/autosecure.sh"
+    local autosecure_target="/usr/local/bin/autosecure"
+
+    info "Falling back to script-only autosecure install..."
+    if curl -fsSL -o "$autosecure_tmp" https://raw.githubusercontent.com/vincentkoc/autosecure/master/autosecure.sh; then
+        run_privileged install -m 0755 "$autosecure_tmp" "$autosecure_target"
+        rm -f "$autosecure_tmp"
+        success "autosecure script installed at $autosecure_target"
+        return 0
+    fi
+
+    warn "Failed to download fallback autosecure script"
+    return 1
+}
+
 setup_linux_security_baseline() {
     if [[ "$(uname)" != "Linux" ]]; then
         warn "Security baseline is Linux-only"
@@ -161,10 +177,137 @@ setup_uv() {
     fi
 }
 
+setup_qmd_with_bun() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        warn "QMD bootstrap is currently Linux-only"
+        return
+    fi
+
+    info "Setting up Bun + QMD..."
+    local force_update="${CLAW_FORCE_TOOL_UPDATES:-0}"
+    local agent_id="${CLAW_OPENCLAW_AGENT_ID:-main}"
+    local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
+    local qmd_root="$state_dir/agents/$agent_id/qmd"
+    local qmd_xdg_config="$qmd_root/xdg-config"
+    local qmd_xdg_cache="$qmd_root/xdg-cache"
+    local bun_bin="$HOME/.bun/bin/bun"
+    local qmd_bin="$HOME/.bun/bin/qmd"
+
+    if command -v apt-get &>/dev/null; then
+        run_privileged apt-get update
+        run_privileged apt-get install -y curl ca-certificates unzip sqlite3
+    fi
+
+    if ! command -v bun &>/dev/null && [[ ! -x "$bun_bin" ]]; then
+        if curl -fsSL https://bun.sh/install | bash; then
+            success "Bun installed"
+        else
+            warn "Failed to install Bun"
+            return 1
+        fi
+    else
+        success "Bun already installed"
+    fi
+
+    ensure_path_line 'export BUN_INSTALL="$HOME/.bun"' "$HOME/.bashrc"
+    ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.bashrc"
+    ensure_path_line 'export BUN_INSTALL="$HOME/.bun"' "$HOME/.zshrc"
+    ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.zshrc"
+    ensure_path_line 'export BUN_INSTALL="$HOME/.bun"' "$HOME/.profile"
+    ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.profile"
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+
+    if [[ ! -x "$bun_bin" ]] && ! command -v bun &>/dev/null; then
+        warn "Bun command not found after install"
+        return 1
+    fi
+    if [[ ! -x "$bun_bin" ]]; then
+        bun_bin="$(command -v bun)"
+    fi
+
+    if command -v qmd &>/dev/null && [[ "$force_update" != "1" ]]; then
+        success "qmd already installed ($(qmd --version 2>/dev/null || true))"
+    elif [[ -x "$qmd_bin" ]] && [[ "$force_update" != "1" ]]; then
+        success "qmd already installed ($("$qmd_bin" --version 2>/dev/null || true))"
+    else
+        if "$bun_bin" install -g @tobilu/qmd || "$bun_bin" install -g github:tobi/qmd; then
+            success "qmd installed via bun"
+        else
+            warn "Failed to install qmd via bun"
+            return 1
+        fi
+    fi
+
+    if [[ ! -x "$qmd_bin" ]] && command -v qmd &>/dev/null; then
+        qmd_bin="$(command -v qmd)"
+    fi
+    if [[ ! -x "$qmd_bin" ]]; then
+        local bun_global_bin
+        bun_global_bin="$("$bun_bin" pm bin -g 2>/dev/null || true)"
+        if [[ -n "$bun_global_bin" ]] && [[ -x "$bun_global_bin/qmd" ]]; then
+            qmd_bin="$bun_global_bin/qmd"
+        fi
+    fi
+    if [[ ! -x "$qmd_bin" ]]; then
+        warn "qmd binary not linked by bun; installing wrapper at /usr/local/bin/qmd"
+        local qmd_wrapper="/tmp/qmd-wrapper.$$"
+        cat > "$qmd_wrapper" <<'EOF'
+#!/usr/bin/env bash
+exec "$HOME/.bun/bin/bun" x --bun @tobilu/qmd "$@"
+EOF
+        if run_privileged install -m 0755 "$qmd_wrapper" /usr/local/bin/qmd; then
+            rm -f "$qmd_wrapper"
+            qmd_bin="/usr/local/bin/qmd"
+            success "Installed qmd wrapper at /usr/local/bin/qmd"
+        else
+            rm -f "$qmd_wrapper"
+            warn "Failed to install qmd wrapper"
+            return 1
+        fi
+    fi
+
+    # Make qmd visible to services/non-interactive shells that do not load user PATH.
+    if run_privileged install -m 0755 "$qmd_bin" /usr/local/bin/qmd; then
+        success "Installed qmd shim at /usr/local/bin/qmd"
+    else
+        warn "Could not install /usr/local/bin/qmd shim; keep absolute path in openclaw.json"
+    fi
+
+    ensure_dir "$qmd_xdg_config"
+    ensure_dir "$qmd_xdg_cache"
+    success "QMD cache directories prepared under $qmd_root"
+
+    info "Use this command in openclaw.json if PATH is restricted: \"/usr/local/bin/qmd\""
+    info "QMD cache env:"
+    info "  XDG_CONFIG_HOME=$qmd_xdg_config"
+    info "  XDG_CACHE_HOME=$qmd_xdg_cache"
+
+    if [[ "${CLAW_QMD_PREWARM:-0}" == "1" ]]; then
+        local resolved_qmd="/usr/local/bin/qmd"
+        if [[ ! -x "$resolved_qmd" ]]; then
+            resolved_qmd="$qmd_bin"
+        fi
+        if [[ ! -x "$resolved_qmd" ]] && command -v qmd &>/dev/null; then
+            resolved_qmd="$(command -v qmd)"
+        fi
+        if [[ -x "$resolved_qmd" ]]; then
+            XDG_CONFIG_HOME="$qmd_xdg_config" XDG_CACHE_HOME="$qmd_xdg_cache" "$resolved_qmd" update || warn "qmd update failed during prewarm"
+            XDG_CONFIG_HOME="$qmd_xdg_config" XDG_CACHE_HOME="$qmd_xdg_cache" "$resolved_qmd" embed || warn "qmd embed failed during prewarm"
+            XDG_CONFIG_HOME="$qmd_xdg_config" XDG_CACHE_HOME="$qmd_xdg_cache" "$resolved_qmd" query "test" -c memory-root --json >/dev/null 2>&1 || warn "qmd query prewarm failed"
+            success "QMD prewarm attempted"
+        else
+            warn "Cannot prewarm qmd: binary not found"
+        fi
+    else
+        info "Skipping qmd prewarm (set CLAW_QMD_PREWARM=1 to enable)"
+    fi
+}
+
 linux_release_arch_candidates() {
     case "$(uname -m)" in
         x86_64|amd64)
-            printf '%s\n' x86_64 amd64
+            printf '%s\n' amd64 x86_64
             ;;
         aarch64|arm64)
             printf '%s\n' arm64 aarch64
@@ -178,6 +321,7 @@ linux_release_arch_candidates() {
 install_github_release_tarball_binary() {
     local repo="$1"
     local bin_name="$2"
+    local asset_prefix="${3:-$2}"
     local force_update="${CLAW_FORCE_TOOL_UPDATES:-0}"
 
     if command -v "$bin_name" &>/dev/null && [[ "$force_update" != "1" ]]; then
@@ -191,10 +335,17 @@ install_github_release_tarball_binary() {
     local downloaded=0
     local arch=""
     local url=""
+    local release_json=""
+
+    if ! release_json="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest")"; then
+        rm -rf "$tmpdir"
+        warn "Failed to fetch latest release metadata for $repo"
+        return 1
+    fi
 
     while IFS= read -r arch; do
-        url="https://github.com/${repo}/releases/latest/download/${bin_name}_Linux_${arch}.tar.gz"
-        if curl -fsSL "$url" -o "$archive"; then
+        url="$(printf '%s' "$release_json" | jq -r --arg prefix "${asset_prefix}_" --arg suffix "_linux_${arch}.tar.gz" '.assets[]?.browser_download_url | select(test("/" + $prefix)) | select(endswith($suffix))' | head -n 1)"
+        if [[ -n "$url" ]] && curl -fsSL "$url" -o "$archive"; then
             downloaded=1
             break
         fi
@@ -202,7 +353,7 @@ install_github_release_tarball_binary() {
 
     if [[ "$downloaded" -ne 1 ]]; then
         rm -rf "$tmpdir"
-        warn "Failed to download $bin_name from $repo releases"
+        warn "Failed to download $bin_name from $repo releases (linux asset not found)"
         return 1
     fi
 
@@ -225,6 +376,35 @@ install_github_release_tarball_binary() {
     success "$bin_name installed from $repo"
 }
 
+setup_wacli_linux() {
+    local force_update="${CLAW_FORCE_TOOL_UPDATES:-0}"
+
+    if command -v wacli &>/dev/null && [[ "$force_update" != "1" ]]; then
+        success "wacli already installed"
+        return 0
+    fi
+
+    if command -v go &>/dev/null; then
+        local version="${CLAW_WACLI_VERSION:-latest}"
+        if go install "github.com/steipete/wacli/cmd/wacli@${version}"; then
+            local gopath
+            gopath="$(go env GOPATH 2>/dev/null || true)"
+            if [[ -z "$gopath" ]]; then
+                gopath="$HOME/go"
+            fi
+            local built_bin="$gopath/bin/wacli"
+            if [[ -x "$built_bin" ]]; then
+                run_privileged install -m 0755 "$built_bin" /usr/local/bin/wacli
+                success "wacli installed via go toolchain"
+                return 0
+            fi
+        fi
+    fi
+
+    warn "wacli Linux binary not available in releases and go fallback failed"
+    return 1
+}
+
 setup_linux_tooling() {
     if [[ "$(uname)" != "Linux" ]]; then
         warn "Tooling bootstrap is Linux-only"
@@ -235,7 +415,7 @@ setup_linux_tooling() {
 
     if command -v apt-get &>/dev/null; then
         run_privileged apt-get update
-        run_privileged apt-get install -y curl ca-certificates git jq golang-go python3 python3-venv gh
+        run_privileged apt-get install -y curl ca-certificates git jq golang-go python3 python3-venv gh unzip sqlite3
         success "Base Linux tooling packages installed"
     else
         warn "apt-get not found; skipping apt package installs"
@@ -270,15 +450,18 @@ setup_linux_tooling() {
         warn "go not found; skipping go tool installs"
     fi
 
-    install_github_release_tarball_binary "steipete/gog" "gog" || true
-    install_github_release_tarball_binary "steipete/goplaces" "goplaces" || true
-    install_github_release_tarball_binary "steipete/wacli" "wacli" || true
+    install_github_release_tarball_binary "steipete/gogcli" "gog" "gogcli" || true
+    install_github_release_tarball_binary "steipete/goplaces" "goplaces" "goplaces" || true
+    setup_wacli_linux || true
+    setup_qmd_with_bun || true
 
     success "Linux tooling bootstrap completed"
 }
 
 setup_tailscale() {
     info "Setting up Tailscale..."
+    local run_tailscale_up="${CLAW_TAILSCALE_RUN_UP:-0}"
+    local tailscale_up_args="${CLAW_TAILSCALE_UP_ARGS:---ssh}"
 
     if [[ "$(uname)" != "Linux" ]]; then
         warn "Tailscale bootstrap is currently Linux-only"
@@ -286,7 +469,7 @@ setup_tailscale() {
     fi
 
     if ! command -v tailscale &>/dev/null; then
-        if curl -fsSL https://tailscale.com/install.sh | run_privileged sh; then
+        if curl -fsSL https://tailscale.com/install.sh | run_privileged sh >/dev/null 2>&1; then
             success "Tailscale installed"
         else
             warn "Tailscale installation failed"
@@ -300,15 +483,20 @@ setup_tailscale() {
         run_privileged systemctl enable --now tailscaled >/dev/null 2>&1 || warn "Failed to enable/start tailscaled service"
     fi
 
-    if run_privileged tailscale up --ssh; then
-        success "tailscale up --ssh completed"
-    else
-        warn "tailscale up --ssh did not complete. You may need to re-run and authenticate."
-    fi
+    if [[ "$run_tailscale_up" == "1" ]]; then
+        if run_privileged tailscale up $tailscale_up_args; then
+            success "tailscale up $tailscale_up_args completed"
+        else
+            warn "tailscale up $tailscale_up_args did not complete. You may need to re-run and authenticate."
+        fi
 
-    if command -v tailscale &>/dev/null; then
-        info "Current Tailscale IPv4:"
-        run_privileged tailscale ip -4 || warn "Unable to read Tailscale IPv4"
+        if command -v tailscale &>/dev/null; then
+            info "Current Tailscale IPv4:"
+            run_privileged tailscale ip -4 || warn "Unable to read Tailscale IPv4"
+        fi
+    else
+        info "Skipping tailscale up (set CLAW_TAILSCALE_RUN_UP=1 to run during setup)"
+        info "Manual steps: tailscale up --ssh && tailscale ip -4"
     fi
 }
 
@@ -334,40 +522,60 @@ setup_autosecure() {
         if command -v apt-get &>/dev/null; then
             local setup_deb="/tmp/autosecure-setup.deb.sh"
             if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.deb.sh' -o "$setup_deb"; then
-                run_privileged bash "$setup_deb"
+                run_privileged bash "$setup_deb" || true
                 run_privileged apt-get update
-                run_privileged apt-get install -y autosecure
                 rm -f "$setup_deb"
-                success "autosecure installed via apt"
+
+                if apt-cache show autosecure &>/dev/null; then
+                    if run_privileged apt-get install -y autosecure; then
+                        success "autosecure installed via apt"
+                    else
+                        warn "apt install autosecure failed"
+                        install_autosecure_script_fallback || return
+                    fi
+                else
+                    warn "autosecure package not available via apt on this distro/repo"
+                    install_autosecure_script_fallback || return
+                fi
             else
                 warn "Failed to download autosecure Debian repo setup script"
-                return
+                install_autosecure_script_fallback || return
             fi
         elif command -v dnf &>/dev/null; then
             local setup_rpm="/tmp/autosecure-setup.rpm.sh"
             if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
-                run_privileged bash "$setup_rpm"
-                run_privileged dnf install -y autosecure
+                run_privileged bash "$setup_rpm" || true
                 rm -f "$setup_rpm"
-                success "autosecure installed via dnf"
+
+                if run_privileged dnf install -y autosecure; then
+                    success "autosecure installed via dnf"
+                else
+                    warn "dnf install autosecure failed"
+                    install_autosecure_script_fallback || return
+                fi
             else
                 warn "Failed to download autosecure RPM repo setup script"
-                return
+                install_autosecure_script_fallback || return
             fi
         elif command -v yum &>/dev/null; then
             local setup_rpm="/tmp/autosecure-setup.rpm.sh"
             if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
-                run_privileged bash "$setup_rpm"
-                run_privileged yum install -y autosecure
+                run_privileged bash "$setup_rpm" || true
                 rm -f "$setup_rpm"
-                success "autosecure installed via yum"
+
+                if run_privileged yum install -y autosecure; then
+                    success "autosecure installed via yum"
+                else
+                    warn "yum install autosecure failed"
+                    install_autosecure_script_fallback || return
+                fi
             else
                 warn "Failed to download autosecure RPM repo setup script"
-                return
+                install_autosecure_script_fallback || return
             fi
         else
             warn "No supported package manager found for autosecure setup"
-            return
+            install_autosecure_script_fallback || return
         fi
     else
         warn "Unsupported OS for autosecure setup: $(uname)"
@@ -481,6 +689,13 @@ mark_openclaw_nosync() {
 # Setup config directory symlinks
 setup_config_symlinks() {
     info "Setting up config symlinks..."
+
+    if [[ "$(uname)" != "Darwin" ]]; then
+        info "Skipping OpenClaw dotfile symlinks on non-macOS"
+        return
+    fi
+
+    ensure_dir "$DOTFILES_DIR/.openclaw"
 
     # ~/.openclaw -> dotfiles/.openclaw
     if [[ -d "$DOTFILES_DIR/.openclaw" ]]; then
@@ -702,8 +917,9 @@ Commands:
   setup                    Set up symlinks, Linux baseline, Linux tooling, Node/pnpm, Tailscale, node_modules, and autosecure
   setup-linux-security     Update system + install ufw/fail2ban/unattended-upgrades (apt-based Linux)
   setup-linux-tooling      Install Linux CLI tooling (uv, npm/go tools, gog/goplaces/wacli)
+  setup-qmd               Install Bun + qmd and prepare OpenClaw qmd cache dirs
   setup-node-pnpm          Install/update Node.js and pnpm
-  setup-tailscale          Install/update Tailscale, run tailscale up --ssh, and print IPv4
+  setup-tailscale          Install/update Tailscale (set CLAW_TAILSCALE_RUN_UP=1 to auto-auth)
   setup-autosecure         Install/update autosecure and run an initial refresh
   move-state-off-icloud    Migrate cron+memory state to local disk + symlink back
   mark-nosync              Rename selected paths to *.nosync (no iCloud sync)
@@ -749,6 +965,9 @@ main() {
             ;;
         setup-linux-tooling)
             setup_linux_tooling
+            ;;
+        setup-qmd)
+            setup_qmd_with_bun
             ;;
         setup-node-pnpm)
             setup_node_pnpm

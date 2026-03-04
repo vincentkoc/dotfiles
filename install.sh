@@ -395,6 +395,11 @@ install_vim_theme() {
 
 # Setup openclaw symlinks (legacy clawdbot compatibility)
 setup_openclaw_symlinks() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        info "Skipping OpenClaw dotfile symlinks on non-macOS"
+        return
+    fi
+
     local df_dir
     df_dir="$(dotfiles_dir)"
 
