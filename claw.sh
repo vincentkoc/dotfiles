@@ -379,6 +379,12 @@ mark_openclaw_nosync() {
 # Setup config directory symlinks
 setup_config_symlinks() {
     info "Setting up config symlinks..."
+
+    if [[ "$(uname)" != "Darwin" ]]; then
+        info "Skipping OpenClaw dotfile symlinks on non-macOS"
+        return
+    fi
+
     ensure_dir "$DOTFILES_DIR/.openclaw"
 
     # ~/.openclaw -> dotfiles/.openclaw
