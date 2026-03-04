@@ -213,6 +213,8 @@ setup_qmd_with_bun() {
     ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.bashrc"
     ensure_path_line 'export BUN_INSTALL="$HOME/.bun"' "$HOME/.zshrc"
     ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.zshrc"
+    ensure_path_line 'export BUN_INSTALL="$HOME/.bun"' "$HOME/.profile"
+    ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.profile"
     export BUN_INSTALL="$HOME/.bun"
     export PATH="$BUN_INSTALL/bin:$PATH"
 
@@ -237,17 +239,35 @@ setup_qmd_with_bun() {
         fi
     fi
 
+    if [[ ! -x "$qmd_bin" ]] && command -v qmd &>/dev/null; then
+        qmd_bin="$(command -v qmd)"
+    fi
+    if [[ ! -x "$qmd_bin" ]]; then
+        warn "qmd binary not found at expected path ($HOME/.bun/bin/qmd)"
+        return 1
+    fi
+
+    # Make qmd visible to services/non-interactive shells that do not load user PATH.
+    if run_privileged install -m 0755 "$qmd_bin" /usr/local/bin/qmd; then
+        success "Installed qmd shim at /usr/local/bin/qmd"
+    else
+        warn "Could not install /usr/local/bin/qmd shim; keep absolute path in openclaw.json"
+    fi
+
     ensure_dir "$qmd_xdg_config"
     ensure_dir "$qmd_xdg_cache"
     success "QMD cache directories prepared under $qmd_root"
 
-    info "Use this command in openclaw.json if PATH is restricted: \"$qmd_bin\""
+    info "Use this command in openclaw.json if PATH is restricted: \"/usr/local/bin/qmd\""
     info "QMD cache env:"
     info "  XDG_CONFIG_HOME=$qmd_xdg_config"
     info "  XDG_CACHE_HOME=$qmd_xdg_cache"
 
     if [[ "${CLAW_QMD_PREWARM:-0}" == "1" ]]; then
-        local resolved_qmd="$qmd_bin"
+        local resolved_qmd="/usr/local/bin/qmd"
+        if [[ ! -x "$resolved_qmd" ]]; then
+            resolved_qmd="$qmd_bin"
+        fi
         if [[ ! -x "$resolved_qmd" ]] && command -v qmd &>/dev/null; then
             resolved_qmd="$(command -v qmd)"
         fi
