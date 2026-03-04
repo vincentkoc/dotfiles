@@ -5,8 +5,16 @@ Personal dotfiles managed with [Mackup](https://github.com/lra/mackup).
 ## Install
 
 ```bash
-./install.sh      # Install dependencies
-mackup restore    # Symlink configs
+git clone https://github.com/vincentkoc/dotfiles.git ~/.dotfiles
+~/.dotfiles/install.sh
+```
+
+The installer bootstraps dependencies and links core shell dotfiles.
+
+Optional: restore additional app configs managed via Mackup.
+
+```bash
+mackup restore
 ```
 
 > For full macOS setup (apps, system prefs, Homebrew), see [natilius](https://github.com/vincentkoc/natilius).

@@ -31,7 +31,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
             alias ll='eza -lha --git --icons --no-user'
         fi
     else
-        alias ls='ls -FGh'
+        alias ls='ls -AFGh'
         alias ll='ls -FGgoAhp'
     fi
 
@@ -78,7 +78,7 @@ else
             alias ll='eza -lha --git --icons --no-user'
         fi
     else
-        alias ls='ls --color=auto -Fh'
+        alias ls='ls --color=auto -AFh'
         alias ll='ls --color=auto -FgoAhp'
     fi
 

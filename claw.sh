@@ -18,6 +18,17 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+run_privileged() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif command -v sudo &>/dev/null; then
+        sudo "$@"
+    else
+        error "This step requires root privileges. Re-run as root or install sudo."
+        return 1
+    fi
+}
+
 # Detect dotfiles location
 if [[ "$(uname)" == "Darwin" ]]; then
     DOTFILES_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
@@ -38,31 +49,192 @@ ensure_dir() {
     chmod 700 "$d" 2>/dev/null || true
 }
 
-ensure_node_tooling() {
-    info "Checking Node.js tooling (node/corepack/pnpm)..."
-
-    if ! command -v node >/dev/null 2>&1; then
-        error "node not found. Install Node.js (nodenv/nvm/homebrew)."
-        return 1
+setup_linux_security_baseline() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        warn "Security baseline is Linux-only"
+        return
     fi
 
-    if ! command -v corepack >/dev/null 2>&1; then
+    if ! command -v apt-get &>/dev/null; then
+        warn "Security baseline currently supports apt-based distros only"
+        return
+    fi
+
+    info "Setting up Linux security baseline (ufw/fail2ban/unattended-upgrades)..."
+    run_privileged apt-get update
+    run_privileged apt-get upgrade -y
+    run_privileged apt-get install -y ufw fail2ban unattended-upgrades
+
+    if command -v dpkg-reconfigure &>/dev/null; then
+        if run_privileged env DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive unattended-upgrades; then
+            success "unattended-upgrades configured"
+        else
+            warn "Non-interactive unattended-upgrades configure failed; try: dpkg-reconfigure -plow unattended-upgrades"
+        fi
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        run_privileged systemctl enable --now fail2ban >/dev/null 2>&1 || warn "Failed to enable/start fail2ban service"
+    fi
+
+    info "ufw installed. Configure SSH allow rules before enabling firewall."
+    success "Linux security baseline completed"
+}
+
+setup_node_pnpm() {
+    info "Setting up Node.js and pnpm..."
+
+    if ! command -v node &>/dev/null; then
+        if [[ "$(uname)" == "Linux" ]] && command -v apt-get &>/dev/null; then
+            run_privileged apt-get update
+            run_privileged apt-get install -y ca-certificates curl gnupg
+
+            local nodesource_setup="/tmp/nodesource-setup.sh"
+            if curl -fsSL https://deb.nodesource.com/setup_lts.x -o "$nodesource_setup"; then
+                run_privileged bash "$nodesource_setup"
+                run_privileged apt-get install -y nodejs
+                rm -f "$nodesource_setup"
+                success "Node.js installed via NodeSource"
+            else
+                warn "Failed to fetch NodeSource setup script"
+            fi
+        elif [[ "$(uname)" == "Darwin" ]] && command -v brew &>/dev/null; then
+            brew install node >/dev/null 2>&1 || brew upgrade node >/dev/null 2>&1 || warn "Failed to install Node.js with Homebrew"
+        else
+            warn "No supported automated Node.js install path found"
+        fi
+    else
+        success "Node.js already installed ($(node -v 2>/dev/null || true))"
+    fi
+
+    if ! command -v corepack &>/dev/null; then
         error "corepack not found. Update Node.js to a version that includes corepack."
         return 1
     fi
 
-    if ! command -v pnpm >/dev/null 2>&1; then
-        info "pnpm not found. Enabling corepack and activating pnpm..."
-        corepack enable >/dev/null 2>&1 || true
-        corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true
+    if command -v pnpm &>/dev/null; then
+        success "pnpm already installed ($(pnpm -v 2>/dev/null || true))"
+        return
     fi
 
-    if ! command -v pnpm >/dev/null 2>&1; then
-        error "pnpm not available. Install with: corepack prepare pnpm@latest --activate"
-        return 1
+    if command -v corepack &>/dev/null; then
+        run_privileged corepack enable >/dev/null 2>&1 || true
+        if run_privileged corepack prepare pnpm@latest --activate >/dev/null 2>&1; then
+            success "pnpm installed via corepack"
+            return
+        fi
     fi
 
-    success "Node tooling ready."
+    if command -v npm &>/dev/null; then
+        run_privileged npm install -g pnpm >/dev/null 2>&1 && success "pnpm installed via npm" || warn "Failed to install pnpm via npm"
+    else
+        warn "npm not found; skipping pnpm install"
+    fi
+}
+
+setup_tailscale() {
+    info "Setting up Tailscale..."
+
+    if [[ "$(uname)" != "Linux" ]]; then
+        warn "Tailscale bootstrap is currently Linux-only"
+        return
+    fi
+
+    if ! command -v tailscale &>/dev/null; then
+        if curl -fsSL https://tailscale.com/install.sh | run_privileged sh; then
+            success "Tailscale installed"
+        else
+            warn "Tailscale installation failed"
+            return
+        fi
+    else
+        success "Tailscale already installed"
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        run_privileged systemctl enable --now tailscaled >/dev/null 2>&1 || warn "Failed to enable/start tailscaled service"
+    fi
+
+    if run_privileged tailscale up --ssh; then
+        success "tailscale up --ssh completed"
+    else
+        warn "tailscale up --ssh did not complete. You may need to re-run and authenticate."
+    fi
+
+    if command -v tailscale &>/dev/null; then
+        info "Current Tailscale IPv4:"
+        run_privileged tailscale ip -4 || warn "Unable to read Tailscale IPv4"
+    fi
+}
+
+setup_autosecure() {
+    info "Setting up autosecure..."
+
+    if command -v autosecure &>/dev/null; then
+        success "autosecure already installed"
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &>/dev/null; then
+            brew tap vincentkoc/homebrew-tap >/dev/null 2>&1 || true
+            if brew install autosecure >/dev/null 2>&1 || brew upgrade autosecure >/dev/null 2>&1; then
+                success "autosecure installed via Homebrew"
+            else
+                warn "Failed to install autosecure via Homebrew"
+                return
+            fi
+        else
+            warn "Homebrew not found - skipping autosecure install on macOS"
+            return
+        fi
+    elif [[ "$(uname)" == "Linux" ]]; then
+        if command -v apt-get &>/dev/null; then
+            local setup_deb="/tmp/autosecure-setup.deb.sh"
+            if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.deb.sh' -o "$setup_deb"; then
+                run_privileged bash "$setup_deb"
+                run_privileged apt-get update
+                run_privileged apt-get install -y autosecure
+                rm -f "$setup_deb"
+                success "autosecure installed via apt"
+            else
+                warn "Failed to download autosecure Debian repo setup script"
+                return
+            fi
+        elif command -v dnf &>/dev/null; then
+            local setup_rpm="/tmp/autosecure-setup.rpm.sh"
+            if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
+                run_privileged bash "$setup_rpm"
+                run_privileged dnf install -y autosecure
+                rm -f "$setup_rpm"
+                success "autosecure installed via dnf"
+            else
+                warn "Failed to download autosecure RPM repo setup script"
+                return
+            fi
+        elif command -v yum &>/dev/null; then
+            local setup_rpm="/tmp/autosecure-setup.rpm.sh"
+            if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
+                run_privileged bash "$setup_rpm"
+                run_privileged yum install -y autosecure
+                rm -f "$setup_rpm"
+                success "autosecure installed via yum"
+            else
+                warn "Failed to download autosecure RPM repo setup script"
+                return
+            fi
+        else
+            warn "No supported package manager found for autosecure setup"
+            return
+        fi
+    else
+        warn "Unsupported OS for autosecure setup: $(uname)"
+        return
+    fi
+
+    if command -v autosecure &>/dev/null; then
+        run_privileged autosecure -q || warn "autosecure ran with warnings"
+        success "autosecure bootstrap completed"
+    else
+        warn "autosecure command not found after setup"
+    fi
 }
 
 # iCloud Drive: mark a path as "do not sync" by renaming to *.nosync
@@ -382,7 +554,11 @@ usage() {
 Usage: ./claw.sh <command>
 
 Commands:
-  setup                    Set up symlinks (config + node_modules)
+  setup                    Set up symlinks, Linux baseline, Node/pnpm, Tailscale, node_modules, and autosecure
+  setup-linux-security     Update system + install ufw/fail2ban/unattended-upgrades (apt-based Linux)
+  setup-node-pnpm          Install/update Node.js and pnpm
+  setup-tailscale          Install/update Tailscale, run tailscale up --ssh, and print IPv4
+  setup-autosecure         Install/update autosecure and run an initial refresh
   move-state-off-icloud    Migrate cron+memory state to local disk + symlink back
   mark-nosync              Rename selected paths to *.nosync (no iCloud sync)
   backup-state-now         Run one backup immediately
@@ -410,9 +586,27 @@ main() {
         setup)
             setup_config_symlinks
             echo ""
-            ensure_node_tooling
+            setup_linux_security_baseline
+            echo ""
+            setup_node_pnpm
+            echo ""
+            setup_tailscale
             echo ""
             setup_node_modules_symlink
+            echo ""
+            setup_autosecure
+            ;;
+        setup-linux-security)
+            setup_linux_security_baseline
+            ;;
+        setup-node-pnpm)
+            setup_node_pnpm
+            ;;
+        setup-tailscale)
+            setup_tailscale
+            ;;
+        setup-autosecure)
+            setup_autosecure
             ;;
         move-state-off-icloud)
             move_state_off_icloud
