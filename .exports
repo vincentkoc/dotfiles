@@ -180,6 +180,10 @@ export NPM_CONFIG_FUND=false
 path_prepend "$HOME/.nodenv/bin"
 path_prepend "$HOME/.nodenv/shims"
 
+# Bun
+export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+path_prepend "$BUN_INSTALL/bin"
+
 # pnpm
 if [[ $IS_MACOS == true ]]; then
     export PNPM_HOME="$HOME/Library/pnpm"
@@ -253,7 +257,7 @@ if [[ $IS_MACOS == true ]] && [[ -d /Applications/Cursor.app/Contents/MacOS ]]; 
 fi
 
 # Go
-export GOPATH=$HOME/go
+export GOPATH="${GOPATH:-$HOME/go}"
 path_append "$GOPATH/bin"
 
 # Java
