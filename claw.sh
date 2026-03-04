@@ -177,6 +177,93 @@ setup_uv() {
     fi
 }
 
+setup_qmd_with_bun() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        warn "QMD bootstrap is currently Linux-only"
+        return
+    fi
+
+    info "Setting up Bun + QMD..."
+    local force_update="${CLAW_FORCE_TOOL_UPDATES:-0}"
+    local agent_id="${CLAW_OPENCLAW_AGENT_ID:-main}"
+    local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
+    local qmd_root="$state_dir/agents/$agent_id/qmd"
+    local qmd_xdg_config="$qmd_root/xdg-config"
+    local qmd_xdg_cache="$qmd_root/xdg-cache"
+    local bun_bin="$HOME/.bun/bin/bun"
+    local qmd_bin="$HOME/.bun/bin/qmd"
+
+    if command -v apt-get &>/dev/null; then
+        run_privileged apt-get update
+        run_privileged apt-get install -y curl ca-certificates unzip sqlite3
+    fi
+
+    if ! command -v bun &>/dev/null && [[ ! -x "$bun_bin" ]]; then
+        if curl -fsSL https://bun.sh/install | bash; then
+            success "Bun installed"
+        else
+            warn "Failed to install Bun"
+            return 1
+        fi
+    else
+        success "Bun already installed"
+    fi
+
+    ensure_path_line 'export BUN_INSTALL="$HOME/.bun"' "$HOME/.bashrc"
+    ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.bashrc"
+    ensure_path_line 'export BUN_INSTALL="$HOME/.bun"' "$HOME/.zshrc"
+    ensure_path_line 'export PATH="$BUN_INSTALL/bin:$PATH"' "$HOME/.zshrc"
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+
+    if [[ ! -x "$bun_bin" ]] && ! command -v bun &>/dev/null; then
+        warn "Bun command not found after install"
+        return 1
+    fi
+    if [[ ! -x "$bun_bin" ]]; then
+        bun_bin="$(command -v bun)"
+    fi
+
+    if command -v qmd &>/dev/null && [[ "$force_update" != "1" ]]; then
+        success "qmd already installed ($(qmd --version 2>/dev/null || true))"
+    elif [[ -x "$qmd_bin" ]] && [[ "$force_update" != "1" ]]; then
+        success "qmd already installed ($("$qmd_bin" --version 2>/dev/null || true))"
+    else
+        if "$bun_bin" install -g github:tobi/qmd; then
+            success "qmd installed via bun"
+        else
+            warn "Failed to install qmd via bun"
+            return 1
+        fi
+    fi
+
+    ensure_dir "$qmd_xdg_config"
+    ensure_dir "$qmd_xdg_cache"
+    success "QMD cache directories prepared under $qmd_root"
+
+    info "Use this command in openclaw.json if PATH is restricted: \"$qmd_bin\""
+    info "QMD cache env:"
+    info "  XDG_CONFIG_HOME=$qmd_xdg_config"
+    info "  XDG_CACHE_HOME=$qmd_xdg_cache"
+
+    if [[ "${CLAW_QMD_PREWARM:-0}" == "1" ]]; then
+        local resolved_qmd="$qmd_bin"
+        if [[ ! -x "$resolved_qmd" ]] && command -v qmd &>/dev/null; then
+            resolved_qmd="$(command -v qmd)"
+        fi
+        if [[ -x "$resolved_qmd" ]]; then
+            XDG_CONFIG_HOME="$qmd_xdg_config" XDG_CACHE_HOME="$qmd_xdg_cache" "$resolved_qmd" update || warn "qmd update failed during prewarm"
+            XDG_CONFIG_HOME="$qmd_xdg_config" XDG_CACHE_HOME="$qmd_xdg_cache" "$resolved_qmd" embed || warn "qmd embed failed during prewarm"
+            XDG_CONFIG_HOME="$qmd_xdg_config" XDG_CACHE_HOME="$qmd_xdg_cache" "$resolved_qmd" query "test" -c memory-root --json >/dev/null 2>&1 || warn "qmd query prewarm failed"
+            success "QMD prewarm attempted"
+        else
+            warn "Cannot prewarm qmd: binary not found"
+        fi
+    else
+        info "Skipping qmd prewarm (set CLAW_QMD_PREWARM=1 to enable)"
+    fi
+}
+
 linux_release_arch_candidates() {
     case "$(uname -m)" in
         x86_64|amd64)
@@ -288,7 +375,7 @@ setup_linux_tooling() {
 
     if command -v apt-get &>/dev/null; then
         run_privileged apt-get update
-        run_privileged apt-get install -y curl ca-certificates git jq golang-go python3 python3-venv gh
+        run_privileged apt-get install -y curl ca-certificates git jq golang-go python3 python3-venv gh unzip sqlite3
         success "Base Linux tooling packages installed"
     else
         warn "apt-get not found; skipping apt package installs"
@@ -326,6 +413,7 @@ setup_linux_tooling() {
     install_github_release_tarball_binary "steipete/gogcli" "gog" "gogcli" || true
     install_github_release_tarball_binary "steipete/goplaces" "goplaces" "goplaces" || true
     setup_wacli_linux || true
+    setup_qmd_with_bun || true
 
     success "Linux tooling bootstrap completed"
 }
@@ -789,6 +877,7 @@ Commands:
   setup                    Set up symlinks, Linux baseline, Linux tooling, Node/pnpm, Tailscale, node_modules, and autosecure
   setup-linux-security     Update system + install ufw/fail2ban/unattended-upgrades (apt-based Linux)
   setup-linux-tooling      Install Linux CLI tooling (uv, npm/go tools, gog/goplaces/wacli)
+  setup-qmd               Install Bun + qmd and prepare OpenClaw qmd cache dirs
   setup-node-pnpm          Install/update Node.js and pnpm
   setup-tailscale          Install/update Tailscale (set CLAW_TAILSCALE_RUN_UP=1 to auto-auth)
   setup-autosecure         Install/update autosecure and run an initial refresh
@@ -836,6 +925,9 @@ main() {
             ;;
         setup-linux-tooling)
             setup_linux_tooling
+            ;;
+        setup-qmd)
+            setup_qmd_with_bun
             ;;
         setup-node-pnpm)
             setup_node_pnpm
