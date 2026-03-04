@@ -180,7 +180,7 @@ setup_uv() {
 linux_release_arch_candidates() {
     case "$(uname -m)" in
         x86_64|amd64)
-            printf '%s\n' x86_64 amd64
+            printf '%s\n' amd64 x86_64
             ;;
         aarch64|arm64)
             printf '%s\n' arm64 aarch64
@@ -194,6 +194,7 @@ linux_release_arch_candidates() {
 install_github_release_tarball_binary() {
     local repo="$1"
     local bin_name="$2"
+    local asset_prefix="${3:-$2}"
     local force_update="${CLAW_FORCE_TOOL_UPDATES:-0}"
 
     if command -v "$bin_name" &>/dev/null && [[ "$force_update" != "1" ]]; then
@@ -207,10 +208,17 @@ install_github_release_tarball_binary() {
     local downloaded=0
     local arch=""
     local url=""
+    local release_json=""
+
+    if ! release_json="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest")"; then
+        rm -rf "$tmpdir"
+        warn "Failed to fetch latest release metadata for $repo"
+        return 1
+    fi
 
     while IFS= read -r arch; do
-        url="https://github.com/${repo}/releases/latest/download/${bin_name}_Linux_${arch}.tar.gz"
-        if curl -fsSL "$url" -o "$archive"; then
+        url="$(printf '%s' "$release_json" | jq -r --arg prefix "${asset_prefix}_" --arg suffix "_linux_${arch}.tar.gz" '.assets[]?.browser_download_url | select(test("/" + $prefix)) | select(endswith($suffix))' | head -n 1)"
+        if [[ -n "$url" ]] && curl -fsSL "$url" -o "$archive"; then
             downloaded=1
             break
         fi
@@ -218,7 +226,7 @@ install_github_release_tarball_binary() {
 
     if [[ "$downloaded" -ne 1 ]]; then
         rm -rf "$tmpdir"
-        warn "Failed to download $bin_name from $repo releases"
+        warn "Failed to download $bin_name from $repo releases (linux asset not found)"
         return 1
     fi
 
@@ -239,6 +247,35 @@ install_github_release_tarball_binary() {
     run_privileged install -m 0755 "$extracted" "/usr/local/bin/$bin_name"
     rm -rf "$tmpdir"
     success "$bin_name installed from $repo"
+}
+
+setup_wacli_linux() {
+    local force_update="${CLAW_FORCE_TOOL_UPDATES:-0}"
+
+    if command -v wacli &>/dev/null && [[ "$force_update" != "1" ]]; then
+        success "wacli already installed"
+        return 0
+    fi
+
+    if command -v go &>/dev/null; then
+        local version="${CLAW_WACLI_VERSION:-latest}"
+        if go install "github.com/steipete/wacli/cmd/wacli@${version}"; then
+            local gopath
+            gopath="$(go env GOPATH 2>/dev/null || true)"
+            if [[ -z "$gopath" ]]; then
+                gopath="$HOME/go"
+            fi
+            local built_bin="$gopath/bin/wacli"
+            if [[ -x "$built_bin" ]]; then
+                run_privileged install -m 0755 "$built_bin" /usr/local/bin/wacli
+                success "wacli installed via go toolchain"
+                return 0
+            fi
+        fi
+    fi
+
+    warn "wacli Linux binary not available in releases and go fallback failed"
+    return 1
 }
 
 setup_linux_tooling() {
@@ -286,9 +323,9 @@ setup_linux_tooling() {
         warn "go not found; skipping go tool installs"
     fi
 
-    install_github_release_tarball_binary "steipete/gog" "gog" || true
-    install_github_release_tarball_binary "steipete/goplaces" "goplaces" || true
-    install_github_release_tarball_binary "steipete/wacli" "wacli" || true
+    install_github_release_tarball_binary "steipete/gogcli" "gog" "gogcli" || true
+    install_github_release_tarball_binary "steipete/goplaces" "goplaces" "goplaces" || true
+    setup_wacli_linux || true
 
     success "Linux tooling bootstrap completed"
 }
