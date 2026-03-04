@@ -134,6 +134,8 @@ setup_node_pnpm() {
 
 setup_tailscale() {
     info "Setting up Tailscale..."
+    local run_tailscale_up="${CLAW_TAILSCALE_RUN_UP:-0}"
+    local tailscale_up_args="${CLAW_TAILSCALE_UP_ARGS:---ssh}"
 
     if [[ "$(uname)" != "Linux" ]]; then
         warn "Tailscale bootstrap is currently Linux-only"
@@ -141,7 +143,7 @@ setup_tailscale() {
     fi
 
     if ! command -v tailscale &>/dev/null; then
-        if curl -fsSL https://tailscale.com/install.sh | run_privileged sh; then
+        if curl -fsSL https://tailscale.com/install.sh | run_privileged sh >/dev/null 2>&1; then
             success "Tailscale installed"
         else
             warn "Tailscale installation failed"
@@ -155,15 +157,20 @@ setup_tailscale() {
         run_privileged systemctl enable --now tailscaled >/dev/null 2>&1 || warn "Failed to enable/start tailscaled service"
     fi
 
-    if run_privileged tailscale up --ssh; then
-        success "tailscale up --ssh completed"
-    else
-        warn "tailscale up --ssh did not complete. You may need to re-run and authenticate."
-    fi
+    if [[ "$run_tailscale_up" == "1" ]]; then
+        if run_privileged tailscale up $tailscale_up_args; then
+            success "tailscale up $tailscale_up_args completed"
+        else
+            warn "tailscale up $tailscale_up_args did not complete. You may need to re-run and authenticate."
+        fi
 
-    if command -v tailscale &>/dev/null; then
-        info "Current Tailscale IPv4:"
-        run_privileged tailscale ip -4 || warn "Unable to read Tailscale IPv4"
+        if command -v tailscale &>/dev/null; then
+            info "Current Tailscale IPv4:"
+            run_privileged tailscale ip -4 || warn "Unable to read Tailscale IPv4"
+        fi
+    else
+        info "Skipping tailscale up (set CLAW_TAILSCALE_RUN_UP=1 to run during setup)"
+        info "Manual steps: tailscale up --ssh && tailscale ip -4"
     fi
 }
 
@@ -557,7 +564,7 @@ Commands:
   setup                    Set up symlinks, Linux baseline, Node/pnpm, Tailscale, node_modules, and autosecure
   setup-linux-security     Update system + install ufw/fail2ban/unattended-upgrades (apt-based Linux)
   setup-node-pnpm          Install/update Node.js and pnpm
-  setup-tailscale          Install/update Tailscale, run tailscale up --ssh, and print IPv4
+  setup-tailscale          Install/update Tailscale (set CLAW_TAILSCALE_RUN_UP=1 to auto-auth)
   setup-autosecure         Install/update autosecure and run an initial refresh
   move-state-off-icloud    Migrate cron+memory state to local disk + symlink back
   mark-nosync              Rename selected paths to *.nosync (no iCloud sync)
