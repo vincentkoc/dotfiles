@@ -94,6 +94,38 @@ install_linux_dependencies() {
     fi
 }
 
+install_optional_linux_tools() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        return
+    fi
+
+    if command -v eza &>/dev/null; then
+        success "eza already installed"
+        return
+    fi
+
+    info "Installing optional Linux tools (eza)..."
+    if command -v apt-get &>/dev/null; then
+        if command -v apt-cache &>/dev/null && apt-cache show eza &>/dev/null; then
+            run_privileged apt-get install -y eza && success "eza installed" || warn "Failed to install eza via apt"
+        else
+            warn "eza package not available via apt on this distro/repo"
+        fi
+    elif command -v dnf &>/dev/null; then
+        run_privileged dnf install -y eza && success "eza installed" || warn "Failed to install eza via dnf"
+    elif command -v yum &>/dev/null; then
+        run_privileged yum install -y eza && success "eza installed" || warn "Failed to install eza via yum"
+    elif command -v pacman &>/dev/null; then
+        run_privileged pacman -Sy --noconfirm eza && success "eza installed" || warn "Failed to install eza via pacman"
+    elif command -v zypper &>/dev/null; then
+        run_privileged zypper --non-interactive install eza && success "eza installed" || warn "Failed to install eza via zypper"
+    elif command -v apk &>/dev/null; then
+        run_privileged apk add --no-cache eza && success "eza installed" || warn "Failed to install eza via apk"
+    else
+        warn "No supported package manager found for optional eza install"
+    fi
+}
+
 ensure_linux_locale() {
     if [[ "$(uname)" != "Linux" ]]; then
         return
@@ -350,6 +382,7 @@ main() {
 
     sanitize_linux_locale_env
     install_linux_dependencies
+    install_optional_linux_tools
     ensure_linux_locale
     install_oh_my_zsh
     install_zsh_plugins
