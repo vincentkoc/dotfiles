@@ -94,6 +94,76 @@ install_linux_dependencies() {
     fi
 }
 
+install_apt_package_set_best_effort() {
+    local label="$1"
+    shift
+    local requested=("$@")
+    local available=()
+    local missing=()
+    local failed=()
+    local pkg
+
+    for pkg in "${requested[@]}"; do
+        if dpkg -s "$pkg" &>/dev/null; then
+            continue
+        fi
+        if apt-cache show "$pkg" &>/dev/null; then
+            available+=("$pkg")
+        else
+            missing+=("$pkg")
+        fi
+    done
+
+    if [[ ${#available[@]} -gt 0 ]]; then
+        info "Installing $label packages via apt..."
+        if ! run_privileged apt-get install -y "${available[@]}"; then
+            warn "Bulk install for $label failed; retrying package-by-package"
+            for pkg in "${available[@]}"; do
+                run_privileged apt-get install -y "$pkg" || failed+=("$pkg")
+            done
+        fi
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        warn "Skipped unavailable apt packages ($label): ${missing[*]}"
+    fi
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        warn "Failed to install apt packages ($label): ${failed[*]}"
+    fi
+}
+
+install_debian_brew_equivalent_tools() {
+    if [[ "$(uname)" != "Linux" ]] || ! command -v apt-get &>/dev/null; then
+        return
+    fi
+
+    # CLI equivalents for the most-used Homebrew stack from .natiliusrc.
+    install_apt_package_set_best_effort "brew-equivalent CLI" \
+        git-lfs tig lazygit diff-so-fancy wget jq jc fzf bat eza fd-find ripgrep ack tree htop btop \
+        zoxide tealdeer zsh-completions zsh-syntax-highlighting direnv vim neovim tmux tree-sitter \
+        gnupg pinentry-curses openssh-client keychain nmap shellcheck ffmpeg imagemagick poppler-utils \
+        p7zip-full yt-dlp hexyl mosh httpie speedtest-cli inetutils-telnet lynx croc podman awscli \
+        nodejs npm pyenv pipenv rbenv make cmake pre-commit yamllint icdiff bats sqlite3 mackup
+}
+
+ensure_linux_command_shims() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        return
+    fi
+
+    mkdir -p "$HOME/.local/bin"
+
+    if ! command -v fd &>/dev/null && command -v fdfind &>/dev/null; then
+        ln -sfn "$(command -v fdfind)" "$HOME/.local/bin/fd"
+        success "Created command shim: fd -> fdfind"
+    fi
+
+    if ! command -v bat &>/dev/null && command -v batcat &>/dev/null; then
+        ln -sfn "$(command -v batcat)" "$HOME/.local/bin/bat"
+        success "Created command shim: bat -> batcat"
+    fi
+}
+
 install_optional_linux_tools() {
     if [[ "$(uname)" != "Linux" ]]; then
         return
@@ -382,8 +452,10 @@ main() {
 
     sanitize_linux_locale_env
     install_linux_dependencies
+    install_debian_brew_equivalent_tools
     install_optional_linux_tools
     ensure_linux_locale
+    ensure_linux_command_shims
     install_oh_my_zsh
     install_zsh_plugins
     install_spaceship_theme
