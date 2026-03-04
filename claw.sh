@@ -38,6 +38,33 @@ ensure_dir() {
     chmod 700 "$d" 2>/dev/null || true
 }
 
+ensure_node_tooling() {
+    info "Checking Node.js tooling (node/corepack/pnpm)..."
+
+    if ! command -v node >/dev/null 2>&1; then
+        error "node not found. Install Node.js (nodenv/nvm/homebrew)."
+        return 1
+    fi
+
+    if ! command -v corepack >/dev/null 2>&1; then
+        error "corepack not found. Update Node.js to a version that includes corepack."
+        return 1
+    fi
+
+    if ! command -v pnpm >/dev/null 2>&1; then
+        info "pnpm not found. Enabling corepack and activating pnpm..."
+        corepack enable >/dev/null 2>&1 || true
+        corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true
+    fi
+
+    if ! command -v pnpm >/dev/null 2>&1; then
+        error "pnpm not available. Install with: corepack prepare pnpm@latest --activate"
+        return 1
+    fi
+
+    success "Node tooling ready."
+}
+
 # iCloud Drive: mark a path as "do not sync" by renaming to *.nosync
 mark_nosync_path() {
     local p="$1"
@@ -382,6 +409,8 @@ main() {
     case "$cmd" in
         setup)
             setup_config_symlinks
+            echo ""
+            ensure_node_tooling
             echo ""
             setup_node_modules_symlink
             ;;
