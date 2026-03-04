@@ -231,7 +231,7 @@ setup_qmd_with_bun() {
     elif [[ -x "$qmd_bin" ]] && [[ "$force_update" != "1" ]]; then
         success "qmd already installed ($("$qmd_bin" --version 2>/dev/null || true))"
     else
-        if "$bun_bin" install -g github:tobi/qmd; then
+        if "$bun_bin" install -g @tobilu/qmd || "$bun_bin" install -g github:tobi/qmd; then
             success "qmd installed via bun"
         else
             warn "Failed to install qmd via bun"
@@ -243,8 +243,28 @@ setup_qmd_with_bun() {
         qmd_bin="$(command -v qmd)"
     fi
     if [[ ! -x "$qmd_bin" ]]; then
-        warn "qmd binary not found at expected path ($HOME/.bun/bin/qmd)"
-        return 1
+        local bun_global_bin
+        bun_global_bin="$("$bun_bin" pm bin -g 2>/dev/null || true)"
+        if [[ -n "$bun_global_bin" ]] && [[ -x "$bun_global_bin/qmd" ]]; then
+            qmd_bin="$bun_global_bin/qmd"
+        fi
+    fi
+    if [[ ! -x "$qmd_bin" ]]; then
+        warn "qmd binary not linked by bun; installing wrapper at /usr/local/bin/qmd"
+        local qmd_wrapper="/tmp/qmd-wrapper.$$"
+        cat > "$qmd_wrapper" <<'EOF'
+#!/usr/bin/env bash
+exec "$HOME/.bun/bin/bun" x --bun @tobilu/qmd "$@"
+EOF
+        if run_privileged install -m 0755 "$qmd_wrapper" /usr/local/bin/qmd; then
+            rm -f "$qmd_wrapper"
+            qmd_bin="/usr/local/bin/qmd"
+            success "Installed qmd wrapper at /usr/local/bin/qmd"
+        else
+            rm -f "$qmd_wrapper"
+            warn "Failed to install qmd wrapper"
+            return 1
+        fi
     fi
 
     # Make qmd visible to services/non-interactive shells that do not load user PATH.
