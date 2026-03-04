@@ -29,6 +29,16 @@ run_privileged() {
     fi
 }
 
+ensure_path_line() {
+    local line="$1"
+    local file="$2"
+
+    touch "$file"
+    if ! grep -Fqx "$line" "$file"; then
+        printf '%s\n' "$line" >> "$file"
+    fi
+}
+
 # Detect dotfiles location
 if [[ "$(uname)" == "Darwin" ]]; then
     DOTFILES_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
@@ -130,6 +140,141 @@ setup_node_pnpm() {
     else
         warn "npm not found; skipping pnpm install"
     fi
+}
+
+setup_uv() {
+    info "Setting up uv..."
+    export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
+
+    if command -v uv &>/dev/null; then
+        success "uv already installed ($(uv --version 2>/dev/null || true))"
+        return
+    fi
+
+    if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+        ensure_path_line 'export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"' "$HOME/.bashrc"
+        ensure_path_line 'export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"' "$HOME/.zshrc"
+        export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
+        success "uv installed"
+    else
+        warn "Failed to install uv"
+    fi
+}
+
+linux_release_arch_candidates() {
+    case "$(uname -m)" in
+        x86_64|amd64)
+            printf '%s\n' x86_64 amd64
+            ;;
+        aarch64|arm64)
+            printf '%s\n' arm64 aarch64
+            ;;
+        *)
+            printf '%s\n' "$(uname -m)"
+            ;;
+    esac
+}
+
+install_github_release_tarball_binary() {
+    local repo="$1"
+    local bin_name="$2"
+    local force_update="${CLAW_FORCE_TOOL_UPDATES:-0}"
+
+    if command -v "$bin_name" &>/dev/null && [[ "$force_update" != "1" ]]; then
+        success "$bin_name already installed"
+        return 0
+    fi
+
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    local archive="$tmpdir/${bin_name}.tar.gz"
+    local downloaded=0
+    local arch=""
+    local url=""
+
+    while IFS= read -r arch; do
+        url="https://github.com/${repo}/releases/latest/download/${bin_name}_Linux_${arch}.tar.gz"
+        if curl -fsSL "$url" -o "$archive"; then
+            downloaded=1
+            break
+        fi
+    done < <(linux_release_arch_candidates)
+
+    if [[ "$downloaded" -ne 1 ]]; then
+        rm -rf "$tmpdir"
+        warn "Failed to download $bin_name from $repo releases"
+        return 1
+    fi
+
+    if ! tar -xzf "$archive" -C "$tmpdir"; then
+        rm -rf "$tmpdir"
+        warn "Failed to extract archive for $bin_name"
+        return 1
+    fi
+
+    local extracted
+    extracted="$(find "$tmpdir" -type f -name "$bin_name" | head -n 1)"
+    if [[ -z "$extracted" ]]; then
+        rm -rf "$tmpdir"
+        warn "Could not find binary '$bin_name' in downloaded archive"
+        return 1
+    fi
+
+    run_privileged install -m 0755 "$extracted" "/usr/local/bin/$bin_name"
+    rm -rf "$tmpdir"
+    success "$bin_name installed from $repo"
+}
+
+setup_linux_tooling() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        warn "Tooling bootstrap is Linux-only"
+        return
+    fi
+
+    info "Setting up Linux tooling (apt, npm, go, release binaries)..."
+
+    if command -v apt-get &>/dev/null; then
+        run_privileged apt-get update
+        run_privileged apt-get install -y curl ca-certificates git jq golang-go python3 python3-venv gh
+        success "Base Linux tooling packages installed"
+    else
+        warn "apt-get not found; skipping apt package installs"
+    fi
+
+    setup_uv
+
+    if command -v npm &>/dev/null; then
+        if run_privileged npm install -g @xdevplatform/xurl mcporter; then
+            success "Global npm tools installed (@xdevplatform/xurl, mcporter)"
+        else
+            warn "Failed to install one or more global npm tools"
+        fi
+    else
+        warn "npm not found; skipping npm global tool installs"
+    fi
+
+    if command -v go &>/dev/null; then
+        export PATH="$HOME/go/bin:$PATH"
+        if go install github.com/steipete/gifgrep/cmd/gifgrep@"${CLAW_GIFGREP_VERSION:-latest}"; then
+            success "gifgrep installed via go install"
+        else
+            warn "Failed to install gifgrep via go install"
+        fi
+
+        if go install github.com/Hyaxia/blogwatcher/cmd/blogwatcher@"${CLAW_BLOGWATCHER_VERSION:-latest}"; then
+            success "blogwatcher installed via go install"
+        else
+            warn "Failed to install blogwatcher via go install"
+        fi
+    else
+        warn "go not found; skipping go tool installs"
+    fi
+
+    install_github_release_tarball_binary "steipete/gog" "gog" || true
+    install_github_release_tarball_binary "steipete/goplaces" "goplaces" || true
+    install_github_release_tarball_binary "steipete/wacli" "wacli" || true
+
+    success "Linux tooling bootstrap completed"
 }
 
 setup_tailscale() {
@@ -554,8 +699,9 @@ usage() {
 Usage: ./claw.sh <command>
 
 Commands:
-  setup                    Set up symlinks, Linux baseline, Node/pnpm, Tailscale, node_modules, and autosecure
+  setup                    Set up symlinks, Linux baseline, Linux tooling, Node/pnpm, Tailscale, node_modules, and autosecure
   setup-linux-security     Update system + install ufw/fail2ban/unattended-upgrades (apt-based Linux)
+  setup-linux-tooling      Install Linux CLI tooling (uv, npm/go tools, gog/goplaces/wacli)
   setup-node-pnpm          Install/update Node.js and pnpm
   setup-tailscale          Install/update Tailscale, run tailscale up --ssh, and print IPv4
   setup-autosecure         Install/update autosecure and run an initial refresh
@@ -590,6 +736,8 @@ main() {
             echo ""
             setup_node_pnpm
             echo ""
+            setup_linux_tooling
+            echo ""
             setup_tailscale
             echo ""
             setup_node_modules_symlink
@@ -598,6 +746,9 @@ main() {
             ;;
         setup-linux-security)
             setup_linux_security_baseline
+            ;;
+        setup-linux-tooling)
+            setup_linux_tooling
             ;;
         setup-node-pnpm)
             setup_node_pnpm
