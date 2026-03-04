@@ -49,6 +49,84 @@ ensure_dir() {
     chmod 700 "$d" 2>/dev/null || true
 }
 
+setup_linux_security_baseline() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        warn "Security baseline is Linux-only"
+        return
+    fi
+
+    if ! command -v apt-get &>/dev/null; then
+        warn "Security baseline currently supports apt-based distros only"
+        return
+    fi
+
+    info "Setting up Linux security baseline (ufw/fail2ban/unattended-upgrades)..."
+    run_privileged apt-get update
+    run_privileged apt-get upgrade -y
+    run_privileged apt-get install -y ufw fail2ban unattended-upgrades
+
+    if command -v dpkg-reconfigure &>/dev/null; then
+        if run_privileged env DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive unattended-upgrades; then
+            success "unattended-upgrades configured"
+        else
+            warn "Non-interactive unattended-upgrades configure failed; try: dpkg-reconfigure -plow unattended-upgrades"
+        fi
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        run_privileged systemctl enable --now fail2ban >/dev/null 2>&1 || warn "Failed to enable/start fail2ban service"
+    fi
+
+    info "ufw installed. Configure SSH allow rules before enabling firewall."
+    success "Linux security baseline completed"
+}
+
+setup_node_pnpm() {
+    info "Setting up Node.js and pnpm..."
+
+    if ! command -v node &>/dev/null; then
+        if [[ "$(uname)" == "Linux" ]] && command -v apt-get &>/dev/null; then
+            run_privileged apt-get update
+            run_privileged apt-get install -y ca-certificates curl gnupg
+
+            local nodesource_setup="/tmp/nodesource-setup.sh"
+            if curl -fsSL https://deb.nodesource.com/setup_lts.x -o "$nodesource_setup"; then
+                run_privileged bash "$nodesource_setup"
+                run_privileged apt-get install -y nodejs
+                rm -f "$nodesource_setup"
+                success "Node.js installed via NodeSource"
+            else
+                warn "Failed to fetch NodeSource setup script"
+            fi
+        elif [[ "$(uname)" == "Darwin" ]] && command -v brew &>/dev/null; then
+            brew install node >/dev/null 2>&1 || brew upgrade node >/dev/null 2>&1 || warn "Failed to install Node.js with Homebrew"
+        else
+            warn "No supported automated Node.js install path found"
+        fi
+    else
+        success "Node.js already installed ($(node -v 2>/dev/null || true))"
+    fi
+
+    if command -v pnpm &>/dev/null; then
+        success "pnpm already installed ($(pnpm -v 2>/dev/null || true))"
+        return
+    fi
+
+    if command -v corepack &>/dev/null; then
+        run_privileged corepack enable >/dev/null 2>&1 || true
+        if run_privileged corepack prepare pnpm@latest --activate >/dev/null 2>&1; then
+            success "pnpm installed via corepack"
+            return
+        fi
+    fi
+
+    if command -v npm &>/dev/null; then
+        run_privileged npm install -g pnpm >/dev/null 2>&1 && success "pnpm installed via npm" || warn "Failed to install pnpm via npm"
+    else
+        warn "npm not found; skipping pnpm install"
+    fi
+}
+
 setup_autosecure() {
     info "Setting up autosecure..."
 
@@ -436,7 +514,9 @@ usage() {
 Usage: ./claw.sh <command>
 
 Commands:
-  setup                    Set up symlinks (config + node_modules + autosecure)
+  setup                    Set up symlinks, Linux baseline, Node/pnpm, node_modules, and autosecure
+  setup-linux-security     Update system + install ufw/fail2ban/unattended-upgrades (apt-based Linux)
+  setup-node-pnpm          Install/update Node.js and pnpm
   setup-autosecure         Install/update autosecure and run an initial refresh
   move-state-off-icloud    Migrate cron+memory state to local disk + symlink back
   mark-nosync              Rename selected paths to *.nosync (no iCloud sync)
@@ -465,9 +545,19 @@ main() {
         setup)
             setup_config_symlinks
             echo ""
+            setup_linux_security_baseline
+            echo ""
+            setup_node_pnpm
+            echo ""
             setup_node_modules_symlink
             echo ""
             setup_autosecure
+            ;;
+        setup-linux-security)
+            setup_linux_security_baseline
+            ;;
+        setup-node-pnpm)
+            setup_node_pnpm
             ;;
         setup-autosecure)
             setup_autosecure
