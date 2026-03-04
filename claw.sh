@@ -18,6 +18,17 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+run_privileged() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif command -v sudo &>/dev/null; then
+        sudo "$@"
+    else
+        error "This step requires root privileges. Re-run as root or install sudo."
+        return 1
+    fi
+}
+
 # Detect dotfiles location
 if [[ "$(uname)" == "Darwin" ]]; then
     DOTFILES_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
@@ -36,6 +47,76 @@ ensure_dir() {
     local d="$1"
     mkdir -p "$d"
     chmod 700 "$d" 2>/dev/null || true
+}
+
+setup_autosecure() {
+    info "Setting up autosecure..."
+
+    if command -v autosecure &>/dev/null; then
+        success "autosecure already installed"
+    elif [[ "$(uname)" == "Darwin" ]]; then
+        if command -v brew &>/dev/null; then
+            brew tap vincentkoc/homebrew-tap >/dev/null 2>&1 || true
+            if brew install autosecure >/dev/null 2>&1 || brew upgrade autosecure >/dev/null 2>&1; then
+                success "autosecure installed via Homebrew"
+            else
+                warn "Failed to install autosecure via Homebrew"
+                return
+            fi
+        else
+            warn "Homebrew not found - skipping autosecure install on macOS"
+            return
+        fi
+    elif [[ "$(uname)" == "Linux" ]]; then
+        if command -v apt-get &>/dev/null; then
+            local setup_deb="/tmp/autosecure-setup.deb.sh"
+            if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.deb.sh' -o "$setup_deb"; then
+                run_privileged bash "$setup_deb"
+                run_privileged apt-get update
+                run_privileged apt-get install -y autosecure
+                rm -f "$setup_deb"
+                success "autosecure installed via apt"
+            else
+                warn "Failed to download autosecure Debian repo setup script"
+                return
+            fi
+        elif command -v dnf &>/dev/null; then
+            local setup_rpm="/tmp/autosecure-setup.rpm.sh"
+            if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
+                run_privileged bash "$setup_rpm"
+                run_privileged dnf install -y autosecure
+                rm -f "$setup_rpm"
+                success "autosecure installed via dnf"
+            else
+                warn "Failed to download autosecure RPM repo setup script"
+                return
+            fi
+        elif command -v yum &>/dev/null; then
+            local setup_rpm="/tmp/autosecure-setup.rpm.sh"
+            if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
+                run_privileged bash "$setup_rpm"
+                run_privileged yum install -y autosecure
+                rm -f "$setup_rpm"
+                success "autosecure installed via yum"
+            else
+                warn "Failed to download autosecure RPM repo setup script"
+                return
+            fi
+        else
+            warn "No supported package manager found for autosecure setup"
+            return
+        fi
+    else
+        warn "Unsupported OS for autosecure setup: $(uname)"
+        return
+    fi
+
+    if command -v autosecure &>/dev/null; then
+        run_privileged autosecure -q || warn "autosecure ran with warnings"
+        success "autosecure bootstrap completed"
+    else
+        warn "autosecure command not found after setup"
+    fi
 }
 
 # iCloud Drive: mark a path as "do not sync" by renaming to *.nosync
@@ -355,7 +436,8 @@ usage() {
 Usage: ./claw.sh <command>
 
 Commands:
-  setup                    Set up symlinks (config + node_modules)
+  setup                    Set up symlinks (config + node_modules + autosecure)
+  setup-autosecure         Install/update autosecure and run an initial refresh
   move-state-off-icloud    Migrate cron+memory state to local disk + symlink back
   mark-nosync              Rename selected paths to *.nosync (no iCloud sync)
   backup-state-now         Run one backup immediately
@@ -384,6 +466,11 @@ main() {
             setup_config_symlinks
             echo ""
             setup_node_modules_symlink
+            echo ""
+            setup_autosecure
+            ;;
+        setup-autosecure)
+            setup_autosecure
             ;;
         move-state-off-icloud)
             move_state_off_icloud
