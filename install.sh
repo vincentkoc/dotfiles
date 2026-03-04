@@ -36,6 +36,22 @@ dotfiles_dir() {
     fi
 }
 
+has_en_us_utf8_locale() {
+    LC_ALL=C locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Eq '^en_us\.(utf-?8|utf8)$'
+}
+
+sanitize_linux_locale_env() {
+    if [[ "$(uname)" != "Linux" ]]; then
+        return
+    fi
+
+    if [[ "${LC_ALL:-}" == "en_US.UTF-8" ]] && ! has_en_us_utf8_locale; then
+        warn "LC_ALL=en_US.UTF-8 is set but not generated yet; using LANG=C.UTF-8 temporarily"
+        unset LC_ALL
+        export LANG=C.UTF-8
+    fi
+}
+
 # Check for Homebrew (macOS)
 check_homebrew() {
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -83,8 +99,10 @@ ensure_linux_locale() {
         return
     fi
 
-    if locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q '^en_us\.utf-\?8$'; then
+    if has_en_us_utf8_locale; then
         success "en_US.UTF-8 locale already available"
+        export LANG=en_US.UTF-8
+        export LC_ALL=en_US.UTF-8
         return
     fi
 
@@ -101,9 +119,15 @@ ensure_linux_locale() {
         run_privileged update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 || true
     fi
 
-    export LANG=en_US.UTF-8
-    export LC_ALL=en_US.UTF-8
-    success "Locale setup completed"
+    if has_en_us_utf8_locale; then
+        export LANG=en_US.UTF-8
+        export LC_ALL=en_US.UTF-8
+        success "Locale setup completed"
+    else
+        warn "Could not verify en_US.UTF-8; continuing with LANG=C.UTF-8"
+        unset LC_ALL
+        export LANG=C.UTF-8
+    fi
 }
 
 link_dotfile() {
@@ -188,6 +212,10 @@ install_zsh_plugins() {
 install_fzf() {
     if command -v fzf &>/dev/null; then
         success "fzf already installed"
+    elif [[ -d "$HOME/.fzf/.git" ]]; then
+        success "fzf already installed in ~/.fzf"
+    elif [[ -d "$HOME/.fzf" ]]; then
+        warn "~/.fzf already exists but is not a git checkout - skipping install"
     elif command -v brew &>/dev/null; then
         info "Installing fzf via brew..."
         brew install fzf
@@ -320,6 +348,7 @@ main() {
     info "Installing dependencies..."
     echo ""
 
+    sanitize_linux_locale_env
     install_linux_dependencies
     ensure_linux_locale
     install_oh_my_zsh
