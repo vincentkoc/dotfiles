@@ -49,6 +49,22 @@ ensure_dir() {
     chmod 700 "$d" 2>/dev/null || true
 }
 
+install_autosecure_script_fallback() {
+    local autosecure_tmp="/tmp/autosecure.sh"
+    local autosecure_target="/usr/local/bin/autosecure"
+
+    info "Falling back to script-only autosecure install..."
+    if curl -fsSL -o "$autosecure_tmp" https://raw.githubusercontent.com/vincentkoc/autosecure/master/autosecure.sh; then
+        run_privileged install -m 0755 "$autosecure_tmp" "$autosecure_target"
+        rm -f "$autosecure_tmp"
+        success "autosecure script installed at $autosecure_target"
+        return 0
+    fi
+
+    warn "Failed to download fallback autosecure script"
+    return 1
+}
+
 setup_linux_security_baseline() {
     if [[ "$(uname)" != "Linux" ]]; then
         warn "Security baseline is Linux-only"
@@ -196,40 +212,60 @@ setup_autosecure() {
         if command -v apt-get &>/dev/null; then
             local setup_deb="/tmp/autosecure-setup.deb.sh"
             if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.deb.sh' -o "$setup_deb"; then
-                run_privileged bash "$setup_deb"
+                run_privileged bash "$setup_deb" || true
                 run_privileged apt-get update
-                run_privileged apt-get install -y autosecure
                 rm -f "$setup_deb"
-                success "autosecure installed via apt"
+
+                if apt-cache show autosecure &>/dev/null; then
+                    if run_privileged apt-get install -y autosecure; then
+                        success "autosecure installed via apt"
+                    else
+                        warn "apt install autosecure failed"
+                        install_autosecure_script_fallback || return
+                    fi
+                else
+                    warn "autosecure package not available via apt on this distro/repo"
+                    install_autosecure_script_fallback || return
+                fi
             else
                 warn "Failed to download autosecure Debian repo setup script"
-                return
+                install_autosecure_script_fallback || return
             fi
         elif command -v dnf &>/dev/null; then
             local setup_rpm="/tmp/autosecure-setup.rpm.sh"
             if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
-                run_privileged bash "$setup_rpm"
-                run_privileged dnf install -y autosecure
+                run_privileged bash "$setup_rpm" || true
                 rm -f "$setup_rpm"
-                success "autosecure installed via dnf"
+
+                if run_privileged dnf install -y autosecure; then
+                    success "autosecure installed via dnf"
+                else
+                    warn "dnf install autosecure failed"
+                    install_autosecure_script_fallback || return
+                fi
             else
                 warn "Failed to download autosecure RPM repo setup script"
-                return
+                install_autosecure_script_fallback || return
             fi
         elif command -v yum &>/dev/null; then
             local setup_rpm="/tmp/autosecure-setup.rpm.sh"
             if curl -1sLf 'https://dl.cloudsmith.io/public/vincentkoc/autosecure/setup.rpm.sh' -o "$setup_rpm"; then
-                run_privileged bash "$setup_rpm"
-                run_privileged yum install -y autosecure
+                run_privileged bash "$setup_rpm" || true
                 rm -f "$setup_rpm"
-                success "autosecure installed via yum"
+
+                if run_privileged yum install -y autosecure; then
+                    success "autosecure installed via yum"
+                else
+                    warn "yum install autosecure failed"
+                    install_autosecure_script_fallback || return
+                fi
             else
                 warn "Failed to download autosecure RPM repo setup script"
-                return
+                install_autosecure_script_fallback || return
             fi
         else
             warn "No supported package manager found for autosecure setup"
-            return
+            install_autosecure_script_fallback || return
         fi
     else
         warn "Unsupported OS for autosecure setup: $(uname)"
@@ -343,6 +379,7 @@ mark_openclaw_nosync() {
 # Setup config directory symlinks
 setup_config_symlinks() {
     info "Setting up config symlinks..."
+    ensure_dir "$DOTFILES_DIR/.openclaw"
 
     # ~/.openclaw -> dotfiles/.openclaw
     if [[ -d "$DOTFILES_DIR/.openclaw" ]]; then
