@@ -29,19 +29,28 @@ path_append() {
     esac
 }
 
+path_remove() {
+    local dir="$1"
+    [[ -z "$dir" ]] && return
+    PATH=":${PATH}:"
+    PATH="${PATH//:${dir}:/:}"
+    PATH="${PATH#:}"
+    PATH="${PATH%:}"
+}
+
 #
 # Package Managers
 #
 
 # Homebrew
 if [[ $IS_MACOS == true ]]; then
-    if [[ -x /opt/homebrew/bin/brew ]]; then
+    if [[ -d /opt/homebrew/bin ]]; then
         export HOMEBREW_PREFIX="/opt/homebrew"
         export HOMEBREW_CELLAR="/opt/homebrew/Cellar"
         export HOMEBREW_REPOSITORY="/opt/homebrew"
         path_prepend "/opt/homebrew/bin"
         path_prepend "/opt/homebrew/sbin"
-    elif [[ -x /usr/local/bin/brew ]]; then
+    elif [[ -d /usr/local/bin ]]; then
         export HOMEBREW_PREFIX="/usr/local"
         export HOMEBREW_CELLAR="/usr/local/Cellar"
         export HOMEBREW_REPOSITORY="/usr/local/Homebrew"
@@ -176,9 +185,23 @@ export NODE_REPL_HISTORY_SIZE='32768'
 export NODE_REPL_MODE='sloppy'
 export NODE_OPTIONS='--max-old-space-size=4096'
 export NPM_CONFIG_FUND=false
-# nodenv paths - lazy loading handled in .zshrc
-path_prepend "$HOME/.nodenv/bin"
-path_prepend "$HOME/.nodenv/shims"
+export NODENV_ROOT="${NODENV_ROOT:-$HOME/.nodenv}"
+# Prefer the currently selected Node version directly so shells keep working
+# even when a Homebrew-managed nodenv shim/binary is temporarily broken.
+if [[ -f "$NODENV_ROOT/version" ]]; then
+    _nodenv_ver=$(< "$NODENV_ROOT/version")
+    [[ -d "$NODENV_ROOT/versions/$_nodenv_ver/bin" ]] && path_prepend "$NODENV_ROOT/versions/$_nodenv_ver/bin"
+    unset _nodenv_ver
+fi
+# Only expose nodenv shims when the nodenv executable itself is healthy.
+if _nodenv_cmd=$(command -v nodenv 2>/dev/null) && [[ -n "$_nodenv_cmd" && -e "$_nodenv_cmd" && -x "$_nodenv_cmd" ]]; then
+    path_prepend "$NODENV_ROOT/bin"
+    path_prepend "$NODENV_ROOT/shims"
+else
+    path_remove "$NODENV_ROOT/shims"
+    path_remove "$NODENV_ROOT/bin"
+fi
+unset _nodenv_cmd
 
 # Bun
 export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
