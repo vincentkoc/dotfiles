@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub Issue/PR - Search Shortcuts
 // @namespace    usermonkey.github.issue.pr.search.shortcuts
-// @version      1.1.0
-// @description  Adds repo-scoped GitHub search shortcuts for comment authors and issue/PR authors, with lazy count badges.
+// @version      1.2.0
+// @description  Adds repo-scoped GitHub search shortcuts for comment authors and issue/PR authors, with lazy GraphQL count badges.
 // @match        https://github.com/*/*/issues/*
 // @match        https://github.com/*/*/pull/*
 // @grant        none
@@ -137,42 +137,20 @@
     );
   }
 
-  function getSearchCountFromDocument(doc) {
-    const selectors = [
-      ".issues-search-results h3",
-      "[data-testid='search-sub-header']",
-      ".search-title",
-      ".codesearch-results h3",
-      "main h3",
-    ];
-
-    for (const selector of selectors) {
-      const text = norm(doc.querySelector(selector)?.textContent);
-      const count = parseCountFromText(text);
-      if (count !== null) return count;
-    }
-
-    const bodyText = norm(doc.body?.textContent || "");
-    return parseCountFromText(bodyText);
+  function getGraphqlCsrfToken() {
+    return (
+      document.querySelector("meta[name='csrf-token']")?.getAttribute("content") ||
+      document.querySelector("meta[name='visitor-payload']")?.getAttribute("content") ||
+      ""
+    );
   }
 
-  function parseCountFromText(text) {
-    if (!text) return null;
-
-    const patterns = [
-      /([\d,]+)\s+results?/i,
-      /([\d,]+)\s+open/i,
-      /results?\s+\(([\d,]+)\)/i,
-    ];
-
-    for (const pattern of patterns) {
-      const match = text.match(pattern);
-      if (!match) continue;
-      const value = Number(match[1].replace(/,/g, ""));
-      if (Number.isFinite(value)) return value;
+  function getSearchQueryFromUrl(url) {
+    try {
+      return new URL(url).searchParams.get("q") || "";
+    } catch {
+      return "";
     }
-
-    return null;
   }
 
   async function fetchSearchCount(url) {
@@ -183,13 +161,37 @@
     if (inflight) return inflight;
 
     const promise = (async () => {
-      const res = await fetch(url, { credentials: "same-origin" });
-      if (!res.ok) throw new Error(`Search fetch failed: ${res.status}`);
+      const searchQuery = getSearchQueryFromUrl(url);
+      if (!searchQuery) throw new Error("Missing search query");
 
-      const html = await res.text();
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      const count = getSearchCountFromDocument(doc);
-      if (count === null) throw new Error("Unable to parse search count");
+      const csrfToken = getGraphqlCsrfToken();
+      const res = await fetch("/graphql", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: JSON.stringify({
+          query: `
+            query SearchShortcutCount($query: String!) {
+              search(query: $query, type: ISSUE, first: 1) {
+                issueCount
+              }
+            }
+          `,
+          variables: {
+            query: searchQuery,
+          },
+        }),
+      });
+      if (!res.ok) throw new Error(`GraphQL search failed: ${res.status}`);
+
+      const payload = await res.json();
+      const count = payload?.data?.search?.issueCount;
+      if (!Number.isFinite(count)) throw new Error("Unable to parse GraphQL search count");
 
       countCache.set(url, count);
       persistSessionCache();
