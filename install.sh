@@ -284,6 +284,31 @@ setup_shell_symlinks() {
     link_dotfile "$df_dir/.zprofile" "$HOME/.zprofile"
 }
 
+setup_codex_dotfiles() {
+    local df_dir codex_home codex_agents_src
+    df_dir="$(dotfiles_dir)"
+    codex_home="${CODEX_HOME:-$HOME/.codex}"
+    codex_agents_src="$df_dir/.codex/AGENTS.md"
+
+    mkdir -p "$codex_home"
+
+    if [[ -f "$codex_agents_src" ]]; then
+        link_dotfile "$codex_agents_src" "$codex_home/AGENTS.md"
+    else
+        warn "Codex AGENTS file missing in dotfiles: $codex_agents_src"
+    fi
+
+    if ! command -v codex &>/dev/null; then
+        warn "Codex CLI not found; skipping feature enablement"
+        return
+    fi
+
+    info "Ensuring Codex multi-agent features are enabled"
+    codex features enable multi_agent >/dev/null
+    codex features enable child_agents_md >/dev/null
+    success "Codex multi-agent features enabled"
+}
+
 # Install Oh My Zsh
 install_oh_my_zsh() {
     if [[ -d "$HOME/.oh-my-zsh" ]]; then
@@ -469,6 +494,7 @@ main() {
     install_vim_theme
     install_nvim_plugins
     setup_shell_symlinks
+    setup_codex_dotfiles
     setup_openclaw_symlinks
 
     echo ""
