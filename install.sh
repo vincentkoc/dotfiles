@@ -73,7 +73,7 @@ install_linux_dependencies() {
     if command -v apt-get &>/dev/null; then
         info "Installing Linux packages via apt..."
         run_privileged apt-get update
-        run_privileged apt-get install -y zsh git curl locales ca-certificates
+        run_privileged apt-get install -y zsh git curl locales ca-certificates gh unzip sqlite3
     elif command -v dnf &>/dev/null; then
         info "Installing Linux packages via dnf..."
         run_privileged dnf install -y zsh git curl glibc-langpack-en ca-certificates

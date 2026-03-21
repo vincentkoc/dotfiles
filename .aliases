@@ -8,6 +8,16 @@
 # Enable aliases to be sudo’ed
 alias sudo='sudo '
 
+# Some distro-packaged eza builds lag behind and do not support hiding the symlink target column.
+_dotfiles_eza_no_symlink_flag=""
+if command -v eza >/dev/null 2>&1; then
+    if eza --help 2>&1 | grep -q -- '--no-symlinks'; then
+        _dotfiles_eza_no_symlink_flag="--no-symlinks"
+    elif eza --help 2>&1 | grep -q -- '--no-symlink'; then
+        _dotfiles_eza_no_symlink_flag="--no-symlink"
+    fi
+fi
+
 # Mac Specific
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # Setup PHP
@@ -24,10 +34,10 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # Preferred 'ls' implementation with icon toggle
     if command -v eza >/dev/null 2>&1; then
         if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
-            alias ls='eza -lah --git --no-user --no-permissions --no-time --no-symlinks'
+            alias ls="eza -lah --git --no-user --no-permissions --no-time ${_dotfiles_eza_no_symlink_flag}"
             alias ll='eza -lha --git --no-user'
         else
-            alias ls='eza -lah --icons --git --no-user --no-permissions --no-time --no-symlinks'
+            alias ls="eza -lah --icons --git --no-user --no-permissions --no-time ${_dotfiles_eza_no_symlink_flag}"
             alias ll='eza -lha --git --icons --no-user'
         fi
     else
@@ -71,10 +81,10 @@ else
     # Preferred 'ls' implementation (Linux)
     if command -v eza >/dev/null 2>&1; then
         if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
-            alias ls='eza -lah --git --no-user --no-permissions --no-time --no-symlinks'
+            alias ls="eza -lah --git --no-user --no-permissions --no-time ${_dotfiles_eza_no_symlink_flag}"
             alias ll='eza -lha --git --no-user'
         else
-            alias ls='eza -lah --icons --git --no-user --no-permissions --no-time --no-symlinks'
+            alias ls="eza -lah --icons --git --no-user --no-permissions --no-time ${_dotfiles_eza_no_symlink_flag}"
             alias ll='eza -lha --git --icons --no-user'
         fi
     else
