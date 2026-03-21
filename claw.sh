@@ -29,6 +29,14 @@ run_privileged() {
     fi
 }
 
+apt_install_if_available() {
+    if ! command -v apt-get &>/dev/null; then
+        return 1
+    fi
+
+    run_privileged apt-get install -y "$@"
+}
+
 ensure_path_line() {
     local line="$1"
     local file="$2"
@@ -37,6 +45,41 @@ ensure_path_line() {
     if ! grep -Fqx "$line" "$file"; then
         printf '%s\n' "$line" >> "$file"
     fi
+}
+
+resolve_npm_global_bin() {
+    if ! command -v npm &>/dev/null; then
+        return
+    fi
+
+    local npm_prefix
+    npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+    if [[ -n "$npm_prefix" ]]; then
+        printf '%s\n' "$npm_prefix/bin"
+    fi
+}
+
+install_npm_global_package() {
+    local command_name="$1"
+    local package_name="$2"
+
+    if command -v "$command_name" &>/dev/null; then
+        success "$command_name already installed"
+        return 0
+    fi
+
+    if ! command -v npm &>/dev/null; then
+        warn "npm not found; cannot install $package_name"
+        return 1
+    fi
+
+    if run_privileged npm install -g "$package_name"; then
+        success "$package_name installed via npm"
+        return 0
+    fi
+
+    warn "Failed to install $package_name via npm"
+    return 1
 }
 
 # Detect dotfiles location
@@ -192,15 +235,18 @@ setup_qmd_with_bun() {
     local qmd_xdg_cache="$qmd_root/xdg-cache"
     local bun_bin="$HOME/.bun/bin/bun"
     local qmd_bin="$HOME/.bun/bin/qmd"
+    local npm_global_bin=""
 
     if command -v apt-get &>/dev/null; then
         run_privileged apt-get update
-        run_privileged apt-get install -y curl ca-certificates unzip sqlite3
+        apt_install_if_available curl ca-certificates unzip sqlite3
     fi
 
     if ! command -v bun &>/dev/null && [[ ! -x "$bun_bin" ]]; then
-        if curl -fsSL https://bun.sh/install | bash; then
-            success "Bun installed"
+        if install_npm_global_package bun bun; then
+            success "Bun installed via npm"
+        elif curl -fsSL https://bun.sh/install | bash; then
+            success "Bun installed via bun.sh"
         else
             warn "Failed to install Bun"
             return 1
@@ -231,16 +277,24 @@ setup_qmd_with_bun() {
     elif [[ -x "$qmd_bin" ]] && [[ "$force_update" != "1" ]]; then
         success "qmd already installed ($("$qmd_bin" --version 2>/dev/null || true))"
     else
-        if "$bun_bin" install -g @tobilu/qmd || "$bun_bin" install -g github:tobi/qmd; then
+        if command -v npm &>/dev/null && run_privileged npm install -g @tobilu/qmd; then
+            success "qmd installed via npm"
+        elif "$bun_bin" install -g @tobilu/qmd || "$bun_bin" install -g github:tobi/qmd; then
             success "qmd installed via bun"
         else
-            warn "Failed to install qmd via bun"
+            warn "Failed to install qmd via npm and bun"
             return 1
         fi
     fi
 
     if [[ ! -x "$qmd_bin" ]] && command -v qmd &>/dev/null; then
         qmd_bin="$(command -v qmd)"
+    fi
+    if [[ ! -x "$qmd_bin" ]]; then
+        npm_global_bin="$(resolve_npm_global_bin)"
+        if [[ -n "$npm_global_bin" ]] && [[ -x "$npm_global_bin/qmd" ]]; then
+            qmd_bin="$npm_global_bin/qmd"
+        fi
     fi
     if [[ ! -x "$qmd_bin" ]]; then
         local bun_global_bin
@@ -415,7 +469,7 @@ setup_linux_tooling() {
 
     if command -v apt-get &>/dev/null; then
         run_privileged apt-get update
-        run_privileged apt-get install -y curl ca-certificates git jq golang-go python3 python3-venv gh unzip sqlite3
+        apt_install_if_available curl ca-certificates git jq golang-go python3 python3-venv gh unzip sqlite3
         success "Base Linux tooling packages installed"
     else
         warn "apt-get not found; skipping apt package installs"
