@@ -25,3 +25,4 @@
 - If merging on my behalf, squash PRs unless I say otherwise.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`
 - Use semantic commit messages like `fix(ci):` unless rules say otherwise
+- Do not make any docs/internal/ .md files on openclaw
