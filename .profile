@@ -1,3 +1,8 @@
+# Load shared exports for login/non-interactive shells.
+if [ -r "$HOME/.exports" ]; then
+  . "$HOME/.exports"
+fi
+
 # Load Rust environment when available
 if [ -f "$HOME/.cargo/env" ]; then
   . "$HOME/.cargo/env"

@@ -77,6 +77,9 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	# AI Tools
 	alias clawdbot='openclaw'
 	alias claw='openclaw'
+	nodenv-off() { export DOTFILES_DISABLE_NODENV=1; exec zsh; }
+	nodenv-on() { unset DOTFILES_DISABLE_NODENV; exec zsh; }
+	nodenv-rehash() { command -v nodenv >/dev/null 2>&1 && nodenv rehash; }
 else
     # Preferred 'ls' implementation (Linux)
     if command -v eza >/dev/null 2>&1; then

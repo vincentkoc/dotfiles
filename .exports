@@ -186,22 +186,74 @@ export NODE_REPL_MODE='sloppy'
 export NODE_OPTIONS='--max-old-space-size=4096'
 export NPM_CONFIG_FUND=false
 export NODENV_ROOT="${NODENV_ROOT:-$HOME/.nodenv}"
-# Prefer the currently selected Node version directly so shells keep working
-# even when a Homebrew-managed nodenv shim/binary is temporarily broken.
-if [[ -f "$NODENV_ROOT/version" ]]; then
-    _nodenv_ver=$(< "$NODENV_ROOT/version")
-    [[ -d "$NODENV_ROOT/versions/$_nodenv_ver/bin" ]] && path_prepend "$NODENV_ROOT/versions/$_nodenv_ver/bin"
-    unset _nodenv_ver
-fi
-# Only expose nodenv shims when the nodenv executable itself is healthy.
-if _nodenv_cmd=$(command -v nodenv 2>/dev/null) && [[ -n "$_nodenv_cmd" && -e "$_nodenv_cmd" && -x "$_nodenv_cmd" ]]; then
-    path_prepend "$NODENV_ROOT/bin"
-    path_prepend "$NODENV_ROOT/shims"
-else
+# Kill-switch: set DOTFILES_DISABLE_NODENV=1 to bypass nodenv entirely.
+if [[ "${DOTFILES_DISABLE_NODENV:-}" == "1" ]]; then
     path_remove "$NODENV_ROOT/shims"
     path_remove "$NODENV_ROOT/bin"
+    # With nodenv disabled, ensure npm global installs go to Homebrew prefix.
+    if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
+        export NPM_CONFIG_PREFIX="$HOMEBREW_PREFIX"
+        path_prepend "$HOMEBREW_PREFIX/bin"
+    fi
+    if command -v npm >/dev/null 2>&1; then
+        _npm_prefix=$(npm prefix -g 2>/dev/null)
+        if [[ -n "$_npm_prefix" ]]; then
+            path_prepend "$_npm_prefix/bin"
+        fi
+        unset _npm_prefix
+    fi
+    # Remove any direct nodenv version bins from inherited PATH.
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        _nodenv_path_entries=(${(s.:.)PATH})
+    else
+        IFS=':' read -r -a _nodenv_path_entries <<< "$PATH"
+    fi
+    for _nodenv_entry in "${_nodenv_path_entries[@]}"; do
+        case "$_nodenv_entry" in
+            "$NODENV_ROOT"/versions/*/bin) path_remove "$_nodenv_entry" ;;
+        esac
+    done
+    unset _nodenv_entry _nodenv_path_entries
+else
+    # Only expose nodenv shims when the nodenv executable itself is healthy.
+    if _nodenv_cmd=$(command -v nodenv 2>/dev/null) && [[ -n "$_nodenv_cmd" && -e "$_nodenv_cmd" && -x "$_nodenv_cmd" ]]; then
+        path_prepend "$NODENV_ROOT/bin"
+        path_prepend "$NODENV_ROOT/shims"
+    else
+        path_remove "$NODENV_ROOT/shims"
+        path_remove "$NODENV_ROOT/bin"
+        # Remove any direct nodenv version bins from inherited PATH.
+        if [[ -n "${ZSH_VERSION:-}" ]]; then
+            _nodenv_path_entries=(${(s.:.)PATH})
+        else
+            IFS=':' read -r -a _nodenv_path_entries <<< "$PATH"
+        fi
+        for _nodenv_entry in "${_nodenv_path_entries[@]}"; do
+            case "$_nodenv_entry" in
+                "$NODENV_ROOT"/versions/*/bin) path_remove "$_nodenv_entry" ;;
+            esac
+        done
+        unset _nodenv_entry _nodenv_path_entries
+        # Optional fallback: allow direct version bin if explicitly requested.
+        if [[ "${DOTFILES_NODE_FALLBACK_NODENV_BIN:-}" == "1" ]]; then
+            _nodenv_bin=""
+            if [[ -f "$HOME/.node-version" ]]; then
+                _nodenv_ver=$(< "$HOME/.node-version")
+                [[ -d "$NODENV_ROOT/versions/$_nodenv_ver/bin" ]] && _nodenv_bin="$NODENV_ROOT/versions/$_nodenv_ver/bin"
+            fi
+            if [[ -z "$_nodenv_bin" && -f "$NODENV_ROOT/version" ]]; then
+                _nodenv_ver=$(< "$NODENV_ROOT/version")
+                [[ -d "$NODENV_ROOT/versions/$_nodenv_ver/bin" ]] && _nodenv_bin="$NODENV_ROOT/versions/$_nodenv_ver/bin"
+            fi
+            if [[ -z "$_nodenv_bin" ]]; then
+                _nodenv_bin=$(ls -1d "$NODENV_ROOT"/versions/*/bin 2>/dev/null | sort -V | tail -1)
+            fi
+            [[ -n "$_nodenv_bin" && -d "$_nodenv_bin" ]] && path_prepend "$_nodenv_bin"
+            unset _nodenv_bin _nodenv_ver
+        fi
+    fi
+    unset _nodenv_cmd
 fi
-unset _nodenv_cmd
 
 # Bun
 export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
