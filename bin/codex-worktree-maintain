@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
+
+DEFAULT_REPO="$HOME/GIT/_Perso/openclaw"
+DEFAULT_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+DEFAULT_CLEANER="$SCRIPT_DIR/codex-worktree-clean"
+DEFAULT_SESSION_LIMIT=30
+DEFAULT_MIN_AGE_DAYS=10
+DEFAULT_DELETE_WORKERS=4
+DEFAULT_WORKTREE_THRESHOLD=90
+repo="$DEFAULT_REPO"
+codex_home="$DEFAULT_CODEX_HOME"
+session_limit="$DEFAULT_SESSION_LIMIT"
+min_age_days="$DEFAULT_MIN_AGE_DAYS"
+delete_workers="$DEFAULT_DELETE_WORKERS"
+threshold="$DEFAULT_WORKTREE_THRESHOLD"
+force=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)
+      repo="$2"
+      shift 2
+      ;;
+    --codex-home)
+      codex_home="$2"
+      shift 2
+      ;;
+    --limit)
+      session_limit="$2"
+      shift 2
+      ;;
+    --min-age-days)
+      min_age_days="$2"
+      shift 2
+      ;;
+    --delete-workers)
+      delete_workers="$2"
+      shift 2
+      ;;
+    --threshold)
+      threshold="$2"
+      shift 2
+      ;;
+    --force)
+      force=1
+      shift
+      ;;
+    --help|-h)
+      cat <<'EOF'
+Usage: codex-worktree-maintain [options]
+
+Options:
+  --repo <path>            Repo root to maintain.
+  --codex-home <path>      Codex home directory.
+  --limit <n>              Session keep-set passed to codex-worktree-clean.
+  --min-age-days <n>       Minimum worktree age before cleanup.
+  --delete-workers <n>     Parallel delete workers for the cleaner.
+  --threshold <n>          Minimum Codex worktree count before apply mode runs.
+  --force                  Run cleanup even below the threshold.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "codex-worktree-maintain: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+lock_dir="$codex_home/locks/codex-worktree-maintain.lock"
+log_dir="$codex_home/log"
+log_file="$log_dir/codex-worktree-maintain.log"
+
+mkdir -p "$log_dir" "$(dirname "$lock_dir")"
+
+if mkdir "$lock_dir" 2>/dev/null; then
+  printf '%s\n' "$$" >"$lock_dir/pid"
+else
+  if [[ -f "$lock_dir/pid" ]]; then
+    owner_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    if [[ -n "${owner_pid:-}" ]] && kill -0 "$owner_pid" 2>/dev/null; then
+      echo "[$(date '+%F %T')] codex-worktree-maintain: already running (pid=$owner_pid)" >>"$log_file"
+      exit 0
+    fi
+  fi
+  rm -rf "$lock_dir"
+  mkdir "$lock_dir"
+  printf '%s\n' "$$" >"$lock_dir/pid"
+fi
+
+cleanup_lock() {
+  rm -rf "$lock_dir"
+}
+trap cleanup_lock EXIT
+
+worktree_count="$(git -C "$repo" worktree list --porcelain | awk -v prefix="$codex_home/worktrees/" '
+  /^worktree / {
+    if (index($2, prefix) == 1) {
+      count += 1
+    }
+  }
+  END {
+    print count + 0
+  }
+')"
+
+if (( force == 0 && worktree_count < threshold )); then
+  echo "[$(date '+%F %T')] codex-worktree-maintain: skip count=$worktree_count threshold=$threshold repo=$repo" >>"$log_file"
+  exit 0
+fi
+
+{
+  echo "[$(date '+%F %T')] codex-worktree-maintain: start count=$worktree_count threshold=$threshold repo=$repo"
+  "$DEFAULT_CLEANER" \
+    --repo "$repo" \
+    --limit "$session_limit" \
+    --min-age-days "$min_age_days" \
+    --delete-workers "$delete_workers" \
+    --apply
+  echo "[$(date '+%F %T')] codex-worktree-maintain: done"
+} >>"$log_file" 2>&1
