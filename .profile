@@ -10,6 +10,11 @@ fi
 
 export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
+export CLAUDE_CODE_ENABLE_TELEMETRY=0
+export OTEL_SDK_DISABLED=true
+export OTEL_TRACES_EXPORTER=none
+export OTEL_METRICS_EXPORTER=none
+export OTEL_LOGS_EXPORTER=none
 
 # Ensure cache directories are writable in sandboxed/non-interactive environments
 if [ -z "${XDG_CACHE_HOME:-}" ]; then

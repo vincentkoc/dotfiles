@@ -28,6 +28,13 @@ if [[ -r "$DOTFILES_ENV" ]]; then
 fi
 unset DOTFILES_ENV
 
+# Disable app telemetry and OTEL exporters for local CLIs and inherited MCP processes.
+export CLAUDE_CODE_ENABLE_TELEMETRY=0
+export OTEL_SDK_DISABLED=true
+export OTEL_TRACES_EXPORTER=none
+export OTEL_METRICS_EXPORTER=none
+export OTEL_LOGS_EXPORTER=none
+
 # Tokyo Night palette shared across terminals, prompt, and tooling
 typeset -gx TOKYONIGHT_BG="#1a1b26"
 typeset -gx TOKYONIGHT_BG_DARK="#16161e"
