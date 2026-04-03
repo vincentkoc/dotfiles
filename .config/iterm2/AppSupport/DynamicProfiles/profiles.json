@@ -1,40 +1,46 @@
 {
-  "Profiles" : [
+  "Profiles": [
     {
-      "Initial Text" : "",
-      "Name" : "Normal",
-      "Custom Command" : "No",
-      "Guid" : "51902A9B-2248-48D3-B1AC-EA0151E559FC",
-      "Silence Bell" : true
+      "Initial Text": "",
+      "Custom Command": "No",
+      "Name": "Normal",
+      "Guid": "51902A9B-2248-48D3-B1AC-EA0151E559FC",
+      "Silence Bell": true
     },
     {
-      "Rewritable" : true,
-      "Command" : "\/Users\/vincentkoc\/bin\/tmux-studio-cc",
-      "Visual Bell" : false,
-      "Custom Command" : "Yes",
-      "Guid" : "1A44AF87-9B6D-4807-BE86-086DAA143BB0",
-      "Status Bar Layout" : {
-        "components" : [
-
-        ],
-        "advanced configuration" : {
-          "remove empty components" : false,
-          "font" : ".AppleSystemUIFont 12",
-          "algorithm" : 0,
-          "auto-rainbow style" : 0
+      "Rewritable": true,
+      "Visual Bell": false,
+      "Guid": "1A44AF87-9B6D-4807-BE86-086DAA143BB0",
+      "Name": "Studio 2x3",
+      "Shortcut": "1",
+      "Use Separate Colors for Light and Dark Mode": true,
+      "Transparency": 0.3269810267857143,
+      "Blur Radius": 44.90250279017857,
+      "Custom Command": "Yes",
+      "Command": "/Users/vincentkoc/bin/tmux-studio-cc",
+      "Blur": true,
+      "Status Bar Layout": {
+        "components": [],
+        "advanced configuration": {
+          "remove empty components": false,
+          "font": ".AppleSystemUIFont 12",
+          "algorithm": 0,
+          "auto-rainbow style": 0
         }
       },
-      "Name" : "Studio 2x3",
-      "Use Separate Colors for Light and Dark Mode" : true
+      "Icon": 1
     },
     {
-      "Silence Bell" : true,
-      "Command" : "\/Users\/vincentkoc\/bin\/tmux-studio-cc studio2",
-      "Initial Text" : "",
-      "Custom Command" : "Yes",
-      "Name" : "Studio 2x3 B",
-      "Guid" : "D3A6B2F8-4B9F-4A4A-A0E9-EDC59D1B2B92",
-      "Working Directory" : "\/Users\/vincentkoc"
+      "Silence Bell": true,
+      "Rewritable": true,
+      "Command": "/Users/vincentkoc/bin/tmux-studio-cc studio2",
+      "Shortcut": "2",
+      "Guid": "D3A6B2F8-4B9F-4A4A-A0E9-EDC59D1B2B92",
+      "Custom Command": "Yes",
+      "Name": "Studio 2x3 B",
+      "Icon": 1,
+      "Use Separate Colors for Light and Dark Mode": true,
+      "Transparency": 0.4
     }
   ]
 }

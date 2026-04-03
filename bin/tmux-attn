@@ -6,14 +6,6 @@ if [[ -z "${TMUX_PANE:-}" ]]; then
   exit 1
 fi
 
-# iTerm mark (works with tmux -CC native panes) without echoing escapes.
-pane_tty="$(tmux display -p -t "$TMUX_PANE" "#{pane_tty}" 2>/dev/null || true)"
-if [[ -n "$pane_tty" && -w "$pane_tty" ]]; then
-  tmux run-shell -b "printf '\033]1337;SetMark\a' >\"$pane_tty\"" >/dev/null 2>&1 || true
-fi
-
-# Fallback: tmux message + brief pane highlight (works in standard tmux).
-style="fg=colour229,bg=colour52"
-tmux select-pane -t "$TMUX_PANE" -P "$style" >/dev/null 2>&1 || true
-tmux display-message -d 2000 -t "$TMUX_PANE" "attention" >/dev/null 2>&1 || true
-tmux run-shell -b "sleep 2; tmux select-pane -t $TMUX_PANE -P default" >/dev/null 2>&1 || true
+# Visual attention without altering status style.
+tmux display-panes -d 2000 >/dev/null 2>&1 || true
+tmux display-message -d 2000 "attention" >/dev/null 2>&1 || true
