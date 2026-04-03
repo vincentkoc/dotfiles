@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${TMUX_PANE:-}" ]]; then
+  echo "TMUX_PANE not set" >&2
+  exit 1
+fi
+
+code_id=""
+if [[ -n "${CODEX_SESSION_ID:-}" ]]; then
+  code_id="$CODEX_SESSION_ID"
+elif [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+  code_id="$CODEX_THREAD_ID"
+elif [[ -n "${CODEX_RUN_ID:-}" ]]; then
+  code_id="$CODEX_RUN_ID"
+fi
+
+if [[ -n "$code_id" ]]; then
+  tmux select-pane -t "$TMUX_PANE" -T "codex:$code_id"
+else
+  tmux select-pane -t "$TMUX_PANE" -T "codex"
+fi

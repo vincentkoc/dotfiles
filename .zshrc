@@ -7,6 +7,9 @@ if [[ -n "$DOTFILES_ZSH_PROFILE" ]]; then
   zmodload zsh/zprof
 fi
 
+# Disable terminal bell in zsh (prevents iTerm bell icon/sound).
+setopt NO_BEEP
+
 # Bootstrap environment before loading oh-my-zsh so PATH + theme variables exist early
 if [[ -r ~/.exports ]]; then
 	source ~/.exports
@@ -202,6 +205,15 @@ if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
 
 	add-zsh-hook chpwd _dotfiles_iterm_title
 	add-zsh-hook precmd _dotfiles_iterm_title
+fi
+
+# Tag tmux panes with Codex thread id when present.
+if [[ -n "${TMUX:-}" && -n "${CODEX_THREAD_ID:-}" ]]; then
+	autoload -Uz add-zsh-hook
+	_dotfiles_codex_pane_title() {
+		command -v tmux-codex-title >/dev/null 2>&1 && tmux-codex-title >/dev/null 2>&1 || true
+	}
+	add-zsh-hook precmd _dotfiles_codex_pane_title
 fi
 
 #

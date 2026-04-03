@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION="studio"
+WINDOW="main"
+
+# Avoid iTerm shell integration chatter in tmux panes.
+export ITERM2_DISABLE_SHELL_INTEGRATION=1
+export ITERM_DISABLE_PROMPT_MARK=1
+
+if [[ $# -ge 1 ]]; then
+  SESSION="$1"
+fi
+
+TMUX_BIN="/opt/homebrew/bin/tmux"
+if [[ ! -x "$TMUX_BIN" ]]; then
+  TMUX_BIN="/usr/local/bin/tmux"
+fi
+if [[ ! -x "$TMUX_BIN" ]]; then
+  TMUX_BIN="/usr/bin/tmux"
+fi
+if [[ ! -x "$TMUX_BIN" ]]; then
+  echo "tmux not found at common paths" >&2
+  exit 1
+fi
+
+if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
+  exec "$TMUX_BIN" attach -t "$SESSION"
+fi
+
+"$TMUX_BIN" new-session -d -s "$SESSION" -n "$WINDOW"
+
+# 3 columns across.
+"$TMUX_BIN" split-window -h -t "$SESSION:$WINDOW"
+"$TMUX_BIN" split-window -h -t "$SESSION:$WINDOW"
+"$TMUX_BIN" select-layout -t "$SESSION:$WINDOW" even-horizontal
+
+# 2 rows per column (split each column once).
+while IFS= read -r pane; do
+  "$TMUX_BIN" split-window -v -t "$pane"
+done < <("$TMUX_BIN" list-panes -t "$SESSION:$WINDOW" -F '#{pane_id}')
+exec "$TMUX_BIN" attach -t "$SESSION"
