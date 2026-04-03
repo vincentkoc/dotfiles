@@ -309,6 +309,54 @@ setup_codex_dotfiles() {
     success "Codex multi-agent features enabled"
 }
 
+setup_iterm_preferences() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        return
+    fi
+
+    local df_dir mackup_prefs_dir iterm_custom_dir mackup_plist local_plist custom_plist
+    local iterm_dynamic_dir local_dynamic_dir
+    df_dir="$(dotfiles_dir)"
+    mackup_prefs_dir="$df_dir/Library/Preferences"
+    iterm_custom_dir="$df_dir/iterm"
+    mackup_plist="$mackup_prefs_dir/com.googlecode.iterm2.plist"
+    local_plist="$HOME/Library/Preferences/com.googlecode.iterm2.plist"
+    custom_plist="$iterm_custom_dir/com.googlecode.iterm2.plist"
+    iterm_dynamic_dir="$df_dir/.config/iterm2/AppSupport/DynamicProfiles"
+    local_dynamic_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
+
+    mkdir -p "$mackup_prefs_dir" "$iterm_custom_dir" "$iterm_dynamic_dir"
+
+    if [[ ! -f "$mackup_plist" ]]; then
+        if [[ -f "$custom_plist" ]]; then
+            cp "$custom_plist" "$mackup_plist"
+            success "Seeded iTerm2 prefs from $custom_plist"
+        elif [[ -f "$local_plist" ]]; then
+            cp "$local_plist" "$mackup_plist"
+            success "Seeded iTerm2 prefs from $local_plist"
+        else
+            warn "iTerm2 prefs not found; skipping prefs bootstrap"
+            return
+        fi
+    fi
+
+    /usr/libexec/PlistBuddy -c "Delete :PrefsCustomFolder" "$mackup_plist" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Delete :LoadPrefsFromCustomFolder" "$mackup_plist" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Delete :SavePrefsToCustomFolder" "$mackup_plist" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Add :PrefsCustomFolder string $mackup_prefs_dir" "$mackup_plist"
+    /usr/libexec/PlistBuddy -c "Add :LoadPrefsFromCustomFolder bool true" "$mackup_plist"
+    /usr/libexec/PlistBuddy -c "Add :SavePrefsToCustomFolder bool true" "$mackup_plist"
+
+    link_dotfile "$mackup_plist" "$local_plist"
+    link_dotfile "$mackup_plist" "$custom_plist"
+
+    mkdir -p "$HOME/Library/Application Support/iTerm2"
+    link_dotfile "$iterm_dynamic_dir" "$local_dynamic_dir"
+
+    killall cfprefsd >/dev/null 2>&1 || true
+    success "iTerm2 prefs linked to $mackup_prefs_dir"
+}
+
 # Install Oh My Zsh
 install_oh_my_zsh() {
     if [[ -d "$HOME/.oh-my-zsh" ]]; then
@@ -495,6 +543,7 @@ main() {
     install_nvim_plugins
     setup_shell_symlinks
     setup_codex_dotfiles
+    setup_iterm_preferences
     setup_openclaw_symlinks
 
     echo ""
