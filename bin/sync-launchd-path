@@ -1,0 +1,20 @@
+#!/bin/bash
+
+set -euo pipefail
+
+resolved_path="$(
+  env -i \
+    HOME="$HOME" \
+    USER="${USER:-$(id -un)}" \
+    SHELL=/bin/zsh \
+    TERM=xterm-256color \
+    /bin/zsh -lc 'printf %s "$PATH"'
+)"
+
+if [[ -z "$resolved_path" ]]; then
+  echo "sync-launchd-path: failed to resolve PATH from login shell" >&2
+  exit 1
+fi
+
+/bin/launchctl setenv PATH "$resolved_path"
+printf '%s\n' "$resolved_path"
