@@ -270,6 +270,7 @@ path_prepend "$PNPM_HOME"
 
 # Worktrees (default root used by gwt)
 export DOTFILES_WORKTREES_ROOT="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+export DOTFILES_GIT_SPARSE_ROOT="${DOTFILES_GIT_SPARSE_ROOT:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/git-sparse}"
 
 # Python
 export PYTHONIOENCODING='UTF-8'

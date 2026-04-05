@@ -128,7 +128,7 @@ cleanup_lock() {
 }
 trap cleanup_lock EXIT
 
-worktree_count="$(git -C "$repo" worktree list --porcelain | awk -v prefix="$codex_home/worktrees/" '
+codex_worktree_count="$(git -C "$repo" worktree list --porcelain | awk -v prefix="$codex_home/worktrees/" '
   /^worktree / {
     if (index($2, prefix) == 1) {
       count += 1
@@ -139,19 +139,46 @@ worktree_count="$(git -C "$repo" worktree list --porcelain | awk -v prefix="$cod
   }
 ')"
 
+local_repo_worktree_count="$(
+  for root in "$repo/.claude/worktrees" "$repo/.worktrees"; do
+    [[ -d "$root" ]] || continue
+    find "$root" -mindepth 1 -maxdepth 1 -type d -print
+  done | wc -l | tr -d ' '
+)"
+worktree_count=$((codex_worktree_count + local_repo_worktree_count))
+
 free_gib="$(df -k "$repo" | awk 'NR==2 {printf "%.1f", $4 / 1024 / 1024}')"
 real_node_modules_kib="$(
-  git -C "$repo" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | while IFS= read -r path; do
+  {
+    git -C "$repo" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}'
+    for root in "$repo/.claude/worktrees" "$repo/.worktrees"; do
+      [[ -d "$root" ]] || continue
+      find "$root" -mindepth 1 -maxdepth 1 -type d -print
+    done
+  } | while IFS= read -r path; do
     if [[ "$path" == "$codex_home/worktrees/"* && -d "$path/node_modules" && ! -L "$path/node_modules" ]]; then
+      du -sk "$path/node_modules"
+    elif [[ -d "$path/node_modules" && ! -L "$path/node_modules" ]]; then
       du -sk "$path/node_modules"
     fi
   done | awk '{sum += $1} END {print sum + 0}'
 )"
 real_node_modules_gib="$(awk "BEGIN {printf \"%.1f\", $real_node_modules_kib / 1024 / 1024}")"
 dist_kib="$(
-  git -C "$repo" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | while IFS= read -r path; do
+  {
+    git -C "$repo" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}'
+    for root in "$repo/.claude/worktrees" "$repo/.worktrees"; do
+      [[ -d "$root" ]] || continue
+      find "$root" -mindepth 1 -maxdepth 1 -type d -print
+    done
+  } | while IFS= read -r path; do
     if [[ "$path" == "$codex_home/worktrees/"* && -d "$path/dist" ]]; then
       du -sk "$path/dist"
+    elif [[ -d "$path/dist" ]]; then
+      du -sk "$path/dist"
+    fi
+    if [[ -d "$path/dist-runtime" ]]; then
+      du -sk "$path/dist-runtime"
     fi
   done | awk '{sum += $1} END {print sum + 0}'
 )"

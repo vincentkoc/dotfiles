@@ -1,0 +1,17 @@
+/*
+!/*/
+/.agents/
+/.changeset/
+/.github/
+/.pi/
+/apps/shared/OpenClawKit/Tools/CanvasA2UI/
+/bin/
+/docs/
+!/docs/zh-CN/
+/extensions/
+/git-hooks/
+/scripts/
+/skills/
+/src/
+/test/
+/vendor/a2ui/renderers/lit/

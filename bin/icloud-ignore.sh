@@ -36,6 +36,7 @@ EXCLUDE_PATTERNS=(
 
     # Build/Dist
     "dist"
+    "dist-runtime"
     "build"
     ".next"
     ".nuxt"
@@ -53,6 +54,8 @@ EXCLUDE_PATTERNS=(
 
     # Misc
     ".git"
+    ".worktrees"
+    "worktrees"
     ".terraform"
     "vendor"
     "target"
