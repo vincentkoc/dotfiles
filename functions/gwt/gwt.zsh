@@ -88,6 +88,41 @@ _gwt_sparse_clone_filter() {
     awk 'NF {print; exit}' "$filter_file"
 }
 
+_gwt_worktree_source_checkout_risk() {
+    local repo_root="$1"
+    local shallow="false"
+    local promisor="false"
+    local promisor_filter=""
+    local -a reasons
+
+    repo_root=$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+    shallow=$(git -C "$repo_root" rev-parse --is-shallow-repository 2>/dev/null || echo false)
+    promisor=$(git -C "$repo_root" config --bool remote.origin.promisor 2>/dev/null || echo false)
+    promisor_filter=$(git -C "$repo_root" config --get remote.origin.partialclonefilter 2>/dev/null || true)
+
+    [[ "$shallow" == "true" ]] && reasons+=("shallow=true")
+    [[ "$promisor" == "true" ]] && reasons+=("promisor=true")
+    [[ -n "$promisor_filter" ]] && reasons+=("filter=$promisor_filter")
+
+    (( ${#reasons[@]} > 0 )) || return 1
+    printf '%s\n' "${(j: :)reasons}"
+}
+
+_gwt_cleanup_failed_worktree() {
+    local worktree_path="$1"
+    local repo_root=""
+
+    [[ -n "$worktree_path" ]] || return 0
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    if [[ -n "$repo_root" && "$worktree_path" == "$repo_root" ]]; then
+        echo "gwt: refusing to clean up the main worktree ($worktree_path)" >&2
+        return 1
+    fi
+
+    git worktree remove --force "$worktree_path" >/dev/null 2>&1 || rm -rf "$worktree_path"
+    git worktree prune >/dev/null 2>&1 || true
+}
+
 _gwt_sparse_profile_file() {
     local repo_root="$1"
     local profile="$2"
@@ -912,7 +947,10 @@ EOF
             local branch=""
             local start_point=""
             local profile=""
-            local root repo_slug branch_slug worktree_parent worktree_path
+            local root repo_slug branch_slug worktree_parent worktree_path repo_root
+            local use_sparse=false
+            local checkout_risk=""
+            local created_worktree=false
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -944,6 +982,7 @@ EOF
             fi
 
             root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+            repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
             repo_slug=$(_gwt_repo_slug) || return 1
             branch_slug=$(printf '%s' "$branch" | tr '/' '-' | tr -cd '[:alnum:]._-')
             [[ -z "$branch_slug" ]] && branch_slug="$branch"
@@ -958,16 +997,52 @@ EOF
                 return 0
             fi
 
+            checkout_risk=$(_gwt_worktree_source_checkout_risk "$repo_root" 2>/dev/null || true)
+            if [[ -n "$checkout_risk" ]]; then
+                echo "gwt: refusing to create a worktree from an unsafe base repo ($checkout_risk)" >&2
+                echo "gwt: repair the clone first or use a full non-promisor worktree source" >&2
+                return 1
+            fi
+
+            if [[ "$profile" != "full" ]]; then
+                if [[ -n "$profile" ]]; then
+                    use_sparse=true
+                elif _gwt_sparse_default_profile "$repo_root" > /dev/null 2>&1; then
+                    use_sparse=true
+                fi
+            fi
+
             if git show-ref --verify --quiet "refs/heads/$branch"; then
-                git worktree add "$worktree_path" "$branch" || return 1
+                if [[ "$use_sparse" == true ]]; then
+                    git worktree add --no-checkout "$worktree_path" "$branch" || return 1
+                else
+                    git worktree add "$worktree_path" "$branch" || return 1
+                fi
             else
                 local resolved_start_point
                 resolved_start_point=$(_gwt_resolve_start_point "$start_point") || return 1
-                git worktree add -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
+                if [[ "$use_sparse" == true ]]; then
+                    git worktree add --no-checkout -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
+                else
+                    git worktree add -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
+                fi
             fi
+            created_worktree=true
 
-            _gwt_sparse_apply_default_profile "$worktree_path" "$profile" || return 1
-            _gwt_bootstrap_worktree "$worktree_path" || return 1
+            _gwt_sparse_apply_default_profile "$worktree_path" "$profile" || {
+                [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                return 1
+            }
+            if [[ "$use_sparse" == true ]]; then
+                git -C "$worktree_path" checkout -f >/dev/null 2>&1 || git -C "$worktree_path" read-tree -mu HEAD || {
+                    [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                    return 1
+                }
+            fi
+            _gwt_bootstrap_worktree "$worktree_path" || {
+                [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                return 1
+            }
             cd "$worktree_path" || return 1
             ;;
         cd)
