@@ -2,8 +2,8 @@
   "Profiles": [
     {
       "Initial Text": "",
-      "Custom Command": "No",
       "Name": "Normal",
+      "Custom Command": "No",
       "Guid": "51902A9B-2248-48D3-B1AC-EA0151E559FC",
       "Silence Bell": true
     },
@@ -14,7 +14,6 @@
       "Name": "Studio 2x3",
       "Shortcut": "1",
       "Use Separate Colors for Light and Dark Mode": true,
-      "Transparency": 0.3269810267857143,
       "Blur Radius": 44.90250279017857,
       "Custom Command": "Yes",
       "Command": "/Users/vincentkoc/bin/tmux-studio-cc",
@@ -28,7 +27,8 @@
           "auto-rainbow style": 0
         }
       },
-      "Icon": 1
+      "Icon": 1,
+      "Disable Window Resizing": true
     },
     {
       "Silence Bell": true,
@@ -40,7 +40,7 @@
       "Name": "Studio 2x3 B",
       "Icon": 1,
       "Use Separate Colors for Light and Dark Mode": true,
-      "Transparency": 0.4
+      "Disable Window Resizing": true
     }
   ]
 }
