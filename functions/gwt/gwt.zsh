@@ -273,6 +273,56 @@ _gwt_sparse_add_paths() {
     git -C "$worktree_path" config --worktree --unset-all dotfiles.sparseProfileFile >/dev/null 2>&1 || true
 }
 
+_gwt_sparse_clear_shell_env() {
+    unset GWT_SPARSE_PROFILE
+    unset GWT_SPARSE_PROFILE_FILE
+    unset GWT_SPARSE_REPO_SLUG
+    unset OPENCLAW_SPARSE_PROFILE
+}
+
+_gwt_sparse_sync_shell_env() {
+    local repo_root repo_slug sparse_enabled current_profile profile_file
+
+    if ! repo_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+        _gwt_sparse_clear_shell_env
+        return 0
+    fi
+
+    sparse_enabled=$(git config --bool core.sparseCheckout 2>/dev/null || echo false)
+    if [[ "$sparse_enabled" != "true" ]]; then
+        _gwt_sparse_clear_shell_env
+        return 0
+    fi
+
+    current_profile=$(git config --worktree --get dotfiles.sparseProfile 2>/dev/null || true)
+    profile_file=$(git config --worktree --get dotfiles.sparseProfileFile 2>/dev/null || true)
+    [[ -n "$current_profile" ]] || current_profile="custom"
+
+    repo_slug=$(_gwt_repo_slug "$repo_root" 2>/dev/null || basename "$repo_root")
+
+    export GWT_SPARSE_PROFILE="$current_profile"
+    export GWT_SPARSE_REPO_SLUG="$repo_slug"
+    if [[ -n "$profile_file" ]]; then
+        export GWT_SPARSE_PROFILE_FILE="$profile_file"
+    else
+        unset GWT_SPARSE_PROFILE_FILE
+    fi
+
+    case "$repo_slug" in
+        *openclaw*) export OPENCLAW_SPARSE_PROFILE="$current_profile" ;;
+        *) unset OPENCLAW_SPARSE_PROFILE ;;
+    esac
+}
+
+_gwt_sparse_register_shell_hook() {
+    [[ -o interactive ]] || return 0
+    autoload -Uz add-zsh-hook 2>/dev/null || true
+    if typeset -f add-zsh-hook >/dev/null 2>&1; then
+        add-zsh-hook chpwd _gwt_sparse_sync_shell_env 2>/dev/null || true
+    fi
+    _gwt_sparse_sync_shell_env
+}
+
 _gwt_repo_local_worktree_roots() {
     local repo_root="$1"
     printf '%s\n' "$repo_root/.claude/worktrees"
@@ -764,6 +814,8 @@ _gwt_bootstrap_worktree() {
     _gwt_link_shared_node_modules "$install_source" "$worktree_path" || return 1
 }
 
+_gwt_sparse_register_shell_hook
+
 # gwt: opinionated wrapper around `git worktree`.
 # oh-my-zsh git plugin defines `gwt` alias; remove it so the function can load cleanly.
 unalias gwt 2>/dev/null
@@ -1136,12 +1188,15 @@ EOF
                         return 1
                     }
                     _gwt_sparse_apply_profile "$(git rev-parse --show-toplevel)" "$1" || return 1
+                    _gwt_sparse_sync_shell_env
                     ;;
                 add|expand)
                     _gwt_sparse_add_paths "$(git rev-parse --show-toplevel)" "$@" || return 1
+                    _gwt_sparse_sync_shell_env
                     ;;
                 full|disable)
                     _gwt_sparse_apply_profile "$(git rev-parse --show-toplevel)" "full" || return 1
+                    _gwt_sparse_sync_shell_env
                     ;;
                 *)
                     echo "Usage: gwt sparse <status|list|set|add|full>"
