@@ -22,7 +22,10 @@ mackup restore
 ## Structure
 
 ```
-.zshrc / .exports / .aliases / .functions   # Shell
+.zshrc / .exports / .aliases / .functions   # Shell entrypoints
+functions/                                  # Modular sourced shell features
+bin/agent-worktree-ops/                     # Agent worktree cleanup tools
+git-sparse/                                 # Per-repo sparse-checkout profiles
 .vimrc / .tmux.conf                         # Editors
 .mackup/                                    # Mackup app configs
 userscripts/                                # UserMonkey userscripts source
