@@ -74,6 +74,31 @@ list_managed_worktrees() {
   } | awk 'NF && !seen[$0]++'
 }
 
+sum_real_node_modules_kib() {
+  local managed_worktrees="$1"
+  local path extensions_root extension_path candidate
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+
+    for candidate in "$path/node_modules" "$path/ui/node_modules"; do
+      if [[ -d "$candidate" && ! -L "$candidate" ]]; then
+        du -sk "$candidate"
+      fi
+    done
+
+    extensions_root="$path/extensions"
+    [[ -d "$extensions_root" ]] || continue
+    for extension_path in "$extensions_root"/*; do
+      [[ -d "$extension_path" ]] || continue
+      candidate="$extension_path/node_modules"
+      if [[ -d "$candidate" && ! -L "$candidate" ]]; then
+        du -sk "$candidate"
+      fi
+    done
+  done <<< "$managed_worktrees" | awk '{sum += $1} END {print sum + 0}'
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo)
@@ -135,7 +160,7 @@ Options:
   --threshold <n>          Minimum agent worktree count before apply mode runs.
   --min-free-gib <n>       Run cleanup when free disk falls below this GiB floor.
   --max-real-node-modules-gib <n>
-                           Run cleanup when real top-level worktree node_modules exceeds this GiB cap.
+                           Run cleanup when real worktree node_modules exceeds this GiB cap.
   --max-dist-gib <n>       Run cleanup when top-level worktree dist exceeds this GiB cap.
   --force                  Run cleanup even below the threshold.
 EOF
@@ -178,13 +203,7 @@ managed_worktrees="$(list_managed_worktrees)"
 worktree_count="$(printf '%s\n' "$managed_worktrees" | awk 'NF {count++} END {print count + 0}')"
 
 free_gib="$(df -k "$repo" | awk 'NR==2 {printf "%.1f", $4 / 1024 / 1024}')"
-real_node_modules_kib="$(
-  printf '%s\n' "$managed_worktrees" | while IFS= read -r path; do
-    if [[ -d "$path/node_modules" && ! -L "$path/node_modules" ]]; then
-      du -sk "$path/node_modules"
-    fi
-  done | awk '{sum += $1} END {print sum + 0}'
-)"
+real_node_modules_kib="$(sum_real_node_modules_kib "$managed_worktrees")"
 real_node_modules_gib="$(awk "BEGIN {printf \"%.1f\", $real_node_modules_kib / 1024 / 1024}")"
 dist_kib="$(
   printf '%s\n' "$managed_worktrees" | while IFS= read -r path; do
