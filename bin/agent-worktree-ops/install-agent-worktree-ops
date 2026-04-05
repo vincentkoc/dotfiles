@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DOTFILES_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
+RUNTIME_DIR="$HOME/Library/Application Support/agent-worktree-ops"
+PLIST_SOURCE="$DOTFILES_DIR/Library/LaunchAgents/com.vincentkoc.agent-worktree-ops.plist"
+PLIST_TARGET="$HOME/Library/LaunchAgents/com.vincentkoc.agent-worktree-ops.plist"
+OLD_PLIST_TARGET="$HOME/Library/LaunchAgents/com.vincentkoc.codex-worktree-maintain.plist"
+
+mkdir -p "$RUNTIME_DIR" "$HOME/Library/LaunchAgents"
+cp "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-clean" "$RUNTIME_DIR/agent-worktree-clean"
+cp "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-maintain" "$RUNTIME_DIR/agent-worktree-maintain"
+cp "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-purge" "$RUNTIME_DIR/agent-worktree-purge"
+chmod +x "$RUNTIME_DIR/agent-worktree-clean" "$RUNTIME_DIR/agent-worktree-maintain" "$RUNTIME_DIR/agent-worktree-purge"
+
+ln -sfn "$PLIST_SOURCE" "$PLIST_TARGET"
+launchctl bootout "gui/$(id -u)" "$OLD_PLIST_TARGET" >/dev/null 2>&1 || true
+rm -f "$OLD_PLIST_TARGET"
+launchctl bootout "gui/$(id -u)" "$PLIST_TARGET" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET"

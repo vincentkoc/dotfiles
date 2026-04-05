@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
+
+DEFAULT_REPO="$HOME/GIT/_Perso/openclaw"
+DEFAULT_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+DEFAULT_CLEANER="$SCRIPT_DIR/agent-worktree-clean"
+DEFAULT_SESSION_LIMIT=30
+DEFAULT_MIN_AGE_DAYS=2
+DEFAULT_TRIM_ARTIFACTS_AGE_DAYS=0.25
+DEFAULT_DELETE_WORKERS=4
+DEFAULT_WORKTREE_THRESHOLD=35
+DEFAULT_MIN_FREE_GIB=60
+DEFAULT_MAX_REAL_NODE_MODULES_GIB=2
+DEFAULT_MAX_DIST_GIB=3
+repo="$DEFAULT_REPO"
+codex_home="$DEFAULT_CODEX_HOME"
+session_limit="$DEFAULT_SESSION_LIMIT"
+min_age_days="$DEFAULT_MIN_AGE_DAYS"
+trim_artifacts_age_days="$DEFAULT_TRIM_ARTIFACTS_AGE_DAYS"
+delete_workers="$DEFAULT_DELETE_WORKERS"
+threshold="$DEFAULT_WORKTREE_THRESHOLD"
+min_free_gib="$DEFAULT_MIN_FREE_GIB"
+max_real_node_modules_gib="$DEFAULT_MAX_REAL_NODE_MODULES_GIB"
+max_dist_gib="$DEFAULT_MAX_DIST_GIB"
+force=0
+
+repo_slug_from_origin() {
+  local origin="$1"
+  local cleaned slug
+
+  [[ -n "$origin" ]] || return 1
+
+  cleaned="${origin%.git}"
+  cleaned="${cleaned#ssh://}"
+  cleaned="${cleaned#https://}"
+  cleaned="${cleaned#http://}"
+  cleaned="${cleaned#*:*@}"
+  cleaned="${cleaned#git@}"
+  if [[ "${cleaned%%/*}" == *:* ]]; then
+    cleaned="${cleaned/:/\/}"
+  fi
+  cleaned="${cleaned#*/}"
+  slug=$(printf '%s' "$cleaned" | tr -s '/' '-' | tr -cd '[:alnum:]._-')
+  [[ -n "$slug" ]] || return 1
+  printf '%s\n' "$slug"
+}
+
+resolve_repo_slug() {
+  local origin=""
+  origin="$(git -C "$repo" config --get remote.origin.url 2>/dev/null || true)"
+  if [[ -n "$origin" ]]; then
+    repo_slug_from_origin "$origin" && return 0
+  fi
+  basename "$repo"
+}
+
+list_managed_worktrees() {
+  local repo_slug codex_repo_root root
+
+  repo_slug="$(resolve_repo_slug)"
+  codex_repo_root="$codex_home/worktrees/$repo_slug"
+
+  {
+    git -C "$repo" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}'
+    [[ -d "$codex_repo_root" ]] && find "$codex_repo_root" -mindepth 1 -maxdepth 1 -type d -print
+    for root in "$repo/.claude/worktrees" "$repo/.worktrees"; do
+      [[ -d "$root" ]] || continue
+      find "$root" -mindepth 1 -maxdepth 1 -type d -print
+    done
+  } | awk 'NF && !seen[$0]++'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)
+      repo="$2"
+      shift 2
+      ;;
+    --codex-home)
+      codex_home="$2"
+      shift 2
+      ;;
+    --limit)
+      session_limit="$2"
+      shift 2
+      ;;
+    --min-age-days)
+      min_age_days="$2"
+      shift 2
+      ;;
+    --trim-artifacts-age-days)
+      trim_artifacts_age_days="$2"
+      shift 2
+      ;;
+    --delete-workers)
+      delete_workers="$2"
+      shift 2
+      ;;
+    --threshold)
+      threshold="$2"
+      shift 2
+      ;;
+    --min-free-gib)
+      min_free_gib="$2"
+      shift 2
+      ;;
+    --max-real-node-modules-gib)
+      max_real_node_modules_gib="$2"
+      shift 2
+      ;;
+    --max-dist-gib)
+      max_dist_gib="$2"
+      shift 2
+      ;;
+    --force)
+      force=1
+      shift
+      ;;
+    --help|-h)
+      cat <<'EOF'
+Usage: agent-worktree-maintain [options]
+
+Options:
+  --repo <path>            Repo root to maintain.
+  --codex-home <path>      Codex home directory.
+  --limit <n>              Session keep-set passed to agent-worktree-clean.
+  --min-age-days <n>       Minimum worktree age before cleanup.
+  --trim-artifacts-age-days <n>
+                           Minimum worktree age before trimming node_modules/dist.
+  --delete-workers <n>     Parallel delete workers for the cleaner.
+  --threshold <n>          Minimum Codex worktree count before apply mode runs.
+  --min-free-gib <n>       Run cleanup when free disk falls below this GiB floor.
+  --max-real-node-modules-gib <n>
+                           Run cleanup when real top-level worktree node_modules exceeds this GiB cap.
+  --max-dist-gib <n>       Run cleanup when top-level worktree dist exceeds this GiB cap.
+  --force                  Run cleanup even below the threshold.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "agent-worktree-maintain: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+lock_dir="$codex_home/locks/agent-worktree-maintain.lock"
+log_dir="$codex_home/log"
+log_file="$log_dir/agent-worktree-maintain.log"
+
+mkdir -p "$log_dir" "$(dirname "$lock_dir")"
+
+if mkdir "$lock_dir" 2>/dev/null; then
+  printf '%s\n' "$$" >"$lock_dir/pid"
+else
+  if [[ -f "$lock_dir/pid" ]]; then
+    owner_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    if [[ -n "${owner_pid:-}" ]] && kill -0 "$owner_pid" 2>/dev/null; then
+      echo "[$(date '+%F %T')] agent-worktree-maintain: already running (pid=$owner_pid)" >>"$log_file"
+      exit 0
+    fi
+  fi
+  rm -rf "$lock_dir"
+  mkdir "$lock_dir"
+  printf '%s\n' "$$" >"$lock_dir/pid"
+fi
+
+cleanup_lock() {
+  rm -rf "$lock_dir"
+}
+trap cleanup_lock EXIT
+
+managed_worktrees="$(list_managed_worktrees)"
+worktree_count="$(printf '%s\n' "$managed_worktrees" | awk 'NF {count++} END {print count + 0}')"
+
+free_gib="$(df -k "$repo" | awk 'NR==2 {printf "%.1f", $4 / 1024 / 1024}')"
+real_node_modules_kib="$(
+  printf '%s\n' "$managed_worktrees" | while IFS= read -r path; do
+    if [[ -d "$path/node_modules" && ! -L "$path/node_modules" ]]; then
+      du -sk "$path/node_modules"
+    fi
+  done | awk '{sum += $1} END {print sum + 0}'
+)"
+real_node_modules_gib="$(awk "BEGIN {printf \"%.1f\", $real_node_modules_kib / 1024 / 1024}")"
+dist_kib="$(
+  printf '%s\n' "$managed_worktrees" | while IFS= read -r path; do
+    if [[ -d "$path/dist" ]]; then
+      du -sk "$path/dist"
+    fi
+    if [[ -d "$path/dist-runtime" ]]; then
+      du -sk "$path/dist-runtime"
+    fi
+  done | awk '{sum += $1} END {print sum + 0}'
+)"
+dist_gib="$(awk "BEGIN {printf \"%.1f\", $dist_kib / 1024 / 1024}")"
+should_skip=1
+skip_reason="count=$worktree_count threshold=$threshold free_gib=$free_gib min_free_gib=$min_free_gib real_node_modules_gib=$real_node_modules_gib max_real_node_modules_gib=$max_real_node_modules_gib dist_gib=$dist_gib max_dist_gib=$max_dist_gib"
+
+if (( force == 1 )); then
+  should_skip=0
+elif awk "BEGIN { exit !($worktree_count >= $threshold) }"; then
+  should_skip=0
+elif awk "BEGIN { exit !($free_gib < $min_free_gib) }"; then
+  should_skip=0
+elif awk "BEGIN { exit !($real_node_modules_gib >= $max_real_node_modules_gib) }"; then
+  should_skip=0
+elif awk "BEGIN { exit !($dist_gib >= $max_dist_gib) }"; then
+  should_skip=0
+fi
+
+if (( should_skip == 1 )); then
+  echo "[$(date '+%F %T')] agent-worktree-maintain: skip $skip_reason repo=$repo" >>"$log_file"
+  exit 0
+fi
+
+{
+  echo "[$(date '+%F %T')] agent-worktree-maintain: start count=$worktree_count threshold=$threshold free_gib=$free_gib min_free_gib=$min_free_gib real_node_modules_gib=$real_node_modules_gib max_real_node_modules_gib=$max_real_node_modules_gib dist_gib=$dist_gib max_dist_gib=$max_dist_gib repo=$repo"
+  "$DEFAULT_CLEANER" \
+    --repo "$repo" \
+    --limit "$session_limit" \
+    --min-age-days "$min_age_days" \
+    --trim-artifacts-age-days "$trim_artifacts_age_days" \
+    --delete-workers "$delete_workers" \
+    --apply
+  echo "[$(date '+%F %T')] agent-worktree-maintain: done"
+} >>"$log_file" 2>&1

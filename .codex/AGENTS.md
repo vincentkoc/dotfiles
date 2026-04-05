@@ -34,6 +34,6 @@
   - If node_modules is not a symlink in a Codex worktree, stop and report it.
   - Prefer shared worktrees created with gwt new.
   - Prefer scoped tests and targeted verification; do not run repo-wide heavy gates unless explicitly asked or clearly required.
-  - If disk is low, worktree count is high, or local state looks stale, run codex-worktree-maintain --force before continuing.
+  - If disk is low, worktree count is high, or local state looks stale, run agent-worktree-maintain --force before continuing.
   - If the current worktree was cleaned up or no longer exists, stop and ask whether to recreate it.
   - Do not start duplicate heavy checks if another session is likely already running them.
