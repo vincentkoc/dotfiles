@@ -167,7 +167,10 @@ repo() {
 }
 
 # Modular shell bundles.
-_dotfiles_functions_root="${DOTFILES_FUNCTIONS_ROOT:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/functions}"
+_dotfiles_functions_root="${DOTFILES_FUNCTIONS_ROOT:-$HOME/functions}"
+if [[ ! -d "$_dotfiles_functions_root" ]]; then
+    _dotfiles_functions_root="${DOTFILES_DIR:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles}/functions"
+fi
 typeset -a _dotfiles_functions_modules
 _dotfiles_functions_modules=("${(@f)$(find "$_dotfiles_functions_root" -type f -name '*.zsh' -print 2>/dev/null | /usr/bin/sort)}")
 for _dotfiles_functions_module in "${_dotfiles_functions_modules[@]}"; do

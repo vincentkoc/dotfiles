@@ -282,6 +282,8 @@ setup_shell_symlinks() {
     link_dotfile "$df_dir/.zshrc" "$HOME/.zshrc"
     link_dotfile "$df_dir/.zshenv" "$HOME/.zshenv"
     link_dotfile "$df_dir/.zprofile" "$HOME/.zprofile"
+    link_dotfile "$df_dir/bin" "$HOME/bin"
+    link_dotfile "$df_dir/functions" "$HOME/functions"
 }
 
 setup_codex_dotfiles() {
@@ -296,6 +298,14 @@ setup_codex_dotfiles() {
         link_dotfile "$codex_agents_src" "$codex_home/AGENTS.md"
     else
         warn "Codex AGENTS file missing in dotfiles: $codex_agents_src"
+    fi
+
+    if [[ -x "$df_dir/bin/install-agent-worktree-ops" ]]; then
+        info "Installing agent worktree ops runtime"
+        bash "$df_dir/bin/install-agent-worktree-ops"
+        success "Agent worktree ops installed"
+    else
+        warn "Agent worktree ops installer missing in dotfiles: $df_dir/bin/install-agent-worktree-ops"
     fi
 
     if ! command -v codex &>/dev/null; then
