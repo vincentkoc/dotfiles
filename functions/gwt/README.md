@@ -18,6 +18,7 @@ Key responsibilities:
 
 - sparse-checkout profile application
 - shared `node_modules` bootstrap for pnpm repos
+- pretty/default worktree listing with `--raw`, `--plain`, `--color`, and `--no-color`
 - unified worktree discovery across:
   - `~/.codex/worktrees/<repo-slug>`
   - `<repo>/.claude/worktrees`

@@ -132,7 +132,7 @@ Options:
   --trim-artifacts-age-days <n>
                            Minimum worktree age before trimming node_modules/dist.
   --delete-workers <n>     Parallel delete workers for the cleaner.
-  --threshold <n>          Minimum Codex worktree count before apply mode runs.
+  --threshold <n>          Minimum agent worktree count before apply mode runs.
   --min-free-gib <n>       Run cleanup when free disk falls below this GiB floor.
   --max-real-node-modules-gib <n>
                            Run cleanup when real top-level worktree node_modules exceeds this GiB cap.
