@@ -348,8 +348,6 @@ _gwt_worktree_source_label() {
 
 _gwt_tool_path() {
     local tool_name="$1"
-    shift
-    local legacy_names=("$@")
     local candidate
 
     for candidate in \
@@ -358,22 +356,6 @@ _gwt_tool_path() {
         "$HOME/bin/$tool_name"; do
         if [[ -x "$candidate" ]]; then
             printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-
-    for candidate in "${legacy_names[@]}"; do
-        [[ -n "$candidate" ]] || continue
-        if [[ -x "$HOME/Library/Application Support/codex-worktree-maintain/$candidate" ]]; then
-            printf '%s\n' "$HOME/Library/Application Support/codex-worktree-maintain/$candidate"
-            return 0
-        fi
-        if [[ -x "$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/bin/$candidate" ]]; then
-            printf '%s\n' "$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/bin/$candidate"
-            return 0
-        fi
-        if [[ -x "$HOME/bin/$candidate" ]]; then
-            printf '%s\n' "$HOME/bin/$candidate"
             return 0
         fi
     done
@@ -895,7 +877,7 @@ EOF
         audit)
             local repo_root cleaner_path audit_table worktree_count
             repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
-            cleaner_path=$(_gwt_tool_path agent-worktree-clean codex-worktree-clean) || {
+            cleaner_path=$(_gwt_tool_path agent-worktree-clean) || {
                 echo "gwt: agent-worktree-clean not found" >&2
                 return 1
             }
@@ -919,7 +901,7 @@ EOF
         clean)
             local repo_root maintainer_path
             repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
-            maintainer_path=$(_gwt_tool_path agent-worktree-maintain codex-worktree-maintain) || {
+            maintainer_path=$(_gwt_tool_path agent-worktree-maintain) || {
                 echo "gwt: agent-worktree-maintain not found" >&2
                 return 1
             }

@@ -12,5 +12,3 @@ Bins in this folder:
   - background purge of quarantined worktrees
 - `install-agent-worktree-ops`
   - install runtime copies and reload launchd
-
-Compatibility wrappers still exist at `bin/` for the older `codex-worktree-*` names.
