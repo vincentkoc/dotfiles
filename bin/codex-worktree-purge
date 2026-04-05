@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import shutil
+import signal
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+
+DEFAULT_DELETE_WORKERS = 2
+DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+DEFAULT_QUARANTINE_ROOT = os.path.join(DEFAULT_CODEX_HOME, "quarantine", "worktrees")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Purge quarantined Codex worktree directories.")
+    parser.add_argument(
+        "--quarantine-root",
+        default=DEFAULT_QUARANTINE_ROOT,
+        help=f"quarantine root directory (default: {DEFAULT_QUARANTINE_ROOT})",
+    )
+    parser.add_argument(
+        "--delete-workers",
+        type=positive_int,
+        default=DEFAULT_DELETE_WORKERS,
+        help=f"parallel delete workers (default: {DEFAULT_DELETE_WORKERS})",
+    )
+    return parser.parse_args()
+
+
+def positive_int(raw: str) -> int:
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("value must be > 0")
+    return value
+
+
+def main() -> int:
+    args = parse_args()
+    quarantine_root = Path(os.path.realpath(os.path.expanduser(args.quarantine_root)))
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+
+    lock_dir = quarantine_root / ".purge.lock"
+    if not acquire_lock(lock_dir):
+        return 0
+    try:
+        while True:
+            purge_targets = list_quarantine_targets(quarantine_root)
+            if not purge_targets:
+                return 0
+            with ThreadPoolExecutor(max_workers=args.delete_workers) as executor:
+                futures = [executor.submit(delete_path, target) for target in purge_targets]
+                for future in as_completed(futures):
+                    future.result()
+    finally:
+        release_lock(lock_dir)
+
+
+def acquire_lock(lock_dir: Path) -> bool:
+    try:
+        lock_dir.mkdir()
+    except FileExistsError:
+        pid_path = lock_dir / "pid"
+        if pid_path.is_file():
+            try:
+                owner_pid = int(pid_path.read_text().strip())
+            except ValueError:
+                owner_pid = None
+            if owner_pid and is_pid_alive(owner_pid):
+                return False
+        shutil.rmtree(lock_dir, ignore_errors=True)
+        lock_dir.mkdir()
+    (lock_dir / "pid").write_text(f"{os.getpid()}\n")
+    return True
+
+
+def release_lock(lock_dir: Path) -> None:
+    shutil.rmtree(lock_dir, ignore_errors=True)
+
+
+def is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def list_quarantine_targets(quarantine_root: Path) -> list[Path]:
+    return sorted(
+        [
+            path
+            for path in quarantine_root.iterdir()
+            if path.name != ".purge.lock"
+        ],
+        key=lambda path: path.name,
+    )
+
+
+def delete_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    shutil.rmtree(path, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(128 + signal.SIGINT)

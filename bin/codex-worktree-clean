@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -20,8 +21,10 @@ except ImportError:
 DEFAULT_SESSION_LIMIT = 30
 DEFAULT_SCAN_LIMIT = 200
 DEFAULT_DELETE_WORKERS = 8
-DEFAULT_MIN_AGE_DAYS = 10
+DEFAULT_MIN_AGE_DAYS = 2
+DEFAULT_TRIM_ARTIFACTS_AGE_DAYS = 0.25
 DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+DEFAULT_QUARANTINE_ROOT = os.path.join(DEFAULT_CODEX_HOME, "quarantine", "worktrees")
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,25 @@ def parse_args() -> argparse.Namespace:
         type=non_negative_float,
         default=DEFAULT_MIN_AGE_DAYS,
         help=f"only remove worktrees older than this many days (default: {DEFAULT_MIN_AGE_DAYS})",
+    )
+    parser.add_argument(
+        "--trim-artifacts-age-days",
+        type=non_negative_float,
+        default=DEFAULT_TRIM_ARTIFACTS_AGE_DAYS,
+        help=(
+            "remove node_modules and dist from clean, idle worktrees older than this many days "
+            f"when they are not deleted outright (default: {DEFAULT_TRIM_ARTIFACTS_AGE_DAYS})"
+        ),
+    )
+    parser.add_argument(
+        "--quarantine-root",
+        default=DEFAULT_QUARANTINE_ROOT,
+        help="where removable worktrees are moved before async purge",
+    )
+    parser.add_argument(
+        "--shared-node-modules-source",
+        default=None,
+        help="shared repo node_modules directory to symlink stale worktrees back to",
     )
     return parser.parse_args()
 
@@ -138,6 +160,10 @@ def main() -> int:
     repo_root = normalize_path(resolve_repo_root(args.repo))
     codex_home = normalize_path(args.codex_home)
     codex_worktrees_root = normalize_path(os.path.join(codex_home, "worktrees"))
+    quarantine_root = normalize_path(args.quarantine_root)
+    shared_node_modules_source = normalize_path(
+        args.shared_node_modules_source or os.path.join(repo_root, "node_modules")
+    )
     run(["git", "-C", repo_root, "worktree", "prune"])
     worktrees = parse_git_worktrees(run_text(["git", "-C", repo_root, "worktree", "list", "--porcelain"]))
     codex_repo_worktrees = [
@@ -164,7 +190,7 @@ def main() -> int:
         for worktree in codex_repo_worktrees
         if worktree.path not in keep_paths
         and worktree.path not in busy_paths
-        and worktree.age_days >= args.min_age_days
+        and worktree.age_days >= min(args.min_age_days, args.trim_artifacts_age_days)
     ]
     dirty_paths = {
         worktree.path
@@ -179,12 +205,10 @@ def main() -> int:
     kept_by_session: list[Worktree] = []
     kept_for_safety: list[tuple[Worktree, str]] = []
     removable: list[Worktree] = []
+    trimmable: list[Worktree] = []
     for worktree in codex_repo_worktrees:
         if worktree.path in keep_paths:
             kept_by_session.append(worktree)
-            continue
-        if worktree.age_days < args.min_age_days:
-            kept_for_safety.append((worktree, "young"))
             continue
         if worktree.path in dirty_paths:
             kept_for_safety.append((worktree, "dirty"))
@@ -193,9 +217,23 @@ def main() -> int:
             kept_for_safety.append((worktree, "busy"))
             continue
         if worktree.detached and not args.include_detached:
-            kept_for_safety.append((worktree, "detached"))
+            if worktree.age_days >= args.trim_artifacts_age_days:
+                trimmable.append(worktree)
+                kept_for_safety.append((worktree, "detached-trim-only"))
+            else:
+                kept_for_safety.append((worktree, "detached"))
             continue
-        removable.append(worktree)
+        if worktree.age_days >= args.min_age_days:
+            removable.append(worktree)
+            continue
+        if worktree.age_days >= args.trim_artifacts_age_days:
+            trimmable.append(worktree)
+            kept_for_safety.append((worktree, "trim-only"))
+            continue
+        if worktree.age_days < args.trim_artifacts_age_days:
+            kept_for_safety.append((worktree, "young"))
+            continue
+        kept_for_safety.append((worktree, "kept"))
 
     print_summary(
         repo_root=repo_root,
@@ -204,21 +242,40 @@ def main() -> int:
         recent_session_cwds=recent_session_cwds,
         kept_by_session=kept_by_session,
         kept_for_safety=kept_for_safety,
+        trimmable=trimmable,
         removable=removable,
         apply=args.apply,
         min_age_days=args.min_age_days,
+        trim_artifacts_age_days=args.trim_artifacts_age_days,
+        quarantine_root=quarantine_root,
+        shared_node_modules_source=shared_node_modules_source,
     )
 
     if not args.apply:
         return 0
 
-    with progress_bar(total=len(removable), desc="deleting worktrees") as progress:
+    with progress_bar(total=len(trimmable), desc="trimming artifacts") as progress:
         with ThreadPoolExecutor(max_workers=args.delete_workers) as executor:
-            futures = [executor.submit(delete_worktree_tree, worktree.path) for worktree in removable]
+            futures = [
+                executor.submit(trim_worktree_artifacts, worktree.path, shared_node_modules_source)
+                for worktree in trimmable
+            ]
+            for future in as_completed(futures):
+                future.result()
+                progress.update(1)
+
+    with progress_bar(total=len(removable), desc="quarantining worktrees") as progress:
+        with ThreadPoolExecutor(max_workers=args.delete_workers) as executor:
+            futures = [executor.submit(quarantine_worktree_tree, worktree.path, quarantine_root) for worktree in removable]
             for future in as_completed(futures):
                 future.result()
                 progress.update(1)
     run(["git", "-C", repo_root, "worktree", "prune"])
+    spawn_async_purge(
+        codex_home=codex_home,
+        quarantine_root=quarantine_root,
+        delete_workers=args.delete_workers,
+    )
     return 0
 
 
@@ -385,6 +442,10 @@ def collect_busy_worktree_paths(worktrees: list[Worktree]) -> set[str]:
     return busy_paths
 
 
+def path_is_dir(raw_path: str) -> bool:
+    return os.path.isdir(raw_path)
+
+
 def print_summary(
     *,
     repo_root: str,
@@ -393,17 +454,26 @@ def print_summary(
     recent_session_cwds: list[str],
     kept_by_session: list[Worktree],
     kept_for_safety: list[tuple[Worktree, str]],
+    trimmable: list[Worktree],
     removable: list[Worktree],
     apply: bool,
     min_age_days: float,
+    trim_artifacts_age_days: float,
+    quarantine_root: str,
+    shared_node_modules_source: str,
 ) -> None:
     print(f"repo root: {repo_root}")
     print(f"codex state: {state_db or '(not found)'}")
     print(f"codex worktrees: {len(codex_repo_worktrees)}")
     print(f"recent sessions scanned: {len(recent_session_cwds)}")
     print(f"min age days: {min_age_days:g}")
+    print(f"trim artifacts age days: {trim_artifacts_age_days:g}")
+    print(f"quarantine root: {quarantine_root}")
+    print(f"shared node_modules source: {shared_node_modules_source}")
+    print(f"shared node_modules exists: {'yes' if path_is_dir(shared_node_modules_source) else 'no'}")
     print(f"kept by recent sessions: {len(kept_by_session)}")
     print(f"kept for safety: {len(kept_for_safety)}")
+    print(f"eligible for artifact trim: {len(trimmable)}")
     print(f"eligible for removal: {len(removable)}")
     print(f"mode: {'apply' if apply else 'dry-run'}")
 
@@ -416,6 +486,12 @@ def print_summary(
         print("\nSkipped for safety:")
         for worktree, reason in sorted(kept_for_safety, key=lambda item: item[0].path):
             print(f"keep  {worktree.path}  ({reason}, age={worktree.age_days:.1f}d)")
+
+    if trimmable:
+        print("\nArtifact trim candidates:")
+        for worktree in sorted(trimmable, key=lambda item: item.path):
+            branch_label = simplify_branch_label(worktree)
+            print(f"trim  {worktree.path}  ({branch_label}, age={worktree.age_days:.1f}d)")
 
     if removable:
         print("\nRemoval candidates:")
@@ -448,12 +524,70 @@ def has_changes(command: list[str]) -> bool:
 
 
 def delete_worktree_tree(worktree_path: str) -> None:
+    delete_paths([worktree_path])
+
+
+def trim_worktree_artifacts(worktree_path: str, shared_node_modules_source: str) -> None:
+    node_modules_path = os.path.join(worktree_path, "node_modules")
+    dist_path = os.path.join(worktree_path, "dist")
+
+    if (
+        path_is_dir(node_modules_path)
+        and not os.path.islink(node_modules_path)
+        and path_is_dir(shared_node_modules_source)
+    ):
+        delete_paths([node_modules_path])
+        os.symlink(shared_node_modules_source, node_modules_path)
+
+    if path_is_dir(dist_path):
+        delete_paths([dist_path])
+
+
+def delete_paths(paths: list[str]) -> None:
+    if not paths:
+        return
     subprocess.run(
-        ["/bin/rm", "-rf", worktree_path],
+        ["/bin/rm", "-rf", *paths],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
+
+
+def quarantine_worktree_tree(worktree_path: str, quarantine_root: str) -> str:
+    os.makedirs(quarantine_root, exist_ok=True)
+    quarantine_path = os.path.join(
+        quarantine_root,
+        f"{int(time.time() * 1000)}-{os.getpid()}-{os.path.basename(worktree_path)}",
+    )
+    shutil.move(worktree_path, quarantine_path)
+    return quarantine_path
+
+
+def spawn_async_purge(*, codex_home: str, quarantine_root: str, delete_workers: int) -> None:
+    helper_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "codex-worktree-purge")
+    if not os.path.exists(helper_path):
+        return
+    log_dir = os.path.join(codex_home, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "codex-worktree-purge.log")
+    with open(log_path, "ab") as log_handle:
+        subprocess.Popen(
+            [
+                "/usr/bin/nice",
+                "-n",
+                "20",
+                helper_path,
+                "--quarantine-root",
+                quarantine_root,
+                "--delete-workers",
+                str(delete_workers),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True,
+        )
 
 
 def run_text(command: list[str]) -> str:

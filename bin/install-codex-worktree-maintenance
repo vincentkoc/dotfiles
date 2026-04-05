@@ -10,7 +10,8 @@ PLIST_TARGET="$HOME/Library/LaunchAgents/com.vincentkoc.codex-worktree-maintain.
 mkdir -p "$RUNTIME_DIR" "$HOME/Library/LaunchAgents"
 cp "$DOTFILES_DIR/bin/codex-worktree-clean" "$RUNTIME_DIR/codex-worktree-clean"
 cp "$DOTFILES_DIR/bin/codex-worktree-maintain" "$RUNTIME_DIR/codex-worktree-maintain"
-chmod +x "$RUNTIME_DIR/codex-worktree-clean" "$RUNTIME_DIR/codex-worktree-maintain"
+cp "$DOTFILES_DIR/bin/codex-worktree-purge" "$RUNTIME_DIR/codex-worktree-purge"
+chmod +x "$RUNTIME_DIR/codex-worktree-clean" "$RUNTIME_DIR/codex-worktree-maintain" "$RUNTIME_DIR/codex-worktree-purge"
 
 ln -sfn "$PLIST_SOURCE" "$PLIST_TARGET"
 launchctl bootout "gui/$(id -u)" "$PLIST_TARGET" >/dev/null 2>&1 || true
