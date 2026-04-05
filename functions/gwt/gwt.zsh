@@ -279,6 +279,7 @@ _gwt_discover_worktree_paths() {
 
     while IFS= read -r worktree_path; do
         [[ -n "$worktree_path" && -d "$worktree_path" ]] || continue
+        [[ "$worktree_path" == "$repo_root" ]] && continue
         printf '%s\n' "$worktree_path"
     done <<< "$discovered"
 
