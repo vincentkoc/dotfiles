@@ -24,5 +24,16 @@
 - At the end of a work cycle, clean up or close related issues/PRs when appropriate.
 - If merging on my behalf, squash PRs unless I say otherwise.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`
+- In `openclaw/openclaw`, when testing locally use pnpm test:serial
 - Use semantic commit messages like `fix(ci):` unless rules say otherwise
 - Do not make any docs/internal/ .md files on openclaw
+- On resume or after a crash, always enter recovery mode before doing work.Recovery mode rules:
+  - Re-read the recent thread context and summarize task, status, pending work, and next step.
+  - Verify cwd, repo root, branch, git status, node_modules linkage, and free disk before editing or testing.
+  - Never run pnpm install inside a Codex worktree under ~/.codex/worktrees.
+  - If node_modules is not a symlink in a Codex worktree, stop and report it.
+  - Prefer shared worktrees created with gwt new.
+  - Prefer scoped tests and targeted verification; do not run repo-wide heavy gates unless explicitly asked or clearly required.
+  - If disk is low, worktree count is high, or local state looks stale, run codex-worktree-maintain --force before continuing.
+  - If the current worktree was cleaned up or no longer exists, stop and ask whether to recreate it.
+  - Do not start duplicate heavy checks if another session is likely already running them.
