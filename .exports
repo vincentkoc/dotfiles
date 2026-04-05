@@ -265,6 +265,7 @@ if [[ $IS_MACOS == true ]]; then
 else
     export PNPM_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pnpm"
 fi
+export PNPM_STORE_DIR="${PNPM_STORE_DIR:-$PNPM_HOME/store}"
 path_prepend "$PNPM_HOME"
 
 # Worktrees (default root used by gwt)

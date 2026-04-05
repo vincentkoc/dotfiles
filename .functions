@@ -730,6 +730,88 @@ _gwt_resolve_start_point() {
     return 1
 }
 
+_gwt_is_pnpm_repo() {
+    local repo_root="$1"
+
+    [[ -f "$repo_root/pnpm-lock.yaml" || -f "$repo_root/pnpm-workspace.yaml" ]] && return 0
+    [[ -f "$repo_root/package.json" ]] || return 1
+
+    grep -Eq '"packageManager"[[:space:]]*:[[:space:]]*"pnpm(@|")' "$repo_root/package.json"
+}
+
+_gwt_shared_install_source() {
+    local repo_root="$1"
+    local main_worktree=""
+    local worktrees_root=""
+
+    main_worktree=$(git worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
+    if [[ -n "$main_worktree" && -d "$main_worktree/node_modules" ]]; then
+        printf '%s\n' "$main_worktree"
+        return 0
+    fi
+
+    worktrees_root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    if [[ -d "$repo_root/node_modules" && "$repo_root" != "$worktrees_root/"* ]]; then
+        printf '%s\n' "$repo_root"
+        return 0
+    fi
+
+    return 1
+}
+
+_gwt_find_workspace_node_modules() {
+    local repo_root="$1"
+
+    find "$repo_root" \
+        \( -path "$repo_root/.git" -o -path "$repo_root/.git/*" \) -prune -o \
+        -type d -name node_modules -print -prune
+}
+
+_gwt_link_shared_node_modules() {
+    local source_root="$1"
+    local target_root="$2"
+    local source_path relative_path target_path
+
+    while IFS= read -r source_path; do
+        [[ -n "$source_path" ]] || continue
+
+        relative_path="${source_path#$source_root/}"
+        target_path="$target_root/$relative_path"
+
+        if [[ -L "$target_path" ]]; then
+            continue
+        fi
+
+        if [[ -e "$target_path" ]]; then
+            echo "gwt: refusing to replace existing path $target_path" >&2
+            return 1
+        fi
+
+        mkdir -p "$(dirname "$target_path")" || return 1
+        ln -s "$source_path" "$target_path" || return 1
+    done < <(_gwt_find_workspace_node_modules "$source_root")
+}
+
+_gwt_bootstrap_worktree() {
+    local worktree_path="$1"
+    local install_source=""
+
+    _gwt_is_pnpm_repo "$worktree_path" || return 0
+
+    if ! install_source=$(_gwt_shared_install_source "$worktree_path"); then
+        echo "gwt: pnpm repo detected, but no canonical node_modules tree exists yet" >&2
+        echo "gwt: run pnpm install once in the main checkout, then create worktrees from there" >&2
+        return 0
+    fi
+
+    if [[ "$install_source" == "$worktree_path" ]]; then
+        return 0
+    fi
+
+    echo "gwt: linking shared pnpm install from $install_source"
+    _gwt_link_shared_node_modules "$install_source" "$worktree_path" || return 1
+}
+
 # gwt: opinionated wrapper around `git worktree`.
 # oh-my-zsh git plugin defines `gwt` alias; remove it so the function can load cleanly.
 unalias gwt 2>/dev/null
@@ -799,6 +881,7 @@ EOF
                 git worktree add -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
             fi
 
+            _gwt_bootstrap_worktree "$worktree_path" || return 1
             cd "$worktree_path" || return 1
             ;;
         cd)
