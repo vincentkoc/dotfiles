@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vincentkoc.agent-worktree-ops</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/nice</string>
+    <string>-n</string>
+    <string>20</string>
+    <string>/Users/vincentkoc/Library/Application Support/agent-worktree-ops/agent-worktree-maintain</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/com.vincentkoc.agent-worktree-ops.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/com.vincentkoc.agent-worktree-ops.log</string>
+</dict>
+</plist>
