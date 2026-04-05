@@ -1,5 +1,5 @@
 [[ -n "${DOTFILES_GWT_LOADED:-}" ]] && return 0
-export DOTFILES_GWT_LOADED=1
+typeset -g DOTFILES_GWT_LOADED=1
 
 _gwt_slug_from_origin() {
     local origin="$1"
