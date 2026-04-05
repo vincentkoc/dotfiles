@@ -10,6 +10,11 @@ fi
 # Disable terminal bell in zsh (prevents iTerm bell icon/sound).
 setopt NO_BEEP
 
+# Faster deletes (ctrl-backspace, alt-backspace) if terminals send ^H or meta-backspace.
+bindkey '^H' backward-kill-word
+bindkey '^[^?' backward-kill-word
+bindkey '^?' backward-delete-char
+
 # Bootstrap environment before loading oh-my-zsh so PATH + theme variables exist early
 if [[ -r ~/.exports ]]; then
 	source ~/.exports
