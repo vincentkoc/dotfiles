@@ -207,7 +207,7 @@
         "speaker.h": "c",
         "math.h": "c"
     },
-    "terminal.external.osxExec": "iTerm.app",
+    "terminal.external.osxExec": "Ghostty.app",
     "terminal.integrated.fontSize": 12,
     "git.enableCommitSigning": true,
     "readable.enableAutoComplete": true,

@@ -367,6 +367,31 @@ setup_iterm_preferences() {
     success "iTerm2 prefs linked to $mackup_prefs_dir"
 }
 
+setup_ghostty_config() {
+    local df_dir ghostty_config_dir local_ghostty_dir ghostty_config_file macos_ghostty_dir macos_ghostty_config
+    df_dir="$(dotfiles_dir)"
+    ghostty_config_dir="$df_dir/.config/ghostty"
+    ghostty_config_file="$ghostty_config_dir/config.ghostty"
+    local_ghostty_dir="$HOME/.config/ghostty"
+    macos_ghostty_dir="$HOME/Library/Application Support/com.mitchellh.ghostty"
+    macos_ghostty_config="$macos_ghostty_dir/config.ghostty"
+
+    if [[ ! -d "$ghostty_config_dir" ]]; then
+        warn "Ghostty config directory missing in dotfiles: $ghostty_config_dir"
+        return
+    fi
+
+    mkdir -p "$HOME/.config"
+    link_dotfile "$ghostty_config_dir" "$local_ghostty_dir"
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        mkdir -p "$macos_ghostty_dir"
+        link_dotfile "$ghostty_config_file" "$macos_ghostty_config"
+    fi
+
+    success "Ghostty config linked to $ghostty_config_dir"
+}
+
 # Install Oh My Zsh
 install_oh_my_zsh() {
     if [[ -d "$HOME/.oh-my-zsh" ]]; then
@@ -553,6 +578,7 @@ main() {
     install_nvim_plugins
     setup_shell_symlinks
     setup_codex_dotfiles
+    setup_ghostty_config
     setup_iterm_preferences
     setup_openclaw_symlinks
 

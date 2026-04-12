@@ -1,0 +1,29 @@
+# Keep Ghostty aligned with the Tokyo Night shell palette and the old iTerm
+# reading comfort instead of relying on ad hoc app-local settings.
+theme = TokyoNight Night
+
+font-family = Monaco
+font-family-bold = Monaco
+font-family-italic = Monaco
+font-family-bold-italic = Monaco
+font-size = 12
+
+background = #1a1b26
+foreground = #c0caf5
+selection-background = #7aa2f7
+cursor-color = #c0caf5
+minimum-contrast = 2
+background-opacity = 0.8
+background-blur = true
+window-decoration = server
+term = xterm-256color
+keybind = f11=toggle_fullscreen
+
+window-padding-x = 14
+window-padding-y = 14
+copy-on-select = false
+shell-integration = detect
+macos-titlebar-style = transparent
+link-url = true
+link-previews = osc8
+mouse-shift-capture = never
