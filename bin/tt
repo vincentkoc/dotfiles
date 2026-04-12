@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TMUX_BIN="/opt/homebrew/bin/tmux"
+if [[ ! -x "$TMUX_BIN" ]]; then
+  TMUX_BIN="/usr/local/bin/tmux"
+fi
+if [[ ! -x "$TMUX_BIN" ]]; then
+  TMUX_BIN="/usr/bin/tmux"
+fi
+if [[ ! -x "$TMUX_BIN" ]]; then
+  echo "tmux not found at common paths" >&2
+  exit 1
+fi
+
+attach_or_switch() {
+  local session="$1"
+
+  if [[ -n "${TMUX:-}" ]]; then
+    exec "$TMUX_BIN" switch-client -t "$session"
+  fi
+
+  exec "$TMUX_BIN" attach -t "$session"
+}
+
+confirm_action() {
+  local prompt="$1"
+  local answer
+
+  printf '%s [y/N]: ' "$prompt" >&2
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+kill_server() {
+  local force="${1:-}"
+
+  if [[ "$force" != "force" ]]; then
+    confirm_action "kill tmux server and all sessions?" || exit 1
+  fi
+
+  "$TMUX_BIN" kill-server 2>/dev/null || true
+}
+
+create_plain() {
+  local session="$1"
+
+  if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    attach_or_switch "$session"
+  fi
+
+  if [[ -n "${TMUX:-}" ]]; then
+    "$TMUX_BIN" new-session -d -s "$session"
+    exec "$TMUX_BIN" switch-client -t "$session"
+  fi
+
+  exec "$TMUX_BIN" new -s "$session"
+}
+
+create_studio() {
+  local session="$1"
+
+  if ! "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    "$TMUX_BIN" new-session -d -s "$session" -n main
+    "$TMUX_BIN" split-window -h -t "$session:main"
+    "$TMUX_BIN" split-window -h -t "$session:main"
+    "$TMUX_BIN" select-layout -t "$session:main" even-horizontal
+
+    while IFS= read -r pane; do
+      "$TMUX_BIN" split-window -v -t "$pane"
+    done < <("$TMUX_BIN" list-panes -t "$session:main" -F '#{pane_id}')
+  fi
+
+  attach_or_switch "$session"
+}
+
+reset_to_profile() {
+  local profile="$1"
+  local session="${2:-}"
+
+  kill_server force
+
+  case "$profile" in
+    ai|studio)
+      create_studio "${session:-studio}"
+      ;;
+    shell|plain)
+      create_plain "${session:-main}"
+      ;;
+    *)
+      echo "unknown reset profile: $profile" >&2
+      exit 2
+      ;;
+  esac
+}
+
+list_sessions() {
+  "$TMUX_BIN" list-sessions -F '#S' 2>/dev/null || true
+}
+
+session_summary() {
+  local session="$1"
+  local pane_count window_count
+  pane_count="$("$TMUX_BIN" list-panes -t "$session" 2>/dev/null | wc -l | tr -d ' ')"
+  window_count="$("$TMUX_BIN" list-windows -t "$session" 2>/dev/null | wc -l | tr -d ' ')"
+
+  if [[ "$pane_count" == "6" && "$window_count" == "1" ]]; then
+    printf 'studio'
+  else
+    printf 'plain'
+  fi
+}
+
+profile_label() {
+  case "$1" in
+    studio)
+      printf 'ai'
+      ;;
+    plain)
+      printf 'shell'
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
+choose_with_fzf() {
+  command -v fzf >/dev/null 2>&1 || return 1
+  printf '%s\n' "$@" | fzf --prompt='tt > ' --height=40% --layout=reverse --border
+}
+
+choose_with_select() {
+  local options=("$@")
+  local choice
+  PS3="tt> "
+
+  select choice in "${options[@]}"; do
+    [[ -n "${choice:-}" ]] || continue
+    printf '%s\n' "$choice"
+    return 0
+  done
+}
+
+choose_option() {
+  local options=("$@")
+  local selected
+
+  if selected="$(choose_with_fzf "${options[@]}")"; then
+    printf '%s\n' "$selected"
+    return 0
+  fi
+
+  choose_with_select "${options[@]}"
+}
+
+prompt_session_name() {
+  local prompt="${1:-session name}"
+  local default_name="${2:-}"
+  local value
+
+  if [[ -n "$default_name" ]]; then
+    printf '%s [%s]: ' "$prompt" "$default_name" >&2
+    read -r value
+    printf '%s\n' "${value:-$default_name}"
+  else
+    printf '%s: ' "$prompt" >&2
+    read -r value
+    printf '%s\n' "$value"
+  fi
+}
+
+run_menu() {
+  local session selection summary
+  local -a options=()
+
+  while IFS= read -r session; do
+    [[ -n "$session" ]] || continue
+    summary="$(session_summary "$session")"
+    options+=("attach  [$(profile_label "$summary")]  $session")
+  done < <(list_sessions)
+
+  options+=("new     [ai]     agent cockpit (3x2)")
+  options+=("new     [shell]  normal tmux session")
+  options+=("reset   [ai]     kill server + fresh agent cockpit")
+  options+=("reset   [shell]  kill server + fresh shell session")
+  options+=("kill    [all]    stop tmux server")
+
+  selection="$(choose_option "${options[@]}")"
+
+  case "$selection" in
+    attach*)
+      attach_or_switch "${selection##*  }"
+      ;;
+    "new     [ai]     agent cockpit (3x2)")
+      session="$(prompt_session_name "ai session" "studio")"
+      [[ -n "$session" ]] || exit 1
+      create_studio "$session"
+      ;;
+    "new     [shell]  normal tmux session")
+      session="$(prompt_session_name "shell session")"
+      [[ -n "$session" ]] || exit 1
+      create_plain "$session"
+      ;;
+    "reset   [ai]     kill server + fresh agent cockpit")
+      session="$(prompt_session_name "fresh ai session" "studio")"
+      [[ -n "$session" ]] || exit 1
+      reset_to_profile ai "$session"
+      ;;
+    "reset   [shell]  kill server + fresh shell session")
+      session="$(prompt_session_name "fresh shell session" "main")"
+      [[ -n "$session" ]] || exit 1
+      reset_to_profile shell "$session"
+      ;;
+    "kill    [all]    stop tmux server")
+      kill_server
+      ;;
+    *)
+      echo "unknown selection: $selection" >&2
+      exit 1
+      ;;
+  esac
+}
+
+case "${1:-}" in
+  "")
+    run_menu
+    ;;
+  ai|studio)
+    create_studio "${2:-studio}"
+    ;;
+  shell|plain)
+    if [[ -n "${2:-}" ]]; then
+      create_plain "$2"
+    else
+      session="$(prompt_session_name "shell session")"
+      [[ -n "$session" ]] || exit 1
+      create_plain "$session"
+    fi
+    ;;
+  reset)
+    profile="${2:-ai}"
+    case "$profile" in
+      ai|studio)
+        reset_to_profile ai "${3:-studio}"
+        ;;
+      shell|plain)
+        reset_to_profile shell "${3:-main}"
+        ;;
+      *)
+        echo "usage: tt reset [ai|shell] [session]" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  kill)
+    kill_server
+    ;;
+  attach)
+    [[ -n "${2:-}" ]] || { echo "usage: tt attach <session>" >&2; exit 2; }
+    attach_or_switch "$2"
+    ;;
+  ls)
+    list_sessions
+    ;;
+  *)
+    if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
+      attach_or_switch "$1"
+    else
+      echo "usage: tt [ai [session]|shell [session]|reset [ai|shell] [session]|kill|attach <session>|ls]" >&2
+      exit 2
+    fi
+    ;;
+esac
