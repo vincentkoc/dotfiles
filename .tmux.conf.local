@@ -44,6 +44,13 @@ tmux_conf_new_session_prompt=false
 # see https://github.com/termstandard/colors
 tmux_conf_24b_colour=auto
 
+# Stop advertising ancient screen terminfo inside tmux.
+set -g default-terminal "tmux-256color"
+
+# Ghostty and iTerm usually present as xterm-256color; tell tmux OSC 8 works.
+set -ga terminal-features ",xterm-256color:hyperlinks"
+set -ga terminal-features ",tmux-256color:hyperlinks"
+
 
 # -- theming -------------------------------------------------------------------
 
@@ -119,6 +126,10 @@ tmux_conf_theme_pane_active_border="$tmux_conf_theme_colour_4"
 %if #{>=:#{version},3.2}
 tmux_conf_theme_pane_active_border="#{?pane_in_mode,$tmux_conf_theme_colour_9,#{?synchronize-panes,$tmux_conf_theme_colour_16,$tmux_conf_theme_colour_4}}"
 %endif
+
+set -g pane-border-format "#{pane_index} #{?@agent_pane_badge,#{@agent_pane_badge},}#{pane_title}"
+set-hook -g after-select-pane 'run-shell "tmux set-option -pt \"#{pane_id}\" -u @agent_pane_badge >/dev/null 2>&1 || true"'
+set-hook -g after-select-window 'run-shell "tmux set-option -pt \"#{pane_id}\" -u @agent_pane_badge >/dev/null 2>&1 || true"'
 
 # pane indicator colours (when you hit <prefix> + q)
 tmux_conf_theme_pane_indicator="$tmux_conf_theme_colour_4"
@@ -239,7 +250,7 @@ tmux_conf_theme_right_separator_sub='\uE0B3'
 #     - #{username}
 #     - #{username_ssh}
 tmux_conf_theme_status_left=" ❐ #S "
-tmux_conf_theme_status_right=" #{prefix}#{mouse}#{pairing}#{synchronized}#{?battery_status,#{battery_status},}#{?battery_percentage, #{battery_percentage},} | %R %d %b | #{username}#{root}@#{hostname} "
+tmux_conf_theme_status_right=" #{?@agent_attention_segment,#{@agent_attention_segment},}#{prefix}#{mouse}#{pairing}#{synchronized}#{?battery_status,#{battery_status},}#{?battery_percentage, #{battery_percentage},} | %R %d %b | #{username}#{root}@#{hostname} "
 
 # status left style
 tmux_conf_theme_status_left_fg="$tmux_conf_theme_colour_6,$tmux_conf_theme_colour_7,$tmux_conf_theme_colour_8"
@@ -414,6 +425,7 @@ tmux_conf_uninstall_plugins_on_reload=true
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 set -g @continuum-restore 'on'
+set -g @continuum-save-interval '2'
 
 
 # -- custom variables ----------------------------------------------------------

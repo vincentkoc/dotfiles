@@ -190,11 +190,11 @@ alias pip3='pip'
 # If not running interactively, don't do anything
 [ -z "$PS1" ] && return
 
-# iTerm title: repo/branch context, including linked worktree name.
-if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
+# Terminal title: repo/branch context, including linked worktree name.
+if [[ "${TERM_PROGRAM:-}" == "iTerm.app" || "${TERM_PROGRAM:-}" == "ghostty" ]]; then
 	autoload -Uz add-zsh-hook
 
-	_dotfiles_iterm_title() {
+	_dotfiles_terminal_title() {
 		local title cwd repo branch git_dir wt_name
 		cwd="${PWD/#$HOME/~}"
 		title="$cwd"
@@ -211,20 +211,21 @@ if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
 			fi
 		fi
 
-		# OSC 0 sets both window and tab title in iTerm.
+		# OSC 0 updates the visible terminal title in iTerm and Ghostty.
 		print -Pn "\e]0;${title}\a"
 	}
 
-	add-zsh-hook chpwd _dotfiles_iterm_title
-	add-zsh-hook precmd _dotfiles_iterm_title
+	add-zsh-hook chpwd _dotfiles_terminal_title
+	add-zsh-hook precmd _dotfiles_terminal_title
 fi
 
-# Tag tmux panes with Codex thread id when present.
-if [[ -n "${TMUX:-}" && -n "${CODEX_THREAD_ID:-}" ]]; then
+# Keep tmux pane titles aligned with the current repo/worktree.
+if [[ -n "${TMUX:-}" ]]; then
 	autoload -Uz add-zsh-hook
 	_dotfiles_codex_pane_title() {
 		command -v tmux-codex-title >/dev/null 2>&1 && tmux-codex-title >/dev/null 2>&1 || true
 	}
+	add-zsh-hook chpwd _dotfiles_codex_pane_title
 	add-zsh-hook precmd _dotfiles_codex_pane_title
 fi
 

@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state="${1:-reset}"
+source_name="${2:-agent}"
+
+normalize_source() {
+  local lowered
+  lowered="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+
+  case "$lowered" in
+    codex)
+      printf 'CODEX'
+      ;;
+    claude)
+      printf 'CLAUDE'
+      ;;
+    *)
+      printf 'AGENT'
+      ;;
+  esac
+}
+
+source_label="$(normalize_source "$source_name")"
+source_slug="$(printf '%s' "$source_label" | tr '[:upper:]' '[:lower:]')"
+
+pane_title_base() {
+  local short_cwd repo branch git_dir worktree_label leaf title
+
+  short_cwd="${PWD/#$HOME/~}"
+  leaf="$(basename "$PWD")"
+  title="$short_cwd"
+
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    repo="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")"
+    branch="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)"
+    git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
+    worktree_label=""
+
+    if [[ "$git_dir" == *"/worktrees/"* ]]; then
+      worktree_label="$(basename "$git_dir")"
+      title="$repo [$worktree_label]"
+    else
+      title="$repo:$branch"
+    fi
+
+    if [[ "$leaf" != "$repo" && ( -z "$worktree_label" || "$leaf" != "$worktree_label" ) ]]; then
+      title="$title · $leaf"
+    fi
+  fi
+
+  if [[ "$source_label" != "AGENT" ]]; then
+    title="$source_slug · $title"
+  fi
+
+  printf '%s' "$title"
+}
+
+set_pane_title() {
+  local title="$1"
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ -z "${TMUX_PANE:-}" ]]; then
+    return
+  fi
+
+  tmux select-pane -t "$TMUX_PANE" -T "$title" >/dev/null 2>&1 || true
+}
+
+set_pane_badge() {
+  local badge="$1"
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ -z "${TMUX_PANE:-}" ]]; then
+    return
+  fi
+
+  if [[ -n "$badge" ]]; then
+    tmux set-option -pt "$TMUX_PANE" @agent_pane_badge "$badge" >/dev/null 2>&1 || true
+  else
+    tmux set-option -pt "$TMUX_PANE" -u @agent_pane_badge >/dev/null 2>&1 || true
+  fi
+}
+
+set_tmux_state() {
+  local segment="$1"
+  local client_tty
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    return
+  fi
+
+  if ! tmux ls >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ -n "$segment" ]]; then
+    tmux set-option -gq @agent_attention_state "${state}:${source_label}"
+    tmux set-option -gq @agent_attention_segment "$segment"
+  else
+    tmux set-option -gqu @agent_attention_state || true
+    tmux set-option -gqu @agent_attention_segment || true
+  fi
+
+  while IFS= read -r client_tty; do
+    [[ -n "$client_tty" ]] || continue
+    tmux refresh-client -S -t "$client_tty" >/dev/null 2>&1 || true
+  done < <(tmux list-clients -F '#{client_tty}' 2>/dev/null || true)
+}
+
+write_terminal_bg() {
+  local bg="$1"
+  local cursor="$2"
+  local tty_path
+
+  if [[ -n "${AGENT_ATTN_TTY:-}" ]]; then
+    tty_path="$AGENT_ATTN_TTY"
+  else
+    tty_path="$(tty 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$tty_path" || "$tty_path" == "not a tty" || ! -w "$tty_path" ]]; then
+    return
+  fi
+
+  # OSC 11 updates background; OSC 12 updates cursor color.
+  printf '\033]11;%s\007\033]12;%s\007' "$bg" "$cursor" >"$tty_path" || true
+}
+
+wait_segment() {
+  case "$source_label" in
+    CODEX)
+      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default]'
+      ;;
+    CLAUDE)
+      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default]'
+      ;;
+    *)
+      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default]'
+      ;;
+  esac
+}
+
+approval_segment() {
+  case "$source_label" in
+    CODEX)
+      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default]'
+      ;;
+    CLAUDE)
+      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default]'
+      ;;
+    *)
+      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default]'
+      ;;
+  esac
+}
+
+wait_cursor() {
+  case "$source_label" in
+    CODEX)
+      printf '%s' '#7aa2f7'
+      ;;
+    CLAUDE)
+      printf '%s' '#73daca'
+      ;;
+    *)
+      printf '%s' '#e0af68'
+      ;;
+  esac
+}
+
+wait_pane_badge() {
+  case "$source_label" in
+    CODEX)
+      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] '
+      ;;
+    CLAUDE)
+      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] '
+      ;;
+    *)
+      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] '
+      ;;
+  esac
+}
+
+approval_pane_badge() {
+  case "$source_label" in
+    CODEX)
+      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] '
+      ;;
+    CLAUDE)
+      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] '
+      ;;
+    *)
+      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] '
+      ;;
+  esac
+}
+
+case "$state" in
+  waiting)
+    set_tmux_state "$(wait_segment)"
+    set_pane_title "$(pane_title_base)"
+    set_pane_badge "$(wait_pane_badge)"
+    write_terminal_bg '#241d12' "$(wait_cursor)"
+    ;;
+  permission|approve)
+    set_tmux_state "$(approval_segment)"
+    set_pane_title "$(pane_title_base)"
+    set_pane_badge "$(approval_pane_badge)"
+    write_terminal_bg '#2b1720' '#f7768e'
+    ;;
+  reset|active|idle|clear)
+    set_tmux_state ''
+    set_pane_title "$(pane_title_base)"
+    set_pane_badge ''
+    write_terminal_bg '#1a1b26' '#c0caf5'
+    ;;
+  *)
+    echo "usage: agent-attn-set [waiting|permission|reset] [codex|claude]" >&2
+    exit 2
+    ;;
+esac
