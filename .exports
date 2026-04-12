@@ -53,6 +53,10 @@ if [[ $IS_MACOS == true ]]; then
         export HOMEBREW_PREFIX="/opt/homebrew"
         export HOMEBREW_CELLAR="/opt/homebrew/Cellar"
         export HOMEBREW_REPOSITORY="/opt/homebrew"
+        path_remove "/opt/homebrew/bin"
+        path_remove "/opt/homebrew/sbin"
+        path_remove "/usr/local/bin"
+        path_remove "/usr/local/sbin"
         path_prepend "/opt/homebrew/bin"
         path_prepend "/opt/homebrew/sbin"
     elif [[ -d /usr/local/bin ]]; then
@@ -81,8 +85,14 @@ fi
 # Base PATH
 path_prepend "/bin"
 path_prepend "/usr/bin"
-path_prepend "/usr/local/bin"
-path_prepend "/usr/local/sbin"
+if [[ $IS_MACOS == true ]] && [[ "${HOMEBREW_PREFIX:-}" == "/opt/homebrew" ]]; then
+    # Keep Apple Silicon Homebrew ahead of legacy /usr/local tooling like MacGPG2.
+    path_append "/usr/local/bin"
+    path_append "/usr/local/sbin"
+else
+    path_prepend "/usr/local/bin"
+    path_prepend "/usr/local/sbin"
+fi
 
 # Custom binaries
 path_prepend "$DOTFILES_BIN_ROOT"

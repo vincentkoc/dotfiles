@@ -1,8 +1,8 @@
 [user]
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
-	signingkey = FB4C24AE87080A95
-	# signingkey = FB4C24AE87080A95
+	signingkey = /Users/vincentkoc/.ssh/id_ed25519
+	# GPG signing key id preserved for easy switching later: FB4C24AE87080A95
 	# # set name, email and gpg signature on commits
 	# # values are set using ~/.extra/user.sh
 	#
@@ -11,10 +11,13 @@
 	# signingkey = ""
 
 [commit]
+	gpgsign = true
 	# sign commits with gpg keys
 	# gpgsign = true
 
 [gpg]
+	format = ssh
+	program = /opt/homebrew/bin/gpg
 	# git config --global gpg.program "$(which gpg)"
 	# TODO: fix gpg alias for github client
 	# program = /opt/homebrew/bin/gpg
@@ -26,7 +29,7 @@
 
 [core]
 	# Sets editor to sublime
-	editor = subl -n -w
+	editor = true
 	# Sets global excludes
 	excludesfile = ~/.gitignore_global
 	# Improves diff used by git in CLI
@@ -129,3 +132,7 @@
 [credential "https://gist.github.com"]
 	helper = 
 	helper = !gh auth git-credential
+[tag]
+	gpgsign = true
+[gpg "ssh"]
+	allowedSignersFile = /Users/vincentkoc/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.ssh/allowed_signers

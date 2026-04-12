@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+git_config="${HOME}/.gitconfig"
+ssh_key="${HOME}/.ssh/id_ed25519"
+ssh_allowed_signers="${HOME}/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.ssh/allowed_signers"
+gpg_program="/opt/homebrew/bin/gpg"
+gpg_key_id="FB4C24AE87080A95"
+
+usage() {
+  cat <<'EOF'
+usage: git-signing-mode <ssh|gpg|status>
+
+  ssh    use SSH commit/tag signing with ~/.ssh/id_ed25519
+  gpg    switch Git back to OpenPGP signing with the saved key id
+  status show the active signing-related Git config
+EOF
+}
+
+require_git_config() {
+  command -v git >/dev/null 2>&1 || {
+    echo "git-signing-mode: git is not installed" >&2
+    exit 1
+  }
+}
+
+show_status() {
+  git config --global --show-origin --get-regexp '^(user.signingkey|commit.gpgsign|tag.gpgsign|gpg\.format|gpg\.program|gpg\.ssh\.allowedSignersFile)$' || true
+}
+
+set_ssh_mode() {
+  if [[ ! -f "${ssh_key}" ]]; then
+    echo "git-signing-mode: missing SSH private key at ${ssh_key}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${ssh_allowed_signers}" ]]; then
+    echo "git-signing-mode: missing allowed signers file at ${ssh_allowed_signers}" >&2
+    exit 1
+  fi
+
+  git config --global gpg.format ssh
+  git config --global gpg.program "${gpg_program}"
+  git config --global gpg.ssh.allowedSignersFile "${ssh_allowed_signers}"
+  git config --global user.signingkey "${ssh_key}"
+  git config --global commit.gpgsign true
+  git config --global tag.gpgsign true
+
+  echo "git signing mode: ssh"
+  show_status
+}
+
+set_gpg_mode() {
+  if [[ ! -x "${gpg_program}" ]]; then
+    echo "git-signing-mode: missing gpg program at ${gpg_program}" >&2
+    exit 1
+  fi
+
+  git config --global gpg.format openpgp
+  git config --global gpg.program "${gpg_program}"
+  git config --global user.signingkey "${gpg_key_id}"
+  git config --global commit.gpgsign true
+  git config --global tag.gpgsign true
+
+  echo "git signing mode: gpg"
+  show_status
+}
+
+main() {
+  require_git_config
+
+  case "${1:-status}" in
+    ssh)
+      set_ssh_mode
+      ;;
+    gpg)
+      set_gpg_mode
+      ;;
+    status)
+      show_status
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
