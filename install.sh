@@ -287,10 +287,12 @@ setup_shell_symlinks() {
 }
 
 setup_codex_dotfiles() {
-    local df_dir codex_home codex_agents_src
+    local df_dir codex_home codex_agents_src codex_config_src codex_hooks_src
     df_dir="$(dotfiles_dir)"
     codex_home="${CODEX_HOME:-$HOME/.codex}"
     codex_agents_src="$df_dir/.codex/AGENTS.md"
+    codex_config_src="$df_dir/.codex/config.toml"
+    codex_hooks_src="$df_dir/.codex/hooks.json"
 
     mkdir -p "$codex_home"
 
@@ -298,6 +300,18 @@ setup_codex_dotfiles() {
         link_dotfile "$codex_agents_src" "$codex_home/AGENTS.md"
     else
         warn "Codex AGENTS file missing in dotfiles: $codex_agents_src"
+    fi
+
+    if [[ -f "$codex_config_src" ]]; then
+        link_dotfile "$codex_config_src" "$codex_home/config.toml"
+    else
+        warn "Codex config file missing in dotfiles: $codex_config_src"
+    fi
+
+    if [[ -f "$codex_hooks_src" ]]; then
+        link_dotfile "$codex_hooks_src" "$codex_home/hooks.json"
+    else
+        warn "Codex hooks file missing in dotfiles: $codex_hooks_src"
     fi
 
     if [[ -x "$df_dir/bin/install-agent-worktree-ops" ]]; then
@@ -313,10 +327,28 @@ setup_codex_dotfiles() {
         return
     fi
 
-    info "Ensuring Codex multi-agent features are enabled"
+    info "Ensuring Codex features are enabled"
+    codex features enable codex_hooks >/dev/null
     codex features enable multi_agent >/dev/null
     codex features enable child_agents_md >/dev/null
-    success "Codex multi-agent features enabled"
+    success "Codex features enabled"
+}
+
+setup_claude_dotfiles() {
+    local df_dir claude_dir claude_settings_src claude_settings_dest
+    df_dir="$(dotfiles_dir)"
+    claude_dir="$HOME/.claude"
+    claude_settings_src="$df_dir/.claude/settings.json"
+    claude_settings_dest="$claude_dir/settings.json"
+
+    if [[ ! -f "$claude_settings_src" ]]; then
+        warn "Claude settings file missing in dotfiles: $claude_settings_src"
+        return
+    fi
+
+    mkdir -p "$claude_dir"
+    link_dotfile "$claude_settings_src" "$claude_settings_dest"
+    success "Claude settings linked to $claude_settings_src"
 }
 
 setup_iterm_preferences() {
@@ -578,6 +610,7 @@ main() {
     install_nvim_plugins
     setup_shell_symlinks
     setup_codex_dotfiles
+    setup_claude_dotfiles
     setup_ghostty_config
     setup_iterm_preferences
     setup_openclaw_symlinks
