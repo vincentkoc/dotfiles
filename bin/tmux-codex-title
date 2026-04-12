@@ -6,17 +6,38 @@ if [[ -z "${TMUX_PANE:-}" ]]; then
   exit 1
 fi
 
-code_id=""
-if [[ -n "${CODEX_SESSION_ID:-}" ]]; then
-  code_id="$CODEX_SESSION_ID"
-elif [[ -n "${CODEX_THREAD_ID:-}" ]]; then
-  code_id="$CODEX_THREAD_ID"
-elif [[ -n "${CODEX_RUN_ID:-}" ]]; then
-  code_id="$CODEX_RUN_ID"
+short_cwd="${PWD/#$HOME/~}"
+title="$(basename "$PWD")"
+
+agent_label=""
+if [[ -n "${CODEX_SESSION_ID:-}" || -n "${CODEX_THREAD_ID:-}" || -n "${CODEX_RUN_ID:-}" ]]; then
+  agent_label="codex"
+elif [[ -n "${CLAUDE_PROJECT_DIR:-}" || -n "${CLAUDE_SESSION_ID:-}" || -n "${CLAUDECODE:-}" ]]; then
+  agent_label="claude"
 fi
 
-if [[ -n "$code_id" ]]; then
-  tmux select-pane -t "$TMUX_PANE" -T "codex:$code_id"
-else
-  tmux select-pane -t "$TMUX_PANE" -T "codex"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  repo="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")"
+  branch="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)"
+  git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
+  worktree_label=""
+
+  if [[ "$git_dir" == *"/worktrees/"* ]]; then
+    worktree_label="$(basename "$git_dir")"
+    title="$repo [$worktree_label]"
+  else
+    title="$repo:$branch"
+  fi
+
+  if [[ "$short_cwd" != "~" && "$(basename "$PWD")" != "$repo" && "$(basename "$PWD")" != "$worktree_label" ]]; then
+    title="$title · $(basename "$PWD")"
+  fi
+elif [[ -n "$short_cwd" ]]; then
+  title="$short_cwd"
 fi
+
+if [[ -n "$agent_label" ]]; then
+  title="$agent_label · $title"
+fi
+
+tmux select-pane -t "$TMUX_PANE" -T "$title"
