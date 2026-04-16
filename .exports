@@ -164,6 +164,7 @@ fi
 
 # Terminal Colors
 export TERM="xterm-256color"
+export MOSH_TITLE_NOPREFIX=1
 
 # Improved CLI Colors
 export CLI_COLOR_ERROR="1;31"

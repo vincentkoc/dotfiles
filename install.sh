@@ -286,6 +286,46 @@ setup_shell_symlinks() {
     link_dotfile "$df_dir/functions" "$HOME/functions"
 }
 
+ensure_ssh_signing_trust_file() {
+    local df_dir signing_format allowed_signers ssh_pub_key user_email
+    df_dir="$(dotfiles_dir)"
+    signing_format="$(git config --file "$df_dir/.gitconfig" --get gpg.format 2>/dev/null || true)"
+
+    if [[ "$signing_format" != "ssh" ]]; then
+        return
+    fi
+
+    allowed_signers="$df_dir/.ssh/allowed_signers"
+    if [[ -f "$allowed_signers" ]]; then
+        success "SSH signing trust file present"
+        return
+    fi
+
+    ssh_pub_key="$HOME/.ssh/id_ed25519.pub"
+    user_email="$(git config --file "$df_dir/.gitconfig" --get user.email 2>/dev/null || true)"
+    if [[ -z "$user_email" ]]; then
+        user_email="$(git config --global --get user.email 2>/dev/null || true)"
+    fi
+
+    error "Missing required SSH signing trust file: $allowed_signers"
+    if [[ -f "$ssh_pub_key" && -n "$user_email" ]]; then
+        cat <<EOF
+Create it with:
+  mkdir -p "$df_dir/.ssh"
+  printf '%s namespaces=\"git\" %s\n' "$user_email" "\$(cat \"$ssh_pub_key\")" > "$allowed_signers"
+
+Then rerun:
+  "$df_dir/install.sh"
+EOF
+    else
+        warn "Expected SSH public key not found at $ssh_pub_key"
+        warn "Expected Git email not found in $df_dir/.gitconfig or global git config"
+        info "Create $allowed_signers manually once your SSH key and Git email are set"
+    fi
+
+    return 1
+}
+
 setup_codex_dotfiles() {
     local df_dir codex_home codex_agents_src codex_config_src codex_hooks_src
     df_dir="$(dotfiles_dir)"
@@ -609,6 +649,7 @@ main() {
     install_vim_theme
     install_nvim_plugins
     setup_shell_symlinks
+    ensure_ssh_signing_trust_file
     setup_codex_dotfiles
     setup_claude_dotfiles
     setup_ghostty_config

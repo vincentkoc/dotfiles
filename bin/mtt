@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: mtt [session]
+
+mobile tmux helper for this machine:
+- with no args, open the mobile pane picker (`tt mobile`)
+- with a session arg, attach or create that explicit mobile session
+
+examples:
+  mtt
+  mtt mobile
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    ;;
+  "")
+    exec tt mobile
+    ;;
+  *)
+    exec tt mobile "$@"
+    ;;
+esac

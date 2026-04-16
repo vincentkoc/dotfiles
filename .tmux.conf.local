@@ -356,6 +356,9 @@ tmux_conf_copy_to_os_clipboard=true
 # start with mouse mode enabled
 set -g mouse on
 
+# Work around a tmux 3.6a/macOS copy-mode crash path involving pane border UI.
+set -g pane-border-status off
+
 # Vi mode for copy
 set -g mode-keys vi
 set -g status-keys vi

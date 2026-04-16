@@ -11,6 +11,24 @@ git clone https://github.com/vincentkoc/dotfiles.git ~/.dotfiles
 
 The installer bootstraps dependencies and links core shell dotfiles.
 
+If SSH commit signing is your default Git mode, keep a local
+`.ssh/allowed_signers` file in the dotfiles root. It is intentionally ignored
+from git, and the installer will stop if it is missing.
+
+Create it with:
+
+```bash
+dotfiles_root="$HOME/.dotfiles"
+if [[ "$(uname)" == "Darwin" ]]; then
+  dotfiles_root="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
+fi
+mkdir -p "$dotfiles_root/.ssh"
+printf '%s namespaces="git" %s\n' \
+  "$(git config --file "$dotfiles_root/.gitconfig" --get user.email)" \
+  "$(cat ~/.ssh/id_ed25519.pub)" \
+  > "$dotfiles_root/.ssh/allowed_signers"
+```
+
 Optional: restore additional app configs managed via Mackup.
 
 ```bash

@@ -23,6 +23,19 @@ attach_or_switch() {
   exec "$TMUX_BIN" attach -t "$session"
 }
 
+mobile_group_session_name() {
+  local source_session="$1"
+  local sanitized
+  sanitized="${source_session//[^A-Za-z0-9._-]/-}"
+  printf 'ttm-%s\n' "$sanitized"
+}
+
+set_profile_metadata() {
+  local session="$1"
+  local profile="$2"
+  "$TMUX_BIN" set-option -t "$session" -q @tt_profile "$profile"
+}
+
 confirm_action() {
   local prompt="$1"
   local answer
@@ -58,10 +71,13 @@ create_plain() {
 
   if [[ -n "${TMUX:-}" ]]; then
     "$TMUX_BIN" new-session -d -s "$session"
+    set_profile_metadata "$session" plain
     exec "$TMUX_BIN" switch-client -t "$session"
   fi
 
-  exec "$TMUX_BIN" new -s "$session"
+  "$TMUX_BIN" new-session -d -s "$session"
+  set_profile_metadata "$session" plain
+  exec "$TMUX_BIN" attach -t "$session"
 }
 
 create_studio() {
@@ -76,9 +92,160 @@ create_studio() {
     while IFS= read -r pane; do
       "$TMUX_BIN" split-window -v -t "$pane"
     done < <("$TMUX_BIN" list-panes -t "$session:main" -F '#{pane_id}')
+
+    set_profile_metadata "$session" studio
   fi
 
   attach_or_switch "$session"
+}
+
+create_mobile() {
+  local session="$1"
+
+  if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    attach_or_switch "$session"
+  fi
+
+  if [[ -n "${TMUX:-}" ]]; then
+    "$TMUX_BIN" new-session -d -s "$session"
+    set_profile_metadata "$session" mobile
+    "$TMUX_BIN" set-option -t "$session" -q status off
+    exec "$TMUX_BIN" switch-client -t "$session"
+  fi
+
+  "$TMUX_BIN" new -d -s "$session"
+  set_profile_metadata "$session" mobile
+  "$TMUX_BIN" set-option -t "$session" -q status off
+  exec "$TMUX_BIN" attach -t "$session"
+}
+
+mobile_target_label() {
+  local target="$1"
+  local session="$2"
+  local window="$3"
+  local pane="$4"
+  local active="$5"
+  local command="$6"
+  local title="$7"
+  local path="$8"
+  local window_name="$9"
+  local active_mark detail_label path_label
+
+  active_mark=" "
+  [[ "$active" == "*" ]] && active_mark="*"
+
+  detail_label="$title"
+  if [[ -z "$detail_label" || "$detail_label" == "$path" ]]; then
+    detail_label="$window_name"
+  fi
+  if [[ -z "$detail_label" ]]; then
+    detail_label="$command"
+  fi
+
+  path_label="${path/#$HOME/~}"
+  if [[ "$path_label" == "$HOME" || "$path_label" == "~" ]]; then
+    path_label="~"
+  elif [[ "$path_label" == ~/*/*/* ]]; then
+    path_label=".../${path_label##*/}"
+  fi
+
+  printf '%s\x1f%s [%s] %s.%s  %s  %s\n' \
+    "$target" \
+    "$active_mark" \
+    "$session" \
+    "$window" \
+    "$pane" \
+    "$detail_label" \
+    "$path_label"
+}
+
+choose_mobile_option() {
+  local selection sep
+  local -a options=()
+  sep=$'\x1f'
+
+  options=("$@")
+
+  if command -v fzf >/dev/null 2>&1; then
+    selection="$(printf '%s\n' "${options[@]}" | fzf \
+      --prompt='mtt > ' \
+      --height=55% \
+      --layout=reverse \
+      --border \
+      --delimiter="$sep" \
+      --with-nth=2 \
+      --header='pick a pane')"
+    [[ -n "$selection" ]] || return 130
+    printf '%s\n' "$selection"
+    return 0
+  fi
+
+  local choice
+  local -a labels=()
+  for choice in "${options[@]}"; do
+    labels+=("${choice#*$sep}")
+  done
+
+  PS3="mtt> "
+  select choice in "${labels[@]}"; do
+    [[ -n "${choice:-}" ]] || continue
+    printf '%s\n' "${options[REPLY-1]}"
+    return 0
+  done
+}
+
+mobile_choose_pane_target() {
+  local selection sep pane_format
+  local -a options=()
+  sep=$'\x1f'
+  pane_format="#{session_name}${sep}#{@tt_profile}${sep}#{window_index}${sep}#{pane_index}${sep}#{?pane_active,*, }${sep}#{pane_current_command}${sep}#{pane_title}${sep}#{pane_current_path}${sep}#{window_name}"
+
+  while IFS="$sep" read -r session profile window pane active command title path window_name; do
+    [[ -n "$session" ]] || continue
+    [[ "$profile" == "mobile" ]] && continue
+    options+=("$(mobile_target_label "$session:$window.$pane" "$session" "$window" "$pane" "$active" "$command" "$title" "$path" "$window_name")")
+  done < <("$TMUX_BIN" list-panes -a -F "$pane_format" 2>/dev/null || true)
+
+  if [[ ${#options[@]} -eq 0 ]]; then
+    return 1
+  fi
+
+  if ! selection="$(choose_mobile_option "${options[@]}")"; then
+    return 130
+  fi
+
+  printf '%s\n' "${selection%%"$sep"*}"
+}
+
+ensure_mobile_group_session() {
+  local source_session="$1"
+  local mobile_session
+
+  mobile_session="$(mobile_group_session_name "$source_session")"
+  if ! "$TMUX_BIN" has-session -t "$mobile_session" 2>/dev/null; then
+    "$TMUX_BIN" new-session -d -t "$source_session" -s "$mobile_session"
+  fi
+
+  set_profile_metadata "$mobile_session" mobile
+  "$TMUX_BIN" set-option -t "$mobile_session" -q status off
+  printf '%s\n' "$mobile_session"
+}
+
+attach_mobile_target() {
+  local target="$1"
+  local source_session mobile_session target_suffix
+
+  source_session="${target%%:*}"
+  target_suffix="${target#*:}"
+  mobile_session="$(ensure_mobile_group_session "$source_session")"
+
+  if [[ -n "${TMUX:-}" ]]; then
+    exec "$TMUX_BIN" switch-client -t "$mobile_session:$target_suffix"
+  fi
+
+  exec "$TMUX_BIN" attach -f active-pane,ignore-size -t "$mobile_session" \; \
+    select-window -t "$mobile_session:${target_suffix%.*}" \; \
+    select-pane -t "$mobile_session:$target_suffix"
 }
 
 reset_to_profile() {
@@ -94,6 +261,9 @@ reset_to_profile() {
     shell|plain)
       create_plain "${session:-main}"
       ;;
+    mobile|phone)
+      create_mobile "${session:-mobile}"
+      ;;
     *)
       echo "unknown reset profile: $profile" >&2
       exit 2
@@ -107,7 +277,13 @@ list_sessions() {
 
 session_summary() {
   local session="$1"
-  local pane_count window_count
+  local pane_count profile window_count
+  profile="$("$TMUX_BIN" show-options -t "$session" -qv @tt_profile 2>/dev/null || true)"
+  if [[ -n "$profile" ]]; then
+    printf '%s' "$profile"
+    return 0
+  fi
+
   pane_count="$("$TMUX_BIN" list-panes -t "$session" 2>/dev/null | wc -l | tr -d ' ')"
   window_count="$("$TMUX_BIN" list-windows -t "$session" 2>/dev/null | wc -l | tr -d ' ')"
 
@@ -125,6 +301,9 @@ profile_label() {
       ;;
     plain)
       printf 'shell'
+      ;;
+    mobile)
+      printf 'mobile'
       ;;
     *)
       printf '%s' "$1"
@@ -189,8 +368,10 @@ run_menu() {
 
   options+=("new     [ai]     agent cockpit (3x2)")
   options+=("new     [shell]  normal tmux session")
+  options+=("new     [mobile] phone-sized tmux session")
   options+=("reset   [ai]     kill server + fresh agent cockpit")
   options+=("reset   [shell]  kill server + fresh shell session")
+  options+=("reset   [mobile] kill server + fresh phone session")
   options+=("kill    [all]    stop tmux server")
 
   selection="$(choose_option "${options[@]}")"
@@ -209,6 +390,11 @@ run_menu() {
       [[ -n "$session" ]] || exit 1
       create_plain "$session"
       ;;
+    "new     [mobile] phone-sized tmux session")
+      session="$(prompt_session_name "mobile session" "mobile")"
+      [[ -n "$session" ]] || exit 1
+      create_mobile "$session"
+      ;;
     "reset   [ai]     kill server + fresh agent cockpit")
       session="$(prompt_session_name "fresh ai session" "studio")"
       [[ -n "$session" ]] || exit 1
@@ -218,6 +404,11 @@ run_menu() {
       session="$(prompt_session_name "fresh shell session" "main")"
       [[ -n "$session" ]] || exit 1
       reset_to_profile shell "$session"
+      ;;
+    "reset   [mobile] kill server + fresh phone session")
+      session="$(prompt_session_name "fresh mobile session" "mobile")"
+      [[ -n "$session" ]] || exit 1
+      reset_to_profile mobile "$session"
       ;;
     "kill    [all]    stop tmux server")
       kill_server
@@ -240,9 +431,22 @@ case "${1:-}" in
     if [[ -n "${2:-}" ]]; then
       create_plain "$2"
     else
-      session="$(prompt_session_name "shell session")"
+  session="$(prompt_session_name "shell session")"
       [[ -n "$session" ]] || exit 1
       create_plain "$session"
+    fi
+    ;;
+  mobile|phone)
+    if [[ -n "${2:-}" ]]; then
+      create_mobile "$2"
+    elif target="$(mobile_choose_pane_target)"; then
+      attach_mobile_target "$target"
+    else
+      status=$?
+      if [[ "$status" == "1" ]]; then
+        create_mobile "mobile"
+      fi
+      exit "$status"
     fi
     ;;
   reset)
@@ -254,8 +458,11 @@ case "${1:-}" in
       shell|plain)
         reset_to_profile shell "${3:-main}"
         ;;
+      mobile|phone)
+        reset_to_profile mobile "${3:-mobile}"
+        ;;
       *)
-        echo "usage: tt reset [ai|shell] [session]" >&2
+        echo "usage: tt reset [ai|shell|mobile] [session]" >&2
         exit 2
         ;;
     esac
@@ -274,7 +481,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|shell [session]|reset [ai|shell] [session]|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;

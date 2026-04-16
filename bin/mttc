@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: mttc [options] <host-or-quickssh-alias>
+
+connect with mosh, then land in remote `mtt` or `tt`:
+- prefers `mtt` when available on the remote host
+- falls back to `tt`
+- falls back to `tmux new-session -A`
+- falls back to an interactive shell if tmux is missing
+
+options:
+  -p, --profile <shell|ai|mobile>   remote profile to open (default: shell)
+  -s, --session <name>              tmux session name (default: main or studio;
+                                    mobile without -s opens a pane picker)
+  -P, --port <port>                 ssh port for the initial mosh handshake
+  -4                                force IPv4
+  -6                                force IPv6
+  -h, --help                        show this help
+
+notes:
+  - quickssh aliases are supported when `quickssh_hosts.sh` is present
+  - password-based quickssh hosts are not handled; this is for key-backed SSH/mosh
+EOF
+}
+
+die() {
+  printf 'mttc: %s\n' "$*" >&2
+  exit 1
+}
+
+profile="shell"
+session=""
+port=""
+family_arg=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--profile)
+      [[ $# -ge 2 ]] || die "missing value for $1"
+      profile="$2"
+      shift 2
+      ;;
+    -s|--session)
+      [[ $# -ge 2 ]] || die "missing value for $1"
+      session="$2"
+      shift 2
+      ;;
+    -P|--port)
+      [[ $# -ge 2 ]] || die "missing value for $1"
+      port="$2"
+      shift 2
+      ;;
+    -4|-6)
+      family_arg="$1"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ $# -eq 1 ]] || {
+  usage >&2
+  exit 2
+}
+
+host_input="$1"
+
+case "$profile" in
+  shell|plain)
+    tt_profile="shell"
+    [[ -n "$session" ]] || session="main"
+    ;;
+  ai|studio)
+    tt_profile="ai"
+    [[ -n "$session" ]] || session="studio"
+    ;;
+  mobile|phone)
+    tt_profile="mobile"
+    ;;
+  *)
+    die "profile must be one of: shell, plain, ai, studio, mobile, phone"
+    ;;
+esac
+
+[[ -z "$session" || "$session" =~ ^[A-Za-z0-9._-]+$ ]] || die "session name must match [A-Za-z0-9._-]+"
+[[ -z "$port" || "$port" =~ ^[0-9]+$ ]] || die "port must be numeric"
+
+resolve_quickssh_alias() {
+  local input="$1"
+  local hosts_file host_info_var host_info user hostname alias_port
+
+  hosts_file="${EXTRASPATH:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.extra}/quickssh_hosts.sh"
+  [[ -r "$hosts_file" ]] || return 1
+
+  # shellcheck source=/dev/null
+  source "$hosts_file"
+
+  host_info_var="quickssh_hosts_${input}"
+  host_info="${!host_info_var:-}"
+  [[ -n "$host_info" ]] || return 1
+
+  user=$(printf '%s' "$host_info" | cut -d: -f1)
+  hostname=$(printf '%s' "$host_info" | cut -d: -f2)
+  alias_port=$(printf '%s' "$host_info" | cut -d: -f3)
+
+  [[ -n "$hostname" ]] || die "quickssh alias '$input' is missing a hostname"
+  [[ -n "$port" || -z "$alias_port" || "$alias_port" =~ ^[0-9]+$ ]] || die "quickssh alias '$input' has a non-numeric port"
+
+  if [[ -n "$user" ]]; then
+    printf '%s\n' "${user}@${hostname}"
+  else
+    printf '%s\n' "$hostname"
+  fi
+
+  if [[ -z "$port" && -n "$alias_port" ]]; then
+    port="$alias_port"
+  fi
+}
+
+target="$host_input"
+if resolved_target="$(resolve_quickssh_alias "$host_input" 2>/dev/null)"; then
+  target="$resolved_target"
+fi
+
+ssh_cmd="${MOSH_TMUX_SSH:-ssh}"
+if [[ -n "$port" ]]; then
+  ssh_cmd+=" -p $port"
+fi
+
+tt_args=("$tt_profile")
+if [[ -n "$session" ]]; then
+  tt_args+=("$session")
+fi
+printf -v tt_exec '%q ' "${tt_args[@]}"
+tt_exec="${tt_exec% }"
+
+mobile_exec=""
+if [[ "$tt_profile" == "mobile" ]]; then
+  mobile_args=()
+  if [[ -n "$session" ]]; then
+    mobile_args+=("$session")
+  fi
+  if [[ ${#mobile_args[@]} -gt 0 ]]; then
+    printf -v mobile_exec '%q ' "${mobile_args[@]}"
+    mobile_exec="${mobile_exec% }"
+  fi
+fi
+
+remote_cmd=$(cat <<EOF
+if [[ "$tt_profile" == "mobile" ]] && command -v mtt >/dev/null 2>&1; then
+  exec mtt $mobile_exec
+elif command -v tt >/dev/null 2>&1; then
+  exec tt $tt_exec
+elif command -v tmux >/dev/null 2>&1; then
+  exec tmux new-session -A -s ${session:-main}
+elif command -v zsh >/dev/null 2>&1; then
+  exec zsh -il
+elif [ -n "\${SHELL:-}" ]; then
+  exec "\$SHELL" -il
+else
+  exec /bin/sh -l
+fi
+EOF
+)
+
+mosh_args=()
+[[ -n "$family_arg" ]] && mosh_args+=("$family_arg")
+
+exec mosh "${mosh_args[@]}" --ssh="$ssh_cmd" -- "$target" sh -lc "$remote_cmd"
