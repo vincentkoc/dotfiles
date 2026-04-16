@@ -1,7 +1,7 @@
 [user]
 	name = Vincent Koc
 	email = vincentkoc@ieee.org
-	signingkey = /Users/vincentkoc/.ssh/id_ed25519
+	signingkey = /Users/vincentkoc/.ssh/id_ed25519.pub
 	# GPG signing key id preserved for easy switching later: FB4C24AE87080A95
 	# # set name, email and gpg signature on commits
 	# # values are set using ~/.extra/user.sh
