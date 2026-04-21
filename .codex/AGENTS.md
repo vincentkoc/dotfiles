@@ -96,6 +96,7 @@
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`.
 - In `openclaw/openclaw`, when testing locally use `pnpm test:serial`.
 - Use semantic commit messages and PR titles like `fix(ci):` unless rules say otherwise.
+- Never add `[codex]` to PR titles or mention AI tooling in PR titles. Keep titles about the actual change, not the tool used.
 - When mentioning GitHub issues or PRs, give full links.
 - Do not make any `docs/internal/*.md` files on openclaw.
 - On resume or after a crash, always enter recovery mode before doing work.
