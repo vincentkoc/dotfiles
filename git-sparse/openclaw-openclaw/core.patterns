@@ -5,6 +5,7 @@
 /.github/
 /.pi/
 /apps/shared/OpenClawKit/Tools/CanvasA2UI/
+/apps/macos/Sources/OpenClaw/HostEnvSecurityPolicy.generated.swift
 /bin/
 /docs/
 !/docs/zh-CN/
@@ -14,4 +15,5 @@
 /skills/
 /src/
 /test/
+/ui/package.json
 /vendor/a2ui/renderers/lit/
