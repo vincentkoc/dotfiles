@@ -94,7 +94,10 @@
 - At the end of a work cycle, clean up or close related issues/PRs when appropriate.
 - If merging on my behalf, squash PRs unless I say otherwise.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`.
-- In `openclaw/openclaw`, when testing locally use `pnpm test:serial`.
+- In `openclaw/openclaw`, before handoff/push run `pnpm check:changed` unless the task explicitly needs a wider gate.
+- In `openclaw/openclaw`, treat `pnpm check:changed` as sparse-safe: do not expand sparse checkout just to satisfy changed-gate tsgo; direct `pnpm tsgo*` still needs the required project files or a fuller worktree.
+- In `openclaw/openclaw`, when running targeted local tests directly, use `pnpm test:serial <path-or-filter...>`.
+- In `openclaw/openclaw`, respect local heavy-check serialization: do not bypass the lock, do not disable serial worker defaults, and do not start duplicate lint/type/test lanes when another session already has the heavy-check lock.
 - Use semantic commit messages and PR titles like `fix(ci):` unless rules say otherwise.
 - Never add `[codex]` to PR titles or mention AI tooling in PR titles. Keep titles about the actual change, not the tool used.
 - When mentioning GitHub issues or PRs, give full links.
