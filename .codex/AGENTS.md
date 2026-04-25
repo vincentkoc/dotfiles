@@ -98,6 +98,7 @@
 - In `openclaw/openclaw`, treat `pnpm check:changed` as sparse-safe: do not expand sparse checkout just to satisfy changed-gate tsgo; direct `pnpm tsgo*` still needs the required project files or a fuller worktree.
 - In `openclaw/openclaw`, when running targeted local tests directly, use `pnpm test:serial <path-or-filter...>`.
 - In `openclaw/openclaw`, respect local heavy-check serialization: do not bypass the lock, do not disable serial worker defaults, and do not start duplicate lint/type/test lanes when another session already has the heavy-check lock.
+- In `openclaw/openclaw`, never run local Vitest/check/typecheck commands with `OPENCLAW_LOCAL_CHECK=0`; use `OPENCLAW_LOCAL_CHECK_MODE=throttled` for laptop-friendly runs. Reserve `OPENCLAW_LOCAL_CHECK=0` for CI/shared automation only.
 - Use semantic commit messages and PR titles like `fix(ci):` unless rules say otherwise.
 - Never add `[codex]` to PR titles or mention AI tooling in PR titles. Keep titles about the actual change, not the tool used.
 - When mentioning GitHub issues or PRs, give full links.
