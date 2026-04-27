@@ -169,6 +169,74 @@ elif [[ -d /usr/local/share/zsh/site-functions ]] || [[ -d /usr/local/share/zsh-
 fi
 source $ZSH/oh-my-zsh.sh
 
+# Spaceship's async init is brittle when zpty startup flakes. Fall back to a
+# sync prompt for this shell instead of spamming worker errors.
+if (( ${+functions[spaceship::worker::init]} )); then
+	_dotfiles_spaceship_disable_async() {
+		async_stop_worker "spaceship" >/dev/null 2>&1
+		SPACESHIP_JOBS=()
+		typeset -g SPACESHIP_PROMPT_ASYNC=false
+	}
+
+	_dotfiles_spaceship_worker_alive() {
+		zpty -t spaceship &>/dev/null
+	}
+
+	spaceship::worker::init() {
+		if spaceship::is_prompt_async; then
+			_dotfiles_spaceship_disable_async
+			typeset -g SPACESHIP_PROMPT_ASYNC=true
+			if ! async_start_worker "spaceship" -n -u 2>/dev/null || ! zpty -t spaceship &>/dev/null; then
+				_dotfiles_spaceship_disable_async
+				return 0
+			fi
+			async_worker_eval "spaceship" setopt extendedglob 2>/dev/null || {
+				_dotfiles_spaceship_disable_async
+				return 0
+			}
+			async_worker_eval "spaceship" spaceship::worker::renice 2>/dev/null || {
+				_dotfiles_spaceship_disable_async
+				return 0
+			}
+			async_register_callback "spaceship" spaceship::core::async_callback
+		fi
+	}
+
+	spaceship::worker::flush() {
+		if spaceship::is_prompt_async; then
+			_dotfiles_spaceship_worker_alive || {
+				_dotfiles_spaceship_disable_async
+				return 0
+			}
+			async_flush_jobs "spaceship" 2>/dev/null || _dotfiles_spaceship_disable_async
+		fi
+	}
+
+	spaceship::worker::eval() {
+		if spaceship::is_prompt_async; then
+			_dotfiles_spaceship_worker_alive || {
+				_dotfiles_spaceship_disable_async
+				return 0
+			}
+			async_worker_eval "spaceship" "$@" 2>/dev/null || _dotfiles_spaceship_disable_async
+		fi
+	}
+
+	spaceship::worker::run() {
+		if spaceship::is_prompt_async; then
+			_dotfiles_spaceship_worker_alive || {
+				_dotfiles_spaceship_disable_async
+				return 0
+			}
+			SPACESHIP_JOBS+=("$1")
+			async_job "spaceship" "$@" 2>/dev/null || _dotfiles_spaceship_disable_async
+		fi
+	}
+fi
+
+# `z foo` should jump, not trigger spelling correction on the argument.
+alias z='nocorrect zshz 2>&1'
+
 #
 # Load dotfiles pre-ENV
 #
@@ -455,6 +523,11 @@ fi
 # bun
 export BUN_INSTALL="$HOME/.bun"
 export PATH="$BUN_INSTALL/bin:$PATH"
+
+# Prefer user-installed CLI shims over stale Homebrew globals.
+typeset -U path PATH
+path=("$HOME/.local/bin" ${path:#$HOME/.local/bin})
+export PATH
 
 # OpenClaw completion
 [[ -r "$HOME/.openclaw/completions/openclaw.zsh" ]] && source "$HOME/.openclaw/completions/openclaw.zsh"
