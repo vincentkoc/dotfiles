@@ -4,6 +4,7 @@
 /.changeset/
 /.github/
 /.pi/
+/assets/
 /apps/shared/OpenClawKit/Tools/CanvasA2UI/
 /apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json
 /apps/macos/Sources/OpenClaw/HostEnvSecurityPolicy.generated.swift
@@ -12,10 +13,18 @@
 !/docs/zh-CN/
 /extensions/
 /git-hooks/
+/qa/scenarios/
 /scripts/
 /skills/
 /src/
 /test/
 /packages/
+/patches/
+/ui/index.html
 /ui/package.json
+/ui/public/
+/ui/src/
+/ui/vite.config.ts
+/ui/vitest.config.ts
+/ui/vitest.node.config.ts
 /vendor/a2ui/renderers/lit/
