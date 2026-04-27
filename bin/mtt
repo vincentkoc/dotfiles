@@ -22,6 +22,9 @@ case "${1:-}" in
   "")
     exec tt mobile
     ;;
+  restore)
+    exec tt restore "${@:2}"
+    ;;
   *)
     exec tt mobile "$@"
     ;;
