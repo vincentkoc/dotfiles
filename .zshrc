@@ -40,6 +40,12 @@ export OTEL_TRACES_EXPORTER=none
 export OTEL_METRICS_EXPORTER=none
 export OTEL_LOGS_EXPORTER=none
 
+# Keep OpenClaw local checks civil on this 24 GB laptop. Repo scripts still allow
+# explicit overrides when a wider run is worth the heat.
+export OPENCLAW_LOCAL_CHECK_MODE="${OPENCLAW_LOCAL_CHECK_MODE:-throttled}"
+export OPENCLAW_TEST_PROJECTS_SERIAL="${OPENCLAW_TEST_PROJECTS_SERIAL:-1}"
+export OPENCLAW_VITEST_MAX_WORKERS="${OPENCLAW_VITEST_MAX_WORKERS:-1}"
+
 # Tokyo Night palette shared across terminals, prompt, and tooling
 typeset -gx TOKYONIGHT_BG="#1a1b26"
 typeset -gx TOKYONIGHT_BG_DARK="#16161e"
