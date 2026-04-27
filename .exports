@@ -364,6 +364,10 @@ export ANDROID_HOME=$HOME/Library/Android/sdk
 path_append "$ANDROID_HOME/tools"
 path_append "$ANDROID_HOME/platform-tools"
 
+# Prefer user-level CLI shims over stale Homebrew globals.
+path_remove "$HOME/.local/bin"
+path_prepend "$HOME/.local/bin"
+
 # AWS
 export AWS_SDK_LOAD_CONFIG=1
 
