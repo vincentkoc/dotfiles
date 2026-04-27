@@ -8,9 +8,9 @@ Top-level wrappers:
 - `agent-worktree-maintain`
 - `agent-worktree-purge`
 - `install-agent-worktree-ops`
-- `mtt` - local mobile tmux helper that opens the pane picker on this machine
+- `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
-- `tt` - create or attach tmux sessions, including a `mobile` pane-picker profile
+- `tt` - create or attach tmux sessions, including a `mobile` pane-picker profile; `tt restore [target]` repairs zoomed/tiled layouts
 
 Tool folders:
 
