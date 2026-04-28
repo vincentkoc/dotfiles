@@ -42,14 +42,21 @@ tmux_conf_new_session_prompt=false
 # automatic detection relies on the COLORTERM environment variable being defined
 # to 'truecolor' or '24bit' or '$ tput colors' answering '16777216'
 # see https://github.com/termstandard/colors
-tmux_conf_24b_colour=auto
+tmux_conf_24b_colour=true
 
 # Stop advertising ancient screen terminfo inside tmux.
 set -g default-terminal "tmux-256color"
 
-# Ghostty and iTerm usually present as xterm-256color; tell tmux OSC 8 works.
-set -ga terminal-features ",xterm-256color:hyperlinks"
-set -ga terminal-features ",tmux-256color:hyperlinks"
+# Preserve shell/TUI color inside tmux. NO_COLOR can leak in from agent shells.
+set-environment -gu NO_COLOR
+set-environment -g CLICOLOR 1
+set-environment -g CLICOLOR_FORCE 1
+set-environment -g FORCE_COLOR 3
+set-environment -g COLORTERM truecolor
+
+# Ghostty and iTerm usually present as xterm-256color; keep RGB + OSC 8.
+set -g terminal-features "xterm*:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
+set -g terminal-overrides ",*:Tc,linux*:AX@"
 
 
 # -- theming -------------------------------------------------------------------
