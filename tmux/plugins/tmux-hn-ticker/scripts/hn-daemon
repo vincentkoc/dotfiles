@@ -8,11 +8,22 @@ tmux_opt() {
 }
 
 cache="$(tmux_opt @hn_ticker_cache)"
+items_cache="$(tmux_opt @hn_ticker_items_cache)"
+interval="$(tmux_opt @hn_ticker_interval)"
+width="$(tmux_opt @hn_ticker_width)"
+reserved_width="$(tmux_opt @hn_ticker_reserved_width)"
+max_width="$(tmux_opt @hn_ticker_max_width)"
 speed="$(tmux_opt @hn_ticker_speed)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
-speed="${speed:-0.06}"
-[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.06
-awk -v speed="$speed" 'BEGIN { exit !(speed < 0.04) }' && speed=0.04
+items_cache="${items_cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.items.jsonl}"
+interval="${interval:-300}"
+width="${width:-auto}"
+reserved_width="${reserved_width:-150}"
+max_width="${max_width:-120}"
+speed="${speed:-0.22}"
+[[ "$interval" =~ ^[0-9]+$ ]] || interval=300
+[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.22
+awk -v speed="$speed" 'BEGIN { exit !(speed < 0.22) }' && speed=0.22
 
 cache_dir="$(dirname "$cache")"
 mkdir -p "$cache_dir"
@@ -40,14 +51,151 @@ if ! tmux display-message -p '#{pid}' >/dev/null 2>&1; then
   exit 0
 fi
 
-while tmux display-message -p '#{pid}' >/dev/null 2>&1; do
-  fields="$("$CURRENT_DIR/hn-ticker" --fields 2>/dev/null || printf 'HN: offline\thttps://news.ycombinator.com/')"
-  text="${fields%%$'\t'*}"
-  url="${fields#*$'\t'}"
-  [[ "$url" == "$fields" ]] && url="https://news.ycombinator.com/"
-  tmux set-option -gq @hn_ticker "$text" >/dev/null 2>&1 || true
-  tmux set-option -gq @hn_ticker_text "$text" >/dev/null 2>&1 || true
-  tmux set-option -gq @hn_ticker_url "$url" >/dev/null 2>&1 || true
-  tmux refresh-client -S >/dev/null 2>&1 || true
-  sleep "$speed"
-done
+exec python3 - "$CURRENT_DIR" "$cache" "$items_cache" "$interval" "$width" "$reserved_width" "$max_width" "$speed" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+
+current_dir, cache, items_cache = sys.argv[1], sys.argv[2], sys.argv[3]
+interval = int(sys.argv[4])
+width_setting, reserved_width, max_width = sys.argv[5], sys.argv[6], sys.argv[7]
+speed = max(0.22, float(sys.argv[8]))
+separator = " · "
+fallback_url = "https://news.ycombinator.com/"
+
+
+def run_tmux(*args):
+    return subprocess.run(["tmux", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def read_mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0
+
+
+def resolve_width():
+    if width_setting != "auto":
+        try:
+            return max(1, int(width_setting))
+        except ValueError:
+            return 36
+
+    try:
+        output = subprocess.check_output(["tmux", "list-clients", "-F", "#{client_width}"], text=True, stderr=subprocess.DEVNULL)
+        client_width = max([int(line) for line in output.splitlines() if line.isdigit()] or [120])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        client_width = 120
+
+    try:
+        reserved = int(reserved_width)
+    except ValueError:
+        reserved = 150
+    try:
+        maximum = int(max_width)
+    except ValueError:
+        maximum = 120
+
+    return max(32, min(maximum, client_width - reserved))
+
+
+def read_items():
+    items = []
+    try:
+        with open(items_cache, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                item = json.loads(line)
+                title = str(item.get("title", "")).replace("\t", " ").strip()
+                url = str(item.get("url", "")).strip()
+                if title and url.startswith(("http://", "https://")):
+                    items.append((title, url))
+    except (OSError, ValueError, json.JSONDecodeError):
+        items = []
+
+    if items:
+        parts = [("HN: ", fallback_url)]
+        for index, (title, url) in enumerate(items):
+            if index:
+                parts.append((separator, ""))
+            parts.append((title, url))
+        text = "".join(part for part, _url in parts)
+        urls = [url for part, url in parts for _char in part]
+        return text, urls
+
+    try:
+        with open(cache, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.readline().strip()
+    except OSError:
+        text = "HN: loading"
+    return text, [fallback_url] * len(text)
+
+
+def frame_for(text, urls, width):
+    if width <= 0:
+        frame = text
+        frame_urls = urls
+    elif len(text) <= width:
+        frame = text.ljust(width)
+        frame_urls = urls + [""] * (width - len(text))
+    else:
+        padded = text + "     "
+        padded_urls = urls + [""] * 5
+        offset = int(time.time() / speed) % len(padded)
+        frame = (padded + padded)[offset : offset + width]
+        frame_urls = (padded_urls + padded_urls)[offset : offset + width]
+
+    target = fallback_url
+    if frame_urls:
+        center = min(len(frame_urls) - 1, max(0, width // 2))
+        for delta in range(len(frame_urls)):
+            right = center + delta
+            left = center - delta
+            if right < len(frame_urls) and frame_urls[right]:
+                target = frame_urls[right]
+                break
+            if left >= 0 and frame_urls[left]:
+                target = frame_urls[left]
+                break
+    return frame, target
+
+
+last_refresh_check = 0
+last_width_check = 0
+last_items_mtime = -1
+last_cache_mtime = -1
+width = resolve_width()
+text, urls = read_items()
+
+while True:
+    now = time.time()
+
+    if now - last_width_check >= 1:
+        last_width_check = now
+        width = resolve_width()
+
+    cache_mtime = read_mtime(cache)
+    items_mtime = read_mtime(items_cache)
+    if cache_mtime != last_cache_mtime or items_mtime != last_items_mtime:
+        last_cache_mtime = cache_mtime
+        last_items_mtime = items_mtime
+        text, urls = read_items()
+
+    if now - last_refresh_check >= 5:
+        last_refresh_check = now
+        if now - cache_mtime > interval:
+            subprocess.Popen([os.path.join(current_dir, "hn-refresh")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    frame, url = frame_for(text, urls, width)
+    result = run_tmux(
+        "set-option", "-gq", "@hn_ticker", frame,
+        ";", "set-option", "-gq", "@hn_ticker_text", frame,
+        ";", "set-option", "-gq", "@hn_ticker_url", url,
+        ";", "refresh-client", "-S",
+    )
+    if result.returncode != 0:
+        break
+    time.sleep(speed)
+PY

@@ -5,6 +5,44 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mode="${1:---text}"
 
 tmux_opt() {
+  case "$1" in
+    @hn_ticker_cache)
+      [[ -n "${HN_TICKER_CACHE:-}" ]] && {
+        printf '%s\n' "$HN_TICKER_CACHE"
+        return
+      }
+      ;;
+    @hn_ticker_items_cache)
+      [[ -n "${HN_TICKER_ITEMS_CACHE:-}" ]] && {
+        printf '%s\n' "$HN_TICKER_ITEMS_CACHE"
+        return
+      }
+      ;;
+    @hn_ticker_width)
+      [[ -n "${HN_TICKER_WIDTH:-}" ]] && {
+        printf '%s\n' "$HN_TICKER_WIDTH"
+        return
+      }
+      ;;
+    @hn_ticker_reserved_width)
+      [[ -n "${HN_TICKER_RESERVED_WIDTH:-}" ]] && {
+        printf '%s\n' "$HN_TICKER_RESERVED_WIDTH"
+        return
+      }
+      ;;
+    @hn_ticker_max_width)
+      [[ -n "${HN_TICKER_MAX_WIDTH:-}" ]] && {
+        printf '%s\n' "$HN_TICKER_MAX_WIDTH"
+        return
+      }
+      ;;
+    @hn_ticker_speed)
+      [[ -n "${HN_TICKER_SPEED:-}" ]] && {
+        printf '%s\n' "$HN_TICKER_SPEED"
+        return
+      }
+      ;;
+  esac
   tmux show-option -gqv "$1" 2>/dev/null || true
 }
 
@@ -17,12 +55,11 @@ max_width="$(tmux_opt @hn_ticker_max_width)"
 speed="$(tmux_opt @hn_ticker_speed)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
 items_cache="${items_cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.items.jsonl}"
-interval="${interval:-300}"
 width="${width:-auto}"
 reserved_width="${reserved_width:-150}"
 max_width="${max_width:-120}"
-speed="${speed:-0.06}"
-[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.06
+speed="${speed:-0.22}"
+[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.22
 
 if [[ "$width" == "auto" ]]; then
   client_width="$(tmux list-clients -F '#{client_width}' 2>/dev/null | sort -nr | head -n 1)"
@@ -35,20 +72,6 @@ if [[ "$width" == "auto" ]]; then
   (( width > max_width )) && width="$max_width"
 elif ! [[ "$width" =~ ^[0-9]+$ ]]; then
   width=36
-fi
-
-now="$(date +%s)"
-mtime=0
-if [[ -f "$cache" ]]; then
-  if stat -f %m "$cache" >/dev/null 2>&1; then
-    mtime="$(stat -f %m "$cache")"
-  else
-    mtime="$(stat -c %Y "$cache" 2>/dev/null || printf '0')"
-  fi
-fi
-
-if (( now - mtime > interval )); then
-  "$CURRENT_DIR/hn-refresh" >/dev/null 2>&1 &
 fi
 
 if [[ -s "$cache" || -s "$items_cache" ]]; then
