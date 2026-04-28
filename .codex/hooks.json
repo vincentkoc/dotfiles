@@ -39,8 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/vincentkoc/.codex/plugins/cache/vincentkoc-local/tokenjuice/local/scripts/post_tool_use_tokenjuice.py",
-            "statusMessage": "compacting bash output with tokenjuice"
+            "command": "/Users/vincentkoc/.codex/plugins/cache/vincentkoc-local/tokenjuice/local/scripts/post_tool_use_tokenjuice.py"
           }
         ]
       }
