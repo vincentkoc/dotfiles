@@ -13,8 +13,8 @@ foreground = #c0caf5
 selection-background = #7aa2f7
 cursor-color = #c0caf5
 minimum-contrast = 2
-background-opacity = 0.8
-background-blur = true
+background-opacity = 1
+background-blur = false
 window-decoration = server
 term = xterm-256color
 keybind = f11=toggle_fullscreen
