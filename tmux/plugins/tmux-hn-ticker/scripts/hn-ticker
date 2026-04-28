@@ -66,9 +66,9 @@ width="${width:-auto}"
 reserved_width="${reserved_width:-150}"
 max_width="${max_width:-120}"
 speed="${speed:-0.18}"
-step="${step:-2}"
+step="${step:-1}"
 [[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.18
-[[ "$step" =~ ^[0-9]+$ ]] || step=2
+[[ "$step" =~ ^[0-9]+$ ]] || step=1
 
 if [[ "$width" == "auto" ]]; then
   client_width="$(tmux list-clients -F '#{client_width}' 2>/dev/null | sort -nr | head -n 1)"
