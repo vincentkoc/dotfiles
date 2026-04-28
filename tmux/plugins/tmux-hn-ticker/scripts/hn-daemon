@@ -14,16 +14,20 @@ width="$(tmux_opt @hn_ticker_width)"
 reserved_width="$(tmux_opt @hn_ticker_reserved_width)"
 max_width="$(tmux_opt @hn_ticker_max_width)"
 speed="$(tmux_opt @hn_ticker_speed)"
+step="$(tmux_opt @hn_ticker_step)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
 items_cache="${items_cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.items.jsonl}"
 interval="${interval:-300}"
 width="${width:-auto}"
 reserved_width="${reserved_width:-150}"
 max_width="${max_width:-120}"
-speed="${speed:-0.22}"
+speed="${speed:-0.18}"
+step="${step:-2}"
 [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
-[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.22
-awk -v speed="$speed" 'BEGIN { exit !(speed < 0.22) }' && speed=0.22
+[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.18
+[[ "$step" =~ ^[0-9]+$ ]] || step=2
+(( step < 1 )) && step=1
+awk -v speed="$speed" 'BEGIN { exit !(speed < 0.16) }' && speed=0.16
 
 cache_dir="$(dirname "$cache")"
 mkdir -p "$cache_dir"
@@ -35,7 +39,7 @@ if ! mkdir "$lock_dir" 2>/dev/null; then
     old_pid="$(cat "$pid_file" 2>/dev/null || true)"
     if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
       old_command="$(ps -p "$old_pid" -o command= 2>/dev/null || true)"
-      if [[ "$old_command" == *hn-daemon* ]]; then
+      if [[ "$old_command" == *hn-daemon* || "$old_command" == *tmux-hn-ticker/scripts* ]]; then
         exit 0
       fi
     fi
@@ -51,7 +55,7 @@ if ! tmux display-message -p '#{pid}' >/dev/null 2>&1; then
   exit 0
 fi
 
-exec python3 - "$CURRENT_DIR" "$cache" "$items_cache" "$interval" "$width" "$reserved_width" "$max_width" "$speed" <<'PY'
+exec python3 - "$CURRENT_DIR" "$cache" "$items_cache" "$interval" "$width" "$reserved_width" "$max_width" "$speed" "$step" <<'PY'
 import json
 import os
 import subprocess
@@ -61,7 +65,8 @@ import time
 current_dir, cache, items_cache = sys.argv[1], sys.argv[2], sys.argv[3]
 interval = int(sys.argv[4])
 width_setting, reserved_width, max_width = sys.argv[5], sys.argv[6], sys.argv[7]
-speed = max(0.22, float(sys.argv[8]))
+speed = max(0.16, float(sys.argv[8]))
+step = max(1, int(sys.argv[9]))
 separator = " · "
 fallback_url = "https://news.ycombinator.com/"
 
@@ -133,7 +138,7 @@ def read_items():
     return text, [fallback_url] * len(text)
 
 
-def frame_for(text, urls, width):
+def frame_for(text, urls, width, offset):
     if width <= 0:
         frame = text
         frame_urls = urls
@@ -143,7 +148,7 @@ def frame_for(text, urls, width):
     else:
         padded = text + "     "
         padded_urls = urls + [""] * 5
-        offset = int(time.time() / speed) % len(padded)
+        offset = offset % len(padded)
         frame = (padded + padded)[offset : offset + width]
         frame_urls = (padded_urls + padded_urls)[offset : offset + width]
 
@@ -168,6 +173,7 @@ last_items_mtime = -1
 last_cache_mtime = -1
 width = resolve_width()
 text, urls = read_items()
+offset = 0
 
 while True:
     now = time.time()
@@ -188,7 +194,8 @@ while True:
         if now - cache_mtime > interval:
             subprocess.Popen([os.path.join(current_dir, "hn-refresh")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    frame, url = frame_for(text, urls, width)
+    frame, url = frame_for(text, urls, width, offset)
+    offset = (offset + step) % max(1, len(text) + 5)
     result = run_tmux(
         "set-option", "-gq", "@hn_ticker", frame,
         ";", "set-option", "-gq", "@hn_ticker_text", frame,

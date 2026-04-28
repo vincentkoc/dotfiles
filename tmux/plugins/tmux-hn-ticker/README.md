@@ -30,7 +30,8 @@ set -g @hn_ticker_interval 300
 set -g @hn_ticker_width auto
 set -g @hn_ticker_reserved_width 150
 set -g @hn_ticker_max_width 120
-set -g @hn_ticker_speed 0.22
+set -g @hn_ticker_speed 0.18
+set -g @hn_ticker_step 2
 set -g @hn_ticker_separator ' · '
 set -g @hn_ticker_cache '~/.cache/tmux-hn-ticker/ticker.txt'
 set -g @hn_ticker_items_cache '~/.cache/tmux-hn-ticker/ticker.items.jsonl'
