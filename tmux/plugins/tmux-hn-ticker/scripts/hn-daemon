@@ -12,6 +12,7 @@ items_cache="$(tmux_opt @hn_ticker_items_cache)"
 interval="$(tmux_opt @hn_ticker_interval)"
 width="$(tmux_opt @hn_ticker_width)"
 reserved_width="$(tmux_opt @hn_ticker_reserved_width)"
+min_width="$(tmux_opt @hn_ticker_min_width)"
 max_width="$(tmux_opt @hn_ticker_max_width)"
 speed="$(tmux_opt @hn_ticker_speed)"
 step="$(tmux_opt @hn_ticker_step)"
@@ -19,8 +20,9 @@ cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
 items_cache="${items_cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.items.jsonl}"
 interval="${interval:-300}"
 width="${width:-auto}"
-reserved_width="${reserved_width:-150}"
-max_width="${max_width:-120}"
+reserved_width="${reserved_width:-176}"
+min_width="${min_width:-24}"
+max_width="${max_width:-96}"
 speed="${speed:-0.18}"
 step="${step:-1}"
 [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
@@ -55,7 +57,7 @@ if ! tmux display-message -p '#{pid}' >/dev/null 2>&1; then
   exit 0
 fi
 
-exec python3 - "$CURRENT_DIR" "$cache" "$items_cache" "$interval" "$width" "$reserved_width" "$max_width" "$speed" "$step" <<'PY'
+exec python3 - "$CURRENT_DIR" "$cache" "$items_cache" "$interval" "$width" "$reserved_width" "$min_width" "$max_width" "$speed" "$step" <<'PY'
 import json
 import os
 import subprocess
@@ -64,9 +66,9 @@ import time
 
 current_dir, cache, items_cache = sys.argv[1], sys.argv[2], sys.argv[3]
 interval = int(sys.argv[4])
-width_setting, reserved_width, max_width = sys.argv[5], sys.argv[6], sys.argv[7]
-speed = max(0.16, float(sys.argv[8]))
-step = max(1, int(sys.argv[9]))
+width_setting, reserved_width, min_width, max_width = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
+speed = max(0.16, float(sys.argv[9]))
+step = max(1, int(sys.argv[10]))
 separator = " · "
 fallback_url = "https://news.ycombinator.com/"
 
@@ -98,13 +100,17 @@ def resolve_width():
     try:
         reserved = int(reserved_width)
     except ValueError:
-        reserved = 150
+        reserved = 176
+    try:
+        minimum = int(min_width)
+    except ValueError:
+        minimum = 24
     try:
         maximum = int(max_width)
     except ValueError:
-        maximum = 120
+        maximum = 96
 
-    return max(32, min(maximum, client_width - reserved))
+    return max(minimum, min(maximum, client_width - reserved))
 
 
 def read_items():

@@ -28,8 +28,9 @@ set -g status-right '#{@hn_ticker} | %H:%M'
 set -g @hn_ticker_limit 8
 set -g @hn_ticker_interval 300
 set -g @hn_ticker_width auto
-set -g @hn_ticker_reserved_width 150
-set -g @hn_ticker_max_width 120
+set -g @hn_ticker_reserved_width 176
+set -g @hn_ticker_min_width 24
+set -g @hn_ticker_max_width 96
 set -g @hn_ticker_speed 0.18
 set -g @hn_ticker_step 1
 set -g @hn_ticker_separator ' · '
