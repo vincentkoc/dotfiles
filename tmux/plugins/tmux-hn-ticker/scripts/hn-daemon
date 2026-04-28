@@ -20,9 +20,9 @@ cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
 items_cache="${items_cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.items.jsonl}"
 interval="${interval:-300}"
 width="${width:-auto}"
-reserved_width="${reserved_width:-176}"
-min_width="${min_width:-24}"
-max_width="${max_width:-96}"
+reserved_width="${reserved_width:-210}"
+min_width="${min_width:-18}"
+max_width="${max_width:-64}"
 speed="${speed:-0.18}"
 step="${step:-1}"
 [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
@@ -100,15 +100,15 @@ def resolve_width():
     try:
         reserved = int(reserved_width)
     except ValueError:
-        reserved = 176
+        reserved = 210
     try:
         minimum = int(min_width)
     except ValueError:
-        minimum = 24
+        minimum = 18
     try:
         maximum = int(max_width)
     except ValueError:
-        maximum = 96
+        maximum = 64
 
     return max(minimum, min(maximum, client_width - reserved))
 
