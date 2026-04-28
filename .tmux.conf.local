@@ -127,9 +127,7 @@ tmux_conf_theme_pane_active_border="$tmux_conf_theme_colour_4"
 tmux_conf_theme_pane_active_border="#{?pane_in_mode,$tmux_conf_theme_colour_9,#{?synchronize-panes,$tmux_conf_theme_colour_16,$tmux_conf_theme_colour_4}}"
 %endif
 
-set -g pane-border-format "#{pane_index} #{?@agent_pane_badge,#{@agent_pane_badge},}#{pane_title}"
-set-hook -g after-select-pane 'run-shell "tmux set-option -pt \"#{pane_id}\" -u @agent_pane_badge >/dev/null 2>&1 || true"'
-set-hook -g after-select-window 'run-shell "tmux set-option -pt \"#{pane_id}\" -u @agent_pane_badge >/dev/null 2>&1 || true"'
+set -g pane-border-format "#{pane_index} #{pane_title}"
 
 # pane indicator colours (when you hit <prefix> + q)
 tmux_conf_theme_pane_indicator="$tmux_conf_theme_colour_4"
@@ -250,7 +248,16 @@ tmux_conf_theme_right_separator_sub='\uE0B3'
 #     - #{username}
 #     - #{username_ssh}
 tmux_conf_theme_status_left=" ❐ #S "
-tmux_conf_theme_status_right="#{?@agent_attention_segment,#{@agent_attention_segment},}#{prefix}#{mouse}#{pairing}#{synchronized}#{?battery_status,#{battery_status},}#{?battery_percentage, #{battery_percentage},} | %R %d %b #[range=user|hn]#[fg=#07150f,bg=#1a1b26,none]#[fg=#9fddb1,bg=#07150f,bold] HN #[fg=#9fddb1,bg=#07150f,none]#{@hn_ticker}#[fg=#07150f,bg=#1a1b26,none]#[norange] #{username}#{root}@#{hostname} "
+tmux_conf_theme_status_right="#{?@agent_attention_segment,#{@agent_attention_segment},}#{prefix}#{mouse}#{pairing}#{synchronized} | %R %d %b $USER@#h "
+# Direct overrides: powerline is cheap; shell-backed status segments are not.
+set -g status-style "fg=#565f89,bg=#1a1b26,none" #!important
+set -g status-left "#[fg=#15161e,bg=#ff9e64,bold] ❐ #S #[fg=#ff9e64,bg=#1a1b26,none] " #!important
+set -g status-right "#{?@agent_attention_segment,#{@agent_attention_segment},}#[fg=#565f89,bg=#1a1b26]#{?client_prefix,⌨ ,  }#{?mouse,↗ ,  }#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#[fg=#f7768e,bg=#1a1b26,none]#[fg=#c0caf5,bg=#f7768e,bold] %R %d %b vincentkoc@#h " #!important
+setw -g window-status-separator "" #!important
+setw -g window-status-format "#[fg=#1a1b26,bg=#1a1b26,none]#[fg=#565f89,bg=#1a1b26,none] #I #W #[fg=#1a1b26,bg=#1a1b26,none]" #!important
+setw -g window-status-current-format "#[fg=#1a1b26,bg=#7aa2f7,none]#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W #[fg=#7aa2f7,bg=#1a1b26,none]" #!important
+setw -g window-status-style "fg=#565f89,bg=#1a1b26,none" #!important
+setw -g window-status-current-style "fg=#1a1b26,bg=#7aa2f7,bold" #!important
 
 # status left style
 tmux_conf_theme_status_left_fg="$tmux_conf_theme_colour_6,$tmux_conf_theme_colour_7,$tmux_conf_theme_colour_8"
@@ -377,15 +384,14 @@ bind -T copy-mode-vi y send-keys -X copy-selection-and-cancel
 
 # Fix clipboard on macOS (no weird lines)
 if-shell "uname | grep -q Darwin" {
-    set -g default-command "reattach-to-user-namespace -l ${SHELL}"
+    set -gu default-command
     bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "pbcopy"
 }
 
 # Increase history
 set -g history-limit 50000
 
-# Local status plugin: cached, non-blocking Hacker News ticker.
-run-shell -b 'sh "/Users/vincentkoc/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/tmux/plugins/tmux-hn-ticker/tmux-hn-ticker.tmux"'
+# HN ticker disabled: network/status daemons make pane switching feel sticky.
 
 # replace C-b by C-a instead of using both prefixes
 # set -gu prefix2
@@ -436,11 +442,12 @@ tmux_conf_uninstall_plugins_on_reload=true
 
 # to enable a plugin, use the 'set -g @plugin' syntax:
 # visit https://github.com/tmux-plugins for available plugins
-set -g @plugin 'tmux-plugins/tmux-resurrect'
-set -g @plugin 'tmux-plugins/tmux-continuum'
-set -g @resurrect-processes 'false'
-set -g @continuum-restore 'on'
-set -g @continuum-save-interval '2'
+# Recovery plugins stay off by default. `tt recover` is the explicit path.
+# set -g @plugin 'tmux-plugins/tmux-resurrect'
+# set -g @plugin 'tmux-plugins/tmux-continuum'
+# set -g @resurrect-processes 'false'
+# set -g @continuum-restore 'off'
+# set -g @continuum-save-interval '2'
 
 
 # -- custom variables ----------------------------------------------------------

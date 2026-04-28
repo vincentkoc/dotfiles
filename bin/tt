@@ -173,8 +173,7 @@ apply_recovery_theme() {
 
 apply_studio_pane_titles() {
   local target="$1"
-  local ready agent_label
-  ready="$(agent_ready_format)"
+  local agent_label
   agent_label="$(agent_label_format)"
 
   if [[ -z "$target" ]]; then
@@ -186,9 +185,9 @@ apply_studio_pane_titles() {
   fi
 
   "$TMUX_BIN" set-window-option -t "$target" -q pane-border-status top
-  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-format " #{pane_index} #[fg=#{?#{==:#{@tt_agent_kind},CLAUDE},#bb9af7,#{?#{==:#{@tt_agent_kind},CODEX},#7dcfff,#9ece6a}},bold]$agent_label#{?$ready,#[fg=#ff9e64,bold] READY,}#[default] #{?@tt_base_title,#{@tt_base_title},#{pane_title}}#{?#{&&:#{@tt_base_title},#{!=:#{pane_title},#{@tt_base_title}}}, #[fg=#{?$ready,#ff9e64,#565f89}]#{pane_title},}#[align=right]#[fg=#565f89]#{?@tt_git_label,#{@tt_git_label} ,}"
-  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-style "fg=#{?$ready,#ff9e64,#292e42},bg=default"
-  "$TMUX_BIN" set-window-option -t "$target" -q pane-active-border-style "fg=#{?$ready,#ff9e64,#7aa2f7},bg=default"
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-format " #{pane_index} #[fg=#{?#{==:#{@tt_agent_kind},CLAUDE},#bb9af7,#{?#{==:#{@tt_agent_kind},CODEX},#7dcfff,#9ece6a}},bold]$agent_label#[default] #{?@tt_base_title,#{@tt_base_title},#{pane_title}}#{?#{&&:#{@tt_base_title},#{!=:#{pane_title},#{@tt_base_title}}}, #[fg=#565f89]#{pane_title},}#[align=right]#[fg=#565f89]#{?@tt_git_label,#{@tt_git_label} ,}"
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-style "fg=#292e42,bg=default"
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-active-border-style "fg=#7aa2f7,bg=default"
 }
 
 clear_studio_pane_titles() {
@@ -293,14 +292,189 @@ first_window_id() {
 
 build_studio_layout() {
   local target="$1"
+  local pane_command="${2:-}"
+  local pane1 pane2 pane3
 
-  "$TMUX_BIN" split-window -h -t "$target"
-  "$TMUX_BIN" split-window -h -t "$target"
+  if [[ -n "$pane_command" ]]; then
+    pane1="$("$TMUX_BIN" list-panes -t "$target" -F '#{pane_id}' | head -n 1)"
+    pane2="$("$TMUX_BIN" split-window -d -h -P -F '#{pane_id}' -t "$pane1" "$pane_command")"
+    pane3="$("$TMUX_BIN" split-window -d -h -P -F '#{pane_id}' -t "$pane2" "$pane_command")"
+    "$TMUX_BIN" select-layout -t "$target" even-horizontal
+    "$TMUX_BIN" split-window -d -v -t "$pane1" "$pane_command"
+    "$TMUX_BIN" split-window -d -v -t "$pane2" "$pane_command"
+    "$TMUX_BIN" split-window -d -v -t "$pane3" "$pane_command"
+    return
+  else
+    "$TMUX_BIN" split-window -h -t "$target"
+    "$TMUX_BIN" split-window -h -t "$target"
+  fi
   "$TMUX_BIN" select-layout -t "$target" even-horizontal
 
   while IFS= read -r pane; do
-    "$TMUX_BIN" split-window -v -t "$pane"
+    if [[ -n "$pane_command" ]]; then
+      "$TMUX_BIN" split-window -d -v -t "$pane" "$pane_command"
+    else
+      "$TMUX_BIN" split-window -v -t "$pane"
+    fi
   done < <("$TMUX_BIN" list-panes -t "$target" -F '#{pane_id}')
+}
+
+label_grid_window() {
+  local target="$1"
+  local label="$2"
+  local pane index
+  local -a commands
+
+  apply_studio_pane_titles "$target"
+
+  index=1
+  while IFS= read -r pane; do
+    [[ -n "$pane" ]] || continue
+    commands+=(select-pane -t "$pane" -T "$label.$index" \;)
+    index=$((index + 1))
+  done < <("$TMUX_BIN" list-panes -t "$target" -F '#{pane_id}')
+
+  if (( ${#commands[@]} )); then
+    "$TMUX_BIN" "${commands[@]}" 2>/dev/null || true
+  fi
+}
+
+refresh_ops_labels() {
+  local session="$1"
+  local window_id window_name
+
+  while IFS=$'\t' read -r window_id window_name; do
+    [[ -n "$window_id" && -n "$window_name" ]] || continue
+    case "$window_name" in
+      ops|L1|L2|L3)
+        label_grid_window "$window_id" "$window_name"
+        ;;
+    esac
+  done < <("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}	#W' 2>/dev/null)
+}
+
+upgrade_ops_shells() {
+  local session="$1"
+  local window_id pane
+
+  while IFS= read -r window_id; do
+    [[ -n "$window_id" ]] || continue
+    while IFS= read -r pane; do
+      [[ -n "$pane" ]] || continue
+      send_literal_command "$pane" "exec zsh"
+    done < <("$TMUX_BIN" list-panes -t "$window_id" -F '#{pane_id}')
+  done < <("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}')
+}
+
+schedule_ops_shell_upgrade() {
+  local session="$1"
+  local self
+
+  self="$(tt_self_command)"
+  "$TMUX_BIN" run-shell -b "$self upgrade-ops-shells $(shell_quote "$session")" 2>/dev/null || true
+}
+
+ops_session_valid() {
+  local session="$1"
+  local window_count bad_count window_id window_name
+
+  window_count="$("$TMUX_BIN" list-windows -t "$session" -F '#W' 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "$window_count" == "4" ]] || return 1
+
+  bad_count="$("$TMUX_BIN" list-windows -t "$session" -F '#W #{window_panes}' 2>/dev/null | awk '
+    $1 !~ /^(ops|L[123])$/ || $2 != 6 { bad++ }
+    { seen[$1]++ }
+    END {
+      if (seen["ops"] != 1 || seen["L1"] != 1 || seen["L2"] != 1 || seen["L3"] != 1) bad++
+      print bad + 0
+    }')"
+  [[ "$bad_count" == "0" ]] || return 1
+
+  while IFS=$'\t' read -r window_id window_name; do
+    [[ -n "$window_id" && -n "$window_name" ]] || return 1
+    "$TMUX_BIN" list-panes -t "$window_id" -F '#{pane_left} #{pane_top}' 2>/dev/null | awk '
+      { count++; left[$1]=1; top[$2]=1 }
+      END {
+        for (x in left) left_count++
+        for (y in top) top_count++
+        exit !(count == 6 && left_count == 3 && top_count == 2)
+      }' || return 1
+  done < <("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}	#W' 2>/dev/null)
+}
+
+ops_session_idle() {
+  local session="$1"
+
+  "$TMUX_BIN" list-panes -t "$session" -F '#{pane_current_command}' 2>/dev/null |
+    awk 'BEGIN { ok=1 } $0 !~ /^(zsh|bash|fish|sh)$/ { ok=0 } END { exit ok ? 0 : 1 }'
+}
+
+create_ops() {
+  local session="${1:-cockpit}"
+  local start_dir="${2:-$PWD}"
+  local window window_id bootstrap_command width height
+
+  case "$session" in
+    ""|--)
+      session="cockpit"
+      ;;
+    -*)
+      echo "tt: invalid ops session name '$session'" >&2
+      exit 2
+      ;;
+  esac
+
+  bootstrap_command="/bin/sh"
+  width="${TT_OPS_WIDTH:-240}"
+  height="${TT_OPS_HEIGHT:-80}"
+
+  if [[ "$session" == "cockpit" ]] &&
+    "$TMUX_BIN" has-session -t ops 2>/dev/null &&
+    ! "$TMUX_BIN" has-session -t cockpit 2>/dev/null; then
+    if ops_session_idle ops; then
+      "$TMUX_BIN" kill-session -t ops 2>/dev/null || true
+    else
+      echo "tt: old session 'ops' is active; not replacing it with 'cockpit'" >&2
+      echo "tt: finish or rename that session, then run 'tt cockpit' again" >&2
+      exit 2
+    fi
+  fi
+
+  if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    if ops_session_valid "$session"; then
+      refresh_ops_labels "$session"
+      schedule_ops_shell_upgrade "$session"
+      attach_or_switch "$session"
+    fi
+    if ops_session_idle "$session"; then
+      "$TMUX_BIN" kill-session -t "$session" 2>/dev/null || true
+    else
+      echo "tt: session '$session' has a non-ops layout and active commands; not rebuilding it" >&2
+      echo "tt: kill or rename that session, then run 'tt ops' again" >&2
+      exit 2
+    fi
+  fi
+
+  if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    attach_or_switch "$session"
+  fi
+
+  "$TMUX_BIN" new-session -d -x "$width" -y "$height" -s "$session" -n ops -c "$start_dir" "$bootstrap_command"
+  set_profile_metadata "$session" ops
+  window_id="$session:1"
+  build_studio_layout "$window_id" "$bootstrap_command"
+  label_grid_window "$window_id" ops
+
+  for window in L1 L2 L3; do
+    "$TMUX_BIN" new-window -d -t "$session:" -n "$window" -c "$start_dir" "$bootstrap_command"
+    window_id="$session:$window"
+    build_studio_layout "$window_id" "$bootstrap_command"
+    label_grid_window "$window_id" "$window"
+  done
+
+  schedule_ops_shell_upgrade "$session"
+  "$TMUX_BIN" select-window -t "$session:1"
+  attach_or_switch "$session"
 }
 
 ensure_studio_layout() {
@@ -648,6 +822,7 @@ write_agent_cockpit_state() {
   while IFS=$'\t' read -r session profile window pane window_panes dir start_command current_command live_title base_title || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" ]] || continue
     [[ "$session" != ttm-* ]] || continue
+    [[ "$profile" != "ops" ]] || continue
     [[ "$profile" != "mobile" ]] || continue
     [[ "$profile" == "studio" || "$window_panes" == "6" ]] || continue
 
@@ -929,6 +1104,7 @@ prompt_session_name() {
   if [[ -n "$default_name" ]]; then
     printf '%s [%s]: ' "$prompt" "$default_name" >&2
     read -r value
+    [[ "$value" == "--" ]] && value=""
     printf '%s\n' "${value:-$default_name}"
   else
     printf '%s: ' "$prompt" >&2
@@ -948,6 +1124,7 @@ run_menu() {
   done < <(list_sessions)
 
   options+=("new     [ai]     agent cockpit (3x2)")
+  options+=("new     [cockpit] ops/L1/L2/L3 cockpit")
   options+=("new     [shell]  normal tmux session")
   options+=("new     [mobile] phone-sized tmux session")
   options+=("reset   [ai]     kill server + fresh agent cockpit")
@@ -976,6 +1153,11 @@ run_menu() {
       session="$(prompt_session_name "ai session" "studio")"
       [[ -n "$session" ]] || exit 1
       create_studio "$session"
+      ;;
+    "new     [cockpit] ops/L1/L2/L3 cockpit")
+      session="$(prompt_session_name "cockpit session" "cockpit")"
+      [[ -n "$session" ]] || exit 1
+      create_ops "$session"
       ;;
     "new     [shell]  normal tmux session")
       session="$(prompt_session_name "shell session")"
@@ -1056,6 +1238,12 @@ case "${1:-}" in
     ;;
   ai|studio)
     create_studio "${2:-studio}"
+    ;;
+  ops|cockpit)
+    create_ops "${2:-cockpit}"
+    ;;
+  upgrade-ops-shells)
+    upgrade_ops_shells "${2:-cockpit}"
     ;;
   shell|plain)
     if [[ -n "${2:-}" ]]; then
@@ -1181,7 +1369,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|autosave [on|off]|refresh [agents]|sync [target|all]|title [target] <short-title>|colorfix|titles [on|off] [target]|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|autosave [on|off]|refresh [agents]|sync [target|all]|title [target] <short-title>|colorfix|titles [on|off] [target]|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;

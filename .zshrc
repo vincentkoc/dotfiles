@@ -372,7 +372,7 @@ cx() {
 }
 
 # Terminal title: repo/branch context, including linked worktree name.
-if [[ "${TERM_PROGRAM:-}" == "iTerm.app" || "${TERM_PROGRAM:-}" == "ghostty" ]]; then
+if [[ -z "${TMUX:-}" && ( "${TERM_PROGRAM:-}" == "iTerm.app" || "${TERM_PROGRAM:-}" == "ghostty" ) ]]; then
 	autoload -Uz add-zsh-hook
 
 	_dotfiles_terminal_git_root() {
