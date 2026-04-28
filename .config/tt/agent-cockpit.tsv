@@ -1,0 +1,13 @@
+# session	pane	dir	title	command
+factory2	1	/Users/vincentkoc/GIT/_Perso/openclaw	tmux recovery	
+factory2	2	/Users/vincentkoc/GIT/_Perso	agent sessions	codex resume --no-alt-screen 019dd11f-2ef1-7461-bf52-e1859617cbcf
+factory2	3	/Users/vincentkoc/GIT/_Perso/openclaw	release packaging	codex resume --no-alt-screen 019dcae2-01df-7203-97b4-2f981978ec1f
+factory2	4	/Users/vincentkoc/GIT/_Perso/openclaw	spec architecture	codex resume --no-alt-screen 019dd00a-abf0-71c3-81fb-4da49068e6f3
+factory2	5	/Users/vincentkoc/GIT/_Perso/openclaw	branch integration	codex resume --no-alt-screen 019dd036-ccbf-72b2-ab4b-3002721e971f
+factory2	6	/Users/vincentkoc/GIT/_Perso/openclaw	Claude coding	claude --dangerously-skip-permissions resume
+run	1	/Users/vincentkoc/GIT/_Perso/openclaw	next surface	codex resume --no-alt-screen 019dcc33-507e-73f2-a9a3-10ac141efc15
+run	2	/Users/vincentkoc/GIT/ghcrawl	crawl repair	codex resume --no-alt-screen 019dcd7d-c311-71f0-8769-b471947cb948
+run	3	/Users/vincentkoc/GIT/_Perso/openclaw	memory system	codex resume --no-alt-screen 019dd0dc-b49c-7800-9d64-c6995c3d2d58
+run	4	/Users/vincentkoc/GIT/_Perso/openclaw	CI validation	codex resume --no-alt-screen 019dd0dc-fc42-7693-9514-07e399515730
+run	5	/Users/vincentkoc/GIT/_Perso/openclaw	agent routing	codex resume --no-alt-screen 019dc404-11d7-7250-ba68-95a99f1b1c7c
+run	6	/Users/vincentkoc/GIT/_Perso/openclaw	backlog triage	codex resume --no-alt-screen 019dcb35-4455-7a63-8484-f9463fa69cba

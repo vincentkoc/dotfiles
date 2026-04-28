@@ -264,6 +264,24 @@ alias pip3='pip'
 # If not running interactively, don't do anything
 [ -z "$PS1" ] && return
 
+termfix() {
+	printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l\033[?2004l'
+	stty sane 2>/dev/null || true
+	reset
+}
+
+codex-resume() {
+	if [[ $# -gt 0 ]]; then
+		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex resume --no-alt-screen "$@"
+	else
+		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex resume --all --no-alt-screen
+	fi
+}
+
+codex-last() {
+	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex resume --last --no-alt-screen "$@"
+}
+
 # Terminal title: repo/branch context, including linked worktree name.
 if [[ "${TERM_PROGRAM:-}" == "iTerm.app" || "${TERM_PROGRAM:-}" == "ghostty" ]]; then
 	autoload -Uz add-zsh-hook
@@ -296,11 +314,22 @@ fi
 # Keep tmux pane titles aligned with the current repo/worktree.
 if [[ -n "${TMUX:-}" ]]; then
 	autoload -Uz add-zsh-hook
-	_dotfiles_codex_pane_title() {
-		command -v tmux-codex-title >/dev/null 2>&1 && tmux-codex-title >/dev/null 2>&1 || true
+	_dotfiles_tmux_sync_context() {
+		command -v tt >/dev/null 2>&1 && tt sync >/dev/null 2>&1 || true
 	}
-	add-zsh-hook chpwd _dotfiles_codex_pane_title
-	add-zsh-hook precmd _dotfiles_codex_pane_title
+	add-zsh-hook chpwd _dotfiles_tmux_sync_context
+	add-zsh-hook precmd _dotfiles_tmux_sync_context
+
+	git() {
+		command git "$@"
+		local status=$?
+		case "${1:-}" in
+			checkout|switch|worktree|rebase)
+				_dotfiles_tmux_sync_context
+				;;
+		esac
+		return "$status"
+	}
 fi
 
 #

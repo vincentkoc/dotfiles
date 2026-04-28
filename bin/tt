@@ -13,6 +13,9 @@ if [[ ! -x "$TMUX_BIN" ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DOTFILES_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
 attach_or_switch() {
   local session="$1"
 
@@ -34,6 +37,208 @@ set_profile_metadata() {
   local session="$1"
   local profile="$2"
   "$TMUX_BIN" set-option -t "$session" -q @tt_profile "$profile"
+}
+
+send_literal_command() {
+  local target="$1"
+  local command="$2"
+
+  "$TMUX_BIN" send-keys -t "$target" -l "$command"
+  "$TMUX_BIN" send-keys -t "$target" Enter
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+agent_color_prefix() {
+  printf 'env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor'
+}
+
+agent_kind_for_command() {
+  local command="$1"
+
+  case "$command" in
+    *claude*)
+      printf 'CLAUDE'
+      ;;
+    *codex*)
+      printf 'CODEX'
+      ;;
+    *)
+      printf 'SHELL'
+      ;;
+  esac
+}
+
+agent_label_format() {
+  printf '#{?#{==:#{@tt_agent_kind},CLAUDE},CC,#{?#{==:#{@tt_agent_kind},CODEX},CX,TM}}'
+}
+
+agent_ready_format() {
+  printf '#{?#{&&:#{||:#{==:#{@tt_agent_kind},CODEX},#{==:#{@tt_agent_kind},CLAUDE}},#{?#{m/r:^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂],#{pane_title}},0,1}},1,0}'
+}
+
+git_pane_label() {
+  local dir="$1"
+  local branch
+
+  [[ -d "$dir" ]] || return 0
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  branch="$(git -C "$dir" branch --show-current 2>/dev/null || true)"
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
+  [[ -n "$branch" ]] || return 0
+
+  printf ' %s\n' "$branch"
+}
+
+set_pane_git_label() {
+  local target="$1"
+  local dir="$2"
+  local git_label
+
+  git_label="$(git_pane_label "$dir")"
+  if [[ -n "$git_label" ]]; then
+    "$TMUX_BIN" set-option -pt "$target" @tt_git_label "$git_label" 2>/dev/null || true
+  else
+    "$TMUX_BIN" set-option -pt "$target" -u @tt_git_label 2>/dev/null || true
+  fi
+}
+
+clean_agent_command() {
+  local command="$1"
+  local prefix
+
+  command="${command#\"}"
+  command="${command%\"}"
+  prefix="$(agent_color_prefix) "
+  if [[ "$command" == "$prefix"* ]]; then
+    command="${command#"$prefix"}"
+  fi
+  if [[ "$command" == env\ -u\ NO_COLOR\ CLICOLOR=1\ CLICOLOR_FORCE=1\ FORCE_COLOR=* ]]; then
+    command="${command#env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=}"
+    command="${command#* COLORTERM=truecolor }"
+  fi
+  if [[ "$command" == "zsh" || "$command" == "-" ]]; then
+    command=""
+  fi
+
+  printf '%s\n' "$command"
+}
+
+apply_recovery_theme() {
+  local ready
+  ready="$(agent_ready_format)"
+
+  "$TMUX_BIN" set -g base-index 1
+  "$TMUX_BIN" set -g pane-base-index 1
+  "$TMUX_BIN" set -g default-terminal "tmux-256color"
+  "$TMUX_BIN" set -g terminal-features "xterm*:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
+  "$TMUX_BIN" set -ga terminal-overrides ",*:Tc"
+  "$TMUX_BIN" set -g extended-keys on
+  "$TMUX_BIN" set -g extended-keys-format csi-u
+  "$TMUX_BIN" set-environment -gu NO_COLOR 2>/dev/null || true
+  "$TMUX_BIN" set-environment -g CLICOLOR 1
+  "$TMUX_BIN" set-environment -g CLICOLOR_FORCE 1
+  "$TMUX_BIN" set-environment -g FORCE_COLOR 3
+  "$TMUX_BIN" set-environment -g COLORTERM truecolor
+  "$TMUX_BIN" set-environment -g TERM_PROGRAM "${TERM_PROGRAM:-ghostty}"
+  "$TMUX_BIN" set-environment -g ITERM2_DISABLE_SHELL_INTEGRATION 1
+  "$TMUX_BIN" set-environment -g ITERM_DISABLE_PROMPT_MARK 1
+  "$TMUX_BIN" set -g mouse on
+  "$TMUX_BIN" set -g history-limit 50000
+  "$TMUX_BIN" set -g status on
+  "$TMUX_BIN" set -g status-style "fg=#565f89,bg=#1a1b26,none"
+  "$TMUX_BIN" set -g window-status-style "fg=#565f89,bg=#1a1b26,none"
+  "$TMUX_BIN" set -g window-status-current-style "fg=#1a1b26,bg=#7aa2f7,bold"
+  "$TMUX_BIN" set -g message-style "fg=#1a1b26,bg=#7aa2f7,bold"
+  "$TMUX_BIN" set -g mode-style "fg=#1a1b26,bg=#7aa2f7,bold"
+  "$TMUX_BIN" set -g pane-border-style "fg=#{?$ready,#ff9e64,#292e42},bg=default"
+  "$TMUX_BIN" set -g pane-active-border-style "fg=#{?$ready,#ff9e64,#7aa2f7},bg=default"
+  "$TMUX_BIN" set -g status-left "#[fg=#1a1b26,bg=#7aa2f7,bold] #S "
+  "$TMUX_BIN" set -g status-right "#[fg=#565f89,bg=#1a1b26] %H:%M "
+  "$TMUX_BIN" set -g window-status-format "#[fg=#565f89,bg=#1a1b26] #I #W "
+  "$TMUX_BIN" set -g window-status-current-format "#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W "
+  "$TMUX_BIN" set -g pane-border-status off
+  "$TMUX_BIN" set -g prefix C-b
+  "$TMUX_BIN" set -g prefix2 C-a
+  "$TMUX_BIN" bind-key C-a send-prefix -2
+  "$TMUX_BIN" bind-key s choose-tree -Zs
+  "$TMUX_BIN" bind-key R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
+  "$TMUX_BIN" refresh-client -S 2>/dev/null || true
+}
+
+apply_studio_pane_titles() {
+  local target="$1"
+  local ready agent_label
+  ready="$(agent_ready_format)"
+  agent_label="$(agent_label_format)"
+
+  if [[ -z "$target" ]]; then
+    while IFS= read -r target; do
+      [[ -n "$target" ]] || continue
+      apply_studio_pane_titles "$target"
+    done < <("$TMUX_BIN" list-windows -a -F '#{window_id}' 2>/dev/null || true)
+    return 0
+  fi
+
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-status top
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-format " #{pane_index} #[fg=#{?#{==:#{@tt_agent_kind},CLAUDE},#bb9af7,#{?#{==:#{@tt_agent_kind},CODEX},#7dcfff,#9ece6a}},bold]$agent_label#{?$ready,#[fg=#ff9e64,bold] READY,}#[default] #{?@tt_base_title,#{@tt_base_title},#{pane_title}}#{?#{&&:#{@tt_base_title},#{!=:#{pane_title},#{@tt_base_title}}}, #[fg=#{?$ready,#ff9e64,#565f89}]#{pane_title},}#[align=right]#[fg=#565f89]#{?@tt_git_label,#{@tt_git_label} ,}"
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-style "fg=#{?$ready,#ff9e64,#292e42},bg=default"
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-active-border-style "fg=#{?$ready,#ff9e64,#7aa2f7},bg=default"
+}
+
+clear_studio_pane_titles() {
+  local target="$1"
+
+  if [[ -z "$target" ]]; then
+    while IFS= read -r target; do
+      [[ -n "$target" ]] || continue
+      clear_studio_pane_titles "$target"
+    done < <("$TMUX_BIN" list-windows -a -F '#{window_id}' 2>/dev/null || true)
+    return 0
+  fi
+
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-status off
+}
+
+set_agent_pane_title() {
+  local target="${1:-}"
+  shift || true
+  local title="$*" path
+
+  if [[ -z "$title" ]]; then
+    title="$target"
+    target="${TMUX_PANE:-}"
+  fi
+  [[ -n "$target" && -n "$title" ]] || { echo "usage: tt title [target] <short title>" >&2; exit 2; }
+
+  "$TMUX_BIN" set-option -pt "$target" @tt_base_title "$title" 2>/dev/null || true
+  path="$("$TMUX_BIN" display-message -p -t "$target" '#{pane_current_path}' 2>/dev/null || true)"
+  set_pane_git_label "$target" "$path"
+  "$TMUX_BIN" select-pane -t "$target" -T "$title" 2>/dev/null || true
+  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+}
+
+sync_agent_pane_context() {
+  local target="${1:-${TMUX_PANE:-}}"
+  local path
+
+  [[ -n "$target" ]] || { echo "usage: tt sync [target|all]" >&2; exit 2; }
+
+  if [[ "$target" == "all" ]]; then
+    while IFS= read -r target; do
+      [[ -n "$target" ]] || continue
+      sync_agent_pane_context "$target"
+    done < <("$TMUX_BIN" list-panes -a -F '#{pane_id}' 2>/dev/null || true)
+    return 0
+  fi
+
+  path="$("$TMUX_BIN" display-message -p -t "$target" '#{pane_current_path}' 2>/dev/null || true)"
+  set_pane_git_label "$target" "$path"
 }
 
 confirm_action() {
@@ -80,23 +285,74 @@ create_plain() {
   exec "$TMUX_BIN" attach -t "$session"
 }
 
+first_window_id() {
+  local session="$1"
+
+  "$TMUX_BIN" list-windows -t "$session" -F '#{window_id}' 2>/dev/null | head -n 1
+}
+
+build_studio_layout() {
+  local target="$1"
+
+  "$TMUX_BIN" split-window -h -t "$target"
+  "$TMUX_BIN" split-window -h -t "$target"
+  "$TMUX_BIN" select-layout -t "$target" even-horizontal
+
+  while IFS= read -r pane; do
+    "$TMUX_BIN" split-window -v -t "$pane"
+  done < <("$TMUX_BIN" list-panes -t "$target" -F '#{pane_id}')
+}
+
+ensure_studio_layout() {
+  local session="$1"
+  local start_dir="${2:-}"
+  local window_id pane_count
+
+  if ! "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    if [[ -n "$start_dir" ]]; then
+      "$TMUX_BIN" new-session -d -s "$session" -n main -c "$start_dir"
+    else
+      "$TMUX_BIN" new-session -d -s "$session" -n main
+    fi
+  fi
+
+  set_profile_metadata "$session" studio
+
+  window_id="$(first_window_id "$session")"
+  [[ -n "$window_id" ]] || return 1
+  pane_count="$("$TMUX_BIN" list-panes -t "$window_id" 2>/dev/null | wc -l | tr -d ' ')"
+
+  case "$pane_count" in
+    1)
+      build_studio_layout "$window_id"
+      apply_studio_pane_titles "$window_id"
+      ;;
+    6)
+      apply_studio_pane_titles "$window_id"
+      ;;
+    *)
+      echo "tt: session '$session' has $pane_count panes; refusing to reshape non-empty layout" >&2
+      echo "tt: use 'tt reset ai $session' if you want to replace it" >&2
+      ;;
+  esac
+}
+
 create_studio() {
   local session="$1"
 
-  if ! "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
-    "$TMUX_BIN" new-session -d -s "$session" -n main
-    "$TMUX_BIN" split-window -h -t "$session:main"
-    "$TMUX_BIN" split-window -h -t "$session:main"
-    "$TMUX_BIN" select-layout -t "$session:main" even-horizontal
-
-    while IFS= read -r pane; do
-      "$TMUX_BIN" split-window -v -t "$pane"
-    done < <("$TMUX_BIN" list-panes -t "$session:main" -F '#{pane_id}')
-
-    set_profile_metadata "$session" studio
-  fi
+  ensure_studio_layout "$session"
+  install_agent_autosave_hooks
+  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
 
   attach_or_switch "$session"
+}
+
+create_studio_detached() {
+  local session="$1"
+  local start_dir="${2:-$HOME}"
+
+  ensure_studio_layout "$session" "$start_dir"
+  install_agent_autosave_hooks
 }
 
 create_mobile() {
@@ -264,20 +520,313 @@ restore_windows() {
 
 restore_studio_layout() {
   local target="${1:-}"
+  local manifest
   local window_id pane_count
   local -a target_args=()
 
   [[ -n "$target" ]] && target_args=(-t "$target")
 
+  manifest="$(agent_cockpit_manifest)"
+  apply_agent_manifest_metadata "$manifest"
   restore_windows "$target"
 
   while IFS= read -r window_id; do
     [[ -n "$window_id" ]] || continue
     pane_count="$("$TMUX_BIN" list-panes -t "$window_id" 2>/dev/null | wc -l | tr -d ' ')"
     if [[ "$pane_count" == "6" ]]; then
-      "$TMUX_BIN" select-layout -t "$window_id" tiled >/dev/null 2>&1 || true
+      apply_studio_pane_titles "$window_id"
     fi
   done < <("$TMUX_BIN" list-windows "${target_args[@]}" -F '#{window_id}' 2>/dev/null | sort -u || true)
+
+  install_agent_autosave_hooks
+  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+}
+
+agent_cockpit_manifest() {
+  local home_manifest="${XDG_CONFIG_HOME:-$HOME/.config}/tt/agent-cockpit.tsv"
+  local dotfiles_manifest="$DOTFILES_DIR/.config/tt/agent-cockpit.tsv"
+  local state_manifest
+  state_manifest="$(agent_cockpit_state_file)"
+
+  if [[ -n "${TT_AGENT_COCKPIT_MANIFEST:-}" ]]; then
+    printf '%s\n' "$TT_AGENT_COCKPIT_MANIFEST"
+  elif [[ -f "$state_manifest" ]]; then
+    printf '%s\n' "$state_manifest"
+  elif [[ -f "$home_manifest" ]]; then
+    printf '%s\n' "$home_manifest"
+  else
+    printf '%s\n' "$dotfiles_manifest"
+  fi
+}
+
+agent_cockpit_seed_manifest() {
+  local home_manifest="${XDG_CONFIG_HOME:-$HOME/.config}/tt/agent-cockpit.tsv"
+  local dotfiles_manifest="$DOTFILES_DIR/.config/tt/agent-cockpit.tsv"
+
+  if [[ -n "${TT_AGENT_COCKPIT_MANIFEST:-}" && -f "$TT_AGENT_COCKPIT_MANIFEST" ]]; then
+    printf '%s\n' "$TT_AGENT_COCKPIT_MANIFEST"
+  elif [[ -f "$home_manifest" ]]; then
+    printf '%s\n' "$home_manifest"
+  else
+    printf '%s\n' "$dotfiles_manifest"
+  fi
+}
+
+agent_cockpit_state_file() {
+  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  printf '%s\n' "$state_home/tt/agent-cockpit.tsv"
+}
+
+manifest_value_for() {
+  local manifest="$1"
+  local wanted_session="$2"
+  local wanted_pane="$3"
+  local wanted_field="$4"
+  local session pane dir title command
+
+  [[ -f "$manifest" ]] || return 0
+
+  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
+    [[ "$session" == "$wanted_session" && "$pane" == "$wanted_pane" ]] || continue
+    case "$wanted_field" in
+      dir)
+        printf '%s\n' "$dir"
+        ;;
+      title)
+        printf '%s\n' "$title"
+        ;;
+      command)
+        printf '%s\n' "$command"
+        ;;
+    esac
+    return 0
+  done < "$manifest"
+}
+
+fallback_title_for_path() {
+  local path="$1"
+  local name
+
+  name="${path##*/}"
+  [[ -n "$name" ]] || name="shell"
+  printf '%s\n' "$name"
+}
+
+apply_agent_manifest_metadata() {
+  local manifest="${1:-}"
+  local session pane dir title command target kind
+
+  [[ -n "$manifest" && -f "$manifest" ]] || return 0
+
+  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
+    target="$session:1.$pane"
+    kind="$(agent_kind_for_command "$command")"
+    "$TMUX_BIN" set-option -pt "$target" @tt_base_title "$title" 2>/dev/null || true
+    "$TMUX_BIN" set-option -pt "$target" @tt_agent_command "$command" 2>/dev/null || true
+    "$TMUX_BIN" set-option -pt "$target" @tt_agent_kind "$kind" 2>/dev/null || true
+    set_pane_git_label "$target" "$dir"
+  done < "$manifest"
+}
+
+write_agent_cockpit_state() {
+  local output="${1:-}"
+  local quiet="${2:-}"
+  local seed tmp session profile window pane window_panes dir start_command current_command live_title base_title seed_title seed_command command kind
+
+  [[ -n "$output" ]] || output="$(agent_cockpit_state_file)"
+  seed="$(agent_cockpit_manifest)"
+  if [[ "$seed" == "$output" ]]; then
+    seed="$(agent_cockpit_seed_manifest)"
+  fi
+
+  mkdir -p "$(dirname "$output")"
+  tmp="$output.$$"
+  printf '# session\tpane\tdir\ttitle\tcommand\n' > "$tmp"
+
+  while IFS=$'\t' read -r session profile window pane window_panes dir start_command current_command live_title base_title || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" ]] || continue
+    [[ "$session" != ttm-* ]] || continue
+    [[ "$profile" != "mobile" ]] || continue
+    [[ "$profile" == "studio" || "$window_panes" == "6" ]] || continue
+
+    seed_title="$(manifest_value_for "$seed" "$session" "$pane" title)"
+    seed_command="$(manifest_value_for "$seed" "$session" "$pane" command)"
+
+    if [[ -n "$base_title" ]]; then
+      title="$base_title"
+    elif [[ -z "$seed_command" && "$current_command" == "zsh" && -n "$live_title" && "$live_title" != "zsh" ]]; then
+      title="$live_title"
+    elif [[ -n "$seed_title" ]]; then
+      title="$seed_title"
+    elif [[ -n "$live_title" ]]; then
+      title="$live_title"
+    else
+      title="$(fallback_title_for_path "$dir")"
+    fi
+
+    command="$(clean_agent_command "$start_command")"
+    if [[ -z "$command" && "$current_command" != "zsh" && "$current_command" != "fish" && "$current_command" != "bash" ]]; then
+      command="$seed_command"
+    fi
+    kind="$(agent_kind_for_command "$command")"
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$pane" "$dir" "$title" "$command" >> "$tmp"
+    "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_base_title "$title" 2>/dev/null || true
+    "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_command "$command" 2>/dev/null || true
+    "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_kind "$kind" 2>/dev/null || true
+    set_pane_git_label "$session:1.$pane" "$dir"
+  done < <("$TMUX_BIN" list-panes -a -F '#{session_name}	#{@tt_profile}	#{window_index}	#{pane_index}	#{window_panes}	#{pane_current_path}	#{pane_start_command}	#{pane_current_command}	#{pane_title}	#{@tt_base_title}' 2>/dev/null || true)
+
+  mv "$tmp" "$output"
+  if [[ "$quiet" != "--quiet" ]]; then
+    printf 'tt snapshot saved: %s\n' "$output" >&2
+  fi
+}
+
+tt_self_command() {
+  if [[ -x "$HOME/bin/tt" ]]; then
+    shell_quote "$HOME/bin/tt"
+  else
+    shell_quote "$SCRIPT_DIR/tt"
+  fi
+}
+
+install_agent_autosave_hooks() {
+  local self
+  self="$(tt_self_command)"
+
+  "$TMUX_BIN" set-hook -g "after-new-session[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-new-window[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-split-window[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-kill-pane[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "pane-exited[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
+}
+
+clear_agent_autosave_hooks() {
+  "$TMUX_BIN" set-hook -gu "after-new-session[90]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-new-window[90]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-split-window[90]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-kill-pane[90]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "pane-exited[90]" 2>/dev/null || true
+
+  # Remove the unindexed hooks from early versions of this script if they are still present.
+  "$TMUX_BIN" set-hook -gu "after-new-session[0]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-new-window[0]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-split-window[0]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-kill-pane[0]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "pane-exited[0]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "window-layout-changed[0]" 2>/dev/null || true
+}
+
+start_recovery_server() {
+  kill_server force
+  "$TMUX_BIN" -f /dev/null new-session -d -s __tt_recover -n main -c "$HOME"
+  apply_recovery_theme
+  install_agent_autosave_hooks
+}
+
+create_agent_cockpit_sessions() {
+  local manifest="$1"
+  local session pane dir title command
+  local sessions=" "
+
+  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
+    if [[ "$sessions" != *" $session "* ]]; then
+      create_studio_detached "$session" "$dir"
+      sessions="$sessions$session "
+    fi
+  done < "$manifest"
+}
+
+launch_agent_cockpit_panes() {
+  local manifest="$1"
+  local session pane dir title command target kind
+
+  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
+    target="$session:1.$pane"
+    kind="$(agent_kind_for_command "$command")"
+    "$TMUX_BIN" set-option -pt "$target" @tt_base_title "$title" 2>/dev/null || true
+    "$TMUX_BIN" set-option -pt "$target" @tt_agent_command "$command" 2>/dev/null || true
+    "$TMUX_BIN" set-option -pt "$target" @tt_agent_kind "$kind" 2>/dev/null || true
+    set_pane_git_label "$target" "$dir"
+    "$TMUX_BIN" select-pane -t "$target" -T "$title" 2>/dev/null || true
+
+    if [[ -n "${command:-}" ]]; then
+      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(agent_color_prefix) $command"
+    else
+      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" zsh
+    fi
+  done < "$manifest"
+}
+
+refresh_agent_pane_colors() {
+  local session pane dir start_command base_title saved_command command kind count
+  count=0
+
+  while IFS=$'\t' read -r session pane dir start_command base_title saved_command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" ]] || continue
+    [[ "$session" != ttm-* ]] || continue
+
+    command="$(clean_agent_command "$start_command")"
+    if [[ -z "$command" ]]; then
+      command="$(clean_agent_command "$saved_command")"
+    fi
+    kind="$(agent_kind_for_command "$command")"
+    case "$kind" in
+      CODEX|CLAUDE)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    "$TMUX_BIN" set-option -pt "$pane" @tt_agent_command "$command" 2>/dev/null || true
+    "$TMUX_BIN" set-option -pt "$pane" @tt_agent_kind "$kind" 2>/dev/null || true
+    if [[ -n "$base_title" ]]; then
+      "$TMUX_BIN" set-option -pt "$pane" @tt_base_title "$base_title" 2>/dev/null || true
+      "$TMUX_BIN" select-pane -t "$pane" -T "$base_title" 2>/dev/null || true
+    fi
+    set_pane_git_label "$pane" "$dir"
+
+    "$TMUX_BIN" respawn-pane -k -t "$pane" -c "$dir" "$(agent_color_prefix) $command"
+    count=$((count + 1))
+  done < <("$TMUX_BIN" list-panes -a -F '#{session_name}	#{pane_id}	#{pane_current_path}	#{pane_start_command}	#{@tt_base_title}	#{@tt_agent_command}' 2>/dev/null || true)
+
+  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+  restore_studio_layout
+  printf 'tt refreshed %s agent panes\n' "$count" >&2
+}
+
+recover_agent_cockpit() {
+  local manifest="${1:-}"
+  local attach_session="${2:-factory2}"
+
+  if [[ -n "${TMUX:-}" ]]; then
+    echo "tt recover must be run outside tmux; it rebuilds the tmux server" >&2
+    exit 2
+  fi
+
+  if [[ -z "$manifest" || "$manifest" == "--default" ]]; then
+    manifest="$(agent_cockpit_manifest)"
+  fi
+  [[ -f "$manifest" ]] || { echo "agent cockpit manifest not found: $manifest" >&2; exit 2; }
+
+  start_recovery_server
+  create_agent_cockpit_sessions "$manifest"
+  "$TMUX_BIN" kill-session -t __tt_recover 2>/dev/null || true
+  launch_agent_cockpit_panes "$manifest"
+  restore_studio_layout
+  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+
+  if [[ -n "${TMUX:-}" ]]; then
+    exec "$TMUX_BIN" switch-client -t "$attach_session"
+  fi
+
+  exec "$TMUX_BIN" attach -t "$attach_session"
 }
 
 reset_to_profile() {
@@ -405,6 +954,16 @@ run_menu() {
   options+=("reset   [shell]  kill server + fresh shell session")
   options+=("reset   [mobile] kill server + fresh phone session")
   options+=("restore [layout] unzoom windows + retile 6-pane sessions")
+  options+=("recover [agents] rebuild saved agent cockpit")
+  options+=("snapshot [agents] save live agent cockpit")
+  options+=("autosave [on]    keep agent snapshot warm")
+  options+=("autosave [off]   disable agent snapshot hooks")
+  options+=("refresh [agents] respawn agents with color env")
+  options+=("sync    [pane]   refresh branch/worktree label")
+  options+=("title   [pane]   set current pane title")
+  options+=("colorfix [theme]  reapply tmux colors/env")
+  options+=("titles  [on]     show pane title bars")
+  options+=("titles  [off]    hide pane title bars")
   options+=("kill    [all]    stop tmux server")
 
   selection="$(choose_option "${options[@]}")"
@@ -445,6 +1004,41 @@ run_menu() {
       ;;
     "restore [layout] unzoom windows + retile 6-pane sessions")
       restore_studio_layout
+      ;;
+    "recover [agents] rebuild saved agent cockpit")
+      recover_agent_cockpit
+      ;;
+    "snapshot [agents] save live agent cockpit")
+      write_agent_cockpit_state
+      ;;
+    "autosave [on]    keep agent snapshot warm")
+      install_agent_autosave_hooks
+      write_agent_cockpit_state
+      ;;
+    "autosave [off]   disable agent snapshot hooks")
+      clear_agent_autosave_hooks
+      ;;
+    "refresh [agents] respawn agents with color env")
+      refresh_agent_pane_colors
+      ;;
+    "sync    [pane]   refresh branch/worktree label")
+      sync_agent_pane_context "${TMUX_PANE:-all}"
+      ;;
+    "title   [pane]   set current pane title")
+      title="$(prompt_session_name "pane title")"
+      [[ -n "$title" ]] || exit 1
+      set_agent_pane_title "$title"
+      ;;
+    "colorfix [theme]  reapply tmux colors/env")
+      apply_recovery_theme
+      install_agent_autosave_hooks
+      ;;
+    "titles  [on]     show pane title bars")
+      apply_agent_manifest_metadata "$(agent_cockpit_manifest)"
+      apply_studio_pane_titles "${TMUX_PANE:-}"
+      ;;
+    "titles  [off]    hide pane title bars")
+      clear_studio_pane_titles "${TMUX_PANE:-}"
       ;;
     "kill    [all]    stop tmux server")
       kill_server
@@ -506,6 +1100,73 @@ case "${1:-}" in
   restore)
     restore_studio_layout "${2:-}"
     ;;
+  recover)
+    recover_agent_cockpit "${2:-}" "${3:-factory2}"
+    ;;
+  snapshot|backup|save)
+    if [[ "${2:-}" == "--quiet" ]]; then
+      write_agent_cockpit_state "" --quiet
+    else
+      write_agent_cockpit_state "${2:-}" "${3:-}"
+    fi
+    ;;
+  autosave)
+    case "${2:-on}" in
+      on)
+        install_agent_autosave_hooks
+        write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+        ;;
+      off)
+        clear_agent_autosave_hooks
+        ;;
+      *)
+        echo "usage: tt autosave [on|off]" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  refresh)
+    case "${2:-agents}" in
+      agents|agent|colors|color)
+        refresh_agent_pane_colors
+        ;;
+      *)
+        echo "usage: tt refresh [agents]" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  sync)
+    sync_agent_pane_context "${2:-${TMUX_PANE:-all}}"
+    ;;
+  title)
+    if [[ -n "${3:-}" ]]; then
+      target="$2"
+      shift 2
+      set_agent_pane_title "$target" "$@"
+    else
+      set_agent_pane_title "${2:-}"
+    fi
+    ;;
+  colorfix)
+    apply_recovery_theme
+    install_agent_autosave_hooks
+    ;;
+  titles)
+    case "${2:-on}" in
+      on)
+        apply_agent_manifest_metadata "$(agent_cockpit_manifest)"
+        apply_studio_pane_titles "${3:-}"
+        ;;
+      off)
+        clear_studio_pane_titles "${3:-}"
+        ;;
+      *)
+        echo "usage: tt titles [on|off] [target]" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   kill)
     kill_server
     ;;
@@ -520,7 +1181,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|autosave [on|off]|refresh [agents]|sync [target|all]|title [target] <short-title>|colorfix|titles [on|off] [target]|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;

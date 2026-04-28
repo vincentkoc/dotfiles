@@ -250,7 +250,7 @@ tmux_conf_theme_right_separator_sub='\uE0B3'
 #     - #{username}
 #     - #{username_ssh}
 tmux_conf_theme_status_left=" ❐ #S "
-tmux_conf_theme_status_right=" #{?@agent_attention_segment,#{@agent_attention_segment},}#{prefix}#{mouse}#{pairing}#{synchronized}#{?battery_status,#{battery_status},}#{?battery_percentage, #{battery_percentage},} | %R %d %b | #{username}#{root}@#{hostname} "
+tmux_conf_theme_status_right=" #{?@hn_ticker,#{@hn_ticker} | ,}#{?@agent_attention_segment,#{@agent_attention_segment},}#{prefix}#{mouse}#{pairing}#{synchronized}#{?battery_status,#{battery_status},}#{?battery_percentage, #{battery_percentage},} | %R %d %b | #{username}#{root}@#{hostname} "
 
 # status left style
 tmux_conf_theme_status_left_fg="$tmux_conf_theme_colour_6,$tmux_conf_theme_colour_7,$tmux_conf_theme_colour_8"
@@ -356,8 +356,16 @@ tmux_conf_copy_to_os_clipboard=true
 # start with mouse mode enabled
 set -g mouse on
 
+# Preserve modified keys like Shift-Enter through tmux for TUIs.
+set -g extended-keys on
+set -g extended-keys-format csi-u
+set -ga terminal-features ",xterm*:extkeys"
+
 # Work around a tmux 3.6a/macOS copy-mode crash path involving pane border UI.
 set -g pane-border-status off
+
+# Recover a pane after a TUI exits without resetting mouse/bracketed-paste modes.
+bind R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
 
 # Vi mode for copy
 set -g mode-keys vi
@@ -375,6 +383,9 @@ if-shell "uname | grep -q Darwin" {
 
 # Increase history
 set -g history-limit 50000
+
+# Local status plugin: cached, non-blocking Hacker News ticker.
+run-shell -b 'sh "/Users/vincentkoc/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/tmux/plugins/tmux-hn-ticker/tmux-hn-ticker.tmux"'
 
 # replace C-b by C-a instead of using both prefixes
 # set -gu prefix2
@@ -402,12 +413,12 @@ set -g history-limit 50000
 # by default, launching tmux will update tpm and all plugins
 #   - true (default)
 #   - false
-tmux_conf_update_plugins_on_launch=true
+tmux_conf_update_plugins_on_launch=false
 
 # by default, reloading the configuration will update tpm and all plugins
 #   - true (default)
 #   - false
-tmux_conf_update_plugins_on_reload=true
+tmux_conf_update_plugins_on_reload=false
 
 # by default, reloading the configuration will uninstall tpm and plugins when no
 # plugins are enabled
@@ -427,6 +438,7 @@ tmux_conf_uninstall_plugins_on_reload=true
 # visit https://github.com/tmux-plugins for available plugins
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @resurrect-processes 'false'
 set -g @continuum-restore 'on'
 set -g @continuum-save-interval '2'
 

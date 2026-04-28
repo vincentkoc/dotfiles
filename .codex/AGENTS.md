@@ -81,6 +81,8 @@
 - Commentary-only turns are incomplete when the next action is clear.
 - Prefer the first real tool step over more narration.
 - If work will take more than a moment, send a brief progress update while acting.
+- When running inside tmux, set the pane title early and update it when the workstream changes: `tt title "<short noun phrase>"` when available, otherwise `tmux select-pane -T "<short noun phrase>"`. Use the core body of work, not a vague action/status. Good: `test refactor`, `release validation`, `tmux recovery`, `GitHub triage`, `provider auth`. Bad: `publish`, `rebase`, `next`, `working`, `codex`. Keep it specific, human-scannable, and under roughly 32 chars.
+- When a tmux pane changes branch, checks out a worktree, rebases onto a different branch, or moves into a different repo cwd, run `tt sync` so the pane titlebar broadcasts the current branch/worktree context. Use `tt sync all` only after broad restore/layout work.
 - Multi-part requests are not done until every requested item is handled or clearly marked blocked.
 - Do prerequisite lookup or discovery before dependent actions.
 - Before finalizing, quickly verify correctness, coverage, formatting, and obvious side effects.
@@ -108,7 +110,7 @@
 - Never add `[codex]` to PR titles or mention AI tooling in PR titles. Keep titles about the actual change, not the tool used.
 - When mentioning GitHub issues or PRs, give full links.
 - Do not make any `docs/internal/*.md` files on openclaw.
-- On resume or after a crash, always enter recovery mode before doing work.
+- On resume or after a crash, always enter recovery mode before doing work. In tmux, immediately set a recovery title such as `tt title "tmux recovery"` or `tt title "openclaw recovery"` and run `tt sync`; update both once the recovered workstream or branch context is clear so restored sessions have useful titles.
 
 Recovery mode rules:
 - Re-read the recent thread context and summarize task, status, pending work, and next step.

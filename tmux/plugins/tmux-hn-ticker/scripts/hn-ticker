@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+tmux_opt() {
+  tmux show-option -gqv "$1" 2>/dev/null || true
+}
+
+cache="$(tmux_opt @hn_ticker_cache)"
+interval="$(tmux_opt @hn_ticker_interval)"
+width="$(tmux_opt @hn_ticker_width)"
+speed="$(tmux_opt @hn_ticker_speed)"
+cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
+interval="${interval:-300}"
+width="${width:-90}"
+speed="${speed:-1}"
+
+now="$(date +%s)"
+mtime=0
+if [[ -f "$cache" ]]; then
+  if stat -f %m "$cache" >/dev/null 2>&1; then
+    mtime="$(stat -f %m "$cache")"
+  else
+    mtime="$(stat -c %Y "$cache" 2>/dev/null || printf '0')"
+  fi
+fi
+
+if (( now - mtime > interval )); then
+  "$CURRENT_DIR/hn-refresh" >/dev/null 2>&1 &
+fi
+
+if [[ -s "$cache" ]]; then
+  python3 - "$cache" "$width" "$speed" "$now" <<'PY'
+import sys
+
+cache, width, speed, now = sys.argv[1], int(sys.argv[2]), max(1, int(sys.argv[3])), int(sys.argv[4])
+with open(cache, "r", encoding="utf-8", errors="replace") as handle:
+    text = handle.readline().strip()
+
+if width <= 0 or len(text) <= width:
+    print(text)
+else:
+    padded = text + "     "
+    offset = (now // speed) % len(padded)
+    frame = (padded + padded)[offset : offset + width]
+    print(frame)
+PY
+else
+  printf 'HN: loading'
+fi

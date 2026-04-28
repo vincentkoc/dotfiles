@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tmux_opt() {
+  tmux show-option -gqv "$1" 2>/dev/null || true
+}
+
+cache="$(tmux_opt @hn_ticker_cache)"
+limit="$(tmux_opt @hn_ticker_limit)"
+separator="$(tmux_opt @hn_ticker_separator)"
+cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
+limit="${limit:-8}"
+separator="${separator:- · }"
+
+cache_dir="$(dirname "$cache")"
+mkdir -p "$cache_dir"
+
+lock_dir="$cache.lock"
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  exit 0
+fi
+trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+
+tmp="$(mktemp "$cache_dir/ticker.XXXXXX")"
+trap 'rm -f "$tmp"; rmdir "$lock_dir" 2>/dev/null || true' EXIT
+
+python3 - "$limit" "$separator" > "$tmp" <<'PY'
+import html
+import json
+import sys
+import urllib.error
+import urllib.request
+
+limit = max(1, int(sys.argv[1]))
+separator = sys.argv[2]
+base = "https://hacker-news.firebaseio.com/v0"
+timeout = 4
+
+def get_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "tmux-hn-ticker/0.1"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.load(response)
+
+try:
+    ids = get_json(f"{base}/topstories.json")[: limit * 3]
+    titles = []
+    for item_id in ids:
+        item = get_json(f"{base}/item/{item_id}.json")
+        if not item or item.get("deleted") or item.get("dead"):
+            continue
+        title = html.unescape(item.get("title", "")).replace("\n", " ").strip()
+        if title:
+            titles.append(title)
+        if len(titles) >= limit:
+            break
+    if titles:
+        print("HN: " + separator.join(titles))
+except (OSError, urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
+    sys.exit(1)
+PY
+
+if [[ -s "$tmp" ]]; then
+  mv "$tmp" "$cache"
+fi
