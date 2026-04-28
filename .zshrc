@@ -16,8 +16,9 @@ bindkey '^[^?' backward-kill-word
 bindkey '^?' backward-delete-char
 
 # Bootstrap environment before loading oh-my-zsh so PATH + theme variables exist early
-if [[ -r ~/.exports ]]; then
+if [[ -z "${DOTFILES_EXPORTS_LOADED:-}" && -r ~/.exports ]]; then
 	source ~/.exports
+	export DOTFILES_EXPORTS_LOADED=1
 fi
 
 # Load dotfiles .env early (auto-export all vars). Use KEY=VALUE (no "export" needed).
@@ -46,6 +47,9 @@ export OPENCLAW_LOCAL_CHECK_MODE="${OPENCLAW_LOCAL_CHECK_MODE:-throttled}"
 export OPENCLAW_TEST_PROJECTS_SERIAL="${OPENCLAW_TEST_PROJECTS_SERIAL:-1}"
 export OPENCLAW_VITEST_MAX_WORKERS="${OPENCLAW_VITEST_MAX_WORKERS:-1}"
 
+# Process launch is expensive on this Mac, so do not make `cd` spawn `ls`.
+export DOTFILES_CD_SKIP_LISTING="${DOTFILES_CD_SKIP_LISTING:-1}"
+
 # Tokyo Night palette shared across terminals, prompt, and tooling
 typeset -gx TOKYONIGHT_BG="#1a1b26"
 typeset -gx TOKYONIGHT_BG_DARK="#16161e"
@@ -70,19 +74,26 @@ ZSH_THEME="spaceship"
 ENABLE_CORRECTION="false"
 
 # Spaceship prompt tuned for Tokyo Night palette
-SPACESHIP_PROMPT_ORDER=(dir git package python node docker exit_code char)
+SPACESHIP_PROMPT_ORDER=(dir git exit_code char)
 SPACESHIP_DIR_TRUNC=3
+SPACESHIP_DIR_TRUNC_REPO=false
 SPACESHIP_DIR_COLOR="cyan"
-SPACESHIP_PACKAGE_SHOW=true
+SPACESHIP_PACKAGE_SHOW=false
 SPACESHIP_PACKAGE_PREFIX="pkg "
 SPACESHIP_RUBY_SHOW=false
-SPACESHIP_PYTHON_SHOW=true
+SPACESHIP_PYTHON_SHOW=false
 SPACESHIP_PYTHON_SYMBOL="py"
-SPACESHIP_NODE_SHOW_VERSION=true
+SPACESHIP_NODE_SHOW=false
+SPACESHIP_NODE_SHOW_VERSION=false
 SPACESHIP_NODE_SYMBOL="node"
 SPACESHIP_KUBECTL_SHOW=false
+SPACESHIP_GIT_SHOW=true
+SPACESHIP_GIT_STATUS_SHOW=false
 SPACESHIP_GIT_BRANCH_COLOR="magenta"
 SPACESHIP_GIT_STATUS_COLOR="yellow"
+SPACESHIP_DOCKER_SHOW=false
+SPACESHIP_DOCKER_CONTEXT_SHOW=false
+SPACESHIP_DOCKER_COMPOSE_SHOW=false
 SPACESHIP_EXEC_TIME_SHOW=false
 SPACESHIP_CHAR_PREFIX=""
 SPACESHIP_CHAR_SYMBOL=">"
@@ -104,8 +115,9 @@ if [[ -n "${DOCKER_HOST:-}" && "$DOCKER_HOST" == tcp://* ]] && [[ -z "${DOTFILES
     SPACESHIP_DOCKER_COMPOSE_SHOW=false
 fi
 
-# Right prompt for host only (hide in tmux since tmux shows it)
-if [[ -n "$TMUX" ]]; then
+# Right prompts are noisy in direct Ghostty because every line edit has to
+# repaint both sides of the prompt. Keep the terminal smooth by default.
+if [[ -n "$TMUX" || ( "${TERM_PROGRAM:-}" == "ghostty" && "${DOTFILES_ZSH_SMOOTH_REDRAW:-1}" == "1" ) ]]; then
     SPACESHIP_RPROMPT_ORDER=()
     SPACESHIP_HOST_SHOW=false
 else
@@ -132,7 +144,11 @@ DISABLE_AUTO_TITLE="true"
 ZSH_DISABLE_COMPFIX="true"
 COMPLETION_WAITING_DOTS="true"
 
-ZSH_AUTOSUGGEST_USE_ASYNC=1
+if [[ "${TERM_PROGRAM:-}" == "ghostty" && -z "${TMUX:-}" && "${DOTFILES_ZSH_SMOOTH_REDRAW:-1}" == "1" ]]; then
+	unset ZSH_AUTOSUGGEST_USE_ASYNC
+else
+	ZSH_AUTOSUGGEST_USE_ASYNC=1
+fi
 ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=20
 ZSH_AUTOSUGGEST_STRATEGY=(history)
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=#565f89,bold"
@@ -168,6 +184,10 @@ fi
 		[[ -r "$ZSH/plugins/z/z.plugin.zsh" ]] && source "$ZSH/plugins/z/z.plugin.zsh"
 		[[ -r "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && source "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
 		[[ -r "$ZSH/custom/themes/spaceship.zsh-theme" ]] && source "$ZSH/custom/themes/spaceship.zsh-theme"
+	fi
+
+	if [[ "${TERM_PROGRAM:-}" == "ghostty" && -z "${TMUX:-}" && "${DOTFILES_ZSH_SMOOTH_REDRAW:-1}" == "1" ]]; then
+		unset ZSH_AUTOSUGGEST_USE_ASYNC
 	fi
 
 # Spaceship's async init is brittle when zpty startup flakes. Fall back to a
@@ -233,6 +253,66 @@ if (( ${+functions[spaceship::worker::init]} )); then
 			async_job "spaceship" "$@" 2>/dev/null || _dotfiles_spaceship_disable_async
 		fi
 	}
+	fi
+
+# Spaceship's stock git section shells out for status-ish data. Keep git in the
+# prompt, but make it branch-only and filesystem-backed so pressing enter stays
+# instant in big repos.
+_dotfiles_git_root_fast() {
+	local dir="${PWD:A}"
+	while [[ "$dir" != "/" && -n "$dir" ]]; do
+		if [[ -d "$dir/.git" || -f "$dir/.git" ]]; then
+			printf '%s\n' "$dir"
+			return 0
+		fi
+		dir="${dir:h}"
+	done
+	return 1
+}
+
+_dotfiles_git_dir_fast() {
+	local repo_root="$1"
+	local git_file git_dir
+	if [[ -d "$repo_root/.git" ]]; then
+		printf '%s\n' "$repo_root/.git"
+		return 0
+	fi
+	[[ -f "$repo_root/.git" ]] || return 1
+	IFS= read -r git_file < "$repo_root/.git" || return 1
+	git_dir="${git_file#gitdir: }"
+	[[ "$git_dir" != "$git_file" && -n "$git_dir" ]] || return 1
+	[[ "$git_dir" = /* ]] || git_dir="$repo_root/$git_dir"
+	printf '%s\n' "${git_dir:A}"
+}
+
+_dotfiles_git_branch_fast() {
+	local git_dir="$1"
+	local head ref
+	IFS= read -r head < "$git_dir/HEAD" || return 1
+	if [[ "$head" == ref:\ * ]]; then
+		ref="${head#ref: }"
+		printf '%s\n' "${ref#refs/heads/}"
+		return 0
+	fi
+	git --git-dir="$git_dir" rev-parse --short HEAD 2>/dev/null
+}
+
+if (( ${+functions[spaceship_git]} )); then
+	spaceship_git() {
+		[[ $SPACESHIP_GIT_SHOW == false ]] && return
+
+		local repo_root git_dir branch
+		repo_root=$(_dotfiles_git_root_fast) || return
+		git_dir=$(_dotfiles_git_dir_fast "$repo_root") || return
+		branch=$(_dotfiles_git_branch_fast "$git_dir") || return
+
+		spaceship::section \
+			--color 'white' \
+			--prefix "$SPACESHIP_GIT_PREFIX" \
+			--suffix "$SPACESHIP_GIT_SUFFIX" \
+			--symbol "$SPACESHIP_GIT_SYMBOL" \
+			"$branch"
+	}
 fi
 
 # `z foo` should jump, not trigger spelling correction on the argument.
@@ -283,26 +363,74 @@ codex-last() {
 	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex resume --last --no-alt-screen "$@"
 }
 
+codex-tmux() {
+	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex --no-alt-screen "$@"
+}
+
+cx() {
+	codex-tmux "$@"
+}
+
 # Terminal title: repo/branch context, including linked worktree name.
 if [[ "${TERM_PROGRAM:-}" == "iTerm.app" || "${TERM_PROGRAM:-}" == "ghostty" ]]; then
 	autoload -Uz add-zsh-hook
 
+	_dotfiles_terminal_git_root() {
+		local dir="${PWD:A}"
+		while [[ "$dir" != "/" && -n "$dir" ]]; do
+			if [[ -d "$dir/.git" || -f "$dir/.git" ]]; then
+				printf '%s\n' "$dir"
+				return 0
+			fi
+			dir="${dir:h}"
+		done
+		return 1
+	}
+
+	_dotfiles_terminal_git_dir() {
+		local repo_root="$1"
+		local git_file git_dir
+		if [[ -d "$repo_root/.git" ]]; then
+			printf '%s\n' "$repo_root/.git"
+			return 0
+		fi
+		[[ -f "$repo_root/.git" ]] || return 1
+		IFS= read -r git_file < "$repo_root/.git" || return 1
+		git_dir="${git_file#gitdir: }"
+		[[ "$git_dir" != "$git_file" && -n "$git_dir" ]] || return 1
+		[[ "$git_dir" = /* ]] || git_dir="$repo_root/$git_dir"
+		printf '%s\n' "${git_dir:A}"
+	}
+
+	_dotfiles_terminal_git_branch() {
+		local git_dir="$1"
+		local head ref
+		IFS= read -r head < "$git_dir/HEAD" || return 1
+		if [[ "$head" == ref:\ * ]]; then
+			ref="${head#ref: }"
+			printf '%s\n' "${ref#refs/heads/}"
+			return 0
+		fi
+		git --git-dir="$git_dir" rev-parse --short HEAD 2>/dev/null
+	}
+
 	_dotfiles_terminal_title() {
-		local title cwd repo branch git_dir wt_name
+		local title cwd repo repo_root branch git_dir wt_name
 		cwd="${PWD/#$HOME/~}"
 		title="$cwd"
 
-		if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-			repo=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")
-			branch=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)
-			git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null)
+		if repo_root=$(_dotfiles_terminal_git_root) && git_dir=$(_dotfiles_terminal_git_dir "$repo_root") && branch=$(_dotfiles_terminal_git_branch "$git_dir"); then
+			repo="${repo_root:t}"
 			if [[ "$git_dir" == *"/worktrees/"* ]]; then
-				wt_name=$(basename "$git_dir")
+				wt_name="${git_dir:t}"
 				title="$repo:$branch [$wt_name] - $cwd"
 			else
 				title="$repo:$branch - $cwd"
 			fi
 		fi
+
+		[[ "$title" == "${_dotfiles_terminal_title_last:-}" ]] && return
+		typeset -g _dotfiles_terminal_title_last="$title"
 
 		# OSC 0 updates the visible terminal title in iTerm and Ghostty.
 		print -Pn "\e]0;${title}\a"
@@ -319,7 +447,6 @@ if [[ -n "${TMUX:-}" ]]; then
 		command -v tt >/dev/null 2>&1 && tt sync >/dev/null 2>&1 || true
 	}
 	add-zsh-hook chpwd _dotfiles_tmux_sync_context
-	add-zsh-hook precmd _dotfiles_tmux_sync_context
 
 	git() {
 		command git "$@"
@@ -340,7 +467,11 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	# Architecture and Security
 	# Uncomment if needed for x86 compatibility
 	# export ARCHFLAGS="-arch x86_64"
-		export GPG_TTY="${TTY:-$(tty 2>/dev/null)}"
+		if [[ -n "${TTY:-}" ]]; then
+			export GPG_TTY="$TTY"
+		elif [[ -t 0 ]]; then
+			export GPG_TTY="$(tty 2>/dev/null)"
+		fi
 
 	# Version Managers - Lazy Loading
 	# Python - pyenv
@@ -540,7 +671,31 @@ fi
 
 # direnv hook (auto-load .envrc)
 if (( $+commands[direnv] )); then
-    eval "$(direnv hook zsh)"
+    _dotfiles_direnv_should_export() {
+        [[ -n "${DIRENV_DIR:-}${DIRENV_FILE:-}${DIRENV_DIFF:-}" ]] && return 0
+
+        local dir="${PWD:A}"
+        while [[ "$dir" != "/" && -n "$dir" ]]; do
+            [[ -f "$dir/.envrc" || -f "$dir/.env" ]] && return 0
+            dir="${dir:h}"
+        done
+        return 1
+    }
+
+    _direnv_hook() {
+        _dotfiles_direnv_should_export || return 0
+        trap -- '' SIGINT
+        eval "$(direnv export zsh)"
+        trap - SIGINT
+    }
+    typeset -ag precmd_functions
+    if (( ! ${precmd_functions[(I)_direnv_hook]} )); then
+        precmd_functions=(_direnv_hook $precmd_functions)
+    fi
+    typeset -ag chpwd_functions
+    if (( ! ${chpwd_functions[(I)_direnv_hook]} )); then
+        chpwd_functions=(_direnv_hook $chpwd_functions)
+    fi
 fi
 
 # bun completions
