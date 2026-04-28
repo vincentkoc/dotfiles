@@ -250,7 +250,7 @@ tmux_conf_theme_right_separator_sub='\uE0B3'
 #     - #{username}
 #     - #{username_ssh}
 tmux_conf_theme_status_left=" ❐ #S "
-tmux_conf_theme_status_right="#[fg=#173f1a,bg=#d7ff5f,bold] HN #[fg=#173f1a,bg=#d7ff5f,none]#{@hn_ticker}#[fg=#d7ff5f,bg=#1a1b26,none] #{?@agent_attention_segment,#{@agent_attention_segment},}#{prefix}#{mouse}#{pairing}#{synchronized}#{?battery_status,#{battery_status},}#{?battery_percentage, #{battery_percentage},} | %R %d %b | #{username}#{root}@#{hostname} "
+tmux_conf_theme_status_right="#[range=user|hn]#[fg=#173f1a,bg=#d7ff5f,bold] HN #[fg=#173f1a,bg=#d7ff5f,none]#{@hn_ticker}#[fg=#d7ff5f,bg=#1a1b26,none]#[norange] #{?@agent_attention_segment,#{@agent_attention_segment},}#{prefix}#{mouse}#{pairing}#{synchronized}#{?battery_status,#{battery_status},}#{?battery_percentage, #{battery_percentage},} | %R %d %b | #{username}#{root}@#{hostname} "
 
 # status left style
 tmux_conf_theme_status_left_fg="$tmux_conf_theme_colour_6,$tmux_conf_theme_colour_7,$tmux_conf_theme_colour_8"

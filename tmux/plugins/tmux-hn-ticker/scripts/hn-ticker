@@ -2,30 +2,37 @@
 set -euo pipefail
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mode="${1:---text}"
 
 tmux_opt() {
   tmux show-option -gqv "$1" 2>/dev/null || true
 }
 
 cache="$(tmux_opt @hn_ticker_cache)"
+items_cache="$(tmux_opt @hn_ticker_items_cache)"
 interval="$(tmux_opt @hn_ticker_interval)"
 width="$(tmux_opt @hn_ticker_width)"
 reserved_width="$(tmux_opt @hn_ticker_reserved_width)"
+max_width="$(tmux_opt @hn_ticker_max_width)"
 speed="$(tmux_opt @hn_ticker_speed)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
+items_cache="${items_cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.items.jsonl}"
 interval="${interval:-300}"
 width="${width:-auto}"
-reserved_width="${reserved_width:-96}"
-speed="${speed:-1}"
+reserved_width="${reserved_width:-150}"
+max_width="${max_width:-120}"
+speed="${speed:-0.06}"
+[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.06
 
 if [[ "$width" == "auto" ]]; then
   client_width="$(tmux list-clients -F '#{client_width}' 2>/dev/null | sort -nr | head -n 1)"
   client_width="${client_width:-120}"
   [[ "$client_width" =~ ^[0-9]+$ ]] || client_width=120
-  [[ "$reserved_width" =~ ^[0-9]+$ ]] || reserved_width=96
+  [[ "$reserved_width" =~ ^[0-9]+$ ]] || reserved_width=150
+  [[ "$max_width" =~ ^[0-9]+$ ]] || max_width=120
   width=$(( client_width - reserved_width ))
   (( width < 32 )) && width=32
-  (( width > 180 )) && width=180
+  (( width > max_width )) && width="$max_width"
 elif ! [[ "$width" =~ ^[0-9]+$ ]]; then
   width=36
 fi
@@ -44,24 +51,80 @@ if (( now - mtime > interval )); then
   "$CURRENT_DIR/hn-refresh" >/dev/null 2>&1 &
 fi
 
-if [[ -s "$cache" ]]; then
-  python3 - "$cache" "$width" "$speed" "$now" <<'PY'
+if [[ -s "$cache" || -s "$items_cache" ]]; then
+  python3 - "$cache" "$items_cache" "$width" "$speed" "$mode" <<'PY'
+import json
 import sys
+import time
 
-cache, width, speed, now = sys.argv[1], int(sys.argv[2]), max(1, int(sys.argv[3])), int(sys.argv[4])
-with open(cache, "r", encoding="utf-8", errors="replace") as handle:
-    text = handle.readline().strip()
+cache, items_cache, width, speed, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), max(0.05, float(sys.argv[4])), sys.argv[5]
+separator = " · "
+items = []
+
+try:
+    with open(items_cache, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            item = json.loads(line)
+            title = str(item.get("title", "")).replace("\t", " ").strip()
+            url = str(item.get("url", "")).strip()
+            if title and url.startswith(("http://", "https://")):
+                items.append((title, url))
+except (OSError, ValueError, json.JSONDecodeError):
+    items = []
+
+if items:
+    parts = [("HN: ", "https://news.ycombinator.com/")]
+    for index, (title, url) in enumerate(items):
+        if index:
+            parts.append((separator, ""))
+        parts.append((title, url))
+    text = "".join(part for part, _url in parts)
+    urls = [url for part, url in parts for _char in part]
+else:
+    with open(cache, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.readline().strip()
+    urls = ["https://news.ycombinator.com/"] * len(text)
 
 if width <= 0:
-    print(text)
+    frame = text
+    frame_urls = urls
 elif len(text) <= width:
-    print(text.ljust(width))
+    frame = text.ljust(width)
+    frame_urls = urls + [""] * (width - len(text))
 else:
     padded = text + "     "
-    offset = (now // speed) % len(padded)
+    padded_urls = urls + [""] * 5
+    offset = int(time.time() / speed) % len(padded)
     frame = (padded + padded)[offset : offset + width]
+    frame_urls = (padded_urls + padded_urls)[offset : offset + width]
+
+target = ""
+if frame_urls:
+    center = min(len(frame_urls) - 1, max(0, width // 2))
+    for delta in range(len(frame_urls)):
+        right = center + delta
+        left = center - delta
+        if right < len(frame_urls) and frame_urls[right]:
+            target = frame_urls[right]
+            break
+        if left >= 0 and frame_urls[left]:
+            target = frame_urls[left]
+            break
+target = target or "https://news.ycombinator.com/"
+
+if mode == "--fields":
+    print(f"{frame}\t{target}")
+elif mode == "--url":
+    print(target)
+else:
     print(frame)
 PY
 else
-  printf '%-*s' "$width" 'HN: loading'
+  if [[ "$mode" == "--fields" ]]; then
+    printf '%-*s\thttps://news.ycombinator.com/' "$width" 'HN: loading'
+  elif [[ "$mode" == "--url" ]]; then
+    printf 'https://news.ycombinator.com/'
+  else
+    printf '%-*s' "$width" 'HN: loading'
+  fi
 fi

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+url="$(tmux show-option -gqv @hn_ticker_url 2>/dev/null || true)"
+case "$url" in
+  http://*|https://*) ;;
+  *) url="https://news.ycombinator.com/" ;;
+esac
+
+if command -v open >/dev/null 2>&1; then
+  open "$url" >/dev/null 2>&1 &
+elif command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "$url" >/dev/null 2>&1 &
+fi

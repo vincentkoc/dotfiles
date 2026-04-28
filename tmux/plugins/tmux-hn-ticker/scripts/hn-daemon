@@ -10,7 +10,9 @@ tmux_opt() {
 cache="$(tmux_opt @hn_ticker_cache)"
 speed="$(tmux_opt @hn_ticker_speed)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
-speed="${speed:-1}"
+speed="${speed:-0.06}"
+[[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || speed=0.06
+awk -v speed="$speed" 'BEGIN { exit !(speed < 0.04) }' && speed=0.04
 
 cache_dir="$(dirname "$cache")"
 mkdir -p "$cache_dir"
@@ -39,9 +41,13 @@ if ! tmux display-message -p '#{pid}' >/dev/null 2>&1; then
 fi
 
 while tmux display-message -p '#{pid}' >/dev/null 2>&1; do
-  text="$("$CURRENT_DIR/hn-ticker" 2>/dev/null || printf 'HN: offline')"
+  fields="$("$CURRENT_DIR/hn-ticker" --fields 2>/dev/null || printf 'HN: offline\thttps://news.ycombinator.com/')"
+  text="${fields%%$'\t'*}"
+  url="${fields#*$'\t'}"
+  [[ "$url" == "$fields" ]] && url="https://news.ycombinator.com/"
   tmux set-option -gq @hn_ticker "$text" >/dev/null 2>&1 || true
   tmux set-option -gq @hn_ticker_text "$text" >/dev/null 2>&1 || true
+  tmux set-option -gq @hn_ticker_url "$url" >/dev/null 2>&1 || true
   tmux refresh-client -S >/dev/null 2>&1 || true
   sleep "$speed"
 done

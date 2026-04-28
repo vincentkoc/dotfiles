@@ -6,25 +6,41 @@ tmux_opt() {
 }
 
 cache="$(tmux_opt @hn_ticker_cache)"
+items_cache="$(tmux_opt @hn_ticker_items_cache)"
 limit="$(tmux_opt @hn_ticker_limit)"
 separator="$(tmux_opt @hn_ticker_separator)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
+items_cache="${items_cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.items.jsonl}"
 limit="${limit:-8}"
 separator="${separator:- · }"
 
 cache_dir="$(dirname "$cache")"
 mkdir -p "$cache_dir"
+mkdir -p "$(dirname "$items_cache")"
 
 lock_dir="$cache.lock"
 if ! mkdir "$lock_dir" 2>/dev/null; then
-  exit 0
+  pid_file="$lock_dir/pid"
+  if [[ -r "$pid_file" ]]; then
+    old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
+      old_command="$(ps -p "$old_pid" -o command= 2>/dev/null || true)"
+      if [[ "$old_command" == *hn-refresh* ]]; then
+        exit 0
+      fi
+    fi
+  fi
+  rm -rf "$lock_dir"
+  mkdir "$lock_dir" 2>/dev/null || exit 0
 fi
-trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+printf '%s\n' "$$" > "$lock_dir/pid"
+trap 'rm -rf "$lock_dir" 2>/dev/null || true' EXIT
 
 tmp="$(mktemp "$cache_dir/ticker.XXXXXX")"
-trap 'rm -f "$tmp"; rmdir "$lock_dir" 2>/dev/null || true' EXIT
+items_tmp="$(mktemp "$cache_dir/items.XXXXXX")"
+trap 'rm -f "$tmp" "$items_tmp"; rm -rf "$lock_dir" 2>/dev/null || true' EXIT
 
-python3 - "$limit" "$separator" > "$tmp" <<'PY'
+python3 - "$limit" "$separator" "$tmp" "$items_tmp" <<'PY'
 import html
 import json
 import sys
@@ -33,6 +49,8 @@ import urllib.request
 
 limit = max(1, int(sys.argv[1]))
 separator = sys.argv[2]
+plain_path = sys.argv[3]
+items_path = sys.argv[4]
 base = "https://hacker-news.firebaseio.com/v0"
 timeout = 4
 
@@ -43,22 +61,30 @@ def get_json(url):
 
 try:
     ids = get_json(f"{base}/topstories.json")[: limit * 3]
-    titles = []
+    items = []
     for item_id in ids:
         item = get_json(f"{base}/item/{item_id}.json")
         if not item or item.get("deleted") or item.get("dead"):
             continue
         title = html.unescape(item.get("title", "")).replace("\n", " ").strip()
         if title:
-            titles.append(title)
-        if len(titles) >= limit:
+            url = item.get("url") or f"https://news.ycombinator.com/item?id={item_id}"
+            items.append({"title": title, "url": url})
+        if len(items) >= limit:
             break
-    if titles:
-        print("HN: " + separator.join(titles))
+    if items:
+        with open(plain_path, "w", encoding="utf-8") as handle:
+            handle.write("HN: " + separator.join(item["title"] for item in items) + "\n")
+        with open(items_path, "w", encoding="utf-8") as handle:
+            for item in items:
+                handle.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
 except (OSError, urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
     sys.exit(1)
 PY
 
 if [[ -s "$tmp" ]]; then
   mv "$tmp" "$cache"
+fi
+if [[ -s "$items_tmp" ]]; then
+  mv "$items_tmp" "$items_cache"
 fi
