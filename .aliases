@@ -8,21 +8,27 @@
 # Enable aliases to be sudo’ed
 alias sudo='sudo '
 
-# Some distro-packaged eza builds lag behind and do not support hiding the symlink target column.
-_dotfiles_eza_no_symlink_flag=""
-if command -v eza >/dev/null 2>&1; then
-    if eza --help 2>&1 | grep -q -- '--no-symlinks'; then
-        _dotfiles_eza_no_symlink_flag="--no-symlinks"
-    elif eza --help 2>&1 | grep -q -- '--no-symlink'; then
-        _dotfiles_eza_no_symlink_flag="--no-symlink"
+_dotfiles_has() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        (( $+commands[$1] ))
+    else
+        command -v "$1" >/dev/null 2>&1
     fi
-fi
+}
+
+_dotfiles_eza_no_symlink_flag="${DOTFILES_EZA_NO_SYMLINK_FLAG:---no-symlinks}"
 
 # Mac Specific
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # Setup PHP
     if [[ -z "${MAMP_LATEST_PHP:-}" && -d "/Applications/MAMP/bin/php" ]]; then
-        MAMP_LATEST_PHP=$(ls /Applications/MAMP/bin/php/ 2>/dev/null | sort -V | tail -1)
+        if [[ -n "${ZSH_VERSION:-}" ]]; then
+            _dotfiles_mamp_php_dirs=(/Applications/MAMP/bin/php/php*(N))
+            [[ ${#_dotfiles_mamp_php_dirs[@]} -gt 0 ]] && MAMP_LATEST_PHP="${_dotfiles_mamp_php_dirs[-1]:t}"
+            unset _dotfiles_mamp_php_dirs
+        else
+            MAMP_LATEST_PHP=$(ls /Applications/MAMP/bin/php/ 2>/dev/null | sort -V | tail -1)
+        fi
     fi
     if [[ -n "${MAMP_LATEST_PHP:-}" ]]; then
         alias php="/Applications/MAMP/bin/php/${MAMP_LATEST_PHP}/bin/php"
@@ -32,7 +38,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     alias updatedb="sudo /usr/libexec/locate.updatedb"
 
     # Preferred 'ls' implementation with icon toggle
-    if command -v eza >/dev/null 2>&1; then
+    if _dotfiles_has eza; then
         if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
             alias ls="eza -lah --git --no-user --no-permissions --no-time ${_dotfiles_eza_no_symlink_flag}"
             alias ll='eza -lha --git --no-user'
@@ -46,7 +52,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     fi
 
 	# Editor
-	if command -v nvim >/dev/null 2>&1; then
+	if _dotfiles_has nvim; then
 		alias vim='nvim'
 	fi
 
@@ -57,8 +63,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 
 	# Fallback for Mac OS
-	command -v md5sum > /dev/null || alias md5sum="md5"
-	command -v sha1sum > /dev/null || alias sha1sum="shasum"
+	_dotfiles_has md5sum || alias md5sum="md5"
+	_dotfiles_has sha1sum || alias sha1sum="shasum"
 
 	# Pipe content to file on MacOS Desktop
 	alias loghome='tee ~/Desktop/logfile_$(date +"%Y%m%d_%H%M%S").txt'
@@ -82,7 +88,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 	nodenv-rehash() { command -v nodenv >/dev/null 2>&1 && nodenv rehash; }
 else
     # Preferred 'ls' implementation (Linux)
-    if command -v eza >/dev/null 2>&1; then
+    if _dotfiles_has eza; then
         if [[ -n "${DOTFILES_DISABLE_EZA_ICONS:-}" ]]; then
             alias ls="eza -lah --git --no-user --no-permissions --no-time ${_dotfiles_eza_no_symlink_flag}"
             alias ll='eza -lha --git --no-user'
@@ -109,7 +115,7 @@ fi
 #
 
 	# Preferred Options and Replacements
-	if command -v tldr >/dev/null 2>&1; then
+	if _dotfiles_has tldr; then
 		alias man='tldr'
 	fi
 	# alias dig='dog'
@@ -119,7 +125,7 @@ fi
 	alias mv='mv -iv'
 	alias mkdir='mkdir -pv'
 	alias vi='vim'
-	if command -v gping >/dev/null 2>&1; then
+	if _dotfiles_has gping; then
 		alias ping='gping'
 	fi
 
@@ -150,9 +156,9 @@ fi
 	alias dc='docker compose'
 
 	# Terraform/OpenTofu - tf shortcut (tfswitch manages the actual binaries)
-	if command -v tofu >/dev/null 2>&1; then
+	if _dotfiles_has tofu; then
 		alias tf='tofu'
-	elif command -v terraform >/dev/null 2>&1; then
+	elif _dotfiles_has terraform; then
 		alias tf='terraform'
 	fi
 
@@ -160,14 +166,14 @@ fi
 	alias brewdump='brew bundle dump --file=~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/Brewfile --force && echo "Brewfile updated"'
 
 	# Tree view (eza)
-	command -v eza >/dev/null 2>&1 && alias tree='eza --tree'
+	_dotfiles_has eza && alias tree='eza --tree'
 
 	# Colour Output
 	alias grep='grep --color=auto'
 	alias fgrep='fgrep --color=auto'
 	alias egrep='egrep --color=auto'
 	alias phpunit='phpunit --colors'
-	command -v bat >/dev/null 2>&1 && alias cat='bat --paging=never'
+	_dotfiles_has bat && alias cat='bat --paging=never'
 
 	# Git
 	alias ga='git add'
@@ -222,10 +228,10 @@ fi
 	alias chmodx='chmod +x'
 
 	# tasks (cascade: btop → htop → top)
-	if command -v btop >/dev/null 2>&1; then
+	if _dotfiles_has btop; then
 		alias top='btop'
 		alias running='btop'
-	elif command -v htop >/dev/null 2>&1; then
+	elif _dotfiles_has htop; then
 		alias top='htop'
 		alias running='htop'
 	fi

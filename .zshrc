@@ -21,7 +21,7 @@ if [[ -r ~/.exports ]]; then
 fi
 
 # Load dotfiles .env early (auto-export all vars). Use KEY=VALUE (no "export" needed).
-if [[ "$(uname)" == "Darwin" ]]; then
+if [[ "$OSTYPE" == darwin* ]]; then
 	DOTFILES_ENV="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.env"
 else
 	DOTFILES_ENV="$HOME/.dotfiles/.env"
@@ -67,7 +67,7 @@ setopt prompt_subst
 
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME="spaceship"
-ENABLE_CORRECTION="true"
+ENABLE_CORRECTION="false"
 
 # Spaceship prompt tuned for Tokyo Night palette
 SPACESHIP_PROMPT_ORDER=(dir git package python node docker exit_code char)
@@ -93,6 +93,7 @@ SPACESHIP_CHAR_SUFFIX=" "
 SPACESHIP_PROMPT_SEPARATE_LINE=false
 SPACESHIP_PROMPT_ADD_NEWLINE=true
 SPACESHIP_CLIPBOARD_SHOW=false
+SPACESHIP_PROMPT_ASYNC=false
 # Keep package section fast by skipping heavyweight managers in prompt rendering.
 SPACESHIP_PACKAGE_ORDER=(npm lerna cargo composer python dart)
 
@@ -116,24 +117,14 @@ SPACESHIP_HOST_PREFIX=""
 SPACESHIP_HOST_SUFFIX=""
 SPACESHIP_HOST_COLOR="242"
 
-# Add more useful plugins
+# Keep OMZ lean; command completions still come from fpath/compinit.
 plugins=(
 	git
 	z
-	kubectl
 	dirhistory
 	zsh-autosuggestions
-	docker
-	npm
-	pip
-	rust
-	golang
-	vscode
 	colored-man-pages
-	command-not-found
 )
-# macOS-only plugins
-[[ "$OSTYPE" == "darwin"* ]] && plugins+=(brew macos)
 
 # Performance improvements
 DISABLE_AUTO_UPDATE="true"
@@ -167,7 +158,17 @@ elif [[ -d /usr/local/share/zsh/site-functions ]] || [[ -d /usr/local/share/zsh-
 	[[ -d /usr/local/share/zsh-completions ]] && fpath=(/usr/local/share/zsh-completions $fpath)
 	[[ -d /usr/local/share/zsh/site-functions ]] && fpath=(/usr/local/share/zsh/site-functions $fpath)
 fi
-source $ZSH/oh-my-zsh.sh
+	ZSH_COMPDUMP="${ZSH_COMPDUMP:-$ZSH_CACHE_DIR/.zcompdump-${HOST:-localhost}-${ZSH_VERSION}}"
+	if [[ "${DOTFILES_USE_OMZ:-0}" == "1" ]]; then
+		source $ZSH/oh-my-zsh.sh
+	else
+		autoload -Uz compinit
+		compinit -C -d "$ZSH_COMPDUMP"
+
+		[[ -r "$ZSH/plugins/z/z.plugin.zsh" ]] && source "$ZSH/plugins/z/z.plugin.zsh"
+		[[ -r "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && source "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
+		[[ -r "$ZSH/custom/themes/spaceship.zsh-theme" ]] && source "$ZSH/custom/themes/spaceship.zsh-theme"
+	fi
 
 # Spaceship's async init is brittle when zpty startup flakes. Fall back to a
 # sync prompt for this shell instead of spamming worker errors.
@@ -322,13 +323,13 @@ if [[ -n "${TMUX:-}" ]]; then
 
 	git() {
 		command git "$@"
-		local status=$?
+		local git_status=$?
 		case "${1:-}" in
 			checkout|switch|worktree|rebase)
 				_dotfiles_tmux_sync_context
 				;;
 		esac
-		return "$status"
+		return "$git_status"
 	}
 fi
 
@@ -339,11 +340,11 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	# Architecture and Security
 	# Uncomment if needed for x86 compatibility
 	# export ARCHFLAGS="-arch x86_64"
-	export GPG_TTY=$(tty)
+		export GPG_TTY="${TTY:-$(tty 2>/dev/null)}"
 
 	# Version Managers - Lazy Loading
 	# Python - pyenv
-	if command -v pyenv >/dev/null 2>&1; then
+		if (( $+commands[pyenv] )); then
 		export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
 		path=("$PYENV_ROOT/shims" $path)
 		pyenv() {
@@ -354,13 +355,13 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	fi
 
 	# Fallback: alias python to python3 if python not available
-	if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+		if (( ! $+commands[python] && $+commands[python3] )); then
 		alias python='python3'
 		alias pip='pip3'
 	fi
 
 	# Node.js - nodenv
-	if _nodenv_cmd=$(command -v nodenv 2>/dev/null) && [[ -n "$_nodenv_cmd" && -e "$_nodenv_cmd" && -x "$_nodenv_cmd" ]]; then
+		if (( $+commands[nodenv] )); then
 		export NODENV_ROOT="${NODENV_ROOT:-$HOME/.nodenv}"
 		nodenv() {
 			unset -f nodenv
@@ -371,7 +372,7 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	unset _nodenv_cmd
 
 	# Ruby - rbenv
-	if command -v rbenv >/dev/null 2>&1; then
+		if (( $+commands[rbenv] )); then
 		rbenv() {
 			unset -f rbenv
 			eval "$(command rbenv init -)"
@@ -380,7 +381,7 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	fi
 
 	# Java - jenv
-	if command -v jenv >/dev/null 2>&1; then
+		if (( $+commands[jenv] )); then
 		export JENV_ROOT="${JENV_ROOT:-$HOME/.jenv}"
 		path=("$JENV_ROOT/bin" $path)
 		jenv() {
@@ -448,14 +449,10 @@ if [ -f ~/.fzf.zsh ]; then
 	source ~/.fzf.zsh
 fi
 
-# OpenClaw completion
-if command -v openclaw >/dev/null 2>&1; then
-fi
-
-if command -v fd >/dev/null 2>&1; then
+if (( $+commands[fd] )); then
 	export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
 	export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-elif command -v rg >/dev/null 2>&1; then
+elif (( $+commands[rg] )); then
 	export FZF_DEFAULT_COMMAND='rg --files --hidden --follow --glob "!.git"'
 	export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
 fi
@@ -542,7 +539,7 @@ if (( $+commands[make] )) && [[ -z ${functions[_make]+x} ]]; then
 fi
 
 # direnv hook (auto-load .envrc)
-if command -v direnv >/dev/null 2>&1; then
+if (( $+commands[direnv] )); then
     eval "$(direnv hook zsh)"
 fi
 

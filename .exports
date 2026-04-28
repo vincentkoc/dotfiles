@@ -159,7 +159,11 @@ export LS_COLORS='no=00:fi=00:di=01;34:ln=01;36:pi=40;33:so=01;35:do=01;35:bd=40
 
 # GPG Configuration
 if [[ $IS_MACOS == true ]]; then
-    export GPG_TTY=$(tty)
+    if [[ -n "${TTY:-}" ]]; then
+        export GPG_TTY="$TTY"
+    elif [[ -t 0 ]]; then
+        export GPG_TTY=$(tty 2>/dev/null)
+    fi
 fi
 
 # Terminal Colors
@@ -354,7 +358,8 @@ export GOPATH="${GOPATH:-$HOME/go}"
 path_append "$GOPATH/bin"
 
 # Java
-if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+# `java_home` is surprisingly expensive on macOS; opt in when a shell needs it.
+if [[ "${DOTFILES_SET_JAVA_HOME:-0}" == "1" && -x /usr/libexec/java_home ]]; then
     export JAVA_HOME=$(/usr/libexec/java_home 2>/dev/null)
 fi
 export GRADLE_USER_HOME=$HOME/.gradle

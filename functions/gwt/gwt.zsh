@@ -280,25 +280,99 @@ _gwt_sparse_clear_shell_env() {
     unset OPENCLAW_SPARSE_PROFILE
 }
 
-_gwt_sparse_sync_shell_env() {
-    local repo_root repo_slug sparse_enabled current_profile profile_file
+_gwt_current_repo_root_fast() {
+    local dir="${PWD:A}"
 
-    if ! repo_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    while [[ "$dir" != "/" && -n "$dir" ]]; do
+        if [[ -d "$dir/.git" || -f "$dir/.git" ]]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+        dir="${dir:h}"
+    done
+
+    return 1
+}
+
+_gwt_git_dir_fast() {
+    local repo_root="$1"
+    local git_file git_dir
+
+    if [[ -d "$repo_root/.git" ]]; then
+        printf '%s\n' "$repo_root/.git"
+        return 0
+    fi
+
+    [[ -f "$repo_root/.git" ]] || return 1
+    IFS= read -r git_file < "$repo_root/.git" || return 1
+    git_dir="${git_file#gitdir: }"
+    [[ "$git_dir" != "$git_file" && -n "$git_dir" ]] || return 1
+    [[ "$git_dir" = /* ]] || git_dir="$repo_root/$git_dir"
+    printf '%s\n' "${git_dir:A}"
+}
+
+_gwt_config_value_from_file() {
+    local config_file="$1"
+    local wanted_section="$2"
+    local wanted_key="$3"
+    local section="" line key value
+
+    [[ -r "$config_file" ]] || return 1
+
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" && "$line" != \#* && "$line" != \;* ]] || continue
+
+        if [[ "$line" == \[*\] ]]; then
+            section="${line#\[}"
+            section="${section%%\]*}"
+            continue
+        fi
+
+        [[ "$section" == "$wanted_section" && "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        key="${key%"${key##*[![:space:]]}"}"
+        [[ "$key" == "$wanted_key" ]] || continue
+        value="${line#*=}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        printf '%s\n' "$value"
+        return 0
+    done < "$config_file"
+
+    return 1
+}
+
+_gwt_sparse_sync_shell_env() {
+    local repo_root repo_slug git_dir config_file sparse_enabled current_profile profile_file
+
+    if ! repo_root=$(_gwt_current_repo_root_fast); then
         _gwt_sparse_clear_shell_env
         return 0
     fi
 
-    sparse_enabled=$(git config --bool core.sparseCheckout 2>/dev/null || echo false)
+    git_dir=$(_gwt_git_dir_fast "$repo_root") || {
+        _gwt_sparse_clear_shell_env
+        return 0
+    }
+    config_file="$git_dir/config.worktree"
+
+    sparse_enabled=$(_gwt_config_value_from_file "$config_file" core sparseCheckout 2>/dev/null || echo false)
     if [[ "$sparse_enabled" != "true" ]]; then
         _gwt_sparse_clear_shell_env
         return 0
     fi
 
-    current_profile=$(git config --worktree --get dotfiles.sparseProfile 2>/dev/null || true)
-    profile_file=$(git config --worktree --get dotfiles.sparseProfileFile 2>/dev/null || true)
+    current_profile=$(_gwt_config_value_from_file "$config_file" dotfiles sparseProfile 2>/dev/null || true)
+    profile_file=$(_gwt_config_value_from_file "$config_file" dotfiles sparseProfileFile 2>/dev/null || true)
     [[ -n "$current_profile" ]] || current_profile="custom"
 
-    repo_slug=$(_gwt_repo_slug "$repo_root" 2>/dev/null || basename "$repo_root")
+    if [[ -n "$profile_file" ]]; then
+        repo_slug="${profile_file:h:t}"
+    else
+        repo_slug="${repo_root:t}"
+    fi
 
     export GWT_SPARSE_PROFILE="$current_profile"
     export GWT_SPARSE_REPO_SLUG="$repo_slug"
