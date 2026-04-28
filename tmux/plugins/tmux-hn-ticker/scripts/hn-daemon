@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+tmux_opt() {
+  tmux show-option -gqv "$1" 2>/dev/null || true
+}
+
+cache="$(tmux_opt @hn_ticker_cache)"
+speed="$(tmux_opt @hn_ticker_speed)"
+cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
+speed="${speed:-1}"
+
+cache_dir="$(dirname "$cache")"
+mkdir -p "$cache_dir"
+
+lock_dir="$cache.daemon.lock"
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  pid_file="$lock_dir/pid"
+  if [[ -r "$pid_file" ]]; then
+    old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
+      old_command="$(ps -p "$old_pid" -o command= 2>/dev/null || true)"
+      if [[ "$old_command" == *hn-daemon* ]]; then
+        exit 0
+      fi
+    fi
+  fi
+  rm -rf "$lock_dir"
+  mkdir "$lock_dir" 2>/dev/null || exit 0
+fi
+
+printf '%s\n' "$$" > "$lock_dir/pid"
+trap 'rm -rf "$lock_dir" 2>/dev/null || true' EXIT
+
+if ! tmux display-message -p '#{pid}' >/dev/null 2>&1; then
+  exit 0
+fi
+
+while tmux display-message -p '#{pid}' >/dev/null 2>&1; do
+  text="$("$CURRENT_DIR/hn-ticker" 2>/dev/null || printf 'HN: offline')"
+  tmux set-option -gq @hn_ticker "$text" >/dev/null 2>&1 || true
+  tmux set-option -gq @hn_ticker_text "$text" >/dev/null 2>&1 || true
+  tmux refresh-client -S >/dev/null 2>&1 || true
+  sleep "$speed"
+done

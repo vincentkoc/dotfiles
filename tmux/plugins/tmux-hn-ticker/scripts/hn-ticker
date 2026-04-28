@@ -13,7 +13,7 @@ width="$(tmux_opt @hn_ticker_width)"
 speed="$(tmux_opt @hn_ticker_speed)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
 interval="${interval:-300}"
-width="${width:-90}"
+width="${width:-36}"
 speed="${speed:-1}"
 
 now="$(date +%s)"

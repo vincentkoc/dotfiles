@@ -814,6 +814,12 @@ _gwt_bootstrap_worktree() {
     _gwt_link_shared_node_modules "$install_source" "$worktree_path" || return 1
 }
 
+_gwt_tmux_sync_context() {
+    [[ -n "${TMUX:-}" ]] || return 0
+    command -v tt >/dev/null 2>&1 || return 0
+    tt sync >/dev/null 2>&1 || true
+}
+
 _gwt_sparse_register_shell_hook
 
 # gwt: opinionated wrapper around `git worktree`.
@@ -920,6 +926,7 @@ EOF
             fi
 
             cd "$dest" || return 1
+            _gwt_tmux_sync_context
             ;;
         *)
             if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
@@ -1046,6 +1053,7 @@ EOF
             if [[ -d "$worktree_path" ]]; then
                 echo "gwt: worktree already exists at $worktree_path"
                 cd "$worktree_path" || return 1
+                _gwt_tmux_sync_context
                 return 0
             fi
 
@@ -1096,6 +1104,7 @@ EOF
                 return 1
             }
             cd "$worktree_path" || return 1
+            _gwt_tmux_sync_context
             ;;
         cd)
             local target="$1"
@@ -1122,6 +1131,7 @@ EOF
             fi
 
             cd "$target_path" || return 1
+            _gwt_tmux_sync_context
             ;;
         rm|remove)
             local target=""
@@ -1168,9 +1178,11 @@ EOF
             fi
 
             git worktree prune
+            _gwt_tmux_sync_context
             ;;
         prune)
             git worktree prune
+            _gwt_tmux_sync_context
             ;;
         sparse)
             local sparse_action="${1:-status}"
@@ -1178,9 +1190,11 @@ EOF
             case "$sparse_action" in
                 status|show)
                     _gwt_sparse_status || return 1
+                    _gwt_tmux_sync_context
                     ;;
                 list|profiles)
                     _gwt_sparse_list_profiles "$(git rev-parse --show-toplevel)" || return 1
+                    _gwt_tmux_sync_context
                     ;;
                 set)
                     [[ -n "$1" ]] || {
@@ -1189,14 +1203,17 @@ EOF
                     }
                     _gwt_sparse_apply_profile "$(git rev-parse --show-toplevel)" "$1" || return 1
                     _gwt_sparse_sync_shell_env
+                    _gwt_tmux_sync_context
                     ;;
                 add|expand)
                     _gwt_sparse_add_paths "$(git rev-parse --show-toplevel)" "$@" || return 1
                     _gwt_sparse_sync_shell_env
+                    _gwt_tmux_sync_context
                     ;;
                 full|disable)
                     _gwt_sparse_apply_profile "$(git rev-parse --show-toplevel)" "full" || return 1
                     _gwt_sparse_sync_shell_env
+                    _gwt_tmux_sync_context
                     ;;
                 *)
                     echo "Usage: gwt sparse <status|list|set|add|full>"
