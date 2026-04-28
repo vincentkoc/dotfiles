@@ -10,11 +10,25 @@ tmux_opt() {
 cache="$(tmux_opt @hn_ticker_cache)"
 interval="$(tmux_opt @hn_ticker_interval)"
 width="$(tmux_opt @hn_ticker_width)"
+reserved_width="$(tmux_opt @hn_ticker_reserved_width)"
 speed="$(tmux_opt @hn_ticker_speed)"
 cache="${cache:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-hn-ticker/ticker.txt}"
 interval="${interval:-300}"
-width="${width:-36}"
+width="${width:-auto}"
+reserved_width="${reserved_width:-96}"
 speed="${speed:-1}"
+
+if [[ "$width" == "auto" ]]; then
+  client_width="$(tmux list-clients -F '#{client_width}' 2>/dev/null | sort -nr | head -n 1)"
+  client_width="${client_width:-120}"
+  [[ "$client_width" =~ ^[0-9]+$ ]] || client_width=120
+  [[ "$reserved_width" =~ ^[0-9]+$ ]] || reserved_width=96
+  width=$(( client_width - reserved_width ))
+  (( width < 32 )) && width=32
+  (( width > 180 )) && width=180
+elif ! [[ "$width" =~ ^[0-9]+$ ]]; then
+  width=36
+fi
 
 now="$(date +%s)"
 mtime=0
@@ -38,8 +52,10 @@ cache, width, speed, now = sys.argv[1], int(sys.argv[2]), max(1, int(sys.argv[3]
 with open(cache, "r", encoding="utf-8", errors="replace") as handle:
     text = handle.readline().strip()
 
-if width <= 0 or len(text) <= width:
+if width <= 0:
     print(text)
+elif len(text) <= width:
+    print(text.ljust(width))
 else:
     padded = text + "     "
     offset = (now // speed) % len(padded)
@@ -47,5 +63,5 @@ else:
     print(frame)
 PY
 else
-  printf 'HN: loading'
+  printf '%-*s' "$width" 'HN: loading'
 fi
