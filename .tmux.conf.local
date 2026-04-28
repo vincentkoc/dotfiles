@@ -398,7 +398,7 @@ run-shell -b 'sh "/Users/vincentkoc/Library/Mobile Documents/com~apple~CloudDocs
 # bind v new-window -c #{pane_current_path} #!important
 
 # move status line to top
-#set -g status-position top
+set -g status-position top
 
 
 # -- tpm -----------------------------------------------------------------------
