@@ -208,13 +208,13 @@ fi
 	alias h='history'
 	alias j='jobs -l'
 
-	# History search
-	alias hs='history | grep'
-	hf() {
-		if [[ -n "$1" ]]; then
-			history | grep "$1" | fzf --tac --no-sort
-		else
-			history | fzf --tac --no-sort
+		# History search
+		alias hs='history | grep'
+		histf() {
+			if [[ -n "$1" ]]; then
+				history | grep "$1" | fzf --tac --no-sort
+			else
+				history | fzf --tac --no-sort
 		fi
 	}
 
