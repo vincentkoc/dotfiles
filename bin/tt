@@ -79,6 +79,13 @@ agent_ready_format() {
   printf '#{?#{&&:#{||:#{==:#{@tt_agent_kind},CODEX},#{==:#{@tt_agent_kind},CLAUDE}},#{?#{m/r:^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂],#{pane_title}},0,1}},1,0}'
 }
 
+set_agent_window_status_formats() {
+  "$TMUX_BIN" set -g window-status-format "#[fg=#1a1b26,bg=#1a1b26,none]#[fg=#565f89,bg=#1a1b26,none] #I #W #[fg=#1a1b26,bg=#1a1b26,none]"
+  "$TMUX_BIN" set -g window-status-current-format "#[fg=#1a1b26,bg=#7aa2f7,none]#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W #[fg=#7aa2f7,bg=#1a1b26,none]"
+  "$TMUX_BIN" set -g window-status-style "fg=#565f89,bg=#1a1b26,none"
+  "$TMUX_BIN" set -g window-status-current-style "fg=#1a1b26,bg=#7aa2f7,bold"
+}
+
 git_pane_label() {
   local dir="$1"
   local branch
@@ -161,9 +168,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g pane-border-style "fg=#{?$ready,#ff9e64,#292e42},bg=default"
   "$TMUX_BIN" set -g pane-active-border-style "fg=#{?$ready,#ff9e64,#7aa2f7},bg=default"
   "$TMUX_BIN" set -g status-left "#[fg=#1a1b26,bg=#7aa2f7,bold] #S "
-  "$TMUX_BIN" set -g status-right "#[fg=#565f89,bg=#1a1b26] %H:%M "
-  "$TMUX_BIN" set -g window-status-format "#[fg=#565f89,bg=#1a1b26] #I #W "
-  "$TMUX_BIN" set -g window-status-current-format "#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W "
+  "$TMUX_BIN" set -g status-right "#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#565f89,bg=#1a1b26] %H:%M "
+  set_agent_window_status_formats
   "$TMUX_BIN" set -g pane-border-status off
   "$TMUX_BIN" set -g prefix C-b
   "$TMUX_BIN" set -g prefix2 C-a
@@ -998,20 +1004,36 @@ PY
 }
 
 refresh_agent_window_state() {
-  local tmp window state
+  local snapshot tmp window state
 
+  snapshot="$(codex_cockpit_snapshot_file)"
   tmp="$(mktemp "${TMPDIR:-/tmp}/tt-window-state.XXXXXX")"
-  "$TMUX_BIN" list-panes -a -F '#{window_id}	#{pane_current_command}	#{pane_title}	#{@tt_agent_kind}' 2>/dev/null |
-    awk -F '\t' '
+  if [[ -f "$snapshot" ]]; then
+    "$TMUX_BIN" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}	#{window_id}' 2>/dev/null |
+      awk -F '\t' -v snapshot="$snapshot" '
+        FNR == NR {
+          if ($1 !~ /^#/ && ($2 == "codex" || $2 == "claude") && $4 !~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/) ready[$1] = 1
+          next
+        }
+        {
+          windows[$2] = 1
+          if (ready[$1]) state[$2] = "attention"
+        }
+        END {
+          for (window in windows) {
+            print window "\t" (state[window] ? state[window] : "shell")
+          }
+        }' "$snapshot" - > "$tmp"
+  else
+    "$TMUX_BIN" list-panes -a -F '#{window_id}	#{pane_title}	#{@tt_agent_kind}' 2>/dev/null |
+      awk -F '\t' '
       {
         window = $1
-        command = $2
-        title = $3
-        kind = $4
+        title = $2
+        kind = $3
         windows[window] = 1
-        if (kind == "CODEX" || kind == "CLAUDE" || command == "node" || title ~ /Claude Code/) {
-          if (state[window] != "busy") state[window] = "agent"
-          if (title ~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/) state[window] = "busy"
+        if (kind == "CODEX" || kind == "CLAUDE") {
+          if (title !~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/) state[window] = "attention"
         }
       }
       END {
@@ -1019,6 +1041,7 @@ refresh_agent_window_state() {
           print window "\t" (state[window] ? state[window] : "shell")
         }
       }' > "$tmp"
+  fi
 
   while IFS=$'\t' read -r window state || [[ -n "${window:-}" ]]; do
     [[ -n "${window:-}" && -n "${state:-}" ]] || continue
@@ -1068,8 +1091,7 @@ install_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -g "after-kill-pane[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
   "$TMUX_BIN" set-hook -g "pane-exited[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
   "$TMUX_BIN" bind-key -T root MouseDown1StatusRight run-shell -b "$self codex-snapshot --quiet && $TMUX_BIN display-message 'codex snapshot saved'" 2>/dev/null || true
-  "$TMUX_BIN" set -g window-status-format "#{?#{==:#{@tt_window_agent_state},busy},#[fg=#1a1b26,bg=#ff9e64,none]#[fg=#1a1b26,bg=#ff9e64,bold] #I #W #[fg=#ff9e64,bg=#1a1b26,none],#{?#{==:#{@tt_window_agent_state},agent},#[fg=#1a1b26,bg=#7dcfff,none]#[fg=#1a1b26,bg=#7dcfff,bold] #I #W #[fg=#7dcfff,bg=#1a1b26,none],#[fg=#1a1b26,bg=#1a1b26,none]#[fg=#565f89,bg=#1a1b26,none] #I #W #[fg=#1a1b26,bg=#1a1b26,none]}}"
-  "$TMUX_BIN" set -g window-status-current-format "#{?#{==:#{@tt_window_agent_state},busy},#[fg=#1a1b26,bg=#ff9e64,none]#[fg=#1a1b26,bg=#ff9e64,bold] #I #W #[fg=#ff9e64,bg=#1a1b26,none],#{?#{==:#{@tt_window_agent_state},agent},#[fg=#1a1b26,bg=#7dcfff,none]#[fg=#1a1b26,bg=#7dcfff,bold] #I #W #[fg=#7dcfff,bg=#1a1b26,none],#[fg=#1a1b26,bg=#7aa2f7,none]#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W #[fg=#7aa2f7,bg=#1a1b26,none]}}"
+  set_agent_window_status_formats
   refresh_agent_window_state
   start_codex_snapshot_timer
 }
