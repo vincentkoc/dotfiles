@@ -838,8 +838,19 @@ _gwt_shared_install_source() {
 _gwt_find_workspace_node_modules() {
     local repo_root="$1"
 
+    if [[ -d "$repo_root/node_modules" ]]; then
+        printf '%s\n' "$repo_root/node_modules"
+    fi
+
+    [[ "${DOTFILES_GWT_LINK_DEEP_NODE_MODULES:-0}" == "1" ]] || return 0
+
     find "$repo_root" \
-        \( -path "$repo_root/.git" -o -path "$repo_root/.git/*" \) -prune -o \
+        \( \
+            -path "$repo_root/.git" -o \
+            -path "$repo_root/.git/*" -o \
+            -path "$repo_root/node_modules" -o \
+            -path "$repo_root/node_modules/*" \
+        \) -prune -o \
         -type d -name node_modules -print -prune
 }
 
@@ -885,6 +896,9 @@ _gwt_bootstrap_worktree() {
     fi
 
     echo "gwt: linking shared pnpm install from $install_source"
+    if [[ "${DOTFILES_GWT_LINK_DEEP_NODE_MODULES:-0}" != "1" ]]; then
+        echo "gwt: linking root node_modules only (set DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1 for deep workspace links)"
+    fi
     _gwt_link_shared_node_modules "$install_source" "$worktree_path" || return 1
 }
 
@@ -924,6 +938,9 @@ Commands:
   gwt sparse add <path...>          Expand the current sparse checkout with extra paths
   gwt sparse full                   Disable sparse checkout for the current worktree
   gwt root                          Print configured worktree root
+
+Env:
+  DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1  Also link nested workspace node_modules trees
 EOF
             ;;
         root)
