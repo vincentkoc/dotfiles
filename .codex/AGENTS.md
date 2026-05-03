@@ -87,7 +87,7 @@
 - Do prerequisite lookup or discovery before dependent actions.
 - Before finalizing, quickly verify correctness, coverage, formatting, and obvious side effects.
 - Before contributing, read `CONTRIBUTING.md` and relevant issue/PR templates. Match repo style. If an issue is linked, use closing refs like `Fixes #123`.
-- Use `gh` for GitHub work. Prefer draft PRs first.
+- Use `ghx` for GitHub work; it is a drop-in replacement for `gh`. Prefer draft PRs first.
 - Prefer worktrees and spawning subagents.
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
 - Start in a branch/worktree early so commits can be made incrementally.
@@ -106,6 +106,7 @@
 - In `openclaw/openclaw`, for lanes not directly wrapped by the repo helper, use `OPENCLAW_TESTBOX=1 pnpm testbox -- <command>`, for example `OPENCLAW_TESTBOX=1 pnpm testbox -- pnpm test:docker:mcp-channels`. This is maintainer-only and requires Blacksmith CLI access/auth; if auth/org is missing, report that instead of falling back to a huge local run.
 - In `openclaw/openclaw`, for long-ish Testbox-mode work, pre-warm early from repo root with `blacksmith testbox warmup ci-check-testbox.yml --idle-timeout 90`. Use `240`, `720`, or `1440` only for multi-hour, all-day, or overnight work; anything above `1440` needs explicit intent and cleanup.
 - In `openclaw/openclaw`, reuse the same `tbx_...` ID for all Testbox run/download commands within one task. Do not warm another box unless the workflow/environment changes, the box expired, or I explicitly ask for a fresh one. Track IDs you create, check `blacksmith testbox list`, and stop current-task boxes with `blacksmith testbox stop --id <ID>` when done.
+- In `openclaw/openclaw`, do long-test preflight only for broad/long work, not for every `gwt new`: after creating a branch/worktree for release, Docker, E2E, or all-plugin matrix work, verify cwd/repo/branch/status/node_modules/free disk, then warm the right Testbox early and continue local inspection while it boots. For explicit sharded matrix runs, multiple Testboxes are allowed when they materially shorten the run; keep ids grouped by shard/risk lane and clean them up. Same goes for crabbox which is an alternative test runner.
 - Use semantic commit messages and PR titles like `fix(ci):` unless rules say otherwise.
 - Never add `[codex]` to PR titles or mention AI tooling in PR titles. Keep titles about the actual change, not the tool used.
 - When mentioning GitHub issues or PRs, give full links.
