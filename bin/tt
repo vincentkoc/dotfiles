@@ -753,6 +753,16 @@ agent_cockpit_state_file() {
   printf '%s\n' "$state_home/tt/agent-cockpit.tsv"
 }
 
+codex_cockpit_snapshot_file() {
+  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  printf '%s\n' "$state_home/tt/codex-cockpit.tsv"
+}
+
+codex_cockpit_timer_pid_file() {
+  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  printf '%s\n' "$state_home/tt/codex-cockpit.timer.pid"
+}
+
 manifest_value_for() {
   local manifest="$1"
   local wanted_session="$2"
@@ -862,6 +872,179 @@ write_agent_cockpit_state() {
   fi
 }
 
+write_codex_cockpit_snapshot() {
+  local output="${1:-}"
+  local quiet="${2:-}"
+
+  [[ -n "$output" ]] || output="$(codex_cockpit_snapshot_file)"
+  mkdir -p "$(dirname "$output")"
+
+  TT_TMUX_BIN="$TMUX_BIN" python3 - "$output" <<'PY'
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from collections import defaultdict
+
+output = pathlib.Path(sys.argv[1])
+tmux = os.environ.get("TT_TMUX_BIN", "tmux")
+sid_re = re.compile(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b")
+
+
+def run(args):
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
+
+
+def clean(value):
+    return (value or "").replace("\t", " ").replace("\n", " ").strip()
+
+
+def descendants(root, children):
+    result = []
+    stack = list(children.get(root, []))
+    while stack:
+        pid = stack.pop(0)
+        result.append(pid)
+        stack.extend(children.get(pid, []))
+    return result
+
+
+ps_children = defaultdict(list)
+ps_command = {}
+for line in run(["ps", "-axo", "pid=,ppid=,command="]).splitlines():
+    match = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)", line)
+    if not match:
+        continue
+    pid, ppid, command = match.groups()
+    pid = int(pid)
+    ppid = int(ppid)
+    ps_children[ppid].append(pid)
+    ps_command[pid] = command
+
+rows = []
+pane_format = "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}"
+for line in run([tmux, "list-panes", "-a", "-F", pane_format]).splitlines():
+    try:
+        target, pane_pid, title, current_command, cwd = line.split("\t", 4)
+    except ValueError:
+        continue
+
+    pane_pid_int = int(pane_pid)
+    codex_commands = []
+    claude_commands = []
+    ids = []
+
+    for pid in descendants(pane_pid_int, ps_children):
+        command = ps_command.get(pid, "")
+        if "codex" in command and "tokenjuice" not in command:
+            codex_commands.append(command)
+            command_ids = sid_re.findall(command)
+            ids.extend(command_ids)
+            if not command_ids:
+                for lsof_line in run(["lsof", "-w", "-F", "n", "-p", str(pid)]).splitlines():
+                    if not lsof_line.startswith("n/Users/vincentkoc/.codex/sessions/"):
+                        continue
+                    ids.extend(sid_re.findall(lsof_line[1:]))
+        elif re.search(r"(^|/)claude(\s|$)|Claude Code", command):
+            claude_commands.append(command)
+
+    ids = list(dict.fromkeys(ids))
+    kind = "shell"
+    status = "shell"
+    session_id = ""
+    restore = f"cd {shlex.quote(cwd)} && exec zsh"
+
+    if codex_commands:
+        kind = "codex"
+        command_text = " ".join(codex_commands)
+        dangerous = " --dangerously-bypass-approvals-and-sandbox" if "--dangerously-bypass-approvals-and-sandbox" in command_text else ""
+        if ids:
+            session_id = ids[0]
+            status = "exact"
+            restore = f"cd {shlex.quote(cwd)} && codex resume{dangerous} --no-alt-screen {session_id}"
+        elif "resume --all" in command_text:
+            status = "picker"
+            restore = f"cd {shlex.quote(cwd)} && codex resume --all --no-alt-screen"
+        else:
+            status = "unresolved"
+            restore = f"cd {shlex.quote(cwd)} && codex --no-alt-screen"
+    elif claude_commands:
+        kind = "claude"
+        status = "resume"
+        dangerous = " --dangerously-skip-permissions" if "--dangerously-skip-permissions" in " ".join(claude_commands) else ""
+        restore = f"cd {shlex.quote(cwd)} && claude{dangerous} resume"
+
+    rows.append([target, kind, cwd, title, current_command, session_id, status, restore])
+
+output.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp_name = tempfile.mkstemp(prefix=output.name + ".", dir=str(output.parent))
+with os.fdopen(fd, "w") as handle:
+    handle.write("# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\tstatus\trestore\n")
+    for row in rows:
+        handle.write("\t".join(clean(value) for value in row) + "\n")
+os.replace(tmp_name, output)
+PY
+
+  if [[ "$quiet" != "--quiet" ]]; then
+    printf 'tt codex snapshot saved: %s\n' "$output" >&2
+  fi
+  refresh_agent_window_state
+}
+
+refresh_agent_window_state() {
+  local tmp window state
+
+  tmp="$(mktemp "${TMPDIR:-/tmp}/tt-window-state.XXXXXX")"
+  "$TMUX_BIN" list-panes -a -F '#{window_id}	#{pane_current_command}	#{pane_title}	#{@tt_agent_kind}' 2>/dev/null |
+    awk -F '\t' '
+      {
+        window = $1
+        command = $2
+        title = $3
+        kind = $4
+        windows[window] = 1
+        if (kind == "CODEX" || kind == "CLAUDE" || command == "node" || title ~ /Claude Code/) {
+          if (state[window] != "busy") state[window] = "agent"
+          if (title ~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/) state[window] = "busy"
+        }
+      }
+      END {
+        for (window in windows) {
+          print window "\t" (state[window] ? state[window] : "shell")
+        }
+      }' > "$tmp"
+
+  while IFS=$'\t' read -r window state || [[ -n "${window:-}" ]]; do
+    [[ -n "${window:-}" && -n "${state:-}" ]] || continue
+    "$TMUX_BIN" set-window-option -t "$window" -q @tt_window_agent_state "$state" 2>/dev/null || true
+  done < "$tmp"
+  rm -f "$tmp"
+}
+
+codex_snapshot_timer_loop() {
+  local interval="${TT_CODEX_SNAPSHOT_INTERVAL:-300}"
+
+  case "$interval" in
+    ''|*[!0-9]*)
+      interval=300
+      ;;
+  esac
+  if (( interval < 30 )); then
+    interval=30
+  fi
+
+  while true; do
+    write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet || true
+    sleep "$interval"
+  done
+}
+
 tt_self_command() {
   if [[ -x "$HOME/bin/tt" ]]; then
     shell_quote "$HOME/bin/tt"
@@ -879,6 +1062,16 @@ install_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -g "after-split-window[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
   "$TMUX_BIN" set-hook -g "after-kill-pane[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
   "$TMUX_BIN" set-hook -g "pane-exited[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-new-session[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-new-window[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-split-window[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-kill-pane[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "pane-exited[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
+  "$TMUX_BIN" bind-key -T root MouseDown1StatusRight run-shell -b "$self codex-snapshot --quiet && $TMUX_BIN display-message 'codex snapshot saved'" 2>/dev/null || true
+  "$TMUX_BIN" set -g window-status-format "#{?#{==:#{@tt_window_agent_state},busy},#[fg=#1a1b26,bg=#ff9e64,none]#[fg=#1a1b26,bg=#ff9e64,bold] #I #W #[fg=#ff9e64,bg=#1a1b26,none],#{?#{==:#{@tt_window_agent_state},agent},#[fg=#1a1b26,bg=#7dcfff,none]#[fg=#1a1b26,bg=#7dcfff,bold] #I #W #[fg=#7dcfff,bg=#1a1b26,none],#[fg=#1a1b26,bg=#1a1b26,none]#[fg=#565f89,bg=#1a1b26,none] #I #W #[fg=#1a1b26,bg=#1a1b26,none]}}"
+  "$TMUX_BIN" set -g window-status-current-format "#{?#{==:#{@tt_window_agent_state},busy},#[fg=#1a1b26,bg=#ff9e64,none]#[fg=#1a1b26,bg=#ff9e64,bold] #I #W #[fg=#ff9e64,bg=#1a1b26,none],#{?#{==:#{@tt_window_agent_state},agent},#[fg=#1a1b26,bg=#7dcfff,none]#[fg=#1a1b26,bg=#7dcfff,bold] #I #W #[fg=#7dcfff,bg=#1a1b26,none],#[fg=#1a1b26,bg=#7aa2f7,none]#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W #[fg=#7aa2f7,bg=#1a1b26,none]}}"
+  refresh_agent_window_state
+  start_codex_snapshot_timer
 }
 
 clear_agent_autosave_hooks() {
@@ -887,6 +1080,12 @@ clear_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -gu "after-split-window[90]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "after-kill-pane[90]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "pane-exited[90]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-new-session[91]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-new-window[91]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-split-window[91]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "after-kill-pane[91]" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -gu "pane-exited[91]" 2>/dev/null || true
+  "$TMUX_BIN" unbind-key -T root MouseDown1StatusRight 2>/dev/null || true
 
   # Remove the unindexed hooks from early versions of this script if they are still present.
   "$TMUX_BIN" set-hook -gu "after-new-session[0]" 2>/dev/null || true
@@ -895,6 +1094,40 @@ clear_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -gu "after-kill-pane[0]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "pane-exited[0]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "window-layout-changed[0]" 2>/dev/null || true
+  stop_codex_snapshot_timer
+}
+
+start_codex_snapshot_timer() {
+  local pid_file pid self
+
+  pid_file="$(codex_cockpit_timer_pid_file)"
+  mkdir -p "$(dirname "$pid_file")"
+  if [[ -f "$pid_file" ]]; then
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      if ps -p "$pid" -o command= 2>/dev/null | grep -q 'codex-snapshot-loop'; then
+        return 0
+      fi
+    fi
+  fi
+
+  self="$(tt_self_command)"
+  nohup bash -lc "exec $self codex-snapshot-loop" >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$pid_file"
+}
+
+stop_codex_snapshot_timer() {
+  local pid_file pid
+
+  pid_file="$(codex_cockpit_timer_pid_file)"
+  [[ -f "$pid_file" ]] || return 0
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q 'codex-snapshot-loop'; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$pid_file"
 }
 
 start_recovery_server() {
@@ -1135,6 +1368,7 @@ run_menu() {
   options+=("restore [layout] unzoom windows + retile 6-pane sessions")
   options+=("recover [agents] rebuild saved agent cockpit")
   options+=("snapshot [agents] save live agent cockpit")
+  options+=("snapshot [codex]  save Codex/Claude restore map")
   options+=("autosave [on]    keep agent snapshot warm")
   options+=("autosave [off]   disable agent snapshot hooks")
   options+=("refresh [agents] respawn agents with color env")
@@ -1195,9 +1429,13 @@ run_menu() {
     "snapshot [agents] save live agent cockpit")
       write_agent_cockpit_state
       ;;
+    "snapshot [codex]  save Codex/Claude restore map")
+      write_codex_cockpit_snapshot
+      ;;
     "autosave [on]    keep agent snapshot warm")
       install_agent_autosave_hooks
       write_agent_cockpit_state
+      write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet
       ;;
     "autosave [off]   disable agent snapshot hooks")
       clear_agent_autosave_hooks
@@ -1300,11 +1538,22 @@ case "${1:-}" in
       write_agent_cockpit_state "${2:-}" "${3:-}"
     fi
     ;;
+  codex-snapshot|cx-snapshot)
+    if [[ "${2:-}" == "--quiet" ]]; then
+      write_codex_cockpit_snapshot "" --quiet
+    else
+      write_codex_cockpit_snapshot "${2:-}" "${3:-}"
+    fi
+    ;;
+  codex-snapshot-loop)
+    codex_snapshot_timer_loop
+    ;;
   autosave)
     case "${2:-on}" in
       on)
         install_agent_autosave_hooks
         write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+        write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet
         ;;
       off)
         clear_agent_autosave_hooks
@@ -1371,7 +1620,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|ops [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|autosave [on|off]|refresh [agents]|sync [target|all]|title [target] <short-title>|colorfix|titles [on|off] [target]|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|autosave [on|off]|refresh [agents]|sync [target|all]|title [target] <short-title>|colorfix|titles [on|off] [target]|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;
