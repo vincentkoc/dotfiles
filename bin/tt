@@ -152,6 +152,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g history-limit 50000
   "$TMUX_BIN" set -g status on
   "$TMUX_BIN" set -g status-style "fg=#565f89,bg=#1a1b26,none"
+  "$TMUX_BIN" set -g window-style "fg=default,bg=#1a1b26"
+  "$TMUX_BIN" set -g window-active-style "fg=default,bg=#1a1b26"
   "$TMUX_BIN" set -g window-status-style "fg=#565f89,bg=#1a1b26,none"
   "$TMUX_BIN" set -g window-status-current-style "fg=#1a1b26,bg=#7aa2f7,bold"
   "$TMUX_BIN" set -g message-style "fg=#1a1b26,bg=#7aa2f7,bold"
