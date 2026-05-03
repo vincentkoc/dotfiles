@@ -382,6 +382,7 @@ set -g pane-border-status off
 
 # Recover a pane after a TUI exits without resetting mouse/bracketed-paste modes.
 bind R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
+bind -T root MouseDown1StatusRight run-shell -b "/Users/vincentkoc/bin/tt codex-snapshot --quiet && tmux display-message 'codex snapshot saved'"
 
 # Vi mode for copy
 set -g mode-keys vi
