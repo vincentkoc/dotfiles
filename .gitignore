@@ -104,6 +104,8 @@ Library/Preferences/com.adobe.Photoshop.plist
 Library/Preferences/com.apple.symbolichotkeys.plist
 Library/Preferences/com.apple.Terminal.plist
 .factory/auth.json
+.docker/config.json
+.docker/daemon.json
 .codex/config.toml
 .claude/settings.local.json
 Library/Application Support/BraveSoftware/Brave-Browser/Default/Preferences
