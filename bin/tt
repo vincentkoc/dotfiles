@@ -51,6 +51,39 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+default_login_shell() {
+  local shell_path=""
+
+  if command -v dscl >/dev/null 2>&1 && [[ -n "${USER:-}" ]]; then
+    shell_path="$(dscl . -read "/Users/$USER" UserShell 2>/dev/null | awk '{print $2; exit}')"
+  fi
+
+  if [[ -z "$shell_path" && -n "${SHELL:-}" ]]; then
+    shell_path="$SHELL"
+  fi
+
+  if [[ -z "$shell_path" || ! -x "$shell_path" ]]; then
+    shell_path="/bin/zsh"
+  fi
+
+  printf '%s\n' "$shell_path"
+}
+
+default_login_shell_command() {
+  local shell_path
+
+  shell_path="$(default_login_shell)"
+  printf '%s -il\n' "$(shell_quote "$shell_path")"
+}
+
+ensure_tmux_default_shell() {
+  local shell_path
+
+  shell_path="$(default_login_shell)"
+  "$TMUX_BIN" set-option -gq default-shell "$shell_path" 2>/dev/null || true
+  "$TMUX_BIN" set-option -gq -u default-command 2>/dev/null || true
+}
+
 agent_color_prefix() {
   printf 'env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor'
 }
@@ -277,6 +310,8 @@ kill_server() {
 create_plain() {
   local session="$1"
 
+  ensure_tmux_default_shell
+
   if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
     attach_or_switch "$session"
   fi
@@ -363,13 +398,16 @@ refresh_ops_labels() {
 
 upgrade_ops_shells() {
   local session="$1"
-  local window_id pane
+  local window_id pane shell_command
+
+  ensure_tmux_default_shell
+  shell_command="exec $(default_login_shell_command)"
 
   while IFS= read -r window_id; do
     [[ -n "$window_id" ]] || continue
     while IFS= read -r pane; do
       [[ -n "$pane" ]] || continue
-      send_literal_command "$pane" "exec zsh"
+      send_literal_command "$pane" "$shell_command"
     done < <("$TMUX_BIN" list-panes -t "$window_id" -F '#{pane_id}')
   done < <("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}')
 }
@@ -432,7 +470,8 @@ create_ops() {
       ;;
   esac
 
-  bootstrap_command="/bin/sh"
+  ensure_tmux_default_shell
+  bootstrap_command="$(default_login_shell_command)"
   width="${TT_OPS_WIDTH:-240}"
   height="${TT_OPS_HEIGHT:-80}"
 
@@ -488,13 +527,16 @@ create_ops() {
 ensure_studio_layout() {
   local session="$1"
   local start_dir="${2:-}"
-  local window_id pane_count
+  local window_id pane_count shell_command
+
+  ensure_tmux_default_shell
+  shell_command="$(default_login_shell_command)"
 
   if ! "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
     if [[ -n "$start_dir" ]]; then
-      "$TMUX_BIN" new-session -d -s "$session" -n main -c "$start_dir"
+      "$TMUX_BIN" new-session -d -s "$session" -n main -c "$start_dir" "$shell_command"
     else
-      "$TMUX_BIN" new-session -d -s "$session" -n main
+      "$TMUX_BIN" new-session -d -s "$session" -n main "$shell_command"
     fi
   fi
 
@@ -506,7 +548,7 @@ ensure_studio_layout() {
 
   case "$pane_count" in
     1)
-      build_studio_layout "$window_id"
+      build_studio_layout "$window_id" "$shell_command"
       apply_studio_pane_titles "$window_id"
       ;;
     6)
@@ -1434,7 +1476,7 @@ write_codex_cockpit_snapshot() {
   [[ -n "$output" ]] || output="$(codex_cockpit_snapshot_file)"
   mkdir -p "$(dirname "$output")"
 
-  TT_TMUX_BIN="$TMUX_BIN" python3 - "$output" <<'PY'
+  TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" python3 - "$output" <<'PY'
 import os
 import pathlib
 import re
@@ -1446,6 +1488,7 @@ from collections import defaultdict
 
 output = pathlib.Path(sys.argv[1])
 tmux = os.environ.get("TT_TMUX_BIN", "tmux")
+login_shell = os.environ.get("TT_LOGIN_SHELL") or "/bin/zsh"
 sid_re = re.compile(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b")
 
 
@@ -1513,7 +1556,7 @@ for line in run([tmux, "list-panes", "-a", "-F", pane_format]).splitlines():
     kind = "shell"
     status = "shell"
     session_id = ""
-    restore = f"cd {shlex.quote(cwd)} && exec zsh"
+    restore = f"cd {shlex.quote(cwd)} && exec {shlex.quote(login_shell)} -il"
 
     if codex_commands:
         kind = "codex"
@@ -2088,7 +2131,7 @@ launch_agent_cockpit_panes() {
     if [[ -n "${command:-}" ]]; then
       "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(agent_color_prefix) $command"
     else
-      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" zsh
+      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(default_login_shell_command)"
     fi
   done < "$manifest"
 }
