@@ -371,6 +371,32 @@ cx() {
 	codex-tmux "$@"
 }
 
+_codex_vpn_env() {
+	env -u NO_COLOR \
+		CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor \
+		HTTP_PROXY=http://127.0.0.1:1082 \
+		HTTPS_PROXY=http://127.0.0.1:1082 \
+		ALL_PROXY=http://127.0.0.1:1082 \
+		http_proxy=http://127.0.0.1:1082 \
+		https_proxy=http://127.0.0.1:1082 \
+		all_proxy=http://127.0.0.1:1082 \
+		NO_PROXY=localhost,127.0.0.1,::1,*.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
+		no_proxy=localhost,127.0.0.1,::1,*.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
+		"$@"
+}
+
+cv() {
+	_codex_vpn_env codex --no-alt-screen "$@"
+}
+
+cv-resume() {
+	if [[ $# -gt 0 ]]; then
+		_codex_vpn_env codex resume --no-alt-screen "$@"
+	else
+		_codex_vpn_env codex resume --all --no-alt-screen
+	fi
+}
+
 # Terminal title: repo/branch context, including linked worktree name.
 if [[ -z "${TMUX:-}" && ( "${TERM_PROGRAM:-}" == "iTerm.app" || "${TERM_PROGRAM:-}" == "ghostty" ) ]]; then
 	autoload -Uz add-zsh-hook
