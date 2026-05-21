@@ -125,6 +125,9 @@
 Recovery mode rules:
 - Re-read the recent thread context and summarize task, status, pending work, and next step.
 - Verify cwd, repo root, branch, git status, node_modules linkage, and free disk before editing or testing.
+- For tmux/Codex cockpit recovery, inspect existing restore state before writing new state: run `tt status`, `tt snapshot-history codex-cockpit`, and `tt restore-preview <snapshot>` or `tt codex-restore ...` dry runs first. Do not click `CX SAVE` or run `tt codex-snapshot` until the candidate restore source is identified.
+- If the `CX SAVE` right-click menu is missing, check `tmux list-keys -T root MouseDown3StatusRight` and re-source `~/.tmux.conf.local`; keep left-click as save and right-click as preview/history/status, not immediate restore.
+- Treat `~/.local/state/tt/history/codex-cockpit/*.tsv` as the first recovery source for Codex/Claude pane restore commands. Use `--execute` only after showing the dry-run restore plan.
 - Never run `pnpm install` inside a Codex worktree under `~/.codex/worktrees`.
 - If `node_modules` is not a symlink in a Codex worktree, stop and report it.
 - Prefer shared worktrees created with `gwt new`.
