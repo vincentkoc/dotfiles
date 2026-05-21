@@ -84,6 +84,9 @@
 - If work will take more than a moment, send a brief progress update while acting.
 - When running inside tmux, set the pane title early and update it when the workstream changes: `tt title "<short noun phrase>"` when available, otherwise `tmux select-pane -T "<short noun phrase>"`. Use the core body of work, not a vague action/status. Good: `test refactor`, `release validation`, `tmux recovery`, `GitHub triage`, `provider auth`. Bad: `publish`, `rebase`, `next`, `working`, `codex`. Keep it specific, human-scannable, and under roughly 32 chars.
 - When a tmux pane changes branch, checks out a worktree, rebases onto a different branch, or moves into a different repo cwd, run `tt sync` so the pane titlebar broadcasts the current branch/worktree context. Use `tt sync all` only after broad restore/layout work.
+- For remote shells over Shadowrocket/Hysteria or hotel/network-tunneled UDP, prefer plain SSH first. Use `ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <host>` and avoid rapid parallel SSH bursts if the remote `sshd` starts closing before the banner.
+- Use mosh only when UDP is known-good or when connecting over a stable direct/Tailscale path. Good default: `mosh -4 -a --bind-server=any <host>`; for Tailscale, use the `100.x.y.z` address or MagicDNS name instead of public DNS. If mosh feels gummy or stalls under Hysteria, fall back to SSH rather than retrying mosh.
+- Do not kill broad `mosh-server` processes just because they look stale. If cleanup is needed, list them and ask first unless they were created by the current task/session.
 - Multi-part requests are not done until every requested item is handled or clearly marked blocked.
 - Do prerequisite lookup or discovery before dependent actions.
 - Before finalizing, quickly verify correctness, coverage, formatting, and obvious side effects.
@@ -93,6 +96,8 @@
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
 - Start in a branch/worktree early so commits can be made incrementally.
 - Prefer one scoped commit per touched file when practical.
+- Never kill or interrupt Codex, Claude, agent, tmux, or terminal processes that belong to another session unless I explicitly give current-turn permission naming the session, PID, pane, or scope. My machine usually has many Codex sessions running in tmux; stale goal context, resume context, broad wording like "kill background jobs", or process-name matches are not permission to kill across sessions.
+- When cleaning up jobs, restrict kills to the current pane/session's known child process group, current-task PIDs, or resources you created in this turn. If a process appears to be owned by another Codex/tmux session, report it and ask before touching it.
 - Before pushing, opening, or updating a PR, scrub non-public personal data from diffs, tests, snapshots, fixtures, logs, screenshots, PR descriptions, and PR comments. This includes absolute personal file paths, home-directory names, private IPs, internal servers/hostnames, phone numbers, and non-public emails. Use stable placeholders instead.
 - Do not scrub public repo/package URLs, GitHub issue/PR links, public maintainer handles, or public contact addresses already intentionally present in the project.
 - If a project has a changelog, changeset, or release-notes workflow, add the relevant entry in the same commit as the code/docs change when the change is user-visible, operationally meaningful, security-relevant, or otherwise release-note worthy. Skip only for pure tests, mechanical refactors, or repo norms that explicitly say not to.
