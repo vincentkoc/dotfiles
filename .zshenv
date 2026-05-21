@@ -6,10 +6,9 @@ if [[ -n "${CODEX_SANDBOX:-}" ]]; then
   mkdir -p "$FONTCONFIG_CACHE" "$MPLCONFIGDIR" 2>/dev/null || true
 fi
 
-# Agent shells can inherit both variables; keep forced color and drop the flag
-# that makes Node warn about the conflict.
+# Agent shells can inherit both variables; Node warns when FORCE_COLOR overrides NO_COLOR.
 if [[ -n "${NO_COLOR:-}" && -n "${FORCE_COLOR:-}" ]]; then
-  unset NO_COLOR
+  unset FORCE_COLOR
 fi
 
 # Non-interactive shells skip ~/.zshrc; load shared exports for PATH/tooling.

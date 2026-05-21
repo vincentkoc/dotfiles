@@ -51,7 +51,7 @@ set -g default-terminal "tmux-256color"
 set-environment -gu NO_COLOR
 set-environment -g CLICOLOR 1
 set-environment -g CLICOLOR_FORCE 1
-set-environment -g FORCE_COLOR 3
+set-environment -gu FORCE_COLOR
 set-environment -g COLORTERM truecolor
 
 # Ghostty and iTerm usually present as xterm-256color; keep RGB + OSC 8.

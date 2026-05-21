@@ -353,18 +353,18 @@ termfix() {
 
 codex-resume() {
 	if [[ $# -gt 0 ]]; then
-		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex resume --no-alt-screen "$@"
+		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex resume --no-alt-screen "$@"
 	else
-		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex resume --all --no-alt-screen
+		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex resume --all --no-alt-screen
 	fi
 }
 
 codex-last() {
-	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex resume --last --no-alt-screen "$@"
+	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex resume --last --no-alt-screen "$@"
 }
 
 codex-tmux() {
-	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor codex --no-alt-screen "$@"
+	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex --no-alt-screen "$@"
 }
 
 cx() {
