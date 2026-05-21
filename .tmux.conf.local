@@ -383,6 +383,16 @@ set -g pane-border-status off
 # Recover a pane after a TUI exits without resetting mouse/bracketed-paste modes.
 bind R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
 bind -T root MouseDown1StatusRight run-shell -b "/Users/vincentkoc/bin/tt codex-snapshot --quiet && tmux display-message 'codex snapshot saved'"
+bind -T root MouseDown3StatusRight display-menu -T "CX SAVE" -x M -y W \
+    "Save now" s "run-shell -b '\$HOME/bin/tt codex-snapshot --quiet && tmux display-message \"codex snapshot saved\"'" \
+    "Show snapshot" v "display-popup -w 95% -h 80% -E '\$HOME/bin/tt popup snapshot'" \
+    "Restore preview" p "display-popup -w 95% -h 80% -E '\$HOME/bin/tt popup restore-preview'" \
+    "Snapshot history" h "display-popup -w 95% -h 80% -E '\$HOME/bin/tt popup snapshot-history'" \
+    "Status" t "display-popup -w 95% -h 80% -E '\$HOME/bin/tt popup status'" \
+    "Doctor" d "display-popup -w 95% -h 80% -E '\$HOME/bin/tt popup doctor'" \
+    "" "" "" \
+    "Autosave on" o "run-shell -b '\$HOME/bin/tt autosave on && tmux display-message \"codex autosave on\"'" \
+    "Autosave off" f "run-shell -b '\$HOME/bin/tt autosave off && tmux display-message \"codex autosave off\"'"
 
 # Vi mode for copy
 set -g mode-keys vi

@@ -1777,6 +1777,10 @@ codex_restore_execute() {
     execute="--execute"
     snapshot=""
   fi
+  if [[ "$mode" == "all" && -n "$selector" && -z "$snapshot" ]]; then
+    snapshot="$selector"
+    selector=""
+  fi
 
   case "$mode" in
     preview)
