@@ -94,9 +94,9 @@ function quicksshconnect() {
     local conn_prefix=""
     local conn_suffix=""
     if [[ $use_mosh == "true" ]]; then
-        conn_prefix="mosh --ssh=\"ssh -p $port\""
+        conn_prefix="mosh -4 -a --bind-server=any --ssh=\"ssh -p $port -o ServerAliveInterval=15 -o ServerAliveCountMax=3\""
     else
-        conn_prefix="ssh -p $port"
+        conn_prefix="ssh -p $port -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
     fi
 
     if [[ $use_tmux == "true" ]]; then

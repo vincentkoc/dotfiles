@@ -34,7 +34,7 @@ die() {
 profile="shell"
 session=""
 port=""
-family_arg=""
+family_arg="-4"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -138,7 +138,7 @@ if resolved_target="$(resolve_quickssh_alias "$host_input" 2>/dev/null)"; then
   target="$resolved_target"
 fi
 
-ssh_cmd="${MOSH_TMUX_SSH:-ssh}"
+ssh_cmd="${MOSH_TMUX_SSH:-ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3}"
 if [[ -n "$port" ]]; then
   ssh_cmd+=" -p $port"
 fi
@@ -179,7 +179,7 @@ fi
 EOF
 )
 
-mosh_args=()
+mosh_args=(-a --bind-server=any)
 [[ -n "$family_arg" ]] && mosh_args+=("$family_arg")
 
 exec mosh "${mosh_args[@]}" --ssh="$ssh_cmd" -- "$target" sh -lc "$remote_cmd"

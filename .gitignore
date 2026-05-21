@@ -97,6 +97,8 @@ Library/Application Support/Dash/library.dash
 /Library/Application Support/Adobe
 /Library/Application Support/Airflow
 .ssh/authorized_keys
+.ssh/config.local
+.ssh/config.d/
 *ca-bundle
 .codex/auth.json
 Library/Preferences/.GlobalPreferences.plist

@@ -288,8 +288,24 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     alias ipinfo1='ipconfig getpacket en1'
 fi
 
-# SSH folder (if Dropbox is set up)
-[[ -d ~/Dropbox/_System/SSH ]] && alias myssh='cd ~/Dropbox/_System/SSH/'
+# SSH helpers
+myssh() {
+	local target="m1"
+	if [[ $# -gt 0 && "$1" != -* ]]; then
+		target="$1"
+		shift
+	fi
+	ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$target" "$@"
+}
+
+mymosh() {
+	local target="m1"
+	if [[ $# -gt 0 && "$1" != -* ]]; then
+		target="$1"
+		shift
+	fi
+	mosh -4 -a --bind-server=any --ssh="ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3" -- "$target" "$@"
+}
 
 # Aliases cheatsheet
 help-aliases() {
