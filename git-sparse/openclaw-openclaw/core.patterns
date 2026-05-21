@@ -9,6 +9,7 @@
 /apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json
 /apps/macos/Sources/OpenClaw/HostEnvSecurityPolicy.generated.swift
 /bin/
+/config/
 /docs/
 !/docs/zh-CN/
 /extensions/
