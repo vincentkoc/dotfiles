@@ -37,3 +37,11 @@ export DO_NOT_TRACK=1
 if [ -f "$HOME/.cargo/env" ]; then
   . "$HOME/.cargo/env"
 fi
+
+# Homebrew rustup is keg-only, so its cargo/rustc proxy dir must be explicit.
+if [ -d "/opt/homebrew/opt/rustup/bin" ]; then
+  case ":$PATH:" in
+    *":/opt/homebrew/opt/rustup/bin:"*) ;;
+    *) export PATH="/opt/homebrew/opt/rustup/bin:$PATH" ;;
+  esac
+fi

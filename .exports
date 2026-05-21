@@ -122,6 +122,9 @@ if [[ $IS_MACOS == true ]] && [[ -d "/Applications/MAMP/bin/php" ]]; then
 fi
 
 # Rust
+if [[ $IS_MACOS == true ]] && [[ -d "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/rustup/bin" ]]; then
+    path_prepend "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/rustup/bin"
+fi
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
 #
