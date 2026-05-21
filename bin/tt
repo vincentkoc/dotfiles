@@ -1230,14 +1230,14 @@ snapshot_history_dir() {
 record_snapshot_history() {
   local source="$1"
   local label="$2"
-  local max="${TT_SNAPSHOT_HISTORY_MAX:-288}"
+  local max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
   local dir ts dest newest file count
   local -a files=()
 
   [[ -f "$source" ]] || return 0
   case "$max" in
     ''|*[!0-9]*)
-      max=288
+      max=864
       ;;
   esac
   (( max > 0 )) || return 0
@@ -1630,7 +1630,7 @@ status_report() {
   snapshot="$(codex_cockpit_snapshot_file)"
   agent_snapshot="$(agent_cockpit_state_file)"
   pid_file="$(codex_cockpit_timer_pid_file)"
-  history_max="${TT_SNAPSHOT_HISTORY_MAX:-288}"
+  history_max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
 
   if [[ -f "$pid_file" ]]; then
     pid="$(cat "$pid_file" 2>/dev/null || true)"
