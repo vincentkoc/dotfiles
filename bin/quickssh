@@ -1,154 +1,174 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Quick SSH
-# Used to quickly connect to SSH services
-# Supporting 1password CLI for SSH Keys and root login passwords
+usage() {
+  cat <<'EOF'
+Usage: quickssh [-m] [-s] [-t] [-l local_port] [-d destination_port] <host>
 
-# For Mosh:
-# Ensure that you have Mosh installed on both your local machine
-# and the remote host to use this feature. You can install Mosh
-# using the package manager for your system:
-#     For Ubuntu/Debian: sudo apt-get install mosh
-#     For CentOS/RHEL: sudo yum install mosh
-#     For Fedora: sudo dnf install mosh
-#     For macOS: brew install mosh
-#     For Arch Linux: sudo pacman -S mosh
-# Also, make sure the necessary UDP ports (usually 60000-61000)
-# are open on the remote host's firewall.
+Options:
+  -m  use mosh
+  -s  run screen -xRR after connecting
+  -t  attach or create tmux after connecting
+  -l  local port for SSH forwarding
+  -d  remote destination port for SSH forwarding
 
-echo -e "\033[0;33m"
-cat << "EOF"
-              _      _            _  x x
-   __ _ _   _(_) ___| | _____ ___| |__x 
-  / _` | | | | |/ __| |/ / __/ __| '_ \ 
- | (_| | |_| | | (__|   <\__ \__ \ | | |
-  \__, |\__,_|_|\___|_|\_\___/___/_| |_|
-     |_|                                
-
+Plain SSH config hosts are supported directly; legacy .extra aliases remain available.
 EOF
-
-echo "  quickssh the SSH swiss army knife."
-echo -e "\033[0m"
-echo " "
-
-# Load hosts from a separate file
-if [ -e "$EXTRASPATH/quickssh_hosts.sh" ]; then
-  source "$EXTRASPATH/quickssh_hosts.sh"
-else
-  echo "Error: quickssh_hosts.sh not found"
-  echo "We need a file with host configurations"
-  exit 1
-fi
-
-# Function to get the password from 1Password
-function get_password() {
-    local alias=$1
-    # Replace 'op_account' with your 1Password account name
-    # Replace 'item_name_prefix' with the prefix of the item names stored in 1Password
-    op item get "ssh_$alias" --account op_account --fields password | tr -d '\n'
 }
 
-# Function to connect to a host using its alias
-# Function to connect to a host using its alias
-function quicksshconnect() {
-    local alias=$1
-    local host_info_var="quickssh_hosts_${alias}"
-    local host_info=${!host_info_var}
-
-    if [[ -z $host_info ]]; then
-        echo "Host alias not found ($alias)... exiting!"
-        return 1
-    fi
-
-    local user=$(echo $host_info | cut -d: -f1)
-    local hostname=$(echo $host_info | cut -d: -f2)
-    local port=$(echo $host_info | cut -d: -f3)
-    local password=$(echo $host_info | cut -d: -f4)
-
-    # Set default port if not provided
-    if [ -z "$port" ]; then
-        port=22
-    fi
-
-    # Get password from 1Password if needed
-    if [ "$password" == "\$1password" ]; then
-        echo "Fetching password from 1password vault"
-        password=$(get_password $alias)
-        if [ -z "$password" ]; then
-            echo "Issue locating password for item (ssh_$alias) in 1password... exiting!"
-            return 1
-        fi
-    fi
-
-    if [ -n "$password" ]; then
-        echo $password | xclip -selection clipboard
-        echo "Password was copied - clipboard will be wiped in 30 seconds"
-        (
-          sleep 30
-          echo "" | xclip -selection clipboard
-          echo "Clipboard reset."
-        ) &
-    fi
-
-    # Prepare connection command
-    local conn_prefix=""
-    local conn_suffix=""
-    if [[ $use_mosh == "true" ]]; then
-        conn_prefix="mosh -4 -a --bind-server=any --ssh=\"ssh -p $port -o ServerAliveInterval=15 -o ServerAliveCountMax=3\""
-    else
-        conn_prefix="ssh -p $port -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
-    fi
-
-    if [[ $use_tmux == "true" ]]; then
-        conn_suffix="'tmux attach || tmux new-session'"
-    elif [[ $use_screen == "true" ]]; then
-        conn_suffix="'screen -xRR'"
-    elif [[ -n $local_port ]] && [[ -n $destination_port ]]; then
-        if [[ $use_mosh == "true" ]]; then
-            echo "Port forwarding not supported with Mosh... exiting!"
-            return 1
-        fi
-        conn_prefix+=" -L $local_port:localhost:$destination_port"
-    fi
-
-    # Connect
-    if [ -z "$user" ]; then
-        echo -e "\033[0;33m☎️  Connecting to $alias: $hostname (Port: $port)\033[0m"
-        eval "$conn_prefix $hostname $conn_suffix"
-    else
-        echo -e "\033[0;33m☎️  Connecting to $alias: $user@$hostname (Port: $port)\033[0m"
-        eval "$conn_prefix $user@$hostname $conn_suffix"
-    fi
+extras_path() {
+  printf '%s\n' "${EXTRASPATH:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.extra}"
 }
 
-# Main script
+load_legacy_hosts() {
+  local hosts_file
+
+  hosts_file="$(extras_path)/quickssh_hosts.sh"
+  [[ -f "$hosts_file" ]] || return 1
+  # shellcheck source=/dev/null
+  source "$hosts_file"
+}
+
+copy_password() {
+  local password="$1"
+
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$password" | pbcopy
+    return 0
+  fi
+  if command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$password" | xclip -selection clipboard
+    return 0
+  fi
+  if command -v wl-copy >/dev/null 2>&1; then
+    printf '%s' "$password" | wl-copy
+    return 0
+  fi
+
+  return 1
+}
+
+password_from_onepassword() {
+  local alias="$1"
+  local account_arg=()
+
+  [[ -n "${QUICKSSH_OP_ACCOUNT:-}" ]] && account_arg=(--account "$QUICKSSH_OP_ACCOUNT")
+  op item get "ssh_$alias" "${account_arg[@]}" --fields password | tr -d '\n'
+}
+
+resolve_legacy_host() {
+  local alias="$1"
+  local host_info_var host_info user host port password
+
+  load_legacy_hosts || return 1
+  host_info_var="quickssh_hosts_${alias}"
+  host_info="${!host_info_var:-}"
+  [[ -n "$host_info" ]] || return 1
+
+  IFS=: read -r user host port password _ <<< "$host_info"
+  [[ -n "$host" ]] || return 1
+  port="${port:-22}"
+
+  if [[ "$password" == "\$1password" ]]; then
+    password="$(password_from_onepassword "$alias")"
+  fi
+
+  if [[ -n "${password:-}" ]]; then
+    if copy_password "$password"; then
+      printf 'quickssh: copied password for legacy alias %s; clipboard is not tracked by ssh\n' "$alias" >&2
+    else
+      printf 'quickssh: legacy alias %s has a password, but no clipboard command is available\n' "$alias" >&2
+    fi
+  fi
+
+  if [[ -n "$user" ]]; then
+    printf '%s\t%s\t%s\n' "$user@$host" "$port" "$alias"
+  else
+    printf '%s\t%s\t%s\n' "$host" "$port" "$alias"
+  fi
+}
+
+list_hosts() {
+  local hosts_file key
+
+  printf 'SSH config hosts are supported directly, e.g. quickssh m1\n'
+
+  hosts_file="$(extras_path)/quickssh_hosts.sh"
+  [[ -f "$hosts_file" ]] || return 0
+
+  if load_legacy_hosts && declare -p quickssh_hosts >/dev/null 2>&1; then
+    printf '\nLegacy quickssh aliases:\n'
+    for key in "${quickssh_hosts[@]}"; do
+      printf '  %s\n' "$key"
+    done
+  fi
+}
+
 use_mosh=false
-use_tmux=false
 use_screen=false
-while getopts ":mstl:d:" option; do
-    case $option in
-        m) use_mosh=true ;;
-        s) use_screen=true ;;
-        t) use_tmux=true ;;
-        l) local_port=$OPTARG ;;
-        d) destination_port=$OPTARG ;;
-        *) echo "Invalid option"
-           exit 1;;
-    esac
-done
+use_tmux=false
+local_port=""
+destination_port=""
 
-shift $((OPTIND-1))
-host_alias=$1
+while getopts ":mstl:d:h" option; do
+  case "$option" in
+    m) use_mosh=true ;;
+    s) use_screen=true ;;
+    t) use_tmux=true ;;
+    l) local_port="$OPTARG" ;;
+    d) destination_port="$OPTARG" ;;
+    h)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+shift $((OPTIND - 1))
 
 if [[ $# -ne 1 ]]; then
-    echo "Usage: quickssh [-m] [-s] [-t] [-l local_port] [-d destination_port] <host-alias>"
-    echo "  -m: Use Mosh instead of SSH"
-    echo "  -s: Use Screen with SSH"
-    echo "  -t: Use Tmux with SSH"
-    echo "Available quickssh host aliases:"
-    for key in "${quickssh_hosts[@]}"; do
-        echo "  - $key"
-    done
-else
-    quicksshconnect $1
+  usage >&2
+  printf '\n' >&2
+  list_hosts >&2
+  exit 2
 fi
+
+input="$1"
+target="$input"
+port=""
+
+if resolved="$(resolve_legacy_host "$input")"; then
+  IFS=$'\t' read -r target port _ <<< "$resolved"
+fi
+
+remote_command=()
+if [[ "$use_tmux" == "true" ]]; then
+  remote_command=(sh -lc 'tmux attach || tmux new-session')
+elif [[ "$use_screen" == "true" ]]; then
+  remote_command=(screen -xRR)
+fi
+
+ssh_args=(-o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+[[ -n "$port" ]] && ssh_args+=(-p "$port")
+
+if [[ -n "$local_port" || -n "$destination_port" ]]; then
+  if [[ -z "$local_port" || -z "$destination_port" ]]; then
+    printf 'quickssh: both -l and -d are required for forwarding\n' >&2
+    exit 2
+  fi
+  if [[ "$use_mosh" == "true" ]]; then
+    printf 'quickssh: port forwarding is not supported with mosh\n' >&2
+    exit 2
+  fi
+  ssh_args+=(-L "$local_port:localhost:$destination_port")
+fi
+
+if [[ "$use_mosh" == "true" ]]; then
+  mosh_ssh=(ssh "${ssh_args[@]}")
+  exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target" "${remote_command[@]}"
+fi
+
+exec ssh "${ssh_args[@]}" "$target" "${remote_command[@]}"
