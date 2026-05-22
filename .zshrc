@@ -518,8 +518,11 @@ if [[ $OSTYPE == 'darwin'* ]]; then
 	fi
 
 	# Node.js - nodenv
-		if (( $+commands[nodenv] )); then
+	if [[ -d "${NODENV_ROOT:-$HOME/.nodenv}" && "${DOTFILES_DISABLE_NODENV:-}" != "1" ]]; then
 		export NODENV_ROOT="${NODENV_ROOT:-$HOME/.nodenv}"
+		path=("$NODENV_ROOT/bin" "$NODENV_ROOT/shims" ${path:#$NODENV_ROOT/bin} ${path:#$NODENV_ROOT/shims})
+	fi
+		if (( $+commands[nodenv] )); then
 		nodenv() {
 			unset -f nodenv
 			eval "$(command nodenv init -)"
