@@ -96,6 +96,7 @@ list_hosts() {
   hosts_file="$(extras_path)/quickssh_hosts.sh"
   [[ -f "$hosts_file" ]] || return 0
 
+  # shellcheck disable=SC2154 # Sourced from the private legacy hosts file.
   if load_legacy_hosts && declare -p quickssh_hosts >/dev/null 2>&1; then
     printf '\nLegacy quickssh aliases:\n'
     for key in "${quickssh_hosts[@]}"; do
