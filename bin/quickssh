@@ -145,10 +145,13 @@ if resolved="$(resolve_legacy_host "$input")"; then
 fi
 
 remote_command=()
+has_remote_command=false
 if [[ "$use_tmux" == "true" ]]; then
   remote_command=(sh -lc 'tmux attach || tmux new-session')
+  has_remote_command=true
 elif [[ "$use_screen" == "true" ]]; then
   remote_command=(screen -xRR)
+  has_remote_command=true
 fi
 
 ssh_args=(-o ServerAliveInterval=15 -o ServerAliveCountMax=3)
@@ -168,7 +171,13 @@ fi
 
 if [[ "$use_mosh" == "true" ]]; then
   mosh_ssh=(ssh "${ssh_args[@]}")
-  exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target" "${remote_command[@]}"
+  if [[ "$has_remote_command" == "true" ]]; then
+    exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target" "${remote_command[@]}"
+  fi
+  exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target"
 fi
 
-exec ssh "${ssh_args[@]}" "$target" "${remote_command[@]}"
+if [[ "$has_remote_command" == "true" ]]; then
+  exec ssh "${ssh_args[@]}" "$target" "${remote_command[@]}"
+fi
+exec ssh "${ssh_args[@]}" "$target"
