@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tmp="$(mktemp "${TMPDIR:-/tmp}/tmux-yank.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+
+cat > "$tmp"
+
+if [[ -n "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
+  tmux load-buffer -w "$tmp" 2>/dev/null || true
+fi
+
+if command -v pbcopy >/dev/null 2>&1; then
+  pbcopy < "$tmp" || true
+elif command -v wl-copy >/dev/null 2>&1; then
+  wl-copy < "$tmp" || true
+elif command -v xclip >/dev/null 2>&1; then
+  xclip -selection clipboard < "$tmp" || true
+fi
