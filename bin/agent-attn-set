@@ -88,6 +88,57 @@ set_pane_badge() {
   fi
 }
 
+marker_window_style() {
+  case "${1:-}" in
+    amber) printf 'fg=default,bg=#211d17\n' ;;
+    green) printf 'fg=default,bg=#182318\n' ;;
+    blue) printf 'fg=default,bg=#171f2b\n' ;;
+    dim) printf 'fg=#565f89,bg=#11121a\n' ;;
+    *) printf '\n' ;;
+  esac
+}
+
+marker_active_style() {
+  case "${1:-}" in
+    amber) printf 'fg=default,bg=#292218\n' ;;
+    green) printf 'fg=default,bg=#1f2a1f\n' ;;
+    blue) printf 'fg=default,bg=#1d2736\n' ;;
+    dim) printf 'fg=#565f89,bg=#11121a\n' ;;
+    *) printf '\n' ;;
+  esac
+}
+
+set_pane_style() {
+  local style="${1:-}"
+  local active_style="${2:-}"
+  local marker marker_style marker_active_style
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ -z "${TMUX_PANE:-}" ]]; then
+    return
+  fi
+
+  if [[ -n "$style" ]]; then
+    tmux set-option -pt "$TMUX_PANE" window-style "$style" >/dev/null 2>&1 || true
+    tmux set-option -pt "$TMUX_PANE" window-active-style "$active_style" >/dev/null 2>&1 || true
+    return
+  fi
+
+  marker="$(tmux show-option -pt "$TMUX_PANE" -qv @tt_marker 2>/dev/null || true)"
+  marker_style="$(marker_window_style "$marker")"
+  marker_active_style="$(marker_active_style "$marker")"
+  if [[ -n "$marker_style" && -n "$marker_active_style" ]]; then
+    tmux set-option -pt "$TMUX_PANE" window-style "$marker_style" >/dev/null 2>&1 || true
+    tmux set-option -pt "$TMUX_PANE" window-active-style "$marker_active_style" >/dev/null 2>&1 || true
+  else
+    tmux set-option -pt "$TMUX_PANE" -qu window-style >/dev/null 2>&1 || true
+    tmux set-option -pt "$TMUX_PANE" -qu window-active-style >/dev/null 2>&1 || true
+  fi
+}
+
 set_tmux_state() {
   local segment="$1"
   local client_tty
@@ -208,18 +259,21 @@ case "$state" in
     set_tmux_state "$(wait_segment)"
     set_pane_title "$(pane_title_base)"
     set_pane_badge "$(wait_pane_badge)"
+    set_pane_style 'fg=default,bg=#241d12' 'fg=default,bg=#2f2517'
     write_terminal_bg '#241d12' "$(wait_cursor)"
     ;;
   permission|approve)
     set_tmux_state "$(approval_segment)"
     set_pane_title "$(pane_title_base)"
     set_pane_badge "$(approval_pane_badge)"
+    set_pane_style 'fg=default,bg=#2b1720' 'fg=default,bg=#361b27'
     write_terminal_bg '#2b1720' '#f7768e'
     ;;
   reset|active|idle|clear)
     set_tmux_state ''
     set_pane_title "$(pane_title_base)"
     set_pane_badge ''
+    set_pane_style ''
     write_terminal_bg '#1a1b26' '#c0caf5'
     ;;
   *)

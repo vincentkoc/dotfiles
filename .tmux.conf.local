@@ -57,6 +57,7 @@ set-environment -g COLORTERM truecolor
 # Ghostty and iTerm usually present as xterm-256color; keep RGB, OSC 8, and OSC 52.
 set -g terminal-features "xterm*:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
 set -g terminal-overrides ",*:Tc,linux*:AX@"
+set -g allow-passthrough on
 set -g set-clipboard on
 
 
