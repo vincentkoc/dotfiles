@@ -178,6 +178,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g default-terminal "tmux-256color"
   "$TMUX_BIN" set -g terminal-features "xterm*:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
   "$TMUX_BIN" set -ga terminal-overrides ",*:Tc"
+  "$TMUX_BIN" set -g allow-passthrough on
+  "$TMUX_BIN" set -g set-clipboard on
   "$TMUX_BIN" set -g extended-keys on
   "$TMUX_BIN" set -g extended-keys-format csi-u
   "$TMUX_BIN" set-environment -gu NO_COLOR 2>/dev/null || true
