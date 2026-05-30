@@ -174,6 +174,10 @@ elif [[ -d /usr/local/share/zsh/site-functions ]] || [[ -d /usr/local/share/zsh-
 	[[ -d /usr/local/share/zsh-completions ]] && fpath=(/usr/local/share/zsh-completions $fpath)
 	[[ -d /usr/local/share/zsh/site-functions ]] && fpath=(/usr/local/share/zsh/site-functions $fpath)
 fi
+	autoload -Uz bracketed-paste-magic url-quote-magic
+	zle -N bracketed-paste bracketed-paste-magic
+	zle -N self-insert url-quote-magic
+
 	ZSH_COMPDUMP="${ZSH_COMPDUMP:-$ZSH_CACHE_DIR/.zcompdump-${HOST:-localhost}-${ZSH_VERSION}}"
 	if [[ "${DOTFILES_USE_OMZ:-0}" == "1" ]]; then
 		source $ZSH/oh-my-zsh.sh
