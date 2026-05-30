@@ -4,10 +4,14 @@
     "commit": "",
     "pr": ""
   },
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
   "enabledPlugins": {
     "claude-supermemory@supermemory-plugins": false,
     "frontend-design@claude-plugins-official": true
   },
+  "autoUpdatesChannel": "latest",
   "skipDangerousModePermissionPrompt": true,
   "feedbackSurveyState": {
     "lastShownTime": 1754472559009
@@ -56,6 +60,19 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/homebrew/bin/tokenjuice claude-code-post-tool-use",
+            "statusMessage": "compacting bash output with tokenjuice"
+          }
+        ]
+      }
     ]
-  }
+  },
+  "effortLevel": "high"
 }

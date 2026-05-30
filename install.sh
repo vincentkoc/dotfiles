@@ -376,10 +376,14 @@ setup_codex_dotfiles() {
 
 setup_claude_dotfiles() {
     local df_dir claude_dir claude_settings_src claude_settings_dest
+    local claude_desktop_dest claude_sessions_dir claude_account_uuid tmp_file
+    local -a claude_session_files
     df_dir="$(dotfiles_dir)"
     claude_dir="$HOME/.claude"
     claude_settings_src="$df_dir/.claude/settings.json"
     claude_settings_dest="$claude_dir/settings.json"
+    claude_desktop_dest="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+    claude_sessions_dir="$HOME/Library/Application Support/Claude/claude-code-sessions"
 
     if [[ ! -f "$claude_settings_src" ]]; then
         warn "Claude settings file missing in dotfiles: $claude_settings_src"
@@ -389,6 +393,74 @@ setup_claude_dotfiles() {
     mkdir -p "$claude_dir"
     link_dotfile "$claude_settings_src" "$claude_settings_dest"
     success "Claude settings linked to $claude_settings_src"
+
+    if [[ "$(uname)" == "Darwin" && -f "$claude_desktop_dest" ]] && command -v jq >/dev/null 2>&1; then
+        claude_account_uuid="$(
+            jq -r '.ownerAccountId // empty' "$HOME/Library/Application Support/Claude/cowork-enabled-cli-ops.json" 2>/dev/null ||
+                jq -r '.oauthAccount.accountUuid // empty' "$HOME/.claude.json" 2>/dev/null ||
+                true
+        )"
+        claude_session_files=()
+        if [[ -d "$claude_sessions_dir" ]]; then
+            while IFS= read -r -d '' session_file; do
+                claude_session_files+=("$session_file")
+            done < <(find "$claude_sessions_dir" -type f -name '*.json' -print0)
+        fi
+
+        tmp_file="$(mktemp)"
+        jq -s --arg account "$claude_account_uuid" '
+          .[0] as $config |
+          [
+            .[1:][]
+            | .cwd?, .originCwd?, .worktreePath?
+            | select(type == "string" and startswith("/"))
+          ] as $sessionDirs |
+          def configured_dirs($config; $account):
+            [
+              $config.preferences.epitaxyPrefs["epitaxy-folder-permission-mode." + $account]? // {}
+              | keys[]
+            ];
+          def yolo_dirs($config; $account; $sessionDirs):
+            (configured_dirs($config; $account) + $sessionDirs) | unique;
+          $config |
+          .preferences |= (. // {}) |
+          .preferences.epitaxyPrefs |= (. // {}) |
+          .preferences.bypassPermissionsGateByAccount |= (. // {}) |
+          .preferences.bypassPermissionsOptInByAccount |= (. // {}) |
+          (if $account != "" then
+            .preferences.bypassPermissionsGateByAccount[$account] = true |
+            .preferences.bypassPermissionsOptInByAccount[$account] = true |
+            .preferences.epitaxyPrefs["epitaxy-folder-permission-mode." + $account] = (
+              yolo_dirs($config; $account; $sessionDirs) | map({(.): "bypassPermissions"}) | add // {}
+            ) |
+            .preferences.epitaxyPrefs["epitaxy-perm-mode-acks." + $account] = (
+              yolo_dirs($config; $account; $sessionDirs) | map(. + ":bypassPermissions")
+            )
+          else
+            .
+          end) |
+          .preferences.bypassPermissionsGateByAccount |= with_entries(.value = true) |
+          .preferences.bypassPermissionsOptInByAccount |= with_entries(.value = true) |
+          .preferences.epitaxyPrefs."cc-landing-draft-permission-mode" = "bypassPermissions" |
+          .preferences.epitaxyPrefs |= with_entries(
+            if (.key | startswith("epitaxy-folder-permission-mode.")) and (.value | type == "object") then
+              .value |= with_entries(.value = "bypassPermissions")
+            else
+              .
+            end
+          )
+        ' "$claude_desktop_dest" "${claude_session_files[@]}" > "$tmp_file"
+        mv "$tmp_file" "$claude_desktop_dest"
+        success "Claude Desktop permission mode set to bypassPermissions"
+
+        if [[ -d "$claude_sessions_dir" ]]; then
+            find "$claude_sessions_dir" -type f -name '*.json' -print0 | while IFS= read -r -d '' session_file; do
+                tmp_file="$(mktemp)"
+                jq '.permissionMode = "bypassPermissions"' "$session_file" > "$tmp_file" && mv "$tmp_file" "$session_file"
+            done
+            success "Claude Desktop session permission modes set to bypassPermissions"
+        fi
+    fi
 }
 
 setup_iterm_preferences() {
