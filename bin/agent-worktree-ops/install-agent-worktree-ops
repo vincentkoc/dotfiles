@@ -20,4 +20,9 @@ launchctl bootout "gui/$(id -u)" "$OLD_PLIST_TARGET" >/dev/null 2>&1 || true
 rm -f "$OLD_PLIST_TARGET"
 rm -rf "$OLD_RUNTIME_DIR"
 launchctl bootout "gui/$(id -u)" "$PLIST_TARGET" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET"
+if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_TARGET" 2>/tmp/agent-worktree-ops-launchctl.err; then
+  printf 'warn: launchctl bootstrap skipped: %s\n' "$(cat /tmp/agent-worktree-ops-launchctl.err)" >&2
+  rm -f /tmp/agent-worktree-ops-launchctl.err
+  exit 0
+fi
+rm -f /tmp/agent-worktree-ops-launchctl.err
