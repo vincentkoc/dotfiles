@@ -2153,8 +2153,6 @@ install_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -g "after-split-window[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
   "$TMUX_BIN" set-hook -g "after-kill-pane[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
   "$TMUX_BIN" set-hook -g "pane-exited[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "client-active-pane[92]" "run-shell -b '$self mosh-attn --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "pane-title-changed[92]" "run-shell -b '$self mosh-attn --quiet'" 2>/dev/null || true
   install_agent_status_menu
   clear_legacy_shell_status_widgets
   set_agent_window_status_formats
@@ -2175,8 +2173,6 @@ clear_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -gu "after-split-window[91]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "after-kill-pane[91]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "pane-exited[91]" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -gu "client-active-pane[92]" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -gu "pane-title-changed[92]" 2>/dev/null || true
   install_agent_status_menu
 
   # Remove the unindexed hooks from early versions of this script if they are still present.
