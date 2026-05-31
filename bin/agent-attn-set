@@ -165,17 +165,10 @@ set_tmux_state() {
   done < <(tmux list-clients -F '#{client_tty}' 2>/dev/null || true)
 }
 
-tmux_passthrough_sequence() {
-  local payload="$1"
-
-  payload="${payload//$'\033'/$'\033\033'}"
-  printf '\033Ptmux;%s\033\\' "$payload"
-}
-
 write_terminal_bg() {
   local bg="$1"
   local cursor="$2"
-  local tty_path sequence one_layer two_layer
+  local tty_path
 
   if [[ -n "${AGENT_ATTN_TTY:-}" ]]; then
     tty_path="$AGENT_ATTN_TTY"
@@ -188,11 +181,7 @@ write_terminal_bg() {
   fi
 
   # OSC 11 updates background; OSC 12 updates cursor color.
-  sequence="$(printf '\033]11;%s\007\033]12;%s\007' "$bg" "$cursor")"
-  # Nested tmux over mosh needs each tmux layer to unwrap its own DCS payload.
-  one_layer="$(tmux_passthrough_sequence "$sequence")"
-  two_layer="$(tmux_passthrough_sequence "$one_layer")"
-  printf '%s%s%s' "$sequence" "$one_layer" "$two_layer" >"$tty_path" || true
+  printf '\033]11;%s\007\033]12;%s\007' "$bg" "$cursor" >"$tty_path" || true
 }
 
 wait_segment() {
@@ -267,16 +256,16 @@ approval_pane_badge() {
 
 case "$state" in
   waiting)
-    set_tmux_state "$(wait_segment)"
+    set_tmux_state ''
     set_pane_title "$(pane_title_base)"
-    set_pane_badge "$(wait_pane_badge)"
+    set_pane_badge ''
     set_pane_style 'fg=default,bg=#241d12' 'fg=default,bg=#2f2517'
     write_terminal_bg '#241d12' "$(wait_cursor)"
     ;;
   permission|approve)
-    set_tmux_state "$(approval_segment)"
+    set_tmux_state ''
     set_pane_title "$(pane_title_base)"
-    set_pane_badge "$(approval_pane_badge)"
+    set_pane_badge ''
     set_pane_style 'fg=default,bg=#2b1720' 'fg=default,bg=#361b27'
     write_terminal_bg '#2b1720' '#f7768e'
     ;;

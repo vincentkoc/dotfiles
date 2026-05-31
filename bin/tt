@@ -85,7 +85,7 @@ ensure_tmux_default_shell() {
 }
 
 agent_color_prefix() {
-  printf 'env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor'
+  printf 'env -u NO_COLOR -u TERMINFO CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor TERMINFO_DIRS=$HOME/.terminfo:/usr/share/terminfo'
 }
 
 agent_kind_for_command() {
@@ -173,6 +173,8 @@ apply_recovery_theme() {
   local ready
   ready="$(agent_ready_format)"
 
+  ensure_tmux_rgb_terminfo
+
   "$TMUX_BIN" set -g base-index 1
   "$TMUX_BIN" set -g pane-base-index 1
   "$TMUX_BIN" set -g default-terminal "tmux-256color"
@@ -187,6 +189,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set-environment -g CLICOLOR_FORCE 1
   "$TMUX_BIN" set-environment -gu FORCE_COLOR 2>/dev/null || true
   "$TMUX_BIN" set-environment -g COLORTERM truecolor
+  "$TMUX_BIN" set-environment -gu TERMINFO 2>/dev/null || true
+  "$TMUX_BIN" set-environment -g TERMINFO_DIRS "$HOME/.terminfo:/usr/share/terminfo"
   "$TMUX_BIN" set-environment -g TERM_PROGRAM "${TERM_PROGRAM:-ghostty}"
   "$TMUX_BIN" set-environment -g ITERM2_DISABLE_SHELL_INTEGRATION 1
   "$TMUX_BIN" set-environment -g ITERM_DISABLE_PROMPT_MARK 1
@@ -202,8 +206,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g mode-style "fg=#1a1b26,bg=#7aa2f7,bold"
   "$TMUX_BIN" set -g pane-border-style "fg=#{?$ready,#ff9e64,#292e42},bg=default"
   "$TMUX_BIN" set -g pane-active-border-style "fg=#{?$ready,#ff9e64,#7aa2f7},bg=default"
-  "$TMUX_BIN" set -g status-left "#[fg=#1a1b26,bg=#7aa2f7,bold] #S "
-  "$TMUX_BIN" set -g status-right "#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#565f89,bg=#1a1b26] %H:%M "
+  "$TMUX_BIN" set -g status-left "#[fg=#15161e,bg=#ff9e64,bold] ❐ #S #[fg=#ff9e64,bg=#1a1b26,none] "
+  "$TMUX_BIN" set -g status-right "#[fg=#565f89,bg=#1a1b26]#{?client_prefix,⌨ ,  }#{?mouse,↗ ,  }#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#[fg=#9ece6a,bg=#1a1b26,none]#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#f7768e,bg=#9ece6a,none]#[fg=#c0caf5,bg=#f7768e,bold] %R %d %b vincentkoc@#h "
   set_agent_window_status_formats
   "$TMUX_BIN" set -g pane-border-status off
   "$TMUX_BIN" set -g prefix C-b
@@ -212,6 +216,32 @@ apply_recovery_theme() {
   "$TMUX_BIN" bind-key s choose-tree -Zs
   "$TMUX_BIN" bind-key R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
   "$TMUX_BIN" refresh-client -S 2>/dev/null || true
+}
+
+ensure_tmux_rgb_terminfo() {
+  local tmp
+
+  if TERMINFO="$HOME/.terminfo" infocmp -x tmux-256color 2>/dev/null | grep -q 'setrgbf='; then
+    return 0
+  fi
+  command -v infocmp >/dev/null 2>&1 || return 0
+  command -v tic >/dev/null 2>&1 || return 0
+
+  mkdir -p "$HOME/.terminfo"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/tmux-256color-rgb.XXXXXX")"
+  if ! TERMINFO= infocmp -x tmux-256color >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  {
+    printf '\tRGB,\n'
+    printf '\tTc,\n'
+    printf '\tsetrgbf=\\E[38;2;%%p1%%d;%%p2%%d;%%p3%%dm,\n'
+    printf '\tsetrgbb=\\E[48;2;%%p1%%d;%%p2%%d;%%p3%%dm,\n'
+  } >>"$tmp"
+  tic -x -o "$HOME/.terminfo" "$tmp" >/dev/null 2>&1 || true
+  rm -f "$tmp"
 }
 
 apply_studio_pane_titles() {
@@ -228,7 +258,7 @@ apply_studio_pane_titles() {
   fi
 
   "$TMUX_BIN" set-window-option -t "$target" -q pane-border-status top
-  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-format " #{pane_index} #{?@tt_note,#[fg=#e0af68]●#[default],#[fg=#565f89]○#[default]}#{?@tt_marker, #[fg=#{@tt_marker_color}]●#[default],} #[fg=#{?#{==:#{@tt_agent_kind},CLAUDE},#bb9af7,#{?#{==:#{@tt_agent_kind},CODEX},#7dcfff,#9ece6a}},bold]$agent_label#[default] #{?@tt_base_title,#{@tt_base_title},#{pane_title}}#{?#{&&:#{@tt_base_title},#{!=:#{pane_title},#{@tt_base_title}}}, #[fg=#565f89]#{pane_title},}#[align=right]#[fg=#565f89]#{?@tt_git_label,#{@tt_git_label} ,}"
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-format " #{pane_index} #{?@tt_note,#[fg=#e0af68]● #[default],}#[fg=#{?#{==:#{@tt_agent_kind},CLAUDE},#bb9af7,#{?#{==:#{@tt_agent_kind},CODEX},#7dcfff,#9ece6a}},bold]$agent_label#[default] #{?@tt_base_title,#{@tt_base_title},#{pane_title}} "
   "$TMUX_BIN" set-window-option -t "$target" -q pane-border-style "fg=#292e42,bg=default"
   "$TMUX_BIN" set-window-option -t "$target" -q pane-active-border-style "fg=#7aa2f7,bg=default"
 }
@@ -460,6 +490,15 @@ ops_session_idle() {
 create_ops() {
   local session="${1:-cockpit}"
   local start_dir="${2:-$PWD}"
+
+  create_ops_detached "$session" "$start_dir"
+  attach_or_switch "$session"
+}
+
+create_ops_detached() {
+  local session="${1:-cockpit}"
+  local start_dir="${2:-$PWD}"
+  local skip_shell_upgrade="${3:-}"
   local window window_id bootstrap_command width height
 
   case "$session" in
@@ -521,9 +560,10 @@ create_ops() {
     label_grid_window "$window_id" "$window"
   done
 
-  schedule_ops_shell_upgrade "$session"
+  if [[ "$skip_shell_upgrade" != "--no-shell-upgrade" ]]; then
+    schedule_ops_shell_upgrade "$session"
+  fi
   "$TMUX_BIN" select-window -t "$session:1"
-  attach_or_switch "$session"
 }
 
 ensure_studio_layout() {
@@ -777,9 +817,9 @@ agent_cockpit_manifest() {
 
   if [[ -n "${TT_AGENT_COCKPIT_MANIFEST:-}" ]]; then
     printf '%s\n' "$TT_AGENT_COCKPIT_MANIFEST"
-  elif [[ -f "$state_manifest" ]]; then
+  elif manifest_has_entries "$state_manifest"; then
     printf '%s\n' "$state_manifest"
-  elif [[ -f "$home_manifest" ]]; then
+  elif manifest_has_entries "$home_manifest"; then
     printf '%s\n' "$home_manifest"
   else
     printf '%s\n' "$dotfiles_manifest"
@@ -792,11 +832,18 @@ agent_cockpit_seed_manifest() {
 
   if [[ -n "${TT_AGENT_COCKPIT_MANIFEST:-}" && -f "$TT_AGENT_COCKPIT_MANIFEST" ]]; then
     printf '%s\n' "$TT_AGENT_COCKPIT_MANIFEST"
-  elif [[ -f "$home_manifest" ]]; then
+  elif manifest_has_entries "$home_manifest"; then
     printf '%s\n' "$home_manifest"
   else
     printf '%s\n' "$dotfiles_manifest"
   fi
+}
+
+manifest_has_entries() {
+  local manifest="$1"
+
+  [[ -f "$manifest" ]] || return 1
+  awk -F '\t' '$1 != "" && $1 !~ /^#/ { found=1 } END { exit found ? 0 : 1 }' "$manifest"
 }
 
 agent_cockpit_state_file() {
@@ -1418,6 +1465,7 @@ write_agent_cockpit_state() {
   local output="${1:-}"
   local quiet="${2:-}"
   local seed tmp session profile window pane window_panes dir start_command current_command live_title base_title seed_title seed_command command kind
+  local rows=0
 
   [[ -n "$output" ]] || output="$(agent_cockpit_state_file)"
   seed="$(agent_cockpit_manifest)"
@@ -1458,11 +1506,20 @@ write_agent_cockpit_state() {
     kind="$(agent_kind_for_command "$command")"
 
     printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$pane" "$dir" "$title" "$command" >> "$tmp"
+    rows=$((rows + 1))
     "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_base_title "$title" 2>/dev/null || true
     "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_command "$command" 2>/dev/null || true
     "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_kind "$kind" 2>/dev/null || true
     set_pane_git_label "$session:1.$pane" "$dir"
   done < <("$TMUX_BIN" list-panes -a -F '#{session_name}	#{@tt_profile}	#{window_index}	#{pane_index}	#{window_panes}	#{pane_current_path}	#{pane_start_command}	#{pane_current_command}	#{pane_title}	#{@tt_base_title}' 2>/dev/null || true)
+
+  if (( rows == 0 )); then
+    rm -f "$tmp"
+    if [[ "$quiet" != "--quiet" ]]; then
+      printf 'tt snapshot skipped: no live agent cockpit panes\n' >&2
+    fi
+    return 0
+  fi
 
   mv "$tmp" "$output"
   record_snapshot_history "$output" "agent-cockpit"
@@ -1807,6 +1864,7 @@ codex_restore_matches() {
     mode == "all" { print; next }
     mode == "pane" && $1 == selector { print; next }
     mode == "window" && index($1, selector ".") == 1 { print; next }
+    mode == "session" && index($1, selector ":") == 1 { print; next }
   ' "$snapshot"
 }
 
@@ -1838,11 +1896,11 @@ codex_restore_execute() {
       ;;
     all)
       ;;
-    pane|window)
+    pane|window|session)
       [[ -n "$selector" ]] || { echo "usage: tt codex-restore $mode <target>" >&2; return 2; }
       ;;
     *)
-      echo "usage: tt codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]" >&2
+      echo "usage: tt codex-restore [preview|all|pane <target>|window <session:window>|session <session>] [snapshot] [--execute]" >&2
       return 2
       ;;
   esac
@@ -2006,6 +2064,34 @@ clear_stale_agent_attention_pane_styles() {
   printf 'repair: cleared %s stale agent attention pane style(s)\n' "$cleared"
 }
 
+reset_agent_attention_pane() {
+  local target="${1:-${TMUX_PANE:-}}"
+  local marker style active_style badge tty
+
+  [[ -n "$target" ]] || return 0
+
+  marker="$("$TMUX_BIN" show-options -pt "$target" -qv @tt_marker 2>/dev/null || true)"
+  style="$("$TMUX_BIN" show-options -pt "$target" -qv window-style 2>/dev/null || true)"
+  active_style="$("$TMUX_BIN" show-options -pt "$target" -qv window-active-style 2>/dev/null || true)"
+  badge="$("$TMUX_BIN" show-options -pt "$target" -qv @agent_pane_badge 2>/dev/null || true)"
+
+  if [[ -n "$marker" ]]; then
+    return 0
+  fi
+  if [[ -z "$badge" ]] && ! is_agent_attention_pane_style "$style" "$active_style"; then
+    return 0
+  fi
+
+  "$TMUX_BIN" set-option -pt "$target" -qu @agent_pane_badge 2>/dev/null || true
+  "$TMUX_BIN" set-option -pt "$target" -qu window-style 2>/dev/null || true
+  "$TMUX_BIN" set-option -pt "$target" -qu window-active-style 2>/dev/null || true
+
+  tty="$("$TMUX_BIN" display-message -p -t "$target" '#{pane_tty}' 2>/dev/null || true)"
+  if [[ -n "$tty" && -w "$tty" ]]; then
+    printf '\033]11;#1a1b26\007\033]12;#c0caf5\007' >"$tty" 2>/dev/null || true
+  fi
+}
+
 mosh_target_for_pane() {
   local target="$1"
   local pane_pid child command remote
@@ -2058,12 +2144,12 @@ apply_mosh_attention_state() {
     approve)
       "$TMUX_BIN" set-option -pt "$target" window-style "fg=default,bg=#2b1720" 2>/dev/null || true
       "$TMUX_BIN" set-option -pt "$target" window-active-style "fg=default,bg=#361b27" 2>/dev/null || true
-      "$TMUX_BIN" set-option -pt "$target" @agent_pane_badge "#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] " 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" -qu @agent_pane_badge 2>/dev/null || true
       ;;
     waiting)
       "$TMUX_BIN" set-option -pt "$target" window-style "fg=default,bg=#241d12" 2>/dev/null || true
       "$TMUX_BIN" set-option -pt "$target" window-active-style "fg=default,bg=#2f2517" 2>/dev/null || true
-      "$TMUX_BIN" set-option -pt "$target" @agent_pane_badge "#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] " 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" -qu @agent_pane_badge 2>/dev/null || true
       ;;
     reset|active|idle|clear|'')
       style="$("$TMUX_BIN" show-options -pt "$target" -qv window-style 2>/dev/null || true)"
@@ -2137,6 +2223,9 @@ install_agent_status_menu() {
     "" "" "" \
     "Autosave on" o "run-shell -b '$self autosave on && $tmux_cmd display-message \"codex autosave on\"'" \
     "Autosave off" f "run-shell -b '$self autosave off && $tmux_cmd display-message \"codex autosave off\"'" 2>/dev/null || true
+
+  "$TMUX_BIN" set-hook -g "after-select-pane[92]" "run-shell -b '$self attention-reset #{pane_id}'" 2>/dev/null || true
+  "$TMUX_BIN" set-hook -g "after-select-window[92]" "run-shell -b '$self attention-reset #{pane_id}'" 2>/dev/null || true
 }
 
 install_agent_autosave_hooks() {
@@ -2312,6 +2401,7 @@ recover_agent_cockpit() {
     manifest="$(agent_cockpit_manifest)"
   fi
   [[ -f "$manifest" ]] || { echo "agent cockpit manifest not found: $manifest" >&2; exit 2; }
+  manifest_has_entries "$manifest" || { echo "agent cockpit manifest has no sessions: $manifest" >&2; exit 2; }
 
   start_recovery_server
   create_agent_cockpit_sessions "$manifest"
@@ -2325,6 +2415,101 @@ recover_agent_cockpit() {
   fi
 
   exec "$TMUX_BIN" attach -t "$attach_session"
+}
+
+snapshot_has_session() {
+  local snapshot="$1"
+  local session="${2:-cockpit}"
+
+  [[ -f "$snapshot" ]] || return 1
+  awk -F '\t' -v prefix="$session:" '$1 !~ /^#/ && index($1, prefix) == 1 { found=1 } END { exit found ? 0 : 1 }' "$snapshot"
+}
+
+snapshot_has_recoverable_session() {
+  local snapshot="$1"
+  local session="${2:-cockpit}"
+
+  [[ -f "$snapshot" ]] || return 1
+  awk -F '\t' -v prefix="$session:" '$1 !~ /^#/ && index($1, prefix) == 1 && $2 == "codex" && $7 == "exact" { found=1 } END { exit found ? 0 : 1 }' "$snapshot"
+}
+
+latest_cockpit_snapshot() {
+  local requested="${1:-}"
+  local session="${2:-cockpit}"
+  local snapshot history_dir
+
+  if [[ -n "$requested" && "$requested" != "--default" ]]; then
+    [[ -f "$requested" ]] || { echo "codex snapshot not found: $requested" >&2; return 1; }
+    snapshot_has_recoverable_session "$requested" "$session" || { echo "codex snapshot has no recoverable $session sessions: $requested" >&2; return 1; }
+    printf '%s\n' "$requested"
+    return 0
+  fi
+
+  snapshot="$(codex_cockpit_snapshot_file)"
+  if snapshot_has_recoverable_session "$snapshot" "$session"; then
+    printf '%s\n' "$snapshot"
+    return 0
+  fi
+
+  history_dir="$(snapshot_history_dir codex-cockpit)"
+  while IFS= read -r snapshot; do
+    [[ -n "$snapshot" ]] || continue
+    if snapshot_has_recoverable_session "$snapshot" "$session"; then
+      printf '%s\n' "$snapshot"
+      return 0
+    fi
+  done < <(find "$history_dir" -maxdepth 1 -type f -name '*.tsv' -print 2>/dev/null | sort -r)
+
+  echo "no CX snapshot found for $session" >&2
+  return 1
+}
+
+restore_cockpit_snapshot() {
+  local snapshot="$1"
+  local session="${2:-cockpit}"
+  local target kind cwd title current_command session_id row_status restore shell_command restored=0
+
+  while IFS=$'\t' read -r target kind cwd title current_command session_id row_status restore || [[ -n "${target:-}" ]]; do
+    [[ -n "${target:-}" && "${target:0:1}" != "#" ]] || continue
+    [[ "$target" == "$session:"* ]] || continue
+
+    shell_command="cd $(shell_quote "$cwd") && exec $(default_login_shell_command)"
+    "$TMUX_BIN" select-pane -t "$target" -T "$title" 2>/dev/null || true
+    "$TMUX_BIN" respawn-pane -k -t "$target" "$shell_command" 2>/dev/null || true
+  done < "$snapshot"
+
+  while IFS=$'\t' read -r target kind cwd title current_command session_id row_status restore || [[ -n "${target:-}" ]]; do
+    [[ -n "${target:-}" && "${target:0:1}" != "#" ]] || continue
+    [[ "$target" == "$session:"* ]] || continue
+    [[ "$kind" == "codex" && "$row_status" == "exact" && -n "$restore" ]] || continue
+
+    "$TMUX_BIN" respawn-pane -k -t "$target" -c "$cwd" "$(agent_color_prefix) codex resume --no-alt-screen $session_id" 2>/dev/null || true
+    restored=$((restored + 1))
+  done < "$snapshot"
+
+  restore_studio_layout "$session"
+  apply_studio_pane_titles "$session"
+  printf 'tt restored %s exact Codex pane(s)\n' "$restored" >&2
+}
+
+recover_cockpit() {
+  local snapshot="${1:-}"
+  local session="${2:-cockpit}"
+
+  if [[ -n "${TMUX:-}" ]]; then
+    echo "tt recover must be run outside tmux; it rebuilds the tmux server" >&2
+    exit 2
+  fi
+
+  snapshot="$(latest_cockpit_snapshot "$snapshot" "$session")" || exit 2
+  printf 'tt recovering %s from %s\n' "$session" "$snapshot" >&2
+
+  start_recovery_server
+  create_ops_detached "$session" "$HOME" --no-shell-upgrade
+  "$TMUX_BIN" kill-session -t __tt_recover 2>/dev/null || true
+  restore_cockpit_snapshot "$snapshot" "$session"
+
+  exec "$TMUX_BIN" attach -t "$session"
 }
 
 reset_to_profile() {
@@ -2455,6 +2640,7 @@ run_menu() {
   options+=("reset   [mobile] kill server + fresh phone session")
   options+=("restore [layout] unzoom windows + retile 6-pane sessions")
   options+=("restore [preview] Codex/Claude restore map")
+  options+=("recover [cockpit] rebuild CX-saved cockpit")
   options+=("recover [agents] rebuild saved agent cockpit")
   options+=("snapshot [agents] save live agent cockpit")
   options+=("snapshot [codex]  save Codex/Claude restore map")
@@ -2515,6 +2701,9 @@ run_menu() {
       ;;
     "restore [preview] Codex/Claude restore map")
       restore_preview
+      ;;
+    "recover [cockpit] rebuild CX-saved cockpit")
+      recover_cockpit
       ;;
     "recover [agents] rebuild saved agent cockpit")
       recover_agent_cockpit
@@ -2628,7 +2817,18 @@ case "${1:-}" in
     restore_preview "${2:-}"
     ;;
   recover)
-    recover_agent_cockpit "${2:-}" "${3:-factory2}"
+    case "${2:-cockpit}" in
+      cockpit|ops|--default)
+        recover_cockpit "${3:-}" "cockpit"
+        ;;
+      agents|agent|factory|factory2)
+        recover_agent_cockpit "${3:-}" "${4:-factory2}"
+        ;;
+      *)
+        echo "usage: tt recover [cockpit [snapshot]|agents [manifest] [attach-session]]" >&2
+        exit 2
+        ;;
+    esac
     ;;
   snapshot|backup|save)
     if [[ "${2:-}" == "--quiet" ]]; then
@@ -2764,6 +2964,9 @@ case "${1:-}" in
     ;;
   status-audit)
     enforce_static_tmux_status
+    ;;
+  attention-reset)
+    reset_agent_attention_pane "${2:-${TMUX_PANE:-}}"
     ;;
   titles)
     case "${2:-on}" in

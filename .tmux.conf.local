@@ -53,6 +53,8 @@ set-environment -g CLICOLOR 1
 set-environment -g CLICOLOR_FORCE 1
 set-environment -gu FORCE_COLOR
 set-environment -g COLORTERM truecolor
+set-environment -gu TERMINFO
+set-environment -g TERMINFO_DIRS "$HOME/.terminfo:/usr/share/terminfo"
 
 # Ghostty and iTerm usually present as xterm-256color; keep RGB, OSC 8, and OSC 52.
 set -g terminal-features "xterm*:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
