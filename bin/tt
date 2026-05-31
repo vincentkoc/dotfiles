@@ -1779,6 +1779,8 @@ doctor_tmux() {
   printf 'repair: sync pane markers\n'
   sync_pane_markers all
 
+  clear_stale_agent_attention_pane_styles
+
   printf 'repair: install autosave hooks/timer\n'
   install_agent_autosave_hooks
 
@@ -1969,6 +1971,37 @@ clear_legacy_shell_status_widgets() {
   "$TMUX_BIN" set -gu @hn_ticker 2>/dev/null || true
   "$TMUX_BIN" set -gu @hn_ticker_cache 2>/dev/null || true
   "$TMUX_BIN" set -gu @hn_ticker_last 2>/dev/null || true
+}
+
+is_agent_attention_pane_style() {
+  local style="${1:-}" active_style="${2:-}"
+
+  case "$style|$active_style" in
+    "fg=default,bg=#241d12|fg=default,bg=#2f2517") return 0 ;;
+    "fg=default,bg=#2b1720|fg=default,bg=#361b27") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+clear_stale_agent_attention_pane_styles() {
+  local target marker style active_style cleared=0
+
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    marker="$("$TMUX_BIN" show-options -pt "$target" -qv @tt_marker 2>/dev/null || true)"
+    [[ -z "$marker" ]] || continue
+
+    style="$("$TMUX_BIN" show-options -pt "$target" -qv window-style 2>/dev/null || true)"
+    active_style="$("$TMUX_BIN" show-options -pt "$target" -qv window-active-style 2>/dev/null || true)"
+    if is_agent_attention_pane_style "$style" "$active_style"; then
+      "$TMUX_BIN" set-option -pt "$target" -qu window-style 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" -qu window-active-style 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" -qu @agent_pane_badge 2>/dev/null || true
+      cleared=$((cleared + 1))
+    fi
+  done < <("$TMUX_BIN" list-panes -a -F '#{pane_id}' 2>/dev/null || true)
+
+  printf 'repair: cleared %s stale agent attention pane style(s)\n' "$cleared"
 }
 
 install_agent_status_menu() {
