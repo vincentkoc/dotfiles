@@ -1781,6 +1781,8 @@ doctor_tmux() {
 
   clear_stale_agent_attention_pane_styles
 
+  sync_mosh_attention_panes --quiet
+
   printf 'repair: install autosave hooks/timer\n'
   install_agent_autosave_hooks
 
@@ -2002,6 +2004,94 @@ clear_stale_agent_attention_pane_styles() {
   done < <("$TMUX_BIN" list-panes -a -F '#{pane_id}' 2>/dev/null || true)
 
   printf 'repair: cleared %s stale agent attention pane style(s)\n' "$cleared"
+}
+
+mosh_target_for_pane() {
+  local target="$1"
+  local pane_pid child command remote
+
+  pane_pid="$("$TMUX_BIN" display-message -p -t "$target" '#{pane_pid}' 2>/dev/null || true)"
+  [[ -n "$pane_pid" ]] || return 1
+
+  while IFS= read -r child; do
+    command="$(ps -ww -o command= -p "$child" 2>/dev/null || true)"
+    [[ "$command" == *mosh-client* && "$command" == *" -- "* ]] || continue
+    remote="${command##* -- }"
+    remote="${remote%% | *}"
+    remote="${remote%% *}"
+    [[ -n "$remote" ]] || continue
+    printf '%s\n' "$remote"
+    return 0
+  done < <(pgrep -P "$pane_pid" 2>/dev/null || true)
+
+  return 1
+}
+
+remote_agent_attention_state() {
+  local remote="$1"
+
+  ssh -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=15 -o ServerAliveCountMax=1 "$remote" '
+    if ! command -v tmux >/dev/null 2>&1 || ! tmux ls >/dev/null 2>&1; then
+      printf "reset\n"
+      exit 0
+    fi
+    state=reset
+    for pane in $(tmux list-panes -a -F "#{pane_id}" 2>/dev/null); do
+      badge="$(tmux show-options -pt "$pane" -qv @agent_pane_badge 2>/dev/null || true)"
+      case "$badge" in
+        *APPROVE*) printf "approve\n"; exit 0 ;;
+        *WAIT*) state=waiting ;;
+      esac
+    done
+    printf "%s\n" "$state"
+  ' 2>/dev/null | sed -n '1p'
+}
+
+apply_mosh_attention_state() {
+  local target="$1" state="$2"
+  local marker style active_style
+
+  marker="$("$TMUX_BIN" show-options -pt "$target" -qv @tt_marker 2>/dev/null || true)"
+  [[ -z "$marker" ]] || return 0
+
+  case "$state" in
+    approve)
+      "$TMUX_BIN" set-option -pt "$target" window-style "fg=default,bg=#2b1720" 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" window-active-style "fg=default,bg=#361b27" 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" @agent_pane_badge "#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] " 2>/dev/null || true
+      ;;
+    waiting)
+      "$TMUX_BIN" set-option -pt "$target" window-style "fg=default,bg=#241d12" 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" window-active-style "fg=default,bg=#2f2517" 2>/dev/null || true
+      "$TMUX_BIN" set-option -pt "$target" @agent_pane_badge "#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] " 2>/dev/null || true
+      ;;
+    reset|active|idle|clear|'')
+      style="$("$TMUX_BIN" show-options -pt "$target" -qv window-style 2>/dev/null || true)"
+      active_style="$("$TMUX_BIN" show-options -pt "$target" -qv window-active-style 2>/dev/null || true)"
+      if is_agent_attention_pane_style "$style" "$active_style"; then
+        "$TMUX_BIN" set-option -pt "$target" -qu window-style 2>/dev/null || true
+        "$TMUX_BIN" set-option -pt "$target" -qu window-active-style 2>/dev/null || true
+      fi
+      "$TMUX_BIN" set-option -pt "$target" -qu @agent_pane_badge 2>/dev/null || true
+      ;;
+  esac
+}
+
+sync_mosh_attention_panes() {
+  local quiet="${1:-}"
+  local target command remote state count=0
+
+  while IFS=$'\t' read -r target command; do
+    [[ "$command" == "mosh-client" ]] || continue
+    remote="$(mosh_target_for_pane "$target")" || continue
+    state="$(remote_agent_attention_state "$remote")"
+    [[ -n "$state" ]] || continue
+    apply_mosh_attention_state "$target" "$state"
+    count=$((count + 1))
+    [[ "$quiet" == "--quiet" ]] || printf 'mosh-attn: %s -> %s (%s)\n' "$target" "$remote" "$state"
+  done < <("$TMUX_BIN" list-panes -a -F '#{pane_id}	#{pane_current_command}' 2>/dev/null || true)
+
+  [[ "$quiet" == "--quiet" ]] || printf 'mosh-attn: synced %s pane(s)\n' "$count"
 }
 
 install_agent_status_menu() {
@@ -2574,6 +2664,9 @@ case "${1:-}" in
     ;;
   codex-snapshot-loop)
     codex_snapshot_timer_loop
+    ;;
+  mosh-attn)
+    sync_mosh_attention_panes "${2:-}"
     ;;
   autosave)
     case "${2:-on}" in
