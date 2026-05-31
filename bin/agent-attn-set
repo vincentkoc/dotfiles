@@ -168,7 +168,7 @@ set_tmux_state() {
 write_terminal_bg() {
   local bg="$1"
   local cursor="$2"
-  local tty_path
+  local tty_path sequence one_layer two_layer
 
   if [[ -n "${AGENT_ATTN_TTY:-}" ]]; then
     tty_path="$AGENT_ATTN_TTY"
@@ -181,7 +181,11 @@ write_terminal_bg() {
   fi
 
   # OSC 11 updates background; OSC 12 updates cursor color.
-  printf '\033]11;%s\007\033]12;%s\007' "$bg" "$cursor" >"$tty_path" || true
+  sequence="$(printf '\033]11;%s\007\033]12;%s\007' "$bg" "$cursor")"
+  # Nested tmux over mosh needs each tmux layer to unwrap its own DCS payload.
+  one_layer="$(printf '\033Ptmux;\033%s\033\\' "$sequence")"
+  two_layer="$(printf '\033Ptmux;\033%s\033\\' "$one_layer")"
+  printf '%s%s%s' "$sequence" "$one_layer" "$two_layer" >"$tty_path" || true
 }
 
 wait_segment() {
