@@ -2180,43 +2180,53 @@ sync_mosh_attention_panes() {
   [[ "$quiet" == "--quiet" ]] || printf 'mosh-attn: synced %s pane(s)\n' "$count"
 }
 
+show_pane_menu() {
+  local target="${1:-${TMUX_PANE:-}}"
+  local x="${2:-P}"
+  local y="${3:-P}"
+  local client="${4:-}"
+  local self tmux_cmd
+  local -a client_args=()
+
+  [[ -n "$target" ]] || return 0
+  self="$(tt_self_command)"
+  tmux_cmd="$(shell_quote "$TMUX_BIN")"
+  [[ -n "$client" ]] && client_args=(-c "$client")
+
+  "$TMUX_BIN" display-menu "${client_args[@]}" -T "Pane #{pane_index}" -t "$target" -x "$x" -y "$y" \
+    "Edit note" e "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 84 -h 24 -E '$self note edit #{pane_id}'" \
+    "Show note" v "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 72 -h 16 -E '$self note show #{pane_id} | LESS= less -SR'" \
+    "Replace with quick note" n "display-popup -t '#{pane_id}' -T 'quick note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 64 -h 10 -E '$self note prompt #{pane_id}'" \
+    "Clear note" c "run-shell -b '$self note clear #{pane_id} && $tmux_cmd display-message \"pane note cleared\"'" \
+    "" "" "" \
+    "Marker default" 0 "run-shell -b '$self marker set #{pane_id} default && $tmux_cmd display-message \"pane marker default\"'" \
+    "Marker amber" 1 "run-shell -b '$self marker set #{pane_id} amber && $tmux_cmd display-message \"pane marker amber\"'" \
+    "Marker green" 2 "run-shell -b '$self marker set #{pane_id} green && $tmux_cmd display-message \"pane marker green\"'" \
+    "Marker blue" 3 "run-shell -b '$self marker set #{pane_id} blue && $tmux_cmd display-message \"pane marker blue\"'" \
+    "Dim pane" 4 "run-shell -b '$self marker set #{pane_id} dim && $tmux_cmd display-message \"pane dimmed\"'" \
+    "" "" "" \
+    "Sync pane" s "run-shell -b '$self note sync #{pane_id} && $tmux_cmd display-message \"pane note synced\"'" \
+    "Sync all notes" a "run-shell -b '$self note sync all && $tmux_cmd display-message \"pane notes synced\"'" \
+    "" "" "" \
+    "Split horizontal" h "split-window -h -c '#{pane_current_path}'" \
+    "Split vertical" V "split-window -v -c '#{pane_current_path}'" \
+    "#{?#{>:#{window_panes},1},,-}Swap Up" u "swap-pane -U" \
+    "#{?#{>:#{window_panes},1},,-}Swap Down" d "swap-pane -D" \
+    "#{?pane_marked_set,,-}Swap Marked" S "swap-pane" \
+    "#{?pane_marked,Unmark,Mark}" m "select-pane -m" \
+    "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
+    "Respawn" R "respawn-pane -k" \
+    "Kill" X "kill-pane" 2>/dev/null || true
+}
+
 install_agent_status_menu() {
-  local self tmux_cmd mouse_passthrough_expr pane_menu_command
-  local -a pane_menu
+  local self tmux_cmd mouse_passthrough_expr
   self="$(tt_self_command)"
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
   mouse_passthrough_expr='#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}'
 
-  pane_menu=(
-    display-menu -T "Pane #{pane_index}" -t = -x M -y M
-    "Edit note" e "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 84 -h 24 -E '$self note edit #{pane_id}'"
-    "Show note" v "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 72 -h 16 -E '$self note show #{pane_id} | LESS= less -SR'"
-    "Replace with quick note" n "display-popup -t '#{pane_id}' -T 'quick note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 64 -h 10 -E '$self note prompt #{pane_id}'"
-    "Clear note" c "run-shell -b '$self note clear #{pane_id} && $tmux_cmd display-message \"pane note cleared\"'"
-    "" "" ""
-    "Marker default" 0 "run-shell -b '$self marker set #{pane_id} default && $tmux_cmd display-message \"pane marker default\"'"
-    "Marker amber" 1 "run-shell -b '$self marker set #{pane_id} amber && $tmux_cmd display-message \"pane marker amber\"'"
-    "Marker green" 2 "run-shell -b '$self marker set #{pane_id} green && $tmux_cmd display-message \"pane marker green\"'"
-    "Marker blue" 3 "run-shell -b '$self marker set #{pane_id} blue && $tmux_cmd display-message \"pane marker blue\"'"
-    "Dim pane" 4 "run-shell -b '$self marker set #{pane_id} dim && $tmux_cmd display-message \"pane dimmed\"'"
-    "" "" ""
-    "Sync pane" s "run-shell -b '$self note sync #{pane_id} && $tmux_cmd display-message \"pane note synced\"'"
-    "Sync all notes" a "run-shell -b '$self note sync all && $tmux_cmd display-message \"pane notes synced\"'"
-    "" "" ""
-    "Split horizontal" h "split-window -h -c '#{pane_current_path}'"
-    "Split vertical" V "split-window -v -c '#{pane_current_path}'"
-    "#{?#{>:#{window_panes},1},,-}Swap Up" u "swap-pane -U"
-    "#{?#{>:#{window_panes},1},,-}Swap Down" d "swap-pane -D"
-    "#{?pane_marked_set,,-}Swap Marked" S "swap-pane"
-    "#{?pane_marked,Unmark,Mark}" m "select-pane -m"
-    "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z"
-    "Respawn" R "respawn-pane -k"
-    "Kill" X "kill-pane"
-  )
-  printf -v pane_menu_command '%q ' "${pane_menu[@]}"
-
   "$TMUX_BIN" bind-key N display-popup -t "#{pane_id}" -T "note: #{session_name}:#{window_index}.#{pane_index}" -x "#{pane_left}" -y "#{pane_top}" -w 84 -h 24 -E "$self note edit #{pane_id}" 2>/dev/null || true
-  "$TMUX_BIN" bind-key -T root MouseDown3Pane if-shell -F "$mouse_passthrough_expr" "select-pane -t = \\; send-keys -M" "$pane_menu_command" 2>/dev/null || true
+  "$TMUX_BIN" bind-key -T root MouseDown3Pane if-shell -F "$mouse_passthrough_expr" "select-pane -t = \\; send-keys -M" "run-shell -b '$self pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{client_name}'" 2>/dev/null || true
 
   "$TMUX_BIN" bind-key -T root MouseDown1StatusRight run-shell -b "$self codex-snapshot --quiet && $tmux_cmd display-message 'codex snapshot saved'" 2>/dev/null || true
   "$TMUX_BIN" bind-key -T root MouseDown3StatusRight display-menu -T "CX SAVE" -x M -y W \
@@ -2874,6 +2884,9 @@ case "${1:-}" in
     ;;
   mosh-attn)
     sync_mosh_attention_panes "${2:-}"
+    ;;
+  pane-menu)
+    show_pane_menu "${2:-${TMUX_PANE:-}}" "${3:-P}" "${4:-P}" "${5:-}"
     ;;
   autosave)
     case "${2:-on}" in
