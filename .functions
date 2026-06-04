@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Always list directory contents upon 'cd'
+# List directory contents after interactive 'cd' unless disabled.
 cd() {
     builtin cd "$@" || return
-    if [[ -n "${DOTFILES_CD_SKIP_LISTING:-}" ]]; then
+    if [[ $- != *i* || -n "${DOTFILES_CD_SKIP_LISTING:-}" ]]; then
         return
     fi
     ls
