@@ -347,12 +347,14 @@ EOF
 }
 
 setup_codex_dotfiles() {
-    local df_dir codex_home codex_agents_src codex_config_src codex_hooks_src
+    local df_dir codex_home codex_agents_src codex_config_src codex_hooks_src private_codex_dir private_codex_config
     df_dir="$(dotfiles_dir)"
     codex_home="${CODEX_HOME:-$HOME/.codex}"
     codex_agents_src="$df_dir/.codex/AGENTS.md"
     codex_config_src="$df_dir/.codex/config.toml"
     codex_hooks_src="$df_dir/.codex/hooks.json"
+    private_codex_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.codex"
+    private_codex_config="$private_codex_dir/config.toml"
 
     mkdir -p "$codex_home"
 
@@ -364,6 +366,8 @@ setup_codex_dotfiles() {
 
     if [[ -f "$codex_config_src" ]]; then
         link_dotfile "$codex_config_src" "$codex_home/config.toml"
+    elif [[ "$(uname)" == "Darwin" && -f "$private_codex_config" ]]; then
+        link_dotfile "$private_codex_config" "$codex_home/config.toml"
     else
         warn "Codex config file missing in dotfiles: $codex_config_src"
     fi
