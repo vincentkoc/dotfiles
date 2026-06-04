@@ -426,13 +426,7 @@ APPSTORE=(
     "1378123825"  # Negative
 
     # Communication
-    "803453959"   # Slack
     "310633997"   # WhatsApp
-
-    # Microsoft Office
-    "462058435"   # Microsoft Excel
-    "462062816"   # Microsoft PowerPoint
-    "462054704"   # Microsoft Word
 
     # Travel & Utilities
     "1358823008"  # Flighty
