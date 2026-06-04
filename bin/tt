@@ -547,9 +547,8 @@ create_ops_detached() {
     attach_or_switch "$session"
   fi
 
-  "$TMUX_BIN" new-session -d -x "$width" -y "$height" -s "$session" -n ops -c "$start_dir" "$bootstrap_command"
+  window_id="$("$TMUX_BIN" new-session -d -x "$width" -y "$height" -P -F '#{window_id}' -s "$session" -n ops -c "$start_dir" "$bootstrap_command")"
   set_profile_metadata "$session" ops
-  window_id="$session:1"
   build_studio_layout "$window_id" "$bootstrap_command"
   label_grid_window "$window_id" ops
 
@@ -563,7 +562,7 @@ create_ops_detached() {
   if [[ "$skip_shell_upgrade" != "--no-shell-upgrade" ]]; then
     schedule_ops_shell_upgrade "$session"
   fi
-  "$TMUX_BIN" select-window -t "$session:1"
+  "$TMUX_BIN" select-window -t "$window_id"
 }
 
 ensure_studio_layout() {
