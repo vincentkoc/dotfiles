@@ -30,6 +30,11 @@ run_privileged() {
 
 dotfiles_dir() {
     if [[ "$(uname)" == "Darwin" ]]; then
+        if [[ -d "$HOME/GIT/_Perso/dotfiles" ]]; then
+            echo "$HOME/GIT/_Perso/dotfiles"
+            return
+        fi
+
         echo "$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
     else
         echo "$HOME/.dotfiles"
