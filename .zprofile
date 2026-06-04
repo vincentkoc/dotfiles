@@ -19,3 +19,6 @@ if [[ ! -o interactive ]] && [[ -z "${DOTFILES_Z_LOADED:-}" ]]; then
   fi
   unset _dotfiles_z_plugin
 fi
+
+# OrbStack command-line tools and integration.
+source ~/.orbstack/shell/init.zsh 2>/dev/null || :
