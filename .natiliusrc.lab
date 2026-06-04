@@ -1,0 +1,23 @@
+# Natilius opt-in profile: heavy/specialist tools.
+# Use with: natilius --profile lab --check
+
+source "$HOME/.natiliusrc"
+
+BREWTAPS+=(
+    "r-lib/rig"
+    "rfidresearchgroup/proxmark3"
+)
+
+BREWPACKAGES+=(
+    "rfidresearchgroup/proxmark3/proxmark3"
+)
+
+BREWCASKS+=(
+    "gpg-suite"
+    "xquartz"
+    "mactex"
+    "charles"
+    "tableplus"
+    "mysqlworkbench"
+    "rig"
+)

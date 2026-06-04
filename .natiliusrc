@@ -109,8 +109,6 @@ BREWTAPS=(
     "homebrew/cask"
     "adoptopenjdk/openjdk"
     "github/gh"
-    "r-lib/rig"
-    "rfidresearchgroup/proxmark3"
     "mongodb/brew"
     "warrensbox/tap"
     "derailed/popeye"
@@ -252,7 +250,6 @@ BREWPACKAGES=(
     "huggingface/tap/git-xet"
 
     # AI Tools
-    "codex"
     "gemini-cli"
 
     # Python Tools
@@ -272,7 +269,6 @@ BREWPACKAGES=(
     "glow"
     "gum"
     "vhs"
-    "espanso"
     "xz"
     "zlib"
     "vincentkoc/tap/natilius"
@@ -332,9 +328,10 @@ BREWCASKS=(
     # Security & Privacy
     "1password"
     "1password-cli"
-    "gpg-suite"
-    "keybase"
-    "muzzle"
+    "blockblock"
+    "little-snitch"
+    "do-not-disturb"
+    "knockknock"
 
     # Browsers
     "google-chrome"
@@ -343,27 +340,28 @@ BREWCASKS=(
 
     # Productivity & System
     "raycast"
-    "alfred"
     "alt-tab"
-    "bartender"
     "cheatsheet"
     "keyboard-maestro"
     "betterdisplay"
     "stats"
     "onyx"
     "pika"
+    "wispr-flow"
+    "granola"
 
     # Terminal & Development
     "iterm2"
-    "itermai"
-    "docker-desktop"
+    "orbstack"
     "visual-studio-code"
     "sublime-text"
     "sublime-merge"
-    "xquartz"
     "ngrok"
-    "mactex"
     "android-platform-tools"
+    "codex"
+    "claude"
+    "ollama-app"
+    "zed"
 
     # Java Runtimes
     "temurin"
@@ -373,12 +371,7 @@ BREWCASKS=(
     # Git Clients (choose one)
     "github"
 
-    # Database Tools (choose one)
-    "tableplus"
-    "mysqlworkbench"
-
     # API & Network Debug
-    "charles"
     "tailscale-app"
     "tripmode"
 
@@ -388,18 +381,14 @@ BREWCASKS=(
     "dropbox"
 
     # Image & Video
-    "balenaetcher"
     "imageoptim"
-    "kap"
     "keycastr"
 
     # Communication
     "slack"
     "zoom"
     "discord"
-    "amazon-chime"
     "loom"
-    "miro"
 
     # Notes & Knowledge
     "notion"
@@ -417,18 +406,12 @@ BREWCASKS=(
 
     # Hardware & Devices
     "airbuddy"
-    "rfidresearchgroup/proxmark3/proxmark3"
 
-    # Development Languages
-    "mamp"
-    "rig"
+    # Virtualization
+    "parallels"
 
     # Text Expansion
     "espanso"
-
-    # Other
-    "clay"
-    "rescuetime"
 )
 
 # ============================================================================
@@ -442,7 +425,7 @@ APPSTORE=(
     "975937182"   # Fantastical
     "639968404"   # Parcel Classic
     "1246781916"  # Kerberos Ticket Autorenewal
-    "1484348796"  # Endel
+    "1346247457"  # Endel
     "1423210932"  # Flow
     "1039633667"  # Irvue
     "585829637"   # Todoist
@@ -452,7 +435,6 @@ APPSTORE=(
     # Communication
     "803453959"   # Slack
     "310633997"   # WhatsApp
-    "1475387142"  # Tailscale
 
     # Microsoft Office
     "462058435"   # Microsoft Excel
@@ -461,7 +443,12 @@ APPSTORE=(
 
     # Travel & Utilities
     "1358823008"  # Flighty
+    "932747118"   # Shadowrocket
     "1668083311"  # Whisper Transcription
+)
+
+MANUAL_APPS=(
+    "cotypist"
 )
 
 # ============================================================================

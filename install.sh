@@ -286,6 +286,20 @@ setup_shell_symlinks() {
     link_dotfile "$df_dir/functions" "$HOME/functions"
 }
 
+setup_config_symlinks() {
+    local df_dir natilius_profile
+    df_dir="$(dotfiles_dir)"
+
+    link_dotfile "$df_dir/.gitconfig" "$HOME/.gitconfig"
+    link_dotfile "$df_dir/.mackup.cfg" "$HOME/.mackup.cfg"
+    link_dotfile "$df_dir/.natiliusrc" "$HOME/.natiliusrc"
+
+    for natilius_profile in "$df_dir"/.natiliusrc.*; do
+        [[ -e "$natilius_profile" ]] || continue
+        link_dotfile "$natilius_profile" "$HOME/$(basename "$natilius_profile")"
+    done
+}
+
 ensure_ssh_signing_trust_file() {
     local df_dir signing_format allowed_signers ssh_pub_key user_email
     df_dir="$(dotfiles_dir)"
@@ -721,6 +735,7 @@ main() {
     install_vim_theme
     install_nvim_plugins
     setup_shell_symlinks
+    setup_config_symlinks
     ensure_ssh_signing_trust_file
     setup_codex_dotfiles
     setup_claude_dotfiles

@@ -1,0 +1,19 @@
+# Natilius opt-in profile: older apps kept out of first-run setup.
+# Use with: natilius --profile legacy --check
+
+source "$HOME/.natiliusrc"
+
+BREWCASKS+=(
+    "keybase"
+    "muzzle"
+    "alfred"
+    "bartender"
+    "itermai"
+    "mamp"
+    "balenaetcher"
+    "kap"
+    "amazon-chime"
+    "miro"
+    "clay"
+    "rescuetime"
+)
