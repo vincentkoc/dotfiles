@@ -74,7 +74,6 @@ if [[ $IS_MACOS == true ]]; then
         export HOMEBREW_NO_ANALYTICS=1
         export HOMEBREW_NO_INSECURE_REDIRECT=1
         export HOMEBREW_NO_ENV_HINTS=1
-        export HOMEBREW_CASK_OPTS="--appdir=/Applications"
     fi
 fi
 
