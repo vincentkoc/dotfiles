@@ -418,7 +418,12 @@ setup_claude_dotfiles() {
     link_dotfile "$claude_settings_src" "$claude_settings_dest"
     success "Claude settings linked to $claude_settings_src"
 
-    if [[ "$(uname)" == "Darwin" && -f "$claude_desktop_dest" ]] && command -v jq >/dev/null 2>&1; then
+    if [[ "$(uname)" == "Darwin" ]] && command -v jq >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$claude_desktop_dest")"
+        if [[ ! -s "$claude_desktop_dest" ]]; then
+            printf '{"preferences":{}}\n' > "$claude_desktop_dest"
+        fi
+
         claude_account_uuid="$(
             jq -r '.ownerAccountId // empty' "$HOME/Library/Application Support/Claude/cowork-enabled-cli-ops.json" 2>/dev/null ||
                 jq -r '.oauthAccount.accountUuid // empty' "$HOME/.claude.json" 2>/dev/null ||
