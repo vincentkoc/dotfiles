@@ -112,7 +112,6 @@ BREWTAPS=(
     "warrensbox/tap"
     "terraform-linters/tap"
     "derailed/popeye"
-    "huggingface/tap"
     "supabase/tap"
     "vincentkoc/tap"
 )
@@ -210,7 +209,6 @@ BREWPACKAGES=(
     # Infrastructure as Code
     "opentofu"
     "terraformer"
-    "tflint"
     "tfsec"
 
     # Cloud CLIs
@@ -246,7 +244,6 @@ BREWPACKAGES=(
     "apache-spark"
     "scala"
     "huggingface-cli"
-    "huggingface/tap/git-xet"
 
     # AI Tools
     "gemini-cli"
@@ -311,6 +308,7 @@ BREWCASKS=(
     "ngrok"
     "android-platform-tools"
     "warrensbox/tap/tfswitch"
+    "terraform-linters/tap/tflint"
     "codex"
     "claude"
     "ollama-app"
