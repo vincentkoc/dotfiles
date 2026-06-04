@@ -290,7 +290,6 @@ BREWCASKS=(
     # Productivity & System
     "raycast"
     "alt-tab"
-    "cheatsheet"
     "keyboard-maestro"
     "betterdisplay"
     "stats"
