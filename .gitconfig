@@ -135,4 +135,4 @@
 [tag]
 	gpgsign = true
 [gpg "ssh"]
-	allowedSignersFile = ~/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.ssh/allowed_signers
+	allowedSignersFile = ~/GIT/_Perso/dotfiles/.ssh/allowed_signers
