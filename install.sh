@@ -306,6 +306,48 @@ setup_config_symlinks() {
     done
 }
 
+setup_spec_symlink() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        info "Skipping ~/.spec sync on non-macOS"
+        return
+    fi
+
+    local sync_dir local_spec backup
+    sync_dir="${DOTFILES_SPEC_SYNC_DIR:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/spec}"
+    local_spec="$HOME/.spec"
+
+    if [[ ! -d "$(dirname "$sync_dir")" ]]; then
+        warn "Spec sync parent not found: $(dirname "$sync_dir")"
+        return
+    fi
+
+    mkdir -p "$sync_dir"
+
+    if [[ -L "$local_spec" ]]; then
+        if [[ "$(readlink "$local_spec")" == "$sync_dir" ]]; then
+            success "~/.spec already symlinked"
+        else
+            ln -sfn "$sync_dir" "$local_spec"
+            success "Updated ~/.spec symlink"
+        fi
+        return
+    fi
+
+    if [[ -d "$local_spec" ]]; then
+        rsync -a --exclude '.DS_Store' "$local_spec"/ "$sync_dir"/
+        backup="${local_spec}.pre-dotfiles.$(date +%Y%m%d%H%M%S).bak"
+        mv "$local_spec" "$backup"
+        warn "Existing ~/.spec backed up: $backup"
+    elif [[ -e "$local_spec" ]]; then
+        backup="${local_spec}.pre-dotfiles.$(date +%Y%m%d%H%M%S).bak"
+        mv "$local_spec" "$backup"
+        warn "Existing ~/.spec file backed up: $backup"
+    fi
+
+    ln -s "$sync_dir" "$local_spec"
+    success "Symlinked ~/.spec to $sync_dir"
+}
+
 ensure_ssh_signing_trust_file() {
     local df_dir signing_format allowed_signers ssh_pub_key user_email
     df_dir="$(dotfiles_dir)"
@@ -751,6 +793,7 @@ main() {
     install_nvim_plugins
     setup_shell_symlinks
     setup_config_symlinks
+    setup_spec_symlink
     ensure_ssh_signing_trust_file
     setup_codex_dotfiles
     setup_claude_dotfiles
