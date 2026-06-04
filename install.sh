@@ -298,6 +298,7 @@ setup_config_symlinks() {
     link_dotfile "$df_dir/.gitconfig" "$HOME/.gitconfig"
     link_dotfile "$df_dir/.mackup.cfg" "$HOME/.mackup.cfg"
     link_dotfile "$df_dir/.natiliusrc" "$HOME/.natiliusrc"
+    link_dotfile "$df_dir/.ripgreprc" "$HOME/.ripgreprc"
 
     for natilius_profile in "$df_dir"/.natiliusrc.*; do
         [[ -e "$natilius_profile" ]] || continue

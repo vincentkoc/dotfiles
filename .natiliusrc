@@ -106,9 +106,6 @@ DIRSTOEXCLUDEFROMTIMEMACHINE=(
 # HOMEBREW TAPS
 # ============================================================================
 BREWTAPS=(
-    "adoptopenjdk/openjdk"
-    "github/gh"
-    "mongodb/brew"
     "warrensbox/tap"
     "terraform-linters/tap"
     "derailed/popeye"
