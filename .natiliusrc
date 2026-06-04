@@ -157,7 +157,7 @@ BREWPACKAGES=(
     "reattach-to-user-namespace"
 
     # Security & Encryption
-    "gpg"
+    "gnupg"
     "pinentry"
     "pinentry-mac"
     "openssl@3"
@@ -188,7 +188,6 @@ BREWPACKAGES=(
 
     # Containers & Kubernetes
     "docker-compose"
-    "kubectl"
     "kubernetes-cli"
     "kubectx"
     "helm"
@@ -239,7 +238,7 @@ BREWPACKAGES=(
     # Data & ML
     "apache-spark"
     "scala"
-    "huggingface-cli"
+    "hf"
 
     # AI Tools
     "gemini-cli"
@@ -250,7 +249,6 @@ BREWPACKAGES=(
 
     # Databases
     "sqlite"
-    "sqlite3"
     "readline"
 
     # Utilities
@@ -303,8 +301,8 @@ BREWCASKS=(
     "sublime-merge"
     "ngrok"
     "android-platform-tools"
-    "warrensbox/tap/tfswitch"
-    "terraform-linters/tap/tflint"
+    "tfswitch"
+    "tflint"
     "codex"
     "claude"
     "ollama-app"
