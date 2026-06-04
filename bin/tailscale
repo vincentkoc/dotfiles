@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app_cli="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+if [[ ! -x "$app_cli" ]]; then
+    echo "tailscale: Tailscale.app CLI not found at $app_cli" >&2
+    exit 127
+fi
+
+exec "$app_cli" "$@"
