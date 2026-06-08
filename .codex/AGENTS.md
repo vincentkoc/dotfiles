@@ -106,6 +106,9 @@
 - For external repos, run relevant tests and formatters before handoff.
 - At the end of a work cycle, clean up or close related issues/PRs when appropriate.
 - If merging on my behalf, squash PRs unless I say otherwise.
+- For contributor PRs, land the PR instead of copying the work to `main` whenever the PR is viable. If fixes are needed and maintainers can edit the branch, push the maintainer fixes to that PR branch and merge the PR.
+- If a contributor PR cannot be edited (`maintainerCanModify=false`), merge it as-is when it is clean and correct. Only direct-land or cherry-pick when the PR branch is uneditable and the landed diff must differ, the PR is conflicted/dirty with unrelated drift, or multiple PRs overlap and one canonical fix is needed.
+- When direct-landing or cherry-picking from a contributor PR is unavoidable, preserve author/co-author credit, explain the exact reason in the PR before closing, link the landed commit, and do not post duplicate close comments.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`.
 - In `openclaw/openclaw`, maintainer Testbox mode is my personal default: treat `OPENCLAW_TESTBOX=1` or these standing rules as permission to use Blacksmith Testbox for `pnpm` gates, e2e, broad suites, and long/heavy validation. This is maintainers-only and requires Blacksmith access; if auth/org is missing, report that instead of falling back to a huge local run.
 - In `openclaw/openclaw`, before handoff/push run `pnpm check:changed` unless the task explicitly needs a wider gate. When maintainer Testbox mode applies, run it inside the same warmed Testbox unless `OPENCLAW_LOCAL_CHECK_MODE=throttled` is explicitly set as the local escape hatch.
