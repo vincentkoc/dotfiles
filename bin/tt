@@ -430,17 +430,21 @@ refresh_ops_labels() {
 
 upgrade_ops_shells() {
   local session="$1"
-  local window_id pane shell_command
+  local current_command cwd pane shell_command window_id
 
   ensure_tmux_default_shell
-  shell_command="exec $(default_login_shell_command)"
+  shell_command="$(default_login_shell_command)"
 
   while IFS= read -r window_id; do
     [[ -n "$window_id" ]] || continue
-    while IFS= read -r pane; do
+    while IFS=$'\t' read -r pane current_command cwd; do
       [[ -n "$pane" ]] || continue
-      send_literal_command "$pane" "$shell_command"
-    done < <("$TMUX_BIN" list-panes -t "$window_id" -F '#{pane_id}')
+      case "$current_command" in
+        zsh|bash|fish|sh)
+          "$TMUX_BIN" respawn-pane -k -t "$pane" -c "$cwd" "$shell_command" 2>/dev/null || true
+          ;;
+      esac
+    done < <("$TMUX_BIN" list-panes -t "$window_id" -F '#{pane_id}	#{pane_current_command}	#{pane_current_path}')
   done < <("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}')
 }
 
