@@ -7,15 +7,6 @@
   "permissions": {
     "defaultMode": "bypassPermissions"
   },
-  "enabledPlugins": {
-    "claude-supermemory@supermemory-plugins": false,
-    "frontend-design@claude-plugins-official": true
-  },
-  "autoUpdatesChannel": "latest",
-  "skipDangerousModePermissionPrompt": true,
-  "feedbackSurveyState": {
-    "lastShownTime": 1754472559009
-  },
   "hooks": {
     "SessionStart": [
       {
@@ -74,5 +65,15 @@
       }
     ]
   },
-  "effortLevel": "high"
+  "enabledPlugins": {
+    "claude-supermemory@supermemory-plugins": false,
+    "frontend-design@claude-plugins-official": true
+  },
+  "effortLevel": "high",
+  "autoUpdatesChannel": "latest",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "feedbackSurveyState": {
+    "lastShownTime": 1754472559009
+  }
 }
