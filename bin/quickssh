@@ -117,6 +117,19 @@ list_legacy_aliases() {
   fi
 }
 
+legacy_host_prefers_mosh() {
+  local alias="$1" key
+
+  # shellcheck disable=SC2154 # Sourced from the private legacy hosts file.
+  if load_legacy_hosts && declare -p quickssh_mosh_hosts >/dev/null 2>&1; then
+    for key in "${quickssh_mosh_hosts[@]}"; do
+      [[ "$key" == "$alias" ]] && return 0
+    done
+  fi
+
+  return 1
+}
+
 ssh_config_files() {
   local file file_dir line key pattern expanded i
   local -a files=("$HOME/.ssh/config")
@@ -224,6 +237,7 @@ choose_host() {
 }
 
 use_mosh=false
+mosh_requested=false
 use_screen=false
 use_tmux=false
 local_port=""
@@ -231,7 +245,10 @@ destination_port=""
 
 while getopts ":mstl:d:h" option; do
   case "$option" in
-    m) use_mosh=true ;;
+    m)
+      use_mosh=true
+      mosh_requested=true
+      ;;
     s) use_screen=true ;;
     t) use_tmux=true ;;
     l) local_port="$OPTARG" ;;
@@ -264,6 +281,9 @@ port=""
 
 if resolved="$(resolve_legacy_host "$input")"; then
   IFS=$'\t' read -r target port _ <<< "$resolved"
+  if legacy_host_prefers_mosh "$input"; then
+    use_mosh=true
+  fi
 fi
 
 remote_command=()
@@ -285,8 +305,11 @@ if [[ -n "$local_port" || -n "$destination_port" ]]; then
     exit 2
   fi
   if [[ "$use_mosh" == "true" ]]; then
-    printf 'quickssh: port forwarding is not supported with mosh\n' >&2
-    exit 2
+    if [[ "$mosh_requested" == "true" ]]; then
+      printf 'quickssh: port forwarding is not supported with mosh\n' >&2
+      exit 2
+    fi
+    use_mosh=false
   fi
   ssh_args+=(-L "$local_port:localhost:$destination_port")
 fi
