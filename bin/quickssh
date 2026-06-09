@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: quickssh [-m] [-s] [-t] [-l local_port] [-d destination_port] <host>
+Usage: quickssh [-m] [-s] [-t] [-l local_port] [-d destination_port] [host]
 
 Options:
   -m  use mosh
@@ -12,6 +12,7 @@ Options:
   -l  local port for SSH forwarding
   -d  remote destination port for SSH forwarding
 
+Run without a host to choose one interactively.
 Plain SSH config hosts are supported directly; legacy .extra aliases remain available.
 EOF
 }
@@ -105,6 +106,123 @@ list_hosts() {
   fi
 }
 
+list_legacy_aliases() {
+  local key
+
+  # shellcheck disable=SC2154 # Sourced from the private legacy hosts file.
+  if load_legacy_hosts && declare -p quickssh_hosts >/dev/null 2>&1; then
+    for key in "${quickssh_hosts[@]}"; do
+      printf '%s\n' "$key"
+    done
+  fi
+}
+
+ssh_config_files() {
+  local file file_dir line key pattern expanded i
+  local -a files=("$HOME/.ssh/config")
+
+  for ((i = 0; i < ${#files[@]}; i++)); do
+    file="${files[$i]}"
+    [[ -f "$file" ]] || continue
+    printf '%s\n' "$file"
+    file_dir="$(dirname "$file")"
+
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      # shellcheck disable=SC2086 # Split OpenSSH Include arguments like ssh_config does.
+      set -- $line
+      [[ $# -gt 1 ]] || continue
+
+      key="$1"
+      case "$key" in
+        [Ii][Nn][Cc][Ll][Uu][Dd][Ee]) ;;
+        *) continue ;;
+      esac
+      shift
+
+      for pattern in "$@"; do
+        pattern="${pattern/#\~/$HOME}"
+        [[ "$pattern" = /* ]] || pattern="$file_dir/$pattern"
+        for expanded in $pattern; do
+          [[ -f "$expanded" ]] && files+=("$expanded")
+        done
+      done
+    done < "$file"
+  done
+}
+
+list_ssh_config_hosts() {
+  local file
+
+  while IFS= read -r file; do
+    awk '
+      /^[[:space:]]*(#|$)/ { next }
+      tolower($1) == "host" {
+        for (i = 2; i <= NF; i++) {
+          if ($i !~ /[*?!%]/) {
+            print $i
+          }
+        }
+      }
+    ' "$file"
+  done < <(ssh_config_files) | sort -fu
+}
+
+choose_with_fzf() {
+  command -v fzf >/dev/null 2>&1 || return 1
+  printf '%s\n' "$@" | fzf --prompt='quickssh > ' --height=40% --layout=reverse --border
+}
+
+choose_with_select() {
+  local options=("$@")
+  local choice
+  PS3="quickssh> "
+
+  select choice in "${options[@]}"; do
+    [[ -n "${choice:-}" ]] || continue
+    printf '%s\n' "$choice"
+    return 0
+  done
+}
+
+choose_option() {
+  local options=("$@")
+  local selected
+
+  if selected="$(choose_with_fzf "${options[@]}")"; then
+    printf '%s\n' "$selected"
+    return 0
+  fi
+
+  choose_with_select "${options[@]}"
+}
+
+choose_host() {
+  local host row selection
+  local -a options=()
+
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    options+=("$(printf '%-28s %s' "$host" "quickssh alias")")
+  done < <(list_legacy_aliases | awk 'NF && !seen[$0]++')
+
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    options+=("$(printf '%-28s %s' "$host" "ssh config host")")
+  done < <(list_ssh_config_hosts)
+
+  if [[ ${#options[@]} -eq 0 ]]; then
+    usage >&2
+    printf '\nquickssh: no hosts found to choose from\n' >&2
+    exit 2
+  fi
+
+  selection="$(choose_option "${options[@]}")"
+  row="${selection%%[[:space:]]*}"
+  [[ -n "$row" ]] || return 130
+  printf '%s\n' "$row"
+}
+
 use_mosh=false
 use_screen=false
 use_tmux=false
@@ -130,14 +248,17 @@ while getopts ":mstl:d:h" option; do
 done
 shift $((OPTIND - 1))
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -eq 0 ]]; then
+  input="$(choose_host)"
+elif [[ $# -eq 1 ]]; then
+  input="$1"
+else
   usage >&2
   printf '\n' >&2
   list_hosts >&2
   exit 2
 fi
 
-input="$1"
 target="$input"
 port=""
 
