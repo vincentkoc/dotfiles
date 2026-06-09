@@ -39,7 +39,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.codex/plugins/cache/vincentkoc-local/tokenjuice/local/scripts/post_tool_use_tokenjuice.py"
+            "command": "/opt/homebrew/bin/tokenjuice codex-post-tool-use",
+            "statusMessage": "compacting bash output with tokenjuice",
+            "timeout": 10
           }
         ]
       }
