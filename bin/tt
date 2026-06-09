@@ -85,7 +85,7 @@ ensure_tmux_default_shell() {
 }
 
 agent_color_prefix() {
-  printf 'env -u NO_COLOR -u TERMINFO CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor TERMINFO_DIRS=$HOME/.terminfo:/usr/share/terminfo'
+  printf 'env -u NO_COLOR -u TERMINFO CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor TERMINFO_DIRS=$HOME/.terminfo:/usr/share/terminfo'
 }
 
 agent_kind_for_command() {

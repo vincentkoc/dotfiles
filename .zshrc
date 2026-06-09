@@ -34,6 +34,13 @@ if [[ -r "$DOTFILES_ENV" ]]; then
 fi
 unset DOTFILES_ENV
 
+# Interactive shells should not inherit agent/no-color defaults. They break TUIs
+# like Codex, especially when launched directly instead of through wrappers.
+if [[ "${DOTFILES_PRESERVE_NO_COLOR:-0}" != "1" ]]; then
+	unset NO_COLOR
+fi
+export COLORTERM="${COLORTERM:-truecolor}"
+
 # Disable app telemetry and OTEL exporters for local CLIs and inherited MCP processes.
 export CLAUDE_CODE_ENABLE_TELEMETRY=0
 export OTEL_SDK_DISABLED=true
@@ -355,20 +362,28 @@ termfix() {
 	reset
 }
 
+_dotfiles_codex_env() {
+	env -u NO_COLOR -u TERMINFO CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor "$@"
+}
+
+codex() {
+	_dotfiles_codex_env codex "$@"
+}
+
 codex-resume() {
 	if [[ $# -gt 0 ]]; then
-		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex resume --no-alt-screen "$@"
+		_dotfiles_codex_env codex resume --no-alt-screen "$@"
 	else
-		env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex resume --all --no-alt-screen
+		_dotfiles_codex_env codex resume --all --no-alt-screen
 	fi
 }
 
 codex-last() {
-	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex resume --last --no-alt-screen "$@"
+	_dotfiles_codex_env codex resume --last --no-alt-screen "$@"
 }
 
 codex-tmux() {
-	env -u NO_COLOR CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor codex --no-alt-screen "$@"
+	_dotfiles_codex_env codex --no-alt-screen "$@"
 }
 
 cx() {
@@ -376,8 +391,8 @@ cx() {
 }
 
 _codex_vpn_env() {
-	env -u NO_COLOR \
-		CLICOLOR=1 CLICOLOR_FORCE=1 COLORTERM=truecolor \
+	env -u NO_COLOR -u TERMINFO \
+		CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor \
 		HTTP_PROXY=http://127.0.0.1:1082 \
 		HTTPS_PROXY=http://127.0.0.1:1082 \
 		ALL_PROXY=http://127.0.0.1:1082 \
