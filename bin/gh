@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+lookup_path=""
+IFS=: read -r -a path_entries <<< "${PATH:-}"
+
+for path_entry in "${path_entries[@]}"; do
+  path_entry="${path_entry:-.}"
+  if [[ -d "$path_entry" ]] && [[ "$(cd -P -- "$path_entry" && pwd)" == "$wrapper_dir" ]]; then
+    continue
+  fi
+  lookup_path+="${lookup_path:+:}$path_entry"
+done
+
+gh_bin="$(PATH="$lookup_path" command -v gh || true)"
+if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
+  printf 'gh: GitHub CLI is not installed\n' >&2
+  exit 127
+fi
+
+exec env NO_COLOR=1 GH_FORCE_TTY=0 "$gh_bin" "$@"

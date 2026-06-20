@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec gh "$@"
+# `ghx` is available on every dotfiles host, even where no separate ghx binary is installed.
+# Delegate to the gh wrapper so agent-facing output never contains terminal color escapes.
+wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "$wrapper_dir/gh" "$@"
