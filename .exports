@@ -380,6 +380,10 @@ path_append "$ANDROID_HOME/platform-tools"
 path_remove "$HOME/.local/bin"
 path_prepend "$HOME/.local/bin"
 
+# Keep the dotfiles shims ahead of package-manager binaries.
+path_remove "$DOTFILES_BIN_ROOT"
+path_prepend "$DOTFILES_BIN_ROOT"
+
 # AWS
 export AWS_SDK_LOAD_CONFIG=1
 

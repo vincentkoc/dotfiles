@@ -1,7 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# `ghx` is available on every dotfiles host, even where no separate ghx binary is installed.
-# Delegate to the gh wrapper so agent-facing output never contains terminal color escapes.
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec "$wrapper_dir/gh" "$@"
+lookup_path=""
+IFS=: read -r -a path_entries <<< "${PATH:-}"
+
+for path_entry in "${path_entries[@]}"; do
+  path_entry="${path_entry:-.}"
+  if [[ -d "$path_entry" ]] && [[ "$(cd -P -- "$path_entry" && pwd)" == "$wrapper_dir" ]]; then
+    continue
+  fi
+  lookup_path+="${lookup_path:+:}$path_entry"
+done
+
+ghx_bin="$(PATH="$lookup_path" command -v ghx || true)"
+gh_bin="$(PATH="$lookup_path" command -v gh || true)"
+
+if [[ -n "$ghx_bin" && -x "$ghx_bin" ]]; then
+  # Avoid resolving this gh wrapper when ghx needs the real GitHub CLI.
+  if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
+    exec env NO_COLOR=1 GH_FORCE_TTY=0 GHX_GH_PATH="$gh_bin" "$ghx_bin" "$@"
+  fi
+  exec env NO_COLOR=1 GH_FORCE_TTY=0 "$ghx_bin" "$@"
+fi
+
+if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
+  printf 'ghx: neither ghx nor GitHub CLI is installed\n' >&2
+  exit 127
+fi
+
+exec env NO_COLOR=1 GH_FORCE_TTY=0 "$gh_bin" "$@"
