@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+lookup_path=""
+IFS=: read -r -a path_entries <<< "${PATH:-}"
+for path_entry in "${path_entries[@]}"; do
+  path_entry="${path_entry:-.}"
+  if [[ -d "$path_entry" ]] && [[ "$(cd -P -- "$path_entry" && pwd)" == "$wrapper_dir" ]]; then
+    continue
+  fi
+  lookup_path+="${lookup_path:+:}$path_entry"
+done
+
+real_codex="$(PATH="$lookup_path" command -v codex || true)"
+if [[ -z "$real_codex" && -x "/Applications/Codex.app/Contents/Resources/codex" ]]; then
+  real_codex="/Applications/Codex.app/Contents/Resources/codex"
+fi
+
+if [[ -z "$real_codex" || ! -x "$real_codex" ]]; then
+  printf 'codex: real Codex binary not found outside %s\n' "$wrapper_dir" >&2
+  exit 127
+fi
+
+if [[ -z "${GITHUB_PAT_TOKEN:-}" ]]; then
+  token=""
+  if command -v ghx >/dev/null 2>&1; then
+    token="$(ghx auth token 2>/dev/null || true)"
+  elif command -v gh >/dev/null 2>&1; then
+    token="$(gh auth token 2>/dev/null || true)"
+  fi
+  if [[ -n "$token" ]]; then
+    export GITHUB_PAT_TOKEN="$token"
+  fi
+  unset token
+fi
+
+exec "$real_codex" "$@"
