@@ -3,4 +3,40 @@
 set -euo pipefail
 
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# API consumers need byte-clean JSON. ghx's cache renderer colorizes object
+# responses, which breaks jq and ClawSweeper's line-oriented parsers.
+if [[ "${1:-}" == "api" ]]; then
+  lookup_path=""
+  IFS=: read -r -a path_entries <<< "${PATH:-}"
+  for path_entry in "${path_entries[@]}"; do
+    path_entry="${path_entry:-.}"
+    if [[ -d "$path_entry" ]] && [[ "$(cd -P -- "$path_entry" && pwd)" == "$wrapper_dir" ]]; then
+      continue
+    fi
+    lookup_path+="${lookup_path:+:}$path_entry"
+  done
+  gh_bin="$(PATH="$lookup_path" command -v gh || true)"
+  if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
+    jq_expression=""
+    for ((index = 1; index < $#; index += 1)); do
+      if [[ "${!index}" == "--jq" ]]; then
+        next_index=$((index + 1))
+        jq_expression="${!next_index:-}"
+        break
+      fi
+    done
+
+    # ClawSweeper consumes one compact JSON object per line. The real gh
+    # prints jq object results prettily, so compact only object expressions;
+    # scalar expressions must keep gh's plain output contract.
+    if [[ "$jq_expression" == *"{"* ]] && jq_bin="$(PATH="$lookup_path" command -v jq)" && [[ -n "$jq_bin" ]]; then
+      env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@" | "$jq_bin" -c .
+      exit "${PIPESTATUS[0]}"
+    fi
+
+    exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
+  fi
+fi
+
 exec "$wrapper_dir/ghx" "$@"

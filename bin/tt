@@ -113,6 +113,9 @@ agent_ready_format() {
 }
 
 set_agent_window_status_formats() {
+  "$TMUX_BIN" set -g status-position top
+  "$TMUX_BIN" set -g status-left-length 32
+  "$TMUX_BIN" set -g status-left "#[fg=#15161e,bg=#ff9e64,bold] ❐ #S #[fg=#ff9e64,bg=#1a1b26,none] "
   "$TMUX_BIN" set -g window-status-format "#[fg=#1a1b26,bg=#1a1b26,none]#[fg=#565f89,bg=#1a1b26,none] #I #W #[fg=#1a1b26,bg=#1a1b26,none]"
   "$TMUX_BIN" set -g window-status-current-format "#[fg=#1a1b26,bg=#7aa2f7,none]#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W #[fg=#7aa2f7,bg=#1a1b26,none]"
   "$TMUX_BIN" set -g window-status-style "fg=#565f89,bg=#1a1b26,none"
@@ -197,6 +200,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g mouse on
   "$TMUX_BIN" set -g history-limit 50000
   "$TMUX_BIN" set -g status on
+  "$TMUX_BIN" set -g status-position top
+  "$TMUX_BIN" set -g status-left-length 32
   "$TMUX_BIN" set -g status-style "fg=#565f89,bg=#1a1b26,none"
   "$TMUX_BIN" set -g window-style "fg=default,bg=#1a1b26"
   "$TMUX_BIN" set -g window-active-style "fg=default,bg=#1a1b26"
@@ -247,6 +252,7 @@ ensure_tmux_rgb_terminfo() {
 apply_studio_pane_titles() {
   local target="${1:-}"
   local agent_label
+  local pane_commands pane_count
   agent_label="$(agent_label_format)"
 
   if [[ -z "$target" ]]; then
@@ -254,6 +260,13 @@ apply_studio_pane_titles() {
       [[ -n "$target" ]] || continue
       apply_studio_pane_titles "$target"
     done < <("$TMUX_BIN" list-windows -a -F '#{window_id}' 2>/dev/null || true)
+    return 0
+  fi
+
+  pane_commands="$("$TMUX_BIN" list-panes -t "$target" -F '#{pane_current_command}' 2>/dev/null || true)"
+  pane_count="$(printf '%s\n' "$pane_commands" | awk 'NF {n++} END {print n+0}')"
+  if [[ "$pane_count" == "1" ]] && printf '%s\n' "$pane_commands" | grep -Eq '^(mosh-client|ssh)$'; then
+    "$TMUX_BIN" set-window-option -t "$target" -q pane-border-status off
     return 0
   fi
 
@@ -1600,7 +1613,7 @@ for line in run([tmux, "list-panes", "-a", "-F", pane_format]).splitlines():
     claude_commands = []
     ids = []
 
-    for pid in descendants(pane_pid_int, ps_children):
+    for pid in [pane_pid_int] + descendants(pane_pid_int, ps_children):
         command = ps_command.get(pid, "")
         if "codex" in command and "tokenjuice" not in command:
             codex_commands.append(command)
@@ -1935,6 +1948,9 @@ codex_restore_execute() {
     fi
   done < <(codex_restore_matches "$mode" "$selector" "$snapshot")
 
+  "$TMUX_BIN" set -g status-position top
+  set_agent_window_status_formats
+  apply_studio_pane_titles "$selector"
   if (( matched == 0 )); then
     echo "no matching Codex/Claude panes" >&2
     return 1

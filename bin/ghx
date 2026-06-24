@@ -19,9 +19,9 @@ gh_bin="$(PATH="$lookup_path" command -v gh || true)"
 if [[ -n "$ghx_bin" && -x "$ghx_bin" ]]; then
   # Avoid resolving this gh wrapper when ghx needs the real GitHub CLI.
   if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    exec env NO_COLOR=1 GH_FORCE_TTY=0 GHX_GH_PATH="$gh_bin" "$ghx_bin" "$@"
+    exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 GHX_GH_PATH="$gh_bin" "$ghx_bin" "$@"
   fi
-  exec env NO_COLOR=1 GH_FORCE_TTY=0 "$ghx_bin" "$@"
+  exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$ghx_bin" "$@"
 fi
 
 if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
@@ -29,4 +29,4 @@ if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
   exit 127
 fi
 
-exec env NO_COLOR=1 GH_FORCE_TTY=0 "$gh_bin" "$@"
+exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
