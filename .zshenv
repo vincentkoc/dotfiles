@@ -1,3 +1,9 @@
+# Agent runtimes keep persistent MCP transports open. macOS defaults to 256,
+# which can exhaust the parent process before it can spawn another command.
+if [[ "$(ulimit -Sn)" != "unlimited" ]] && (( $(ulimit -Sn) < 8192 )); then
+  ulimit -n 8192 2>/dev/null || true
+fi
+
 # Codex agent sandbox cannot write to ~/.cache or Homebrew cache paths.
 if [[ -n "${CODEX_SANDBOX:-}" ]]; then
   export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${TMPDIR:-/tmp}/${USER}-cache}"
