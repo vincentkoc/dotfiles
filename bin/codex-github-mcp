@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+github_mcp_server="$(command -v github-mcp-server || true)"
+if [[ -z "$github_mcp_server" ]]; then
+  echo "codex-github-mcp: install github-mcp-server with Homebrew" >&2
+  exit 127
+fi
+
+github_token="$("$HOME/bin/ghx" auth token 2>/dev/null || true)"
+if [[ -z "$github_token" ]]; then
+  echo "codex-github-mcp: GitHub CLI authentication is unavailable" >&2
+  exit 1
+fi
+
+export GITHUB_PERSONAL_ACCESS_TOKEN="$github_token"
+unset github_token
+
+exec "$github_mcp_server" stdio

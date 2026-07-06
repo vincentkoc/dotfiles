@@ -65,6 +65,7 @@
       }
     ]
   },
+  "enableWorkflows": true,
   "enabledPlugins": {
     "claude-supermemory@supermemory-plugins": false,
     "frontend-design@claude-plugins-official": true
@@ -75,5 +76,6 @@
   "theme": "dark",
   "feedbackSurveyState": {
     "lastShownTime": 1754472559009
-  }
+  },
+  "model": "claude-fable-5"
 }

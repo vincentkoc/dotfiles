@@ -420,6 +420,16 @@ setup_codex_dotfiles() {
         warn "Codex hooks file missing in dotfiles: $codex_hooks_src"
     fi
 
+    if [[ "$(uname)" == "Darwin" ]] && ! command -v github-mcp-server &>/dev/null; then
+        if command -v brew &>/dev/null; then
+            info "Installing GitHub MCP server"
+            brew install github-mcp-server
+            success "GitHub MCP server installed"
+        else
+            warn "Homebrew is required to install github-mcp-server"
+        fi
+    fi
+
     if [[ -x "$df_dir/bin/install-agent-worktree-ops" ]]; then
         info "Installing agent worktree ops runtime"
         bash "$df_dir/bin/install-agent-worktree-ops"

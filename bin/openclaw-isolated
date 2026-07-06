@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+ROOT=${OPENCLAW_ISOLATED_ROOT:-$HOME/GIT/_Perso/openclaw-workspace}
+
+if [ ! -x "$ROOT/runtime/bin/openclaw" ]; then
+  printf 'openclaw-isolated: runtime missing at %s/runtime/bin/openclaw\n' "$ROOT" >&2
+  exit 127
+fi
+
+export OPENCLAW_HOME="$ROOT/home"
+export OPENCLAW_STATE_DIR="$ROOT/state"
+export OPENCLAW_CONFIG_PATH="$ROOT/state/openclaw.json"
+export OPENCLAW_WORKSPACE_DIR="$ROOT/workspace"
+export OPENCLAW_GIT_DIR="$ROOT/git"
+export OPENCLAW_PROFILE="isolated"
+export OPENCLAW_GATEWAY_PORT="19789"
+
+exec "$ROOT/runtime/bin/openclaw" "$@"
