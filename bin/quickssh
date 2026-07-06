@@ -130,6 +130,24 @@ legacy_host_prefers_mosh() {
   return 1
 }
 
+set_tmux_connection_title() {
+  local title="$1" window_id pane_count
+
+  [[ -n "${TMUX_PANE:-}" ]] || return 0
+  command -v tmux >/dev/null 2>&1 || return 0
+
+  tmux set-option -pt "$TMUX_PANE" @tt_base_title "$title" 2>/dev/null || true
+  tmux select-pane -t "$TMUX_PANE" -T "$title" 2>/dev/null || true
+
+  window_id="$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null || true)"
+  [[ -n "$window_id" ]] || return 0
+  pane_count="$(tmux display-message -p -t "$window_id" '#{window_panes}' 2>/dev/null || true)"
+  [[ "$pane_count" == "1" ]] || return 0
+
+  tmux set-window-option -t "$window_id" automatic-rename off 2>/dev/null || true
+  tmux rename-window -t "$window_id" "$title" 2>/dev/null || true
+}
+
 ssh_config_files() {
   local file file_dir line key pattern expanded i
   local -a files=("$HOME/.ssh/config")
@@ -315,6 +333,7 @@ if [[ -n "$local_port" || -n "$destination_port" ]]; then
 fi
 
 if [[ "$use_mosh" == "true" ]]; then
+  set_tmux_connection_title "$input"
   mosh_ssh=(ssh "${ssh_args[@]}")
   if [[ "$has_remote_command" == "true" ]]; then
     exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target" "${remote_command[@]}"
