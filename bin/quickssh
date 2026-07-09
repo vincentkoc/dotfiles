@@ -58,11 +58,12 @@ password_from_onepassword() {
 }
 
 resolve_legacy_host() {
-  local alias="$1"
+  local alias="$1" alias_key
   local host_info_var host_info user host port password
 
   load_legacy_hosts || return 1
-  host_info_var="quickssh_hosts_${alias}"
+  alias_key="${alias//-/_}"
+  host_info_var="quickssh_hosts_${alias_key}"
   host_info="${!host_info_var:-}"
   [[ -n "$host_info" ]] || return 1
 
@@ -236,11 +237,6 @@ choose_host() {
     [[ -n "$host" ]] || continue
     options+=("$(printf '%-28s %s' "$host" "quickssh alias")")
   done < <(list_legacy_aliases | awk 'NF && !seen[$0]++')
-
-  while IFS= read -r host; do
-    [[ -n "$host" ]] || continue
-    options+=("$(printf '%-28s %s' "$host" "ssh config host")")
-  done < <(list_ssh_config_hosts)
 
   if [[ ${#options[@]} -eq 0 ]]; then
     usage >&2
