@@ -391,7 +391,7 @@ ensure_ssh_signing_trust_file() {
         user_email="$(git config --global --get user.email 2>/dev/null || true)"
     fi
 
-    error "Missing required SSH signing trust file: $allowed_signers"
+    warn "Missing SSH signing trust file: $allowed_signers"
     if [[ -f "$ssh_pub_key" && -n "$user_email" ]]; then
         cat <<EOF
 Create it with:
@@ -407,7 +407,7 @@ EOF
         info "Create $allowed_signers manually once your SSH key and Git email are set"
     fi
 
-    return 1
+    return 0
 }
 
 setup_codex_dotfiles() {
@@ -465,11 +465,15 @@ setup_codex_dotfiles() {
         return
     fi
 
-    info "Ensuring Codex features are enabled"
-    codex features enable codex_hooks >/dev/null
-    codex features enable multi_agent >/dev/null
-    codex features enable child_agents_md >/dev/null
-    success "Codex features enabled"
+    info "Ensuring supported Codex features are enabled"
+    local available_features feature
+    available_features="$(codex features list 2>/dev/null || true)"
+    for feature in hooks multi_agent fast_mode; do
+        if grep -Eq "^${feature}[[:space:]]" <<<"$available_features"; then
+            codex features enable "$feature" >/dev/null
+        fi
+    done
+    success "Supported Codex features enabled"
 }
 
 setup_claude_dotfiles() {
