@@ -34,6 +34,11 @@ if [[ -r "$DOTFILES_ENV" ]]; then
 fi
 unset DOTFILES_ENV
 
+# Codex GitHub integrations reuse the authenticated CLI token without persisting it.
+if [[ -z "${GITHUB_PAT_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+	export GITHUB_PAT_TOKEN="$(gh auth token 2>/dev/null)"
+fi
+
 # Interactive shells should not inherit agent/no-color defaults. They break TUIs
 # like Codex, especially when launched directly instead of through wrappers.
 if [[ "${DOTFILES_PRESERVE_NO_COLOR:-0}" != "1" ]]; then
