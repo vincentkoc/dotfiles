@@ -299,11 +299,33 @@ setup_config_symlinks() {
     link_dotfile "$df_dir/.mackup.cfg" "$HOME/.mackup.cfg"
     link_dotfile "$df_dir/.natiliusrc" "$HOME/.natiliusrc"
     link_dotfile "$df_dir/.ripgreprc" "$HOME/.ripgreprc"
+    link_dotfile "$df_dir/.tmux.conf" "$HOME/.tmux.conf"
+    link_dotfile "$df_dir/.tmux.conf.local" "$HOME/.tmux.conf.local"
 
     for natilius_profile in "$df_dir"/.natiliusrc.*; do
         [[ -e "$natilius_profile" ]] || continue
         link_dotfile "$natilius_profile" "$HOME/$(basename "$natilius_profile")"
     done
+}
+
+setup_terminal_glyph_font() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        return
+    fi
+
+    if command -v brew &>/dev/null && ! brew list --cask font-meslo-lg-nerd-font &>/dev/null; then
+        info "Installing MesloLG Nerd Font for terminal status glyphs..."
+        brew install --cask font-meslo-lg-nerd-font
+    fi
+
+    if command -v osascript &>/dev/null; then
+        osascript <<'APPLESCRIPT' >/dev/null 2>&1 || warn "Could not update the Terminal default font; set it to MesloLGL Nerd Font Mono manually"
+tell application "Terminal"
+    set font name of default settings to "MesloLGL Nerd Font Mono"
+    set font size of default settings to 12
+end tell
+APPLESCRIPT
+    fi
 }
 
 setup_spec_symlink() {
@@ -807,6 +829,7 @@ main() {
     ensure_ssh_signing_trust_file
     setup_codex_dotfiles
     setup_claude_dotfiles
+    setup_terminal_glyph_font
     setup_ghostty_config
     setup_iterm_preferences
     setup_openclaw_symlinks

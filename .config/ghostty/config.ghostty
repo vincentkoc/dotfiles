@@ -2,10 +2,10 @@
 # reading comfort instead of relying on ad hoc app-local settings.
 theme = TokyoNight Night
 
-font-family = Monaco
-font-family-bold = Monaco
-font-family-italic = Monaco
-font-family-bold-italic = Monaco
+font-family = MesloLGL Nerd Font Mono
+font-family-bold = MesloLGL Nerd Font Mono
+font-family-italic = MesloLGL Nerd Font Mono
+font-family-bold-italic = MesloLGL Nerd Font Mono
 font-size = 12
 
 background = #1a1b26
