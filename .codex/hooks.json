@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "$HOME/bin/agent-attn-set reset codex",
-            "timeout": 2
+            "timeout": 6
           }
         ]
       },
@@ -26,7 +26,7 @@
           {
             "type": "command",
             "command": "$HOME/bin/agent-attn-set reset codex",
-            "timeout": 2
+            "timeout": 6
           }
         ]
       }
@@ -37,20 +37,7 @@
           {
             "type": "command",
             "command": "$HOME/bin/agent-attn-set waiting codex",
-            "timeout": 2
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/opt/homebrew/bin/tokenjuice codex-post-tool-use",
-            "statusMessage": "compacting bash output with tokenjuice",
-            "timeout": 10
+            "timeout": 6
           }
         ]
       }
