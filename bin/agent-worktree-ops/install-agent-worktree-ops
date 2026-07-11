@@ -2,7 +2,13 @@
 
 set -euo pipefail
 
-DOTFILES_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf 'agent-worktree-ops is macOS-only; skipping\n'
+  exit 0
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOTFILES_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUNTIME_DIR="$HOME/Library/Application Support/agent-worktree-ops"
 OLD_RUNTIME_DIR="$HOME/Library/Application Support/codex-worktree-maintain"
 PLIST_SOURCE="$DOTFILES_DIR/Library/LaunchAgents/com.vincentkoc.agent-worktree-ops.plist"
