@@ -3,7 +3,13 @@ $DotfilesWslDistro = if ($env:DOTFILES_WSL_DISTRO) { $env:DOTFILES_WSL_DISTRO } 
 function Invoke-DotfilesWsl {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Command)
     $line = $Command -join ' '
-    wsl.exe -d $DotfilesWslDistro -- zsh -lic $line
+    $windowsPath = $env:PATH
+    try {
+        $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+        wsl.exe -d $DotfilesWslDistro --cd '~' -- zsh -lic $line
+    } finally {
+        $env:PATH = $windowsPath
+    }
 }
 
 function dots { Invoke-DotfilesWsl 'cd ~/GIT/_Perso/dotfiles && exec zsh' }

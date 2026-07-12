@@ -4,6 +4,8 @@ script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/functions/system/deepcl
 zsh -n "$script"
 grep -q 'repository disappeared during cleanup; skipping' "$script"
 grep -q 'purge_status != 0 && purge_status != 2' "$script"
+grep -q 'worktree maintenance failed; continuing' "$script"
+grep -q 'worktree_failures=' "$script"
 grep -q 'The default is --dry-run' "$script"
 grep -q 'does not kill Codex' "$script"
 echo deepclean_test=passed

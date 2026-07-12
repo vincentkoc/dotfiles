@@ -18,4 +18,4 @@ $current = if (Test-Path $PROFILE) { Get-Content -Raw $PROFILE } else { '' }
 $current = [regex]::Replace($current, '(?s)# >>> vincent-dotfiles >>>.*?# <<< vincent-dotfiles <<<\r?\n?', '')
 Set-Content -Path $PROFILE -Value ($current.TrimEnd() + "`r`n`r`n" + $block)
 Write-Output "powershell_profile=ready"
-Write-Output "wsl_distro=$((wsl.exe -l -q | Select-Object -First 1).Trim())"
+Write-Output "wsl_distro=$DotfilesWslDistro"

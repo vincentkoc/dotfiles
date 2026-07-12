@@ -48,6 +48,7 @@ EOF
     echo "repositories=${#repo_roots}"
 
     local repo_root
+    local worktree_failures=0
     for repo_root in "${repo_roots[@]}"; do
         [[ -n "$repo_root" ]] || continue
         if [[ ! -d "$repo_root" ]]; then
@@ -60,15 +61,24 @@ EOF
         echo "== worktrees: $repo_root =="
         if (( apply )); then
             if command -v agent-worktree-maintain >/dev/null 2>&1; then
-                agent-worktree-maintain --repo "$repo_root" --force || return
+                if ! agent-worktree-maintain --repo "$repo_root" --force; then
+                    echo "deepclean: worktree maintenance failed; continuing: $repo_root" >&2
+                    worktree_failures=$((worktree_failures + 1))
+                fi
             else
                 echo "deepclean: agent-worktree-maintain missing" >&2
                 return 127
             fi
         elif command -v agent-worktree-clean >/dev/null 2>&1; then
-            agent-worktree-clean --repo "$repo_root" || return
+            if ! agent-worktree-clean --repo "$repo_root"; then
+                echo "deepclean: worktree audit failed; continuing: $repo_root" >&2
+                worktree_failures=$((worktree_failures + 1))
+            fi
         elif command -v gwt >/dev/null 2>&1; then
-            (DOTFILES_CD_SKIP_LISTING=1; builtin cd "$repo_root" && gwt audit) || return
+            if ! (DOTFILES_CD_SKIP_LISTING=1; builtin cd "$repo_root" && gwt audit); then
+                echo "deepclean: gwt audit failed; continuing: $repo_root" >&2
+                worktree_failures=$((worktree_failures + 1))
+            fi
         else
             echo "deepclean: worktree audit tools missing" >&2
             return 127
@@ -94,5 +104,7 @@ EOF
     fi
 
     echo
+    echo "worktree_failures=$worktree_failures"
     echo "deepclean complete"
+    (( worktree_failures == 0 ))
 }
