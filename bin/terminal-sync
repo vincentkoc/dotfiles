@@ -75,12 +75,13 @@ repair_font() {
 configure_terminal_font() {
     [[ "$mode" == "apply" ]] || return
     command -v osascript >/dev/null 2>&1 || return
-    perl -e 'alarm shift; exec @ARGV' 8 osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+    (perl -e 'alarm shift; exec @ARGV' 8 osascript <<'APPLESCRIPT'
 tell application "Terminal"
     set font name of default settings to "MesloLGL Nerd Font Mono"
     set font size of default settings to 12
 end tell
 APPLESCRIPT
+    ) >/dev/null 2>&1 || true
 }
 
 validate_ghostty() {
