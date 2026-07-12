@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+kernel="$(uname -s)"
+case "$kernel" in
+  Darwin) platform=macos ;;
+  Linux)
+    if grep -qiE '(microsoft|wsl)' /proc/sys/kernel/osrelease 2>/dev/null || [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+      platform=wsl
+    else
+      platform=linux
+    fi
+    ;;
+  *) platform=unknown ;;
+esac
+
+if [[ "${1:-}" == --json ]]; then
+  printf '{"platform":"%s","kernel":"%s","arch":"%s","wsl_distro":"%s"}\n' \
+    "$platform" "$kernel" "$(uname -m)" "${WSL_DISTRO_NAME:-}"
+else
+  printf '%s\n' "$platform"
+fi

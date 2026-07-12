@@ -17,6 +17,16 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+platform_name() {
+    local helper
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin/dotfiles-platform"
+    if [[ -x "$helper" ]]; then
+        "$helper"
+    else
+        uname | tr '[:upper:]' '[:lower:]'
+    fi
+}
+
 run_privileged() {
     if [[ $EUID -eq 0 ]]; then
         "$@"
@@ -808,6 +818,10 @@ setup_openclaw_symlinks() {
 
 main() {
     echo ""
+    info "Platform: $(platform_name)"
+    if [[ "$(platform_name)" == wsl ]]; then
+        info "WSL is the canonical Git/SSH/agent shell; native Windows receives only the PowerShell bridge"
+    fi
     echo "╔═══════════════════════════════════════════╗"
     echo "║         Dotfiles Installer                ║"
     echo "╚═══════════════════════════════════════════╝"

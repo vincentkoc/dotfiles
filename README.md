@@ -38,6 +38,23 @@ mackup restore
 
 > For full macOS setup (apps, system prefs, Homebrew), see [natilius](https://github.com/vincentkoc/natilius).
 
+## Windows and WSL2
+
+WSL2 is the canonical Unix development environment. Run `./install.sh` inside
+WSL, then verify it with `dotfiles-audit`. Keep repositories, Git signing,
+SSH, tmux, Codex CLI, and cleanup inside WSL instead of duplicating them in
+native Windows.
+
+Native Windows gets a small PowerShell bridge:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
+```
+
+It adds `dots`, `wgit`/`wg`, `wcx`/`cxw`, `wssh`, and `wdeepclean` commands
+that execute through the configured WSL distro. Set `DOTFILES_WSL_DISTRO` if
+the distro is not named `Ubuntu`.
+
 ## Structure
 
 ```
@@ -45,7 +62,10 @@ mackup restore
 functions/                                  # Modular sourced shell features
 bin/agent-worktree-ops/                     # Agent worktree cleanup tools
 bin/terminal-sync                           # Ghostty/full font pack/tmux parity audit and repair
+bin/dotfiles-platform                       # macOS/Linux/WSL platform detection
+bin/dotfiles-audit                          # portable shell/link/tool audit
 functions/system/deepclean.zsh              # Dry-run-first Mole + worktree cleanup
+windows/                                    # Native PowerShell bridge into WSL
 git-sparse/                                 # Per-repo sparse-checkout profiles
 .vimrc / .tmux.conf                         # Editors
 .mackup/                                    # Mackup app configs

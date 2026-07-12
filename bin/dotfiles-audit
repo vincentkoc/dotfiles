@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+platform="$(dotfiles-platform)"
+failures=0
+status() {
+  printf '%s=%s\n' "$1" "$2"
+  [[ "$2" == ready ]] || failures=$((failures + 1))
+}
+
+printf 'platform=%s\n' "$platform"
+for path in .zshrc .zshenv .profile .gitconfig .tmux.conf; do
+  if [[ -L "$HOME/$path" && -e "$HOME/$path" ]]; then status "link:$path" ready; else status "link:$path" drift; fi
+done
+for command in zsh git curl tmux rg fzf; do
+  if command -v "$command" >/dev/null 2>&1; then status "command:$command" ready; else status "command:$command" missing; fi
+done
+if [[ "$platform" == wsl ]]; then
+  if mountpoint -q /mnt/c 2>/dev/null; then status windows_drive drift; else status windows_drive ready; fi
+  [[ "$SHELL" == */zsh ]] && status default_shell ready || status default_shell drift
+fi
+exit "$failures"
