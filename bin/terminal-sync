@@ -73,7 +73,7 @@ repair_font() {
 }
 
 configure_terminal_font() {
-    [[ "$mode" == "apply" ]] || return
+    [[ "$mode" == "apply" ]] || return 0
     command -v osascript >/dev/null 2>&1 || return
     (perl -e 'alarm shift; exec @ARGV' 8 osascript <<'APPLESCRIPT'
 tell application "Terminal"
