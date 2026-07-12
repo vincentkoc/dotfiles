@@ -14,6 +14,7 @@ ghostty_source="$repo/.config/ghostty"
 ghostty_config="$ghostty_source/config.ghostty"
 tmux_config="$repo/.tmux.conf"
 tmux_local_config="$repo/.tmux.conf.local"
+natilius_config="$repo/.natiliusrc"
 
 failures=0
 
@@ -48,6 +49,47 @@ check_link() {
 has_meslo_font_payload() {
     find "$HOME/Library/Fonts" /Library/Fonts -maxdepth 1 -type f \
         -iname 'MesloLGL*NerdFontMono-Regular.*' -print -quit 2>/dev/null | grep -q .
+}
+
+declared_font_casks() {
+    awk '
+        /^[[:space:]]*# Fonts[[:space:]]*$/ { in_fonts=1; next }
+        in_fonts && /^[[:space:]]*\)/ { exit }
+        in_fonts && match($0, /"font-[^"]+"/) {
+            print substr($0, RSTART + 1, RLENGTH - 2)
+        }
+    ' "$natilius_config"
+}
+
+sync_font_pack() {
+    local cask
+    local installed
+    local missing=()
+    local total=0
+
+    command -v brew >/dev/null 2>&1 || {
+        report Homebrew missing
+        failures=$((failures + 1))
+        return
+    }
+    installed="$(brew list --cask 2>/dev/null || true)"
+    while IFS= read -r cask; do
+        [[ -n "$cask" ]] || continue
+        total=$((total + 1))
+        if ! grep -qxF "$cask" <<<"$installed"; then
+            missing+=("$cask")
+        fi
+    done < <(declared_font_casks)
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        report "terminal font pack ($total)" ready
+        return
+    fi
+
+    report "terminal font pack ($total)" "drift missing=${#missing[@]}"
+    failures=$((failures + 1))
+    [[ "$mode" == "apply" ]] || return
+    brew install --cask "${missing[@]}"
 }
 
 repair_font() {
@@ -131,6 +173,7 @@ check_link "$ghostty_config" "$HOME/Library/Application Support/com.mitchellh.gh
 check_link "$tmux_config" "$HOME/.tmux.conf"
 check_link "$tmux_local_config" "$HOME/.tmux.conf.local"
 repair_font
+sync_font_pack
 configure_terminal_font
 validate_ghostty
 reload_tmux
@@ -143,6 +186,9 @@ fi
 if [[ "$mode" == "apply" ]]; then
     failures=0
     has_meslo_font_payload || failures=$((failures + 1))
+    while IFS= read -r cask; do
+        brew list --cask "$cask" >/dev/null 2>&1 || failures=$((failures + 1))
+    done < <(declared_font_casks)
     [[ -L "$HOME/.config/ghostty" && "$(readlink "$HOME/.config/ghostty")" == "$ghostty_source" ]] || failures=$((failures + 1))
     [[ -L "$HOME/.tmux.conf" && "$(readlink "$HOME/.tmux.conf")" == "$tmux_config" ]] || failures=$((failures + 1))
     [[ "$failures" -eq 0 ]] || exit 1
