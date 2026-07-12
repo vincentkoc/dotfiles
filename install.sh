@@ -392,7 +392,7 @@ ensure_ssh_signing_trust_file() {
         return
     fi
 
-    ssh_pub_key="$HOME/.ssh/id_ed25519.pub"
+    ssh_pub_key="$HOME/.ssh/git_signing_vincentkoc_ieee.pub"
     user_email="$(git config --file "$df_dir/.gitconfig" --get user.email 2>/dev/null || true)"
     if [[ -z "$user_email" ]]; then
         user_email="$(git config --global --get user.email 2>/dev/null || true)"
