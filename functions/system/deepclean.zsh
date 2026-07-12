@@ -50,6 +50,12 @@ EOF
     local repo_root
     for repo_root in "${repo_roots[@]}"; do
         [[ -n "$repo_root" ]] || continue
+        if [[ ! -d "$repo_root" ]]; then
+            echo
+            echo "== worktrees: $repo_root =="
+            echo "deepclean: repository disappeared during cleanup; skipping"
+            continue
+        fi
         echo
         echo "== worktrees: $repo_root =="
         if (( apply )); then
