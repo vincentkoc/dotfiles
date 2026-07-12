@@ -82,7 +82,11 @@ EOF
             echo "deepclean: mole missing; skipping" >&2
         elif (( apply )); then
             mole clean || return
-            mole purge || return
+            mole purge
+            local purge_status=$?
+            if (( purge_status != 0 && purge_status != 2 )); then
+                return "$purge_status"
+            fi
         else
             mole clean --dry-run || return
             mole purge --dry-run || return
