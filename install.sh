@@ -309,13 +309,20 @@ setup_config_symlinks() {
 }
 
 setup_terminal_glyph_font() {
+    local font_payload
     if [[ "$(uname)" != "Darwin" ]]; then
         return
     fi
 
-    if command -v brew &>/dev/null && ! brew list --cask font-meslo-lg-nerd-font &>/dev/null; then
-        info "Installing MesloLG Nerd Font for terminal status glyphs..."
-        brew install --cask font-meslo-lg-nerd-font
+    font_payload="$(find "$HOME/Library/Fonts" /Library/Fonts -maxdepth 1 -type f -iname 'MesloLGL*NerdFontMono-Regular.*' -print -quit 2>/dev/null)"
+    if command -v brew &>/dev/null && [[ -z "$font_payload" ]]; then
+        if brew list --cask font-meslo-lg-nerd-font &>/dev/null; then
+            info "Repairing missing MesloLG Nerd Font payload..."
+            brew reinstall --cask font-meslo-lg-nerd-font
+        else
+            info "Installing MesloLG Nerd Font for terminal status glyphs..."
+            brew install --cask font-meslo-lg-nerd-font
+        fi
     fi
 
     if command -v osascript &>/dev/null; then

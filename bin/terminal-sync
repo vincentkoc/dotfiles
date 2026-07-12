@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="check"
+if [[ "${1:-}" == "--apply" ]]; then
+    mode="apply"
+elif [[ -n "${1:-}" && "${1:-}" != "--check" ]]; then
+    printf 'usage: terminal-sync [--check|--apply]\n' >&2
+    exit 2
+fi
+
+repo="${TERMINAL_SYNC_DOTFILES_DIR:-$HOME/GIT/_Perso/dotfiles}"
+ghostty_source="$repo/.config/ghostty"
+ghostty_config="$ghostty_source/config.ghostty"
+tmux_config="$repo/.tmux.conf"
+tmux_local_config="$repo/.tmux.conf.local"
+
+failures=0
+
+report() {
+    printf '%-28s %s\n' "$1" "$2"
+}
+
+check_link() {
+    local source="$1"
+    local target="$2"
+
+    if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
+        report "$target" ready
+        return
+    fi
+
+    report "$target" drift
+    failures=$((failures + 1))
+    [[ "$mode" == "apply" ]] || return
+
+    mkdir -p "$(dirname "$target")"
+    if [[ -e "$target" || -L "$target" ]]; then
+        if [[ -e "$target" && ! -L "$target" ]] && cmp -s "$source" "$target"; then
+            rm -rf "$target"
+        else
+            mv "$target" "$target.pre-terminal-sync.$(date +%Y%m%d%H%M%S).bak"
+        fi
+    fi
+    ln -s "$source" "$target"
+}
+
+has_meslo_font_payload() {
+    find "$HOME/Library/Fonts" /Library/Fonts -maxdepth 1 -type f \
+        -iname 'MesloLGL*NerdFontMono-Regular.*' -print -quit 2>/dev/null | grep -q .
+}
+
+repair_font() {
+    if has_meslo_font_payload; then
+        report "MesloLGL Nerd Font Mono" ready
+        return
+    fi
+
+    report "MesloLGL Nerd Font Mono" drift
+    failures=$((failures + 1))
+    [[ "$mode" == "apply" ]] || return
+
+    command -v brew >/dev/null 2>&1 || {
+        report Homebrew missing
+        return 1
+    }
+    if brew list --cask font-meslo-lg-nerd-font >/dev/null 2>&1; then
+        brew reinstall --cask font-meslo-lg-nerd-font
+    else
+        brew install --cask font-meslo-lg-nerd-font
+    fi
+    has_meslo_font_payload
+}
+
+configure_terminal_font() {
+    [[ "$mode" == "apply" ]] || return
+    command -v osascript >/dev/null 2>&1 || return
+    perl -e 'alarm shift; exec @ARGV' 8 osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+tell application "Terminal"
+    set font name of default settings to "MesloLGL Nerd Font Mono"
+    set font size of default settings to 12
+end tell
+APPLESCRIPT
+}
+
+validate_ghostty() {
+    local binary="/Applications/Ghostty.app/Contents/MacOS/ghostty"
+    local effective_config
+    if [[ ! -x "$binary" ]]; then
+        report Ghostty missing
+        failures=$((failures + 1))
+        return
+    fi
+    effective_config="$($binary +show-config 2>/dev/null || true)"
+    if grep -q '^font-family = MesloLGL Nerd Font Mono$' <<<"$effective_config"; then
+        report "Ghostty effective config" ready
+    else
+        report "Ghostty effective config" drift
+        failures=$((failures + 1))
+    fi
+}
+
+reload_tmux() {
+    if ! command -v tmux >/dev/null 2>&1; then
+        report tmux missing
+        failures=$((failures + 1))
+        return
+    fi
+    if tmux list-sessions >/dev/null 2>&1; then
+        if [[ "$mode" == "apply" ]]; then
+            tmux source-file "$HOME/.tmux.conf"
+        fi
+        report "tmux live config" ready
+    else
+        report "tmux live config" idle
+    fi
+}
+
+[[ "$(uname -s)" == Darwin ]] || {
+    printf 'terminal-sync currently supports macOS only\n' >&2
+    exit 2
+}
+[[ -f "$ghostty_config" && -f "$tmux_config" && -f "$tmux_local_config" ]] || {
+    printf 'dotfiles terminal sources are incomplete under %s\n' "$repo" >&2
+    exit 2
+}
+
+check_link "$ghostty_source" "$HOME/.config/ghostty"
+check_link "$ghostty_config" "$HOME/Library/Application Support/com.mitchellh.ghostty/config.ghostty"
+check_link "$tmux_config" "$HOME/.tmux.conf"
+check_link "$tmux_local_config" "$HOME/.tmux.conf.local"
+repair_font
+configure_terminal_font
+validate_ghostty
+reload_tmux
+
+if [[ "$mode" == "check" && "$failures" -gt 0 ]]; then
+    printf '\nrun terminal-sync --apply to repair %d drift item(s)\n' "$failures" >&2
+    exit 1
+fi
+
+if [[ "$mode" == "apply" ]]; then
+    failures=0
+    has_meslo_font_payload || failures=$((failures + 1))
+    [[ -L "$HOME/.config/ghostty" && "$(readlink "$HOME/.config/ghostty")" == "$ghostty_source" ]] || failures=$((failures + 1))
+    [[ -L "$HOME/.tmux.conf" && "$(readlink "$HOME/.tmux.conf")" == "$tmux_config" ]] || failures=$((failures + 1))
+    [[ "$failures" -eq 0 ]] || exit 1
+    printf '\nterminal parity applied; open a new Ghostty window if an existing window cached the old font\n'
+fi
