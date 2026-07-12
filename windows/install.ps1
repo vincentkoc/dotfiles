@@ -18,4 +18,5 @@ $current = if (Test-Path $PROFILE) { Get-Content -Raw $PROFILE } else { '' }
 $current = [regex]::Replace($current, '(?s)# >>> vincent-dotfiles >>>.*?# <<< vincent-dotfiles <<<\r?\n?', '')
 Set-Content -Path $PROFILE -Value ($current.TrimEnd() + "`r`n`r`n" + $block)
 Write-Output "powershell_profile=ready"
-Write-Output "wsl_distro=$DotfilesWslDistro"
+$distro = if ($env:DOTFILES_WSL_DISTRO) { $env:DOTFILES_WSL_DISTRO } else { 'Ubuntu' }
+Write-Output "wsl_distro=$distro"

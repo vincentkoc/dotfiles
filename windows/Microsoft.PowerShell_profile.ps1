@@ -5,8 +5,9 @@ function Invoke-DotfilesWsl {
     $line = $Command -join ' '
     $windowsPath = $env:PATH
     try {
-        $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
-        wsl.exe -d $DotfilesWslDistro --cd '~' -- zsh -lic $line
+        $wsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
+        $env:PATH = ''
+        & $wsl -d $DotfilesWslDistro --cd '~' -- zsh -lic $line
     } finally {
         $env:PATH = $windowsPath
     }
