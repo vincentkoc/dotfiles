@@ -43,6 +43,7 @@ mackup restore
 .zshrc / .exports / .aliases / .functions   # Shell entrypoints
 functions/                                  # Modular sourced shell features
 bin/agent-worktree-ops/                     # Agent worktree cleanup tools
+functions/system/deepclean.zsh              # Dry-run-first Mole + worktree cleanup
 git-sparse/                                 # Per-repo sparse-checkout profiles
 .vimrc / .tmux.conf                         # Editors
 .mackup/                                    # Mackup app configs
