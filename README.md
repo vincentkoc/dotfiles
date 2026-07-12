@@ -11,9 +11,10 @@ git clone https://github.com/vincentkoc/dotfiles.git ~/.dotfiles
 
 The installer bootstraps dependencies and links core shell dotfiles.
 
-If SSH commit signing is your default Git mode, keep a local
-`.ssh/allowed_signers` file in the dotfiles root. It is intentionally ignored
-from git, and the installer will stop if it is missing.
+Git uses the dedicated SSH signing-only key at
+`~/.ssh/git_signing_vincentkoc_ieee`. Keep a local `.ssh/allowed_signers` file
+in the dotfiles root. It is intentionally ignored from git, and the installer
+will stop if it is missing.
 
 Create it with:
 
@@ -25,7 +26,7 @@ fi
 mkdir -p "$dotfiles_root/.ssh"
 printf '%s namespaces="git" %s\n' \
   "$(git config --file "$dotfiles_root/.gitconfig" --get user.email)" \
-  "$(cat ~/.ssh/id_ed25519.pub)" \
+  "$(cat ~/.ssh/git_signing_vincentkoc_ieee.pub)" \
   > "$dotfiles_root/.ssh/allowed_signers"
 ```
 
