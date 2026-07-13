@@ -75,6 +75,19 @@
 - Bias toward speed, momentum, and visible artifacts: code, docs, PRs, plans, diagrams, templates, dashboards, writeups.
 - Surface second-order effects when relevant: incentives, scaling risk, narrative impact, maintenance cost, ecosystem fit.
 - Challenge weak assumptions directly. Do not hedge unnecessarily. Be clear, rigorous, and opinionated when evidence supports it.
+
+## Loop guards
+
+- Do not reopen settled scope, replace an active execution route, repeat
+  completed work, or dispatch a replacement root task unless the user or
+  concrete new evidence invalidates the current route.
+- Do not repeat an unchanged check without new evidence. Inspect the exact
+  failure and retry only the failed surface.
+- After resume or compaction, re-anchor to the latest user request and live
+  state. Discard obsolete plans and completed work.
+- Stop when the request is satisfied. If progress requires external action,
+  report one precise blocker, its evidence, and the exact unblock action.
+
 - For writing: preserve style fidelity, strong phrasing, and persuasive clarity. Avoid generic filler.
 - For code: give the solution first, prefer complete working changes, add concise inline comments only where they help.
 - If the user asks you to do the work, start in the same turn instead of restating the plan.
@@ -88,7 +101,6 @@
 - Use mosh only when UDP is known-good or when connecting over a stable direct/Tailscale path. Good default: `mosh -4 -a --bind-server=any <host>`; for Tailscale, use the `100.x.y.z` address or MagicDNS name instead of public DNS. If mosh feels gummy or stalls under Hysteria, fall back to SSH rather than retrying mosh.
 - Mosh does not forward TCP ports. When a dev server, preview, web UI, or test fixture is running on a remote machine, create a separate SSH tunnel before handoff. From the main local machine, use `ssh -4 -fN -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:<localPort>:127.0.0.1:<remotePort> <host>`. If Codex is running inside the remote machine, use reverse forwarding only when a known main-local SSH target or explicit operator instruction exists; otherwise report the exact local-forward command needed from the main machine. Verify with `lsof` and `curl` and report the local URL plus tunnel PID.
 - Do not kill broad `mosh-server` processes just because they look stale. If cleanup is needed, list them and ask first unless they were created by the current task/session.
-- Broad cleanup wording such as "kill all background jobs", "stop the jobs", "clean up everything", stale goal/resume context, or process-name matches are never permission to kill Codex, Claude, agent, tmux, terminal, mosh, SSH control-master, crabbox, blacksmith, or testbox processes owned by another pane/session. Before any kill command that touches more than the current tool session's child process group or resources created in the current turn, print the candidate PID table and wait for explicit approval naming the PID, pane/session, process group, or scope.
 - Multi-part requests are not done until every requested item is handled or clearly marked blocked.
 - Do prerequisite lookup or discovery before dependent actions.
 - Before finalizing, quickly verify correctness, coverage, formatting, and obvious side effects.
@@ -110,17 +122,17 @@
 - If a contributor PR cannot be edited (`maintainerCanModify=false`), merge it as-is when it is clean and correct. Only direct-land or cherry-pick when the PR branch is uneditable and the landed diff must differ, the PR is conflicted/dirty with unrelated drift, or multiple PRs overlap and one canonical fix is needed.
 - When direct-landing or cherry-picking from a contributor PR is unavoidable, preserve author/co-author credit, explain the exact reason in the PR before closing, link the landed commit, and do not post duplicate close comments.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`.
-- In `openclaw/openclaw`, maintainer Testbox mode is my personal default: treat `OPENCLAW_TESTBOX=1` or these standing rules as permission to use Blacksmith Testbox for `pnpm` gates, e2e, broad suites, and long/heavy validation. This is maintainers-only and requires Blacksmith access; if auth/org is missing, report that instead of falling back to a huge local run.
-- In `openclaw/openclaw`, before handoff/push run `pnpm check:changed` unless the task explicitly needs a wider gate. When maintainer Testbox mode applies, run it inside the same warmed Testbox unless `OPENCLAW_LOCAL_CHECK_MODE=throttled` is explicitly set as the local escape hatch.
-- In `openclaw/openclaw`, treat `pnpm check:changed` as sparse-safe: do not expand sparse checkout just to satisfy changed-gate tsgo; direct `pnpm tsgo*` still needs the required project files or a fuller worktree.
-- In `openclaw/openclaw`, when running targeted local tests directly, use `pnpm test:serial <path-or-filter...>`.
-- In `openclaw/openclaw`, respect local heavy-check serialization: do not bypass the lock, do not disable serial worker defaults, and do not start duplicate lint/type/test lanes when another session already has the heavy-check lock.
-- In `openclaw/openclaw`, never run local Vitest/check/typecheck commands with `OPENCLAW_LOCAL_CHECK=0`; use `OPENCLAW_LOCAL_CHECK_MODE=throttled` only when intentionally taking the local escape hatch. Reserve `OPENCLAW_LOCAL_CHECK=0` for CI/shared automation only.
-- In `openclaw/openclaw`, unless `OPENCLAW_LOCAL_CHECK_MODE=throttled` is set, route broad, slow, Docker, live, E2E, release, or complex validation through the repo Blacksmith Testbox path. Prefix wrapped pnpm commands with `OPENCLAW_TESTBOX=1`, for example `OPENCLAW_TESTBOX=1 pnpm check:changed`, `OPENCLAW_TESTBOX=1 pnpm test:e2e`, `OPENCLAW_TESTBOX=1 pnpm test:docker:all`, `OPENCLAW_TESTBOX=1 pnpm test:live`, or `OPENCLAW_TESTBOX=1 pnpm test:all`.
-- In `openclaw/openclaw`, for lanes not directly wrapped by the repo helper, use `OPENCLAW_TESTBOX=1 pnpm testbox -- <command>`, for example `OPENCLAW_TESTBOX=1 pnpm testbox -- pnpm test:docker:mcp-channels`. This is maintainer-only and requires Blacksmith CLI access/auth; if auth/org is missing, report that instead of falling back to a huge local run.
-- In `openclaw/openclaw`, for long-ish Testbox-mode work, pre-warm early from repo root with `blacksmith testbox warmup ci-check-testbox.yml --idle-timeout 90`. Use `240`, `720`, or `1440` only for multi-hour, all-day, or overnight work; anything above `1440` needs explicit intent and cleanup.
-- In `openclaw/openclaw`, reuse the same `tbx_...` ID for all Testbox run/download commands within one task. Do not warm another box unless the workflow/environment changes, the box expired, or I explicitly ask for a fresh one. Track IDs you create, check `blacksmith testbox list`, and stop current-task boxes with `blacksmith testbox stop --id <ID>` when done.
-- In `openclaw/openclaw`, do long-test preflight only for broad/long work, not for every `gwt new`: after creating a branch/worktree for release, Docker, E2E, or all-plugin matrix work, verify cwd/repo/branch/status/node_modules/free disk, then warm the right Testbox early and continue local inspection while it boots. For explicit sharded matrix runs, multiple Testboxes are allowed when they materially shorten the run; keep ids grouped by shard/risk lane and clean them up. Same goes for crabbox which is an alternative test runner.
+- In `openclaw/*`, let autoreview report broadly, but keep review-driven edits
+  centered on the original request, regressions introduced by the diff, the
+  owner boundary, and the touched bug class. Prefer recording adjacent
+  improvements as follow-ups instead of growing the active branch.
+- If autoreview feedback starts causing repeated patch cycles or materially
+  widening an OpenClaw branch, pause and summarize the drift before continuing.
+  During release work, strongly prefer post-release `main` follow-ups unless
+  the finding directly blocks the release.
+- In `openclaw/openclaw`, the repo `AGENTS.md` and invoked skills own
+  Testbox, validation, release, and landing policy. Read them fresh; do not
+  duplicate or override their workflow details here.
 - Use semantic commit messages and PR titles like `fix(ci):` unless rules say otherwise.
 - Never add `[codex]` to PR titles or mention AI tooling in PR titles. Keep titles about the actual change, not the tool used.
 - When mentioning GitHub issues or PRs, give full links.
