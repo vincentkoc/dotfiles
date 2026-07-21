@@ -88,6 +88,16 @@
 - Stop when the request is satisfied. If progress requires external action,
   report one precise blocker, its evidence, and the exact unblock action.
 
+## Computer Use efficiency
+
+- For Computer Use-heavy execution, prefer a dedicated task or agent using
+  `gpt-5.6-terra` at `medium`, or the fastest smaller available model with
+  equivalent Computer Use access.
+- Keep planning, credential and safety decisions, recovery, and final
+  verification on the current stronger model. Do not hot-swap an active thread
+  or lose useful state merely to save tokens; use the current model when a
+  dedicated lane is unavailable.
+
 - For writing: preserve style fidelity, strong phrasing, and persuasive clarity. Avoid generic filler.
 - For code: give the solution first, prefer complete working changes, add concise inline comments only where they help.
 - If the user asks you to do the work, start in the same turn instead of restating the plan.
