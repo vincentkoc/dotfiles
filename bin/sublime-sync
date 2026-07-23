@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="check"
+bundle=""
+install_app=false
+restart=false
+
+usage() {
+    cat <<'EOF'
+usage:
+  sublime-sync --check
+  sublime-sync --export-bundle <archive.tar.gz>
+  sublime-sync --apply --bundle <archive.tar.gz> [--install-app] [--restart]
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check) mode="check" ;;
+        --apply) mode="apply" ;;
+        --export-bundle)
+            mode="export"
+            bundle="${2:-}"
+            shift
+            ;;
+        --bundle)
+            bundle="${2:-}"
+            shift
+            ;;
+        --install-app) install_app=true ;;
+        --restart) restart=true ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+[[ "$(uname -s)" == Darwin ]] || {
+    printf 'sublime-sync currently supports macOS; use windows/sublime-sync.ps1 on Windows\n' >&2
+    exit 2
+}
+
+repo="${SUBLIME_SYNC_DOTFILES_DIR:-$HOME/GIT/_Perso/dotfiles}"
+source_user="$repo/Library/Application Support/Sublime Text/Packages/User"
+support="$HOME/Library/Application Support/Sublime Text"
+live_user="$support/Packages/User"
+installed_dir="$support/Installed Packages"
+packages_dir="$support/Packages"
+app="/Applications/Sublime Text.app"
+binary="$app/Contents/MacOS/sublime_text"
+
+[[ -d "$source_user" ]] || {
+    printf 'missing tracked Sublime User source: %s\n' "$source_user" >&2
+    exit 1
+}
+
+desired_packages() {
+    python3 - "$source_user/Package Control.sublime-settings" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r'"installed_packages"\s*:\s*\[(.*?)\]', text, re.S)
+for name in re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', match.group(1) if match else ""):
+    print(name)
+PY
+}
+
+installed_packages() {
+    {
+        find "$installed_dir" -maxdepth 1 -type f -name '*.sublime-package' -print 2>/dev/null |
+            sed 's#.*/##;s/\.sublime-package$//'
+        find "$packages_dir" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null |
+            sed 's#.*/##' |
+            sed '/^User$/d;s/^zzz A File Icon$/A File Icon/'
+    } | sort -u
+}
+
+check_state() {
+    local failures=0
+    if [[ -x "$binary" ]]; then
+        printf '%-24s ready\n' 'Sublime Text'
+    else
+        printf '%-24s missing\n' 'Sublime Text'
+        failures=$((failures + 1))
+    fi
+
+    if [[ -f "$live_user/Preferences.sublime-settings" ]] &&
+        cmp -s "$source_user/Preferences.sublime-settings" "$live_user/Preferences.sublime-settings"; then
+        printf '%-24s ready\n' 'User configuration'
+    else
+        printf '%-24s drift\n' 'User configuration'
+        failures=$((failures + 1))
+    fi
+
+    local desired actual
+    desired="$(desired_packages)"
+    actual="$(installed_packages)"
+    if [[ "$desired" == "$actual" ]]; then
+        printf '%-24s ready count=%s\n' 'Package Control plugins' "$(wc -l <<<"$desired" | tr -d ' ')"
+    else
+        printf '%-24s drift\n' 'Package Control plugins'
+        comm -23 <(printf '%s\n' "$desired") <(printf '%s\n' "$actual") | sed 's/^/  missing: /'
+        comm -13 <(printf '%s\n' "$desired") <(printf '%s\n' "$actual") | sed 's/^/  extra: /'
+        failures=$((failures + 1))
+    fi
+    return "$failures"
+}
+
+validate_bundle() {
+    [[ -f "$bundle" ]] || {
+        printf 'missing plugin bundle: %s\n' "$bundle" >&2
+        exit 1
+    }
+    python3 - "$bundle" <<'PY'
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    for member in archive.getmembers():
+        parts = member.name.split("/")
+        if member.name.startswith("/") or ".." in parts:
+            raise SystemExit(f"unsafe bundle path: {member.name}")
+        if parts[0] not in {"Installed Packages", "Packages"}:
+            raise SystemExit(f"unexpected bundle root: {member.name}")
+PY
+}
+
+if [[ "$mode" == export ]]; then
+    [[ -n "$bundle" ]] || {
+        usage >&2
+        exit 2
+    }
+    check_state >/dev/null || {
+        printf 'refusing to export an incomplete Sublime installation\n' >&2
+        exit 1
+    }
+    mkdir -p "$(dirname "$bundle")"
+    bundle_paths=('Installed Packages')
+    while IFS= read -r package_dir; do
+        bundle_paths+=("${package_dir#"$support/"}")
+    done < <(find "$packages_dir" -mindepth 1 -maxdepth 1 -type d ! -name User -print)
+    COPYFILE_DISABLE=1 tar -C "$support" -czf "$bundle" "${bundle_paths[@]}"
+    printf 'bundle=%s\n' "$bundle"
+    exit 0
+fi
+
+if [[ "$mode" == check ]]; then
+    check_state
+    exit
+fi
+
+[[ -n "$bundle" ]] || {
+    usage >&2
+    exit 2
+}
+validate_bundle
+
+if [[ ! -x "$binary" ]]; then
+    if [[ "$install_app" == true ]] && command -v brew >/dev/null 2>&1; then
+        brew install --cask sublime-text
+    else
+        printf 'Sublime Text is missing; rerun with --install-app\n' >&2
+        exit 1
+    fi
+fi
+
+was_running=false
+if pgrep -f '/Sublime Text.app/Contents/MacOS/sublime_text' >/dev/null 2>&1; then
+    was_running=true
+    osascript -e 'tell application "Sublime Text" to quit'
+    for _ in {1..20}; do
+        pgrep -f '/Sublime Text.app/Contents/MacOS/sublime_text' >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+    pgrep -f '/Sublime Text.app/Contents/MacOS/sublime_text' >/dev/null 2>&1 && {
+        printf 'Sublime Text did not quit cleanly; refusing to force-kill it\n' >&2
+        exit 1
+    }
+fi
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+backup="$support/Backups/sublime-sync-$timestamp"
+mkdir -p "$backup"
+for path in "$support/Local/Session.sublime_session" "$support/Local/Auto Save Session.sublime_session"; do
+    [[ -f "$path" ]] && cp -p "$path" "$backup/"
+done
+[[ -e "$live_user" || -L "$live_user" ]] && rsync -a "$live_user" "$backup/"
+[[ -d "$installed_dir" ]] && rsync -a "$installed_dir" "$backup/"
+
+rm -rf "$live_user"
+mkdir -p "$live_user"
+rsync -a --exclude '.DS_Store' "$source_user/" "$live_user/"
+
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+tar -C "$temporary" -xzf "$bundle"
+rm -rf "$installed_dir"
+mkdir -p "$installed_dir"
+rsync -a "$temporary/Installed Packages/" "$installed_dir/"
+find "$packages_dir" -mindepth 1 -maxdepth 1 -type d ! -name User -exec rm -rf {} +
+if [[ -d "$temporary/Packages" ]]; then
+    find "$temporary/Packages" -mindepth 1 -maxdepth 1 -type d -exec rsync -a {} "$packages_dir/" \;
+fi
+
+if [[ "$was_running" == true || "$restart" == true ]]; then
+    open -a 'Sublime Text'
+    sleep 10
+fi
+
+printf 'backup=%s\n' "$backup"
+check_state

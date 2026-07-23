@@ -10,6 +10,7 @@ Top-level wrappers:
 - `install-agent-worktree-ops`
 - `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
+- `sublime-sync` - verify or restore Sublime User settings and Package Control plugins from a portable bundle
 - `tt` - create or attach tmux sessions, including a `mobile` pane-picker profile; `tt restore [target]` repairs zoomed/tiled layouts
 
 Tool folders:
