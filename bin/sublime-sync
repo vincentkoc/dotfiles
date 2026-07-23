@@ -211,7 +211,7 @@ if [[ -d "$temporary/Packages" ]]; then
 fi
 
 if [[ "$was_running" == true || "$restart" == true ]]; then
-    open -a 'Sublime Text'
+    open "$app"
     sleep 10
 fi
 
