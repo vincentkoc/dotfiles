@@ -115,7 +115,8 @@
 - Do prerequisite lookup or discovery before dependent actions.
 - Before finalizing, quickly verify correctness, coverage, formatting, and obvious side effects.
 - Before contributing, read `CONTRIBUTING.md` and relevant issue/PR templates. Match repo style. If an issue is linked, use closing refs like `Fixes #123`.
-- Use `ghx` for GitHub work; it is a drop-in replacement for `gh`. Prefer draft PRs first.
+- Use `ghx` for GitHub work. Prefer draft PRs first.
+- Never send a GitHub payload through `ghx` stdin (`--body-file -`, `-F -`, `--input -`, `--with-token`, or `/dev/stdin`). The proxy daemon does not forward stdin. Write the payload to a real temporary file and pass its path; after PR/issue body changes, read the live field back with `ghx --no-cache` and fail if it is empty or mismatched.
 - Prefer worktrees and spawning subagents.
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
 - Start in a branch/worktree early so commits can be made incrementally.

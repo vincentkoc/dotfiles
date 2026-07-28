@@ -16,6 +16,28 @@ done
 ghx_bin="$(PATH="$lookup_path" command -v ghx || true)"
 gh_bin="$(PATH="$lookup_path" command -v gh || true)"
 
+uses_stdin_payload() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      - | -F- | /dev/stdin | /dev/fd/0 | --body-file=- | --body-file=/dev/stdin | --body-file=/dev/fd/0 | --input=- | --input=/dev/stdin | --input=/dev/fd/0 | --with-token)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# ghx's daemon protocol forwards argv, cwd, and output, but not stdin. Sending
+# stdin-backed mutations through it can turn a valid payload into an empty one.
+if uses_stdin_payload "$@"; then
+  if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
+    printf 'ghx: stdin-backed commands require the real GitHub CLI\n' >&2
+    exit 127
+  fi
+  exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
+fi
+
 if [[ -n "$ghx_bin" && -x "$ghx_bin" ]]; then
   # Avoid resolving this gh wrapper when ghx needs the real GitHub CLI.
   if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
