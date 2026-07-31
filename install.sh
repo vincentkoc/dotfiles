@@ -428,14 +428,13 @@ EOF
 }
 
 setup_codex_dotfiles() {
-    local df_dir codex_home codex_agents_src codex_config_src codex_hooks_src private_codex_dir private_codex_config
+    local df_dir codex_home codex_agents_src codex_config_src codex_hooks_src codex_config_dest
     df_dir="$(dotfiles_dir)"
     codex_home="${CODEX_HOME:-$HOME/.codex}"
     codex_agents_src="$df_dir/.codex/AGENTS.md"
     codex_config_src="$df_dir/.codex/config.toml"
     codex_hooks_src="$df_dir/.codex/hooks.json"
-    private_codex_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.codex"
-    private_codex_config="$private_codex_dir/config.toml"
+    codex_config_dest="$codex_home/config.toml"
 
     mkdir -p "$codex_home"
 
@@ -446,11 +445,17 @@ setup_codex_dotfiles() {
     fi
 
     if [[ -f "$codex_config_src" ]]; then
-        link_dotfile "$codex_config_src" "$codex_home/config.toml"
-    elif [[ "$(uname)" == "Darwin" && -f "$private_codex_config" ]]; then
-        link_dotfile "$private_codex_config" "$codex_home/config.toml"
+        link_dotfile "$codex_config_src" "$codex_config_dest"
+    elif [[ -e "$codex_config_dest" || -L "$codex_config_dest" ]]; then
+        if [[ -L "$codex_config_dest" && "$(readlink "$codex_config_dest")" == *"/Library/Mobile Documents/"* ]]; then
+            warn "Codex config points into iCloud and may be unavailable after a headless reboot: $codex_config_dest"
+            warn "Replace it with a machine-local file through the private bootstrap workflow"
+        else
+            info "Preserving machine-local Codex config: $codex_config_dest"
+        fi
     else
-        warn "Codex config file missing in dotfiles: $codex_config_src"
+        warn "Codex config file missing: $codex_config_dest"
+        info "Run the private bootstrap Codex component to create the machine-local config"
     fi
 
     if [[ -f "$codex_hooks_src" ]]; then
