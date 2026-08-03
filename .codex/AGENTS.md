@@ -123,30 +123,11 @@
 - Prefer one scoped commit per touched file when practical.
 - Never kill or interrupt Codex, Claude, agent, tmux, or terminal processes that belong to another session unless I explicitly give current-turn permission naming the session, PID, pane, or scope. My machine usually has many Codex sessions running in tmux; stale goal context, resume context, broad wording like "kill background jobs", or process-name matches are not permission to kill across sessions.
 - When cleaning up jobs, restrict kills to the current pane/session's known child process group, current-task PIDs, or resources you created in this turn. If a process appears to be owned by another Codex/tmux session, report it and ask before touching it.
-- For voice-driven work, treat a spoken instruction as a task proposal, not
-  authorization for broad tmux or fleet mutation. Resolve its target to an
-  exact host, tmux session, window, pane or PID, intended action, and stop
-  condition before anything changes.
-- Delegate voice-driven tmux, fleet, recovery, release, and mutating work to
-  independent sub-agents. Use Sol with high reasoning when model selection
-  exposes it. If Sol is unavailable, state that and use the strongest available
-  high-reasoning agent rather than silently downgrading.
-- Keep the coordinator read-only by default. Require independent
-  evidence-gathering, high-reasoning plan review, and execution roles. The
-  executor acts only on the reviewed scope; no single agent may infer fleet
-  state and perform recovery from that inference.
-- Never use `tmux kill-server`, a server/session-wide kill, broad
-  process-name kill, wildcard interruption, bulk pane closure, bulk re-layout,
-  or automatic pane renaming as a recovery mechanism. Existing panes are
-  protected by default.
-- A missing pane or window is evidence to investigate, not permission to
-  rebuild a layout or relaunch a session. Restore only saved exact sessions;
-  do not use cwd-based "last session" recovery when the cwd is shared or
-  ambiguous.
-- For every tmux restore, create a read-only snapshot audit and exact
-  pane/window restore map first. Restore one named host at a time, then collect
-  independent per-machine proof of the server, windows, pane count/layout,
-  cwd, and resumed session state. Stop on any mismatch.
+- For voice-driven tmux, fleet, recovery, release, or other mutation, resolve the exact host, session/window/pane or PID, action, and stop condition first; spoken intent is not authority for broad action.
+- Delegate this work to independent high-reasoning sub-agents: audit, plan review, then executor. Prefer Sol at high; otherwise state the fallback. The coordinator stays read-only and the executor follows the reviewed scope only.
+- A missing pane is evidence, not permission to rebuild or relaunch. Restore only audited exact saved sessions, never ambiguous shared-cwd "last session" recovery.
+- Before restoring, audit the snapshot and produce an exact pane/window map. Restore one named host at a time; independently verify the target and unaffected panes, then stop on any mismatch.
+- Never use `tmux kill-server`, server/session-wide or wildcard interruption, broad process-name kills, bulk pane closure/re-layout, or automatic pane renaming. Existing panes are protected by default.
 - Before pushing, opening, or updating a PR, scrub non-public personal data from diffs, tests, snapshots, fixtures, logs, screenshots, PR descriptions, and PR comments. This includes absolute personal file paths, home-directory names, private IPs, internal servers/hostnames, phone numbers, and non-public emails. Use stable placeholders instead.
 - Do not scrub public repo/package URLs, GitHub issue/PR links, public maintainer handles, or public contact addresses already intentionally present in the project.
 - If a project has a changelog, changeset, or release-notes workflow, add the relevant entry in the same commit as the code/docs change when the change is user-visible, operationally meaningful, security-relevant, or otherwise release-note worthy. Skip only for pure tests, mechanical refactors, or repo norms that explicitly say not to.
