@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TMUX_BIN="/opt/homebrew/bin/tmux"
-if [[ ! -x "$TMUX_BIN" ]]; then
+TMUX_BIN="${TT_TMUX_BIN:-/opt/homebrew/bin/tmux}"
+if [[ ! -x "$TMUX_BIN" && -z "${TT_TMUX_BIN:-}" ]]; then
   TMUX_BIN="/usr/local/bin/tmux"
 fi
-if [[ ! -x "$TMUX_BIN" ]]; then
+if [[ ! -x "$TMUX_BIN" && -z "${TT_TMUX_BIN:-}" ]]; then
   TMUX_BIN="/usr/bin/tmux"
 fi
 if [[ ! -x "$TMUX_BIN" ]]; then
@@ -516,6 +516,8 @@ create_ops_detached() {
   local session="${1:-cockpit}"
   local start_dir="${2:-$PWD}"
   local skip_shell_upgrade="${3:-}"
+  local preserve_server="${4:-}"
+  local recovery_session="${5:-}"
   local window window_id bootstrap_command width height
 
   case "$session" in
@@ -528,7 +530,9 @@ create_ops_detached() {
       ;;
   esac
 
-  ensure_tmux_default_shell
+  if [[ "$preserve_server" != "--preserve-server" ]]; then
+    ensure_tmux_default_shell
+  fi
   bootstrap_command="$(default_login_shell_command)"
   width="${TT_OPS_WIDTH:-240}"
   height="${TT_OPS_HEIGHT:-80}"
@@ -565,6 +569,9 @@ create_ops_detached() {
   fi
 
   window_id="$("$TMUX_BIN" new-session -d -x "$width" -y "$height" -P -F '#{window_id}' -s "$session" -n ops -c "$start_dir" "$bootstrap_command")"
+  if [[ "$recovery_session" == "--recovery-session" ]]; then
+    set_recovery_session_indices "$session" "$window_id"
+  fi
   set_profile_metadata "$session" ops
   build_studio_layout "$window_id" "$bootstrap_command"
   label_grid_window "$window_id" ops
@@ -585,16 +592,23 @@ create_ops_detached() {
 ensure_studio_layout() {
   local session="$1"
   local start_dir="${2:-}"
+  local preserve_server="${3:-}"
+  local recovery_session="${4:-}"
   local window_id pane_count shell_command
 
-  ensure_tmux_default_shell
+  if [[ "$preserve_server" != "--preserve-server" ]]; then
+    ensure_tmux_default_shell
+  fi
   shell_command="$(default_login_shell_command)"
 
   if ! "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
     if [[ -n "$start_dir" ]]; then
-      "$TMUX_BIN" new-session -d -s "$session" -n main -c "$start_dir" "$shell_command"
+      window_id="$("$TMUX_BIN" new-session -d -P -F '#{window_id}' -s "$session" -n main -c "$start_dir" "$shell_command")"
     else
-      "$TMUX_BIN" new-session -d -s "$session" -n main "$shell_command"
+      window_id="$("$TMUX_BIN" new-session -d -P -F '#{window_id}' -s "$session" -n main "$shell_command")"
+    fi
+    if [[ "$recovery_session" == "--recovery-session" ]]; then
+      set_recovery_session_indices "$session" "$window_id"
     fi
   fi
 
@@ -632,9 +646,14 @@ create_studio() {
 create_studio_detached() {
   local session="$1"
   local start_dir="${2:-$HOME}"
+  local skip_autosave="${3:-}"
+  local preserve_server="${4:-}"
+  local recovery_session="${5:-}"
 
-  ensure_studio_layout "$session" "$start_dir"
-  install_agent_autosave_hooks
+  ensure_studio_layout "$session" "$start_dir" "$preserve_server" "$recovery_session"
+  if [[ "$skip_autosave" != "--no-autosave" ]]; then
+    install_agent_autosave_hooks
+  fi
 }
 
 create_mobile() {
@@ -803,14 +822,17 @@ restore_windows() {
 
 restore_studio_layout() {
   local target="${1:-}"
+  local mode="${2:-}"
   local manifest
   local window_id pane_count
   local -a target_args=()
 
   [[ -n "$target" ]] && target_args=(-t "$target")
 
-  manifest="$(agent_cockpit_manifest)"
-  apply_agent_manifest_metadata "$manifest"
+  if [[ "$mode" != "--preserve-server" ]]; then
+    manifest="$(agent_cockpit_manifest)"
+    apply_agent_manifest_metadata "$manifest"
+  fi
   restore_windows "$target"
 
   while IFS= read -r window_id; do
@@ -821,8 +843,10 @@ restore_studio_layout() {
     fi
   done < <("$TMUX_BIN" list-windows "${target_args[@]}" -F '#{window_id}' 2>/dev/null | sort -u || true)
 
-  install_agent_autosave_hooks
-  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+  if [[ "$mode" != "--preserve-server" ]]; then
+    install_agent_autosave_hooks
+    write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+  fi
 }
 
 agent_cockpit_manifest() {
@@ -2343,24 +2367,113 @@ stop_codex_snapshot_timer() {
   rm -f "$pid_file"
 }
 
-start_recovery_server() {
-  kill_server force
-  "$TMUX_BIN" -f /dev/null new-session -d -s __tt_recover -n main -c "$HOME"
-  apply_recovery_theme
-  install_agent_autosave_hooks
+tmux_server_running() {
+  "$TMUX_BIN" list-sessions >/dev/null 2>&1
 }
 
-create_agent_cockpit_sessions() {
+set_recovery_session_indices() {
+  local session="$1"
+  local first_window_id="$2"
+
+  # `base-index` and `pane-base-index` are window options. Keep them local to
+  # the recovered session, then explicitly move the initial window to :1.
+  # Existing live sessions retain their indexing and layout.
+  "$TMUX_BIN" set-option -t "$session" base-index 1
+  "$TMUX_BIN" set-option -t "$session" pane-base-index 1
+  "$TMUX_BIN" move-window -s "$first_window_id" -t "$session:1"
+}
+
+recovery_pane_target() {
+  local session="$1"
+  local logical_window="$2"
+  local logical_pane="$3"
+  local window_id
+
+  window_id="$("$TMUX_BIN" list-windows -t "$session" -F '#{window_index}	#{window_id}' 2>/dev/null |
+    awk -F $'\t' -v wanted="$logical_window" '$1 == wanted { print $2; exit }')"
+  [[ -n "$window_id" ]] || return 1
+
+  "$TMUX_BIN" list-panes -t "$window_id" -F '#{pane_index}	#{pane_id}' 2>/dev/null |
+    sort -n -k1,1 |
+    awk -F $'\t' -v wanted="$logical_pane" 'NR == wanted { print $2; exit }'
+}
+
+recovery_snapshot_pane_target() {
+  local target="$1"
+  local session="${target%%:*}"
+  local coordinates="${target#*:}"
+  local logical_window="${coordinates%%.*}"
+  local logical_pane="${coordinates#*.}"
+
+  [[ "$target" == *:*.* ]] || return 1
+  recovery_pane_target "$session" "$logical_window" "$logical_pane"
+}
+
+require_recovery_session_absent() {
+  local session="$1"
+
+  if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    echo "tt: session '$session' already exists; refusing recovery without replacing it" >&2
+    echo "tt: use 'tt codex-restore' for a targeted pane or window restore" >&2
+    return 1
+  fi
+}
+
+require_recovery_manifest_sessions_absent() {
   local manifest="$1"
   local session pane dir title command
   local sessions=" "
 
   while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
+    [[ "$sessions" == *" $session "* ]] && continue
+    sessions="$sessions$session "
+    require_recovery_session_absent "$session" || return 1
+  done < "$manifest"
+}
+
+finish_recovery_setup() {
+  local server_was_running="$1"
+
+  # Existing servers may contain unrelated operator work. Do not rewrite their
+  # global options, hooks, or snapshots while adding a recovered session.
+  if [[ "$server_was_running" != "1" ]]; then
+    apply_recovery_theme
+    install_agent_autosave_hooks
+  fi
+}
+
+create_agent_cockpit_sessions() {
+  local manifest="$1"
+  local preserve_server="${2:-}"
+  local recovery_session="${3:-}"
+  local session pane dir title command
+  local skip_autosave=""
+  local sessions=" "
+
+  if [[ "$preserve_server" == "--preserve-server" ]]; then
+    skip_autosave="--no-autosave"
+  fi
+
+  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
     if [[ "$sessions" != *" $session "* ]]; then
-      create_studio_detached "$session" "$dir"
+      create_studio_detached "$session" "$dir" "$skip_autosave" "$preserve_server" "$recovery_session"
       sessions="$sessions$session "
     fi
+  done < "$manifest"
+}
+
+restore_agent_cockpit_layouts() {
+  local manifest="$1"
+  local session pane dir title command
+  local sessions=" "
+
+  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
+    [[ "$sessions" == *" $session "* ]] && continue
+    sessions="$sessions$session "
+    restore_studio_layout "$session" --preserve-server
   done < "$manifest"
 }
 
@@ -2370,7 +2483,11 @@ launch_agent_cockpit_panes() {
 
   while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
-    target="$session:1.$pane"
+    target="$(recovery_pane_target "$session" 1 "$pane" 2>/dev/null || true)"
+    if [[ -z "$target" ]]; then
+      echo "tt: missing recovery pane $session:1.$pane" >&2
+      continue
+    fi
     kind="$(agent_kind_for_command "$command")"
     "$TMUX_BIN" set-option -pt "$target" @tt_base_title "$title" 2>/dev/null || true
     "$TMUX_BIN" set-option -pt "$target" @tt_agent_command "$command" 2>/dev/null || true
@@ -2427,9 +2544,11 @@ refresh_agent_pane_colors() {
 recover_agent_cockpit() {
   local manifest="${1:-}"
   local attach_session="${2:-factory2}"
+  local server_was_running=0
+  local preserve_server=""
 
   if [[ -n "${TMUX:-}" ]]; then
-    echo "tt recover must be run outside tmux; it rebuilds the tmux server" >&2
+    echo "tt recover must be run outside tmux; it refuses to replace live sessions" >&2
     exit 2
   fi
 
@@ -2438,13 +2557,19 @@ recover_agent_cockpit() {
   fi
   [[ -f "$manifest" ]] || { echo "agent cockpit manifest not found: $manifest" >&2; exit 2; }
   manifest_has_entries "$manifest" || { echo "agent cockpit manifest has no sessions: $manifest" >&2; exit 2; }
+  require_recovery_manifest_sessions_absent "$manifest" || exit 2
 
-  start_recovery_server
-  create_agent_cockpit_sessions "$manifest"
-  "$TMUX_BIN" kill-session -t __tt_recover 2>/dev/null || true
+  tmux_server_running && server_was_running=1
+  if [[ "$server_was_running" == "1" ]]; then
+    preserve_server="--preserve-server"
+  fi
+  create_agent_cockpit_sessions "$manifest" "$preserve_server" --recovery-session
+  finish_recovery_setup "$server_was_running"
   launch_agent_cockpit_panes "$manifest"
-  restore_studio_layout
-  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+  restore_agent_cockpit_layouts "$manifest"
+  if [[ "$server_was_running" != "1" ]]; then
+    write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
+  fi
 
   if [[ -n "${TMUX:-}" ]]; then
     exec "$TMUX_BIN" switch-client -t "$attach_session"
@@ -2503,15 +2628,21 @@ latest_cockpit_snapshot() {
 restore_cockpit_snapshot() {
   local snapshot="$1"
   local session="${2:-cockpit}"
-  local target kind cwd title current_command session_id row_status restore shell_command restored=0
+  local mode="${3:-}"
+  local target restore_target kind cwd title current_command session_id row_status restore shell_command restored=0
 
   while IFS=$'\t' read -r target kind cwd title current_command session_id row_status restore || [[ -n "${target:-}" ]]; do
     [[ -n "${target:-}" && "${target:0:1}" != "#" ]] || continue
     [[ "$target" == "$session:"* ]] || continue
 
+    restore_target="$(recovery_snapshot_pane_target "$target" 2>/dev/null || true)"
+    if [[ -z "$restore_target" ]]; then
+      echo "tt: missing recovery pane $target" >&2
+      continue
+    fi
     shell_command="cd $(shell_quote "$cwd") && exec $(default_login_shell_command)"
-    "$TMUX_BIN" select-pane -t "$target" -T "$title" 2>/dev/null || true
-    "$TMUX_BIN" respawn-pane -k -t "$target" "$shell_command" 2>/dev/null || true
+    "$TMUX_BIN" select-pane -t "$restore_target" -T "$title" 2>/dev/null || true
+    "$TMUX_BIN" respawn-pane -k -t "$restore_target" "$shell_command" 2>/dev/null || true
   done < "$snapshot"
 
   while IFS=$'\t' read -r target kind cwd title current_command session_id row_status restore || [[ -n "${target:-}" ]]; do
@@ -2519,11 +2650,16 @@ restore_cockpit_snapshot() {
     [[ "$target" == "$session:"* ]] || continue
     [[ "$kind" == "codex" && "$row_status" == "exact" && -n "$restore" ]] || continue
 
-    "$TMUX_BIN" respawn-pane -k -t "$target" -c "$cwd" "$(agent_color_prefix) codex resume --no-alt-screen $session_id" 2>/dev/null || true
+    restore_target="$(recovery_snapshot_pane_target "$target" 2>/dev/null || true)"
+    if [[ -z "$restore_target" ]]; then
+      echo "tt: missing recovery pane $target" >&2
+      continue
+    fi
+    "$TMUX_BIN" respawn-pane -k -t "$restore_target" -c "$cwd" "$(agent_color_prefix) codex resume --no-alt-screen $session_id" 2>/dev/null || true
     restored=$((restored + 1))
   done < "$snapshot"
 
-  restore_studio_layout "$session"
+  restore_studio_layout "$session" "$mode"
   apply_studio_pane_titles "$session"
   printf 'tt restored %s exact Codex pane(s)\n' "$restored" >&2
 }
@@ -2531,19 +2667,30 @@ restore_cockpit_snapshot() {
 recover_cockpit() {
   local snapshot="${1:-}"
   local session="${2:-cockpit}"
+  local server_was_running=0
+  local preserve_server=""
 
   if [[ -n "${TMUX:-}" ]]; then
-    echo "tt recover must be run outside tmux; it rebuilds the tmux server" >&2
+    echo "tt recover must be run outside tmux; it refuses to replace a live session" >&2
     exit 2
   fi
 
   snapshot="$(latest_cockpit_snapshot "$snapshot" "$session")" || exit 2
   printf 'tt recovering %s from %s\n' "$session" "$snapshot" >&2
 
-  start_recovery_server
-  create_ops_detached "$session" "$HOME" --no-shell-upgrade
-  "$TMUX_BIN" kill-session -t __tt_recover 2>/dev/null || true
-  restore_cockpit_snapshot "$snapshot" "$session"
+  require_recovery_session_absent "$session" || exit 2
+  if [[ "$session" == "cockpit" ]]; then
+    # create_ops_detached historically reclaims an idle "ops" session. Recovery
+    # must not claim or delete any existing session, even an apparently idle one.
+    require_recovery_session_absent "ops" || exit 2
+  fi
+  tmux_server_running && server_was_running=1
+  if [[ "$server_was_running" == "1" ]]; then
+    preserve_server="--preserve-server"
+  fi
+  create_ops_detached "$session" "$HOME" --no-shell-upgrade "$preserve_server" --recovery-session
+  finish_recovery_setup "$server_was_running"
+  restore_cockpit_snapshot "$snapshot" "$session" --preserve-server
 
   exec "$TMUX_BIN" attach -t "$session"
 }
