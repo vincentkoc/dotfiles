@@ -7,6 +7,7 @@ Top-level wrappers:
 - `agent-worktree-clean`
 - `agent-worktree-maintain`
 - `agent-worktree-purge`
+- `discrawl` - preserve explicit remote auth or load `openclaw-crawl/remote.env` from the trusted XDG config location before dispatching to a real backend
 - `install-agent-worktree-ops`
 - `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
