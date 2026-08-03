@@ -3,6 +3,28 @@ set -euo pipefail
 
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+real_codex=""
+case "$(uname -s)" in
+  Darwin)
+    # Homebrew owns the standalone CLI on macOS. Prefer its native binary even
+    # while old npm-backed Codex sessions are still draining.
+    for candidate in /opt/homebrew/bin/codex /usr/local/bin/codex; do
+      if [[ -x "$candidate" ]]; then
+        real_codex="$candidate"
+        break
+      fi
+    done
+    ;;
+  Linux)
+    # The official standalone installer owns Linux/WSL and keeps this symlink
+    # stable across releases.
+    candidate="$HOME/.codex/packages/standalone/current/bin/codex"
+    if [[ -x "$candidate" ]]; then
+      real_codex="$candidate"
+    fi
+    ;;
+esac
+
 lookup_path=""
 IFS=: read -r -a path_entries <<< "${PATH:-}"
 for path_entry in "${path_entries[@]}"; do
@@ -13,7 +35,9 @@ for path_entry in "${path_entries[@]}"; do
   lookup_path+="${lookup_path:+:}$path_entry"
 done
 
-real_codex="$(PATH="$lookup_path" command -v codex || true)"
+if [[ -z "$real_codex" ]]; then
+  real_codex="$(PATH="$lookup_path" command -v codex || true)"
+fi
 if [[ -z "$real_codex" && -x "/Applications/Codex.app/Contents/Resources/codex" ]]; then
   real_codex="/Applications/Codex.app/Contents/Resources/codex"
 fi
@@ -21,6 +45,10 @@ fi
 if [[ -z "$real_codex" || ! -x "$real_codex" ]]; then
   printf 'codex: real Codex binary not found outside %s\n' "$wrapper_dir" >&2
   exit 127
+fi
+
+if [[ "${CODEX_WRAPPER_DEBUG:-0}" == "1" ]]; then
+  printf 'codex launcher: %s\n' "$real_codex" >&2
 fi
 
 if [[ -z "${GITHUB_PAT_TOKEN:-}" ]]; then

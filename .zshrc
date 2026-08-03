@@ -371,24 +371,30 @@ _dotfiles_codex_env() {
 	env -u NO_COLOR -u TERMINFO CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor "$@"
 }
 
+_dotfiles_codex_cli() {
+	local launcher="$HOME/bin/codex"
+	[[ -x "$launcher" ]] || launcher=codex
+	_dotfiles_codex_env "$launcher" "$@"
+}
+
 codex() {
-	_dotfiles_codex_env codex "$@"
+	_dotfiles_codex_cli "$@"
 }
 
 codex-resume() {
 	if [[ $# -gt 0 ]]; then
-		_dotfiles_codex_env codex resume --no-alt-screen "$@"
+		_dotfiles_codex_cli resume --no-alt-screen "$@"
 	else
-		_dotfiles_codex_env codex resume --all --no-alt-screen
+		_dotfiles_codex_cli resume --all --no-alt-screen
 	fi
 }
 
 codex-last() {
-	_dotfiles_codex_env codex resume --last --no-alt-screen "$@"
+	_dotfiles_codex_cli resume --last --no-alt-screen "$@"
 }
 
 codex-tmux() {
-	_dotfiles_codex_env codex --no-alt-screen "$@"
+	_dotfiles_codex_cli --no-alt-screen "$@"
 }
 
 cx() {
