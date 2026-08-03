@@ -87,6 +87,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   TT_TEST_TMUX_SERVER_RUNNING=1 \
   "$tt" recover cockpit "$snapshot"
@@ -99,7 +100,7 @@ grep -Eq '^new-session .* -s cockpit ' "$tmux_log"
 grep -Eq '^set-option -t cockpit base-index 1$' "$tmux_log"
 grep -Eq '^set-option -t cockpit pane-base-index 1$' "$tmux_log"
 grep -Eq '^move-window -s @1 -t cockpit:1$' "$tmux_log"
-grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session$' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session; exec /bin/sh -il$' "$tmux_log"
 if grep -Eq '^(set|set-option|set-hook) -g' "$tmux_log"; then
   printf 'recovery rewrote global server configuration\n' >&2
   exit 1
@@ -110,6 +111,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   "$tt" recover cockpit "$snapshot"
 
@@ -120,7 +122,7 @@ fi
 grep -Eq '^set-option -t cockpit base-index 1$' "$tmux_log"
 grep -Eq '^set-option -t cockpit pane-base-index 1$' "$tmux_log"
 grep -Eq '^move-window -s @1 -t cockpit:1$' "$tmux_log"
-grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session$' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session; exec /bin/sh -il$' "$tmux_log"
 
 : >"$tmux_log"
 agent_manifest="$temporary/agents.tsv"
@@ -129,6 +131,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   TT_TEST_TMUX_SERVER_RUNNING=1 \
   "$tt" recover agents "$agent_manifest" factory2
@@ -140,7 +143,7 @@ fi
 grep -Eq '^set-option -t factory2 base-index 1$' "$tmux_log"
 grep -Eq '^set-option -t factory2 pane-base-index 1$' "$tmux_log"
 grep -Eq '^move-window -s @1 -t factory2:1$' "$tmux_log"
-grep -Eq '^respawn-pane -k -t %1 -c .*printf ready$' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %1 -c .*printf ready; exec /bin/sh -il$' "$tmux_log"
 if grep -Eq '^(set|set-option|set-hook) -g' "$tmux_log"; then
   printf 'agent recovery rewrote global server configuration\n' >&2
   exit 1
@@ -151,6 +154,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   "$tt" recover agents "$agent_manifest" factory2
 
@@ -161,7 +165,7 @@ fi
 grep -Eq '^set-option -t factory2 base-index 1$' "$tmux_log"
 grep -Eq '^set-option -t factory2 pane-base-index 1$' "$tmux_log"
 grep -Eq '^move-window -s @1 -t factory2:1$' "$tmux_log"
-grep -Eq '^respawn-pane -k -t %1 -c .*printf ready$' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %1 -c .*printf ready; exec /bin/sh -il$' "$tmux_log"
 
 : >"$tmux_log"
 if env -u TMUX \

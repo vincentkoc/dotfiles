@@ -52,9 +52,9 @@ shell_quote() {
 }
 
 default_login_shell() {
-  local shell_path=""
+  local shell_path="${TT_LOGIN_SHELL:-}"
 
-  if command -v dscl >/dev/null 2>&1 && [[ -n "${USER:-}" ]]; then
+  if [[ -z "$shell_path" ]] && command -v dscl >/dev/null 2>&1 && [[ -n "${USER:-}" ]]; then
     shell_path="$(dscl . -read "/Users/$USER" UserShell 2>/dev/null | awk '{print $2; exit}')"
   fi
 
@@ -86,6 +86,22 @@ ensure_tmux_default_shell() {
 
 agent_color_prefix() {
   printf 'env -u NO_COLOR -u TERMINFO CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=3 COLORTERM=truecolor TERMINFO_DIRS=$HOME/.terminfo:/usr/share/terminfo'
+}
+
+agent_shell_fallback_suffix() {
+  printf '; exec %s' "$(default_login_shell_command)"
+}
+
+command_with_shell_fallback() {
+  local command="$1"
+
+  printf '%s%s\n' "$command" "$(agent_shell_fallback_suffix)"
+}
+
+agent_pane_command() {
+  local command="$1"
+
+  command_with_shell_fallback "$(agent_color_prefix) $command"
 }
 
 agent_kind_for_command() {
@@ -153,10 +169,14 @@ set_pane_git_label() {
 
 clean_agent_command() {
   local command="$1"
-  local prefix
+  local prefix suffix
 
   command="${command#\"}"
   command="${command%\"}"
+  suffix="$(agent_shell_fallback_suffix)"
+  if [[ "$command" == *"$suffix" ]]; then
+    command="${command%"$suffix"}"
+  fi
   prefix="$(agent_color_prefix) "
   if [[ "$command" == "$prefix"* ]]; then
     command="${command#"$prefix"}"
@@ -1964,7 +1984,7 @@ codex_restore_execute() {
     matched=$((matched + 1))
     printf '%s\t%s\t%s\t%s\n' "$target" "$kind" "$status" "$restore"
     if "$TMUX_BIN" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | grep -Fxq "$target"; then
-      "$TMUX_BIN" respawn-pane -k -t "$target" "$restore"
+      "$TMUX_BIN" respawn-pane -k -t "$target" "$(command_with_shell_fallback "$restore")"
       restored=$((restored + 1))
     else
       printf 'missing pane: %s\n' "$target" >&2
@@ -2496,7 +2516,7 @@ launch_agent_cockpit_panes() {
     "$TMUX_BIN" select-pane -t "$target" -T "$title" 2>/dev/null || true
 
     if [[ -n "${command:-}" ]]; then
-      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(agent_color_prefix) $command"
+      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(agent_pane_command "$command")"
     else
       "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(default_login_shell_command)"
     fi
@@ -2532,7 +2552,7 @@ refresh_agent_pane_colors() {
     fi
     set_pane_git_label "$pane" "$dir"
 
-    "$TMUX_BIN" respawn-pane -k -t "$pane" -c "$dir" "$(agent_color_prefix) $command"
+    "$TMUX_BIN" respawn-pane -k -t "$pane" -c "$dir" "$(agent_pane_command "$command")"
     count=$((count + 1))
   done < <("$TMUX_BIN" list-panes -a -F '#{session_name}	#{pane_id}	#{pane_current_path}	#{pane_start_command}	#{@tt_base_title}	#{@tt_agent_command}' 2>/dev/null || true)
 
@@ -2655,7 +2675,7 @@ restore_cockpit_snapshot() {
       echo "tt: missing recovery pane $target" >&2
       continue
     fi
-    "$TMUX_BIN" respawn-pane -k -t "$restore_target" -c "$cwd" "$(agent_color_prefix) codex resume --no-alt-screen $session_id" 2>/dev/null || true
+    "$TMUX_BIN" respawn-pane -k -t "$restore_target" -c "$cwd" "$(agent_pane_command "codex resume --no-alt-screen $session_id")" 2>/dev/null || true
     restored=$((restored + 1))
   done < "$snapshot"
 
