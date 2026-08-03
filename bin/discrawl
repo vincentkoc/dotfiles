@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+wrapper="${BASH_SOURCE[0]}"
+if [[ "$wrapper" != */* ]]; then
+    wrapper="$(command -v "$wrapper" 2>/dev/null || printf '%s' "$wrapper")"
+fi
+
+if [[ ! ${DISCRAWL_REMOTE_TOKEN+x} ]]; then
+    crawl_env="${OPENCLAW_CRAWL_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/openclaw-crawl/remote.env}"
+    if [[ -f "$crawl_env" ]]; then
+        # shellcheck disable=SC1090
+        if ! source "$crawl_env" >/dev/null 2>&1; then
+            printf '%s\n' "discrawl: failed to load remote auth environment" >&2
+            exit 1
+        fi
+        if [[ ${DISCRAWL_REMOTE_TOKEN+x} ]]; then
+            export DISCRAWL_REMOTE_TOKEN
+        fi
+    fi
+fi
+
+is_backend() {
+    local candidate="$1"
+    [[ -f "$candidate" && -x "$candidate" ]] || return 1
+    [[ "$candidate" -ef "$wrapper" ]] && return 1
+    return 0
+}
+
+run_backend() {
+    local candidate="$1"
+    shift
+    if is_backend "$candidate"; then
+        exec "$candidate" "$@"
+    fi
+}
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    run_backend /opt/homebrew/bin/discrawl "$@"
+    run_backend /usr/local/bin/discrawl "$@"
+fi
+
+old_ifs="$IFS"
+IFS=:
+for path_dir in $PATH; do
+    IFS="$old_ifs"
+    [[ -n "$path_dir" ]] || path_dir=.
+    run_backend "$path_dir/discrawl" "$@"
+    IFS=:
+done
+IFS="$old_ifs"
+
+printf '%s\n' "discrawl: no usable backend found" >&2
+exit 127

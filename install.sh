@@ -301,6 +301,117 @@ setup_shell_symlinks() {
     link_dotfile "$df_dir/functions" "$HOME/functions"
 }
 
+canonical_discrawl_entry() {
+    local path="$1"
+    local parent="${path%/*}"
+    local base="${path##*/}"
+    local physical_parent
+
+    [[ "$parent" != "$path" ]] || parent=.
+    physical_parent="$(cd -P "$parent" 2>/dev/null && pwd -P)" || return 1
+    printf '%s/%s\n' "$physical_parent" "$base"
+}
+
+is_discrawl_backend() {
+    local candidate="$1"
+    local wrapper="$2"
+    local destination="$3"
+    local candidate_entry
+    local destination_entry
+
+    [[ -f "$candidate" && -x "$candidate" ]] || return 1
+    [[ "$candidate" -ef "$wrapper" ]] && return 1
+    if [[ -L "$destination" ]]; then
+        candidate_entry="$(canonical_discrawl_entry "$candidate")" || return 1
+        destination_entry="$(canonical_discrawl_entry "$destination")" || return 1
+        [[ "$candidate_entry" == "$destination_entry" ]] && return 1
+    elif [[ -e "$destination" && "$candidate" -ef "$destination" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+has_discrawl_backend() {
+    local wrapper="$1"
+    local destination="$2"
+    local path_dir
+    local old_ifs
+
+    if is_discrawl_backend /opt/homebrew/bin/discrawl "$wrapper" "$destination"; then
+        return 0
+    fi
+    if is_discrawl_backend /usr/local/bin/discrawl "$wrapper" "$destination"; then
+        return 0
+    fi
+
+    old_ifs="$IFS"
+    IFS=:
+    for path_dir in $PATH; do
+        IFS="$old_ifs"
+        [[ -n "$path_dir" ]] || path_dir=.
+        if is_discrawl_backend "$path_dir/discrawl" "$wrapper" "$destination"; then
+            IFS="$old_ifs"
+            return 0
+        fi
+        IFS=:
+    done
+    IFS="$old_ifs"
+    return 1
+}
+
+discrawl_backup_path() {
+    local destination="$1"
+    local base
+    local backup
+    local suffix=1
+
+    base="${destination}.pre-dotfiles.$(date +%Y%m%d%H%M%S).bak"
+    backup="$base"
+    while [[ -e "$backup" || -L "$backup" ]]; do
+        backup="${base}.${suffix}"
+        suffix=$((suffix + 1))
+    done
+    printf '%s\n' "$backup"
+}
+
+setup_discrawl_shim() {
+    local df_dir
+    local wrapper
+    local destination="$HOME/.local/bin/discrawl"
+    local backup
+
+    [[ "$(uname -s)" == "Darwin" ]] || return 0
+
+    df_dir="$(dotfiles_dir)"
+    wrapper="$df_dir/bin/discrawl"
+    if [[ ! -f "$wrapper" || ! -x "$wrapper" ]]; then
+        error "Discrawl wrapper is missing or not executable"
+        return 1
+    fi
+
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        if [[ "$destination" -ef "$wrapper" ]]; then
+            success "$destination already symlinked"
+            return 0
+        fi
+    fi
+
+    if ! has_discrawl_backend "$wrapper" "$destination"; then
+        warn "Skipping Discrawl wrapper: no usable backend found"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$destination")"
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        backup="$(discrawl_backup_path "$destination")"
+        mv "$destination" "$backup"
+        warn "Existing Discrawl command backed up"
+    fi
+
+    ln -s "$wrapper" "$destination"
+    success "Symlinked Discrawl auth wrapper"
+}
+
 setup_config_symlinks() {
     local df_dir natilius_profile
     df_dir="$(dotfiles_dir)"
@@ -854,6 +965,7 @@ main() {
     install_vim_theme
     install_nvim_plugins
     setup_shell_symlinks
+    setup_discrawl_shim
     setup_config_symlinks
     setup_spec_symlink
     ensure_ssh_signing_trust_file
@@ -873,4 +985,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
