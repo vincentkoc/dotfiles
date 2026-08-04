@@ -87,6 +87,14 @@ write_proc_stat() {
   printf ' %s 0\n' "$starttime" >>"$procroot/$pid/stat"
 }
 
+file_mode() {
+  if /usr/bin/stat -c %a "$1" >/dev/null 2>&1; then
+    /usr/bin/stat -c %a "$1"
+  else
+    /usr/bin/stat -f %Lp "$1"
+  fi
+}
+
 make_proc 1234 bash 111111 'mnt:[7001]' /usr/bin/bash
 make_proc 2222 'tmux: server' 222222 'mnt:[7001]' "$fakebin/tmux"
 make_proc 3333 bash 333333 'mnt:[7001]' /usr/bin/bash
@@ -208,11 +216,19 @@ if [[ "${1:-}" == "-c" ]]; then
       exit 0
       ;;
     %a)
-      /usr/bin/stat -f %Lp "$3"
+      if /usr/bin/stat -c %a "$3" >/dev/null 2>&1; then
+        /usr/bin/stat -c %a "$3"
+      else
+        /usr/bin/stat -f %Lp "$3"
+      fi
       exit 0
       ;;
     %s)
-      /usr/bin/stat -f %z "$3"
+      if /usr/bin/stat -c %s "$3" >/dev/null 2>&1; then
+        /usr/bin/stat -c %s "$3"
+      else
+        /usr/bin/stat -f %z "$3"
+      fi
       exit 0
       ;;
   esac
@@ -395,8 +411,8 @@ grep -Fq -- "-x $lockroot/tt-wsl-bridge.lock /bin/bash -c" "$sudo_log"
 grep -Fqx -- "-t drvfs -o ro,uid=1000,gid=1000,umask=022,fmask=011 C: $croot" "$mount_log"
 grep -Fqx -- "set-option -gq @tt_wsl_interop $socket" "$tmux_log"
 grep -Fqx -- "2222|222222|mnt:[7001]" "$markerroot/mount-1000"
-[[ "$(/usr/bin/stat -f %Lp "$markerroot/mount-1000")" == "600" ]]
-marker_mode="$(/usr/bin/stat -f %Lp "$markerroot")"
+[[ "$(file_mode "$markerroot/mount-1000")" == "600" ]]
+marker_mode="$(file_mode "$markerroot")"
 (( (8#$marker_mode & 8#022) == 0 ))
 [[ ! -L "$markerroot" ]]
 [[ -z "$(find "$markerroot" -maxdepth 1 -name '.record.*' -print -quit)" ]]
