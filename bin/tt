@@ -15,9 +15,149 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DOTFILES_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+TT_WSL_BRIDGE_READY=0
+
+wsl_bridge_is_wsl() {
+  [[ -n "${WSL_DISTRO_NAME:-}" ]] &&
+    [[ "$(uname -r 2>/dev/null || true)" =~ [Mm]icrosoft|WSL ]]
+}
+
+wsl_bridge_valid_socket() {
+  local socket="$1"
+
+  [[ "$socket" =~ ^/run/WSL/[0-9]+_interop$ ]] && [[ -S "$socket" ]]
+}
+
+wsl_bridge_mount_record() {
+  local record
+
+  record="$(findmnt -rn -M /mnt/c -o SOURCE,FSTYPE,OPTIONS 2>/dev/null || true)"
+  [[ -n "$record" ]] || return 1
+  [[ "$record" != *$'\n'* ]] || return 1
+  printf '%s\n' "$record"
+}
+
+wsl_bridge_mount_valid() {
+  local record source fstype options extra
+
+  record="$(wsl_bridge_mount_record)" || return 1
+  read -r source fstype options extra <<<"$record"
+  [[ -z "${extra:-}" ]] || return 1
+  [[ "$source" == C:* ]] || return 1
+  case "$fstype" in
+    drvfs)
+      ;;
+    9p)
+      [[ ",$options," == *",aname=drvfs"* ]] || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ ",$options," == *,ro,* ]]
+}
+
+wsl_bridge_ensure() {
+  local uid gid socket
+
+  wsl_bridge_is_wsl || {
+    echo "tt: wsl-bridge is available only inside WSL" >&2
+    return 2
+  }
+
+  socket="${WSL_INTEROP:-}"
+  [[ -n "$socket" ]] || {
+    echo "tt: wsl-bridge requires WSL_INTEROP from a native wsl.exe launch" >&2
+    return 2
+  }
+  wsl_bridge_valid_socket "$socket" || {
+    echo "tt: refusing invalid or dead WSL_INTEROP socket: $socket" >&2
+    return 2
+  }
+
+  uid="$(id -u)"
+  gid="$(id -g)"
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || {
+    echo "tt: could not determine numeric uid/gid for drvfs mount" >&2
+    return 2
+  }
+
+  sudo -n flock -x /run/lock/tt-wsl-bridge.lock bash -c '
+    set -euo pipefail
+    uid="$1"
+    gid="$2"
+
+    mount_record() {
+      local record
+      record="$(findmnt -rn -M /mnt/c -o SOURCE,FSTYPE,OPTIONS 2>/dev/null || true)"
+      [[ -n "$record" ]] || return 1
+      [[ "$record" != *$'\''\n'\''* ]] || return 1
+      printf "%s\n" "$record"
+    }
+
+    mount_valid() {
+      local record source fstype options extra
+      record="$(mount_record)" || return 1
+      read -r source fstype options extra <<<"$record"
+      [[ -z "${extra:-}" ]] || return 1
+      [[ "$source" == C:* ]] || return 1
+      case "$fstype" in
+        drvfs)
+          ;;
+        9p)
+          [[ ",$options," == *",aname=drvfs"* ]] || return 1
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      [[ ",$options," == *,ro,* ]]
+    }
+
+    if findmnt -rn -M /mnt/c >/dev/null 2>&1; then
+      mount_valid || {
+        echo "tt: refusing unexpected /mnt/c mount; expected read-only C: drvfs" >&2
+        exit 2
+      }
+      exit 0
+    fi
+
+    if [[ -L /mnt/c || ( -e /mnt/c && ! -d /mnt/c ) ]]; then
+      echo "tt: refusing non-directory /mnt/c mountpoint" >&2
+      exit 2
+    fi
+    if [[ -d /mnt/c ]] && [[ -n "$(find /mnt/c -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+      echo "tt: refusing nonempty unmounted /mnt/c" >&2
+      exit 2
+    fi
+
+    mkdir -p /mnt/c
+    mount -t drvfs -o "ro,uid=$uid,gid=$gid,umask=022,fmask=011" C: /mnt/c
+    mount_valid || {
+      echo "tt: /mnt/c failed post-mount validation" >&2
+      exit 2
+    }
+  ' tt-wsl-bridge "$uid" "$gid"
+
+  wsl_bridge_mount_valid || {
+    echo "tt: /mnt/c is not a read-only C: drvfs mount" >&2
+    return 2
+  }
+  "$TMUX_BIN" set-option -gq @tt_wsl_interop "$socket"
+  TT_WSL_BRIDGE_READY=1
+}
+
+wsl_bridge_ensure_for_entry() {
+  [[ "$TT_WSL_BRIDGE_READY" == "1" ]] && return 0
+  if wsl_bridge_is_wsl && [[ -n "${WSL_INTEROP:-}" ]]; then
+    wsl_bridge_ensure
+  fi
+}
 
 attach_or_switch() {
   local session="$1"
+
+  wsl_bridge_ensure_for_entry
 
   if [[ -n "${TMUX:-}" ]]; then
     exec "$TMUX_BIN" switch-client -t "$session"
@@ -375,6 +515,7 @@ kill_server() {
 create_plain() {
   local session="$1"
 
+  wsl_bridge_ensure_for_entry
   ensure_tmux_default_shell
 
   if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
@@ -528,6 +669,7 @@ create_ops() {
   local session="${1:-cockpit}"
   local start_dir="${2:-$PWD}"
 
+  wsl_bridge_ensure_for_entry
   create_ops_detached "$session" "$start_dir"
   attach_or_switch "$session"
 }
@@ -656,6 +798,7 @@ ensure_studio_layout() {
 create_studio() {
   local session="$1"
 
+  wsl_bridge_ensure_for_entry
   ensure_studio_layout "$session"
   install_agent_autosave_hooks
   write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
@@ -679,6 +822,7 @@ create_studio_detached() {
 create_mobile() {
   local session="$1"
 
+  wsl_bridge_ensure_for_entry
   if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
     attach_or_switch "$session"
   fi
@@ -812,6 +956,7 @@ attach_mobile_target() {
   local target="$1"
   local source_session target_suffix
 
+  wsl_bridge_ensure_for_entry
   source_session="${target%%:*}"
   target_suffix="${target#*:}"
 
@@ -2572,6 +2717,7 @@ recover_agent_cockpit() {
     exit 2
   fi
 
+  wsl_bridge_ensure_for_entry
   if [[ -z "$manifest" || "$manifest" == "--default" ]]; then
     manifest="$(agent_cockpit_manifest)"
   fi
@@ -2695,6 +2841,7 @@ recover_cockpit() {
     exit 2
   fi
 
+  wsl_bridge_ensure_for_entry
   snapshot="$(latest_cockpit_snapshot "$snapshot" "$session")" || exit 2
   printf 'tt recovering %s from %s\n' "$session" "$snapshot" >&2
 
@@ -3071,6 +3218,17 @@ case "${1:-}" in
   mosh-attn)
     sync_mosh_attention_panes "${2:-}"
     ;;
+  wsl-bridge)
+    case "${2:-ensure}" in
+      ensure)
+        wsl_bridge_ensure
+        ;;
+      *)
+        echo "usage: tt wsl-bridge ensure" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   pane-menu)
     show_pane_menu "${2:-${TMUX_PANE:-}}" "${3:-P}" "${4:-P}" "${5:-}"
     ;;
@@ -3203,7 +3361,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|ops [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;
