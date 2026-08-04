@@ -37,6 +37,7 @@ dotfiles_argv=("${dotfiles_argv[@]:1}")
 "$dotfiles_command" "${dotfiles_argv[@]}"
 # Keep PowerShell's trailing CR on a comment instead of the final argument.
 '@
+        $invoke = $invoke -replace "`r", ''
         $invoke | & $wsl -d $DotfilesWslDistro --cd $WorkingDirectory -- zsh -ls
     } finally {
         $env:PATH = $windowsPath
