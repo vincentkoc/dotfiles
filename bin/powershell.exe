@@ -11,7 +11,7 @@ valid_c_mount() {
   record="$(findmnt -rn -M /mnt/c -o SOURCE,FSTYPE,OPTIONS 2>/dev/null || true)"
   [[ -n "$record" && "$record" != *$'\n'* ]] || return 1
   read -r source fstype options extra <<<"$record"
-  [[ -z "${extra:-}" && "$source" == C:* ]] || return 1
+  [[ -z "${extra:-}" && "$source" == "C:" ]] || return 1
   case "$fstype" in
     drvfs)
       ;;
@@ -22,7 +22,7 @@ valid_c_mount() {
       return 1
       ;;
   esac
-  [[ ",$options," == *,ro,* ]]
+  [[ ",$options," == *,ro,* && ",$options," != *,rw,* ]]
 }
 
 socket="${WSL_INTEROP:-}"

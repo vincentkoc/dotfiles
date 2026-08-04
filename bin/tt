@@ -16,6 +16,11 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DOTFILES_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 TT_WSL_BRIDGE_READY=0
+TT_WSL_BRIDGE_PENDING=0
+TT_WSL_BRIDGE_PENDING_PID=""
+TT_WSL_BRIDGE_PENDING_STARTTIME=""
+TT_WSL_BRIDGE_PENDING_NS=""
+TT_WSL_BRIDGE_PENDING_EXE=""
 
 wsl_bridge_is_wsl() {
   [[ -n "${WSL_DISTRO_NAME:-}" ]] &&
@@ -28,37 +33,301 @@ wsl_bridge_valid_socket() {
   [[ "$socket" =~ ^/run/WSL/[0-9]+_interop$ ]] && [[ -S "$socket" ]]
 }
 
-wsl_bridge_mount_record() {
-  local record
+wsl_bridge_proc_starttime() {
+  local pid="$1"
+  local stat_line stat_fields
+  local -a fields
 
-  record="$(findmnt -rn -M /mnt/c -o SOURCE,FSTYPE,OPTIONS 2>/dev/null || true)"
-  [[ -n "$record" ]] || return 1
-  [[ "$record" != *$'\n'* ]] || return 1
-  printf '%s\n' "$record"
+  stat_line="$(<"/proc/$pid/stat")" || return 1
+  stat_fields="${stat_line#*) }"
+  read -r -a fields <<<"$stat_fields"
+  [[ "${#fields[@]}" -ge 20 ]] || return 1
+  printf '%s\n' "${fields[19]}"
 }
 
-wsl_bridge_mount_valid() {
-  local record source fstype options extra
+wsl_bridge_current_identity() {
+  local pid="$$"
+  local starttime namespace exe
 
-  record="$(wsl_bridge_mount_record)" || return 1
-  read -r source fstype options extra <<<"$record"
-  [[ -z "${extra:-}" ]] || return 1
-  [[ "$source" == C:* ]] || return 1
-  case "$fstype" in
-    drvfs)
-      ;;
-    9p)
-      [[ ",$options," == *",aname=drvfs"* ]] || return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  [[ ",$options," == *,ro,* ]]
+  starttime="$(wsl_bridge_proc_starttime "$pid")" || return 1
+  namespace="$(readlink "/proc/$pid/ns/mnt")" || return 1
+  exe="$(readlink "/proc/$pid/exe")" || return 1
+  [[ "$namespace" =~ ^mnt:\[[0-9]+\]$ ]] || return 1
+  printf '%s|%s|%s|%s\n' "$pid" "$starttime" "$namespace" "$exe"
+}
+
+wsl_bridge_server_snapshot() {
+  local pid starttime namespace exe expected_exe owner pane pane_namespace panes
+  local -a pane_ids
+
+  pid="$("$TMUX_BIN" display-message -p '#{pid}' 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$(<"/proc/$pid/comm")" == "tmux: server" ]] || return 1
+  owner="$(stat -c %u "/proc/$pid")" || return 1
+  [[ "$owner" == "$(id -u)" ]] || return 1
+  starttime="$(wsl_bridge_proc_starttime "$pid")" || return 1
+  namespace="$(readlink "/proc/$pid/ns/mnt")" || return 1
+  [[ "$namespace" =~ ^mnt:\[[0-9]+\]$ ]] || return 1
+  exe="$(readlink "/proc/$pid/exe")" || return 1
+  expected_exe="$(readlink -f "$TMUX_BIN")" || return 1
+  [[ "$exe" == "$expected_exe" ]] || return 1
+
+  panes="$("$TMUX_BIN" list-panes -a -F '#{pane_pid}' 2>/dev/null | sort -nu | paste -sd, -)"
+  [[ -n "$panes" ]] || return 1
+  IFS=',' read -r -a pane_ids <<<"$panes"
+  for pane in "${pane_ids[@]}"; do
+    [[ "$pane" =~ ^[0-9]+$ ]] || return 1
+    [[ "$(stat -c %u "/proc/$pane")" == "$owner" ]] || return 1
+    pane_namespace="$(readlink "/proc/$pane/ns/mnt")" || return 1
+    [[ "$pane_namespace" == "$namespace" ]] || return 1
+  done
+
+  printf '%s|%s|%s|%s|%s\n' "$pid" "$starttime" "$namespace" "$exe" "$panes"
+}
+
+wsl_bridge_root_action() {
+  local action="$1"
+  local target_kind="$2"
+  local target_pid="$3"
+  local target_starttime="$4"
+  local target_namespace="$5"
+  local target_exe="$6"
+  local pane_pids="$7"
+  local current_pid="$8"
+  local current_starttime="$9"
+  local current_namespace="${10}"
+  local current_exe="${11}"
+  local uid gid
+
+  uid="$(id -u)"
+  gid="$(id -g)"
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || {
+    echo "tt: could not determine numeric uid/gid for drvfs mount" >&2
+    return 2
+  }
+
+  sudo -n /usr/bin/flock -x /run/lock/tt-wsl-bridge.lock /usr/bin/bash -c '
+    set -euo pipefail
+    action="$1"
+    target_kind="$2"
+    target_pid="$3"
+    target_starttime="$4"
+    target_namespace="$5"
+    target_exe="$6"
+    pane_pids="$7"
+    current_pid="$8"
+    current_starttime="$9"
+    current_namespace="${10}"
+    current_exe="${11}"
+    uid="${12}"
+    gid="${13}"
+    marker_dir=/run/tt-wsl-bridge
+    marker="$marker_dir/mount-$uid"
+    pending="$marker_dir/pending-$uid"
+
+    proc_starttime() {
+      local pid="$1"
+      local stat_line stat_fields
+      local -a fields
+      stat_line="$(<"/proc/$pid/stat")" || return 1
+      stat_fields="${stat_line#*) }"
+      read -r -a fields <<<"$stat_fields"
+      [[ "${#fields[@]}" -ge 20 ]] || return 1
+      printf "%s\n" "${fields[19]}"
+    }
+
+    validate_process() {
+      local pid="$1"
+      local expected_starttime="$2"
+      local expected_namespace="$3"
+      local expected_exe="$4"
+      local expected_comm="${5:-}"
+      [[ "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] || return 1
+      [[ "$(/usr/bin/stat -c %u "/proc/$pid")" == "$uid" ]] || return 1
+      [[ "$(proc_starttime "$pid")" == "$expected_starttime" ]] || return 1
+      [[ "$(/usr/bin/readlink "/proc/$pid/ns/mnt")" == "$expected_namespace" ]] || return 1
+      [[ "$(/usr/bin/readlink "/proc/$pid/exe")" == "$expected_exe" ]] || return 1
+      if [[ -n "$expected_comm" ]]; then
+        [[ "$(<"/proc/$pid/comm")" == "$expected_comm" ]] || return 1
+      fi
+    }
+
+    validate_process "$current_pid" "$current_starttime" "$current_namespace" "$current_exe"
+    if [[ "$target_kind" == "server" ]]; then
+      validate_process "$target_pid" "$target_starttime" "$target_namespace" "$target_exe" "tmux: server"
+      [[ -n "$pane_pids" ]] || {
+        echo "tt: tmux server has no validated panes" >&2
+        exit 2
+      }
+      IFS=, read -r -a panes <<<"$pane_pids"
+      for pane in "${panes[@]}"; do
+        [[ "$pane" =~ ^[0-9]+$ && -d "/proc/$pane" ]] || {
+          echo "tt: tmux pane PID changed during bridge setup" >&2
+          exit 2
+        }
+        [[ "$(/usr/bin/stat -c %u "/proc/$pane")" == "$uid" ]] || {
+          echo "tt: tmux pane ownership mismatch" >&2
+          exit 2
+        }
+        [[ "$(/usr/bin/readlink "/proc/$pane/ns/mnt")" == "$target_namespace" ]] || {
+          echo "tt: tmux pane mount namespace mismatch" >&2
+          exit 2
+        }
+      done
+    else
+      [[ "$target_kind" == "current" ]] || exit 2
+      target_pid="$current_pid"
+      target_starttime="$current_starttime"
+      target_namespace="$current_namespace"
+      target_exe="$current_exe"
+    fi
+
+    nsrun() {
+      /usr/bin/nsenter -t "$target_pid" -m -- "$@"
+    }
+
+    mount_record() {
+      local record
+      record="$(nsrun /usr/bin/findmnt -rn -M /mnt/c -o SOURCE,FSTYPE,OPTIONS 2>/dev/null || true)"
+      [[ -n "$record" ]] || return 1
+      [[ "$record" != *$'\''\n'\''* ]] || return 1
+      printf "%s\n" "$record"
+    }
+
+    mount_valid() {
+      local record source fstype options extra
+      record="$(mount_record)" || return 1
+      read -r source fstype options extra <<<"$record"
+      [[ -z "${extra:-}" && "$source" == "C:" ]] || return 1
+      case "$fstype" in
+        drvfs)
+          ;;
+        9p)
+          [[ ",$options," == *",aname=drvfs"* ]] || return 1
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      [[ ",$options," == *,ro,* && ",$options," != *,rw,* ]]
+    }
+
+    propagation="$(nsrun /usr/bin/findmnt -rn -M / -o PROPAGATION)"
+    [[ "$propagation" != shared* ]] || {
+      echo "tt: refusing bridge in a shared root mount namespace" >&2
+      exit 2
+    }
+
+    marker_value="$target_pid|$target_starttime|$target_namespace"
+    current_value="$current_pid|$current_starttime|$current_namespace"
+    /usr/bin/mkdir -p "$marker_dir"
+
+    case "$action" in
+      ensure)
+        if nsrun /usr/bin/findmnt -rn -M /mnt/c >/dev/null 2>&1; then
+          mount_valid || {
+            echo "tt: refusing unexpected /mnt/c mount; expected read-only C: drvfs" >&2
+            exit 2
+          }
+          if [[ -f "$marker" && "$(<"$marker")" != "$marker_value" ]]; then
+            echo "tt: refusing stale WSL bridge mount marker" >&2
+            exit 2
+          fi
+          if [[ "$target_kind" == "server" && -f "$pending" ]]; then
+            [[ "$(<"$pending")" == "$current_value" && "$current_namespace" == "$target_namespace" ]] || {
+              echo "tt: refusing stale WSL bridge pending marker" >&2
+              exit 2
+            }
+            printf "%s\n" "$marker_value" >"$marker"
+            /usr/bin/rm "$pending"
+            printf "promoted\n"
+          else
+            printf "existing\n"
+          fi
+          exit 0
+        fi
+
+        [[ ! -e "$marker" && ! -e "$pending" ]] || {
+          echo "tt: refusing bridge mount with stale marker state" >&2
+          exit 2
+        }
+        if [[ -L /mnt/c || ( -e /mnt/c && ! -d /mnt/c ) ]]; then
+          echo "tt: refusing non-directory /mnt/c mountpoint" >&2
+          exit 2
+        fi
+        if [[ -d /mnt/c ]] && [[ -n "$(nsrun /usr/bin/find /mnt/c -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+          echo "tt: refusing nonempty unmounted /mnt/c" >&2
+          exit 2
+        fi
+
+        nsrun /usr/bin/mkdir -p /mnt/c
+        nsrun /usr/bin/mount -t drvfs -o "ro,uid=$uid,gid=$gid,umask=022,fmask=011" C: /mnt/c
+        mount_valid || {
+          nsrun /usr/bin/umount /mnt/c 2>/dev/null || true
+          echo "tt: /mnt/c failed post-mount validation" >&2
+          exit 2
+        }
+        if [[ "$target_kind" == "server" ]]; then
+          printf "%s\n" "$marker_value" >"$marker"
+          printf "created\n"
+        else
+          printf "%s\n" "$current_value" >"$pending"
+          printf "prepared\n"
+        fi
+        ;;
+      rollback-server)
+        [[ "$target_kind" == "server" && -f "$marker" && "$(<"$marker")" == "$marker_value" ]] || {
+          echo "tt: refusing rollback without exact server mount marker" >&2
+          exit 2
+        }
+        mount_valid || {
+          echo "tt: refusing rollback of an unvalidated mount" >&2
+          exit 2
+        }
+        nsrun /usr/bin/umount /mnt/c
+        nsrun /usr/bin/findmnt -rn -M /mnt/c >/dev/null 2>&1 && exit 2
+        /usr/bin/rm "$marker"
+        printf "rolled-back\n"
+        ;;
+      rollback-current)
+        [[ "$target_kind" == "current" && -f "$pending" && "$(<"$pending")" == "$current_value" ]] || {
+          echo "tt: refusing rollback without exact pending mount marker" >&2
+          exit 2
+        }
+        mount_valid || {
+          echo "tt: refusing rollback of an unvalidated pending mount" >&2
+          exit 2
+        }
+        nsrun /usr/bin/umount /mnt/c
+        nsrun /usr/bin/findmnt -rn -M /mnt/c >/dev/null 2>&1 && exit 2
+        /usr/bin/rm "$pending"
+        printf "rolled-back\n"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+  ' tt-wsl-bridge "$action" "$target_kind" "$target_pid" "$target_starttime" \
+    "$target_namespace" "$target_exe" "$pane_pids" "$current_pid" \
+    "$current_starttime" "$current_namespace" "$current_exe" "$uid" "$gid"
+}
+
+wsl_bridge_cleanup_pending() {
+  [[ "$TT_WSL_BRIDGE_PENDING" == "1" ]] || return 0
+  wsl_bridge_root_action rollback-current current \
+    "$TT_WSL_BRIDGE_PENDING_PID" "$TT_WSL_BRIDGE_PENDING_STARTTIME" \
+    "$TT_WSL_BRIDGE_PENDING_NS" "$TT_WSL_BRIDGE_PENDING_EXE" "" \
+    "$TT_WSL_BRIDGE_PENDING_PID" "$TT_WSL_BRIDGE_PENDING_STARTTIME" \
+    "$TT_WSL_BRIDGE_PENDING_NS" "$TT_WSL_BRIDGE_PENDING_EXE" >/dev/null || true
+  TT_WSL_BRIDGE_PENDING=0
 }
 
 wsl_bridge_ensure() {
-  local uid gid socket
+  local mode="${1:-explicit}"
+  local socket current_snapshot server_snapshot
+  local current_pid current_starttime current_namespace current_exe
+  local server_pid server_starttime server_namespace server_exe pane_pids
+  local result after_snapshot
 
   wsl_bridge_is_wsl || {
     echo "tt: wsl-bridge is available only inside WSL" >&2
@@ -75,82 +344,67 @@ wsl_bridge_ensure() {
     return 2
   }
 
-  uid="$(id -u)"
-  gid="$(id -g)"
-  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || {
-    echo "tt: could not determine numeric uid/gid for drvfs mount" >&2
+  current_snapshot="$(wsl_bridge_current_identity)" || {
+    echo "tt: could not validate the current WSL process identity" >&2
     return 2
   }
+  IFS='|' read -r current_pid current_starttime current_namespace current_exe <<<"$current_snapshot"
 
-  sudo -n flock -x /run/lock/tt-wsl-bridge.lock bash -c '
-    set -euo pipefail
-    uid="$1"
-    gid="$2"
-
-    mount_record() {
-      local record
-      record="$(findmnt -rn -M /mnt/c -o SOURCE,FSTYPE,OPTIONS 2>/dev/null || true)"
-      [[ -n "$record" ]] || return 1
-      [[ "$record" != *$'\''\n'\''* ]] || return 1
-      printf "%s\n" "$record"
+  if server_snapshot="$(wsl_bridge_server_snapshot)"; then
+    IFS='|' read -r server_pid server_starttime server_namespace server_exe pane_pids <<<"$server_snapshot"
+    result="$(wsl_bridge_root_action ensure server \
+      "$server_pid" "$server_starttime" "$server_namespace" "$server_exe" "$pane_pids" \
+      "$current_pid" "$current_starttime" "$current_namespace" "$current_exe")" || return
+    after_snapshot="$(wsl_bridge_server_snapshot)" || {
+      [[ "$result" == "created" || "$result" == "promoted" ]] &&
+        wsl_bridge_root_action rollback-server server \
+          "$server_pid" "$server_starttime" "$server_namespace" "$server_exe" "$pane_pids" \
+          "$current_pid" "$current_starttime" "$current_namespace" "$current_exe" >/dev/null || true
+      echo "tt: tmux server identity changed during bridge setup" >&2
+      return 2
     }
-
-    mount_valid() {
-      local record source fstype options extra
-      record="$(mount_record)" || return 1
-      read -r source fstype options extra <<<"$record"
-      [[ -z "${extra:-}" ]] || return 1
-      [[ "$source" == C:* ]] || return 1
-      case "$fstype" in
-        drvfs)
-          ;;
-        9p)
-          [[ ",$options," == *",aname=drvfs"* ]] || return 1
-          ;;
-        *)
-          return 1
-          ;;
-      esac
-      [[ ",$options," == *,ro,* ]]
+    if [[ "$after_snapshot" != "$server_snapshot" ]]; then
+      [[ "$result" == "created" || "$result" == "promoted" ]] &&
+        wsl_bridge_root_action rollback-server server \
+          "$server_pid" "$server_starttime" "$server_namespace" "$server_exe" "$pane_pids" \
+          "$current_pid" "$current_starttime" "$current_namespace" "$current_exe" >/dev/null || true
+      echo "tt: tmux pane set changed during bridge setup" >&2
+      return 2
+    fi
+    if ! "$TMUX_BIN" set-option -gq @tt_wsl_interop "$socket"; then
+      [[ "$result" == "created" || "$result" == "promoted" ]] &&
+        wsl_bridge_root_action rollback-server server \
+          "$server_pid" "$server_starttime" "$server_namespace" "$server_exe" "$pane_pids" \
+          "$current_pid" "$current_starttime" "$current_namespace" "$current_exe" >/dev/null || true
+      return 2
+    fi
+    TT_WSL_BRIDGE_PENDING=0
+    trap - EXIT
+  else
+    [[ "$mode" == "entry" ]] || {
+      echo "tt: wsl-bridge requires an existing tmux server; use a tt create/attach command" >&2
+      return 2
     }
+    result="$(wsl_bridge_root_action ensure current \
+      "$current_pid" "$current_starttime" "$current_namespace" "$current_exe" "" \
+      "$current_pid" "$current_starttime" "$current_namespace" "$current_exe")" || return
+    [[ "$result" == "prepared" || "$result" == "existing" ]] || return 2
+    TT_WSL_BRIDGE_PENDING=1
+    TT_WSL_BRIDGE_PENDING_PID="$current_pid"
+    TT_WSL_BRIDGE_PENDING_STARTTIME="$current_starttime"
+    TT_WSL_BRIDGE_PENDING_NS="$current_namespace"
+    TT_WSL_BRIDGE_PENDING_EXE="$current_exe"
+    trap wsl_bridge_cleanup_pending EXIT
+    return 0
+  fi
 
-    if findmnt -rn -M /mnt/c >/dev/null 2>&1; then
-      mount_valid || {
-        echo "tt: refusing unexpected /mnt/c mount; expected read-only C: drvfs" >&2
-        exit 2
-      }
-      exit 0
-    fi
-
-    if [[ -L /mnt/c || ( -e /mnt/c && ! -d /mnt/c ) ]]; then
-      echo "tt: refusing non-directory /mnt/c mountpoint" >&2
-      exit 2
-    fi
-    if [[ -d /mnt/c ]] && [[ -n "$(find /mnt/c -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-      echo "tt: refusing nonempty unmounted /mnt/c" >&2
-      exit 2
-    fi
-
-    mkdir -p /mnt/c
-    mount -t drvfs -o "ro,uid=$uid,gid=$gid,umask=022,fmask=011" C: /mnt/c
-    mount_valid || {
-      echo "tt: /mnt/c failed post-mount validation" >&2
-      exit 2
-    }
-  ' tt-wsl-bridge "$uid" "$gid"
-
-  wsl_bridge_mount_valid || {
-    echo "tt: /mnt/c is not a read-only C: drvfs mount" >&2
-    return 2
-  }
-  "$TMUX_BIN" set-option -gq @tt_wsl_interop "$socket"
   TT_WSL_BRIDGE_READY=1
 }
 
 wsl_bridge_ensure_for_entry() {
   [[ "$TT_WSL_BRIDGE_READY" == "1" ]] && return 0
   if wsl_bridge_is_wsl && [[ -n "${WSL_INTEROP:-}" ]]; then
-    wsl_bridge_ensure
+    wsl_bridge_ensure entry
   fi
 }
 
@@ -525,11 +779,13 @@ create_plain() {
   if [[ -n "${TMUX:-}" ]]; then
     "$TMUX_BIN" new-session -d -s "$session"
     set_profile_metadata "$session" plain
+    wsl_bridge_ensure_for_entry
     exec "$TMUX_BIN" switch-client -t "$session"
   fi
 
   "$TMUX_BIN" new-session -d -s "$session"
   set_profile_metadata "$session" plain
+  wsl_bridge_ensure_for_entry
   exec "$TMUX_BIN" attach -t "$session"
 }
 
@@ -831,12 +1087,14 @@ create_mobile() {
     "$TMUX_BIN" new-session -d -s "$session"
     set_profile_metadata "$session" mobile
     "$TMUX_BIN" set-option -t "$session" -q status off
+    wsl_bridge_ensure_for_entry
     exec "$TMUX_BIN" switch-client -t "$session"
   fi
 
   "$TMUX_BIN" new -d -s "$session"
   set_profile_metadata "$session" mobile
   "$TMUX_BIN" set-option -t "$session" -q status off
+  wsl_bridge_ensure_for_entry
   exec "$TMUX_BIN" attach -t "$session"
 }
 
@@ -2737,6 +2995,7 @@ recover_agent_cockpit() {
     write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
   fi
 
+  wsl_bridge_ensure_for_entry
   if [[ -n "${TMUX:-}" ]]; then
     exec "$TMUX_BIN" switch-client -t "$attach_session"
   fi
@@ -2859,6 +3118,7 @@ recover_cockpit() {
   finish_recovery_setup "$server_was_running"
   restore_cockpit_snapshot "$snapshot" "$session" --preserve-server
 
+  wsl_bridge_ensure_for_entry
   exec "$TMUX_BIN" attach -t "$session"
 }
 

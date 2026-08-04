@@ -6,6 +6,8 @@ temporary="/tmp/tt-wsl-bridge-test-$$"
 runtime="$temporary/run/WSL"
 croot="$temporary/mnt/c"
 lockroot="$temporary/run/lock"
+markerroot="$temporary/run/tt-wsl-bridge"
+procroot="$temporary/proc"
 fakebin="$temporary/fakebin"
 socket="$runtime/4242_interop"
 socket_pid=""
@@ -19,11 +21,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$runtime" "$lockroot" "$fakebin"
+mkdir -p "$runtime" "$lockroot" "$markerroot" "$procroot" "$fakebin"
 sed \
   -e "s#/run/WSL#$runtime#g" \
   -e "s#/mnt/c#$croot#g" \
   -e "s#/run/lock#$lockroot#g" \
+  -e "s#/run/tt-wsl-bridge#$markerroot#g" \
+  -e "s#/proc#$procroot#g" \
+  -e 's/local pid="[$][$]"/local pid="1234"/' \
+  -e "s#/usr/bin/flock#$fakebin/flock#g" \
+  -e "s#/usr/bin/nsenter#$fakebin/nsenter#g" \
+  -e "s#/usr/bin/findmnt#$fakebin/findmnt#g" \
+  -e "s#/usr/bin/mount#$fakebin/mount#g" \
+  -e "s#/usr/bin/umount#$fakebin/umount#g" \
+  -e "s#/usr/bin/stat#$fakebin/stat#g" \
+  -e "s#/usr/bin/readlink#$fakebin/readlink#g" \
+  -e "s#/usr/bin/bash#/bin/bash#g" \
+  -e "s#/usr/bin/mkdir#/bin/mkdir#g" \
+  -e "s#/usr/bin/rm#/bin/rm#g" \
   "$repo/bin/tt" >"$temporary/tt"
 sed \
   -e "s#/run/WSL#$runtime#g" \
@@ -34,6 +49,28 @@ sed \
   -e "s#/mnt/c#$croot#g" \
   "$repo/bin/pwsh.exe" >"$temporary/pwsh.exe"
 chmod +x "$temporary/tt" "$temporary/powershell.exe" "$temporary/pwsh.exe"
+
+make_proc() {
+  local pid="$1"
+  local comm="$2"
+  local starttime="$3"
+  local namespace="$4"
+  local exe="$5"
+
+  mkdir -p "$procroot/$pid/ns"
+  printf '%s\n' "$comm" >"$procroot/$pid/comm"
+  printf '%s (%s) S' "$pid" "$comm" >"$procroot/$pid/stat"
+  for i in {1..18}; do
+    printf ' 0' >>"$procroot/$pid/stat"
+  done
+  printf ' %s 0\n' "$starttime" >>"$procroot/$pid/stat"
+  ln -s "$namespace" "$procroot/$pid/ns/mnt"
+  ln -s "$exe" "$procroot/$pid/exe"
+}
+
+make_proc 1234 bash 111111 'mnt:[7001]' /usr/bin/bash
+make_proc 2222 'tmux: server' 222222 'mnt:[7001]' "$fakebin/tmux"
+make_proc 3333 bash 333333 'mnt:[7001]' /usr/bin/bash
 
 python3 - "$socket" <<'PY' &
 import os
@@ -73,13 +110,17 @@ SH
 cat >"$fakebin/findmnt" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$*" == *"-M / -o PROPAGATION"* ]]; then
+  printf '%s\n' "${TT_TEST_PROPAGATION:-private}"
+  exit 0
+fi
 state="${TT_TEST_MOUNT_STATE:?}"
 value="$(cat "$state" 2>/dev/null || printf absent)"
 [[ "$value" != "absent" ]] || exit 1
 if [[ "$*" == *"-o SOURCE,FSTYPE,OPTIONS"* ]]; then
   case "$value" in
     valid) printf 'C: drvfs ro,uid=1000,gid=1000,umask=022,fmask=011\n' ;;
-    valid9p) printf 'C:\\134 9p ro,aname=drvfs;path=C:\\;uid=1000\n' ;;
+    valid9p) printf 'C: 9p ro,aname=drvfs;path=C:;uid=1000\n' ;;
     wrong-source) printf 'D: drvfs ro,uid=1000,gid=1000\n' ;;
     writable) printf 'C: drvfs rw,uid=1000,gid=1000\n' ;;
     *) printf '%s\n' "$value" ;;
@@ -92,6 +133,13 @@ cat >"$fakebin/mount" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >>"${TT_TEST_MOUNT_LOG:?}"
 printf 'valid\n' >"${TT_TEST_MOUNT_STATE:?}"
+SH
+
+cat >"$fakebin/umount" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${TT_TEST_UMOUNT_LOG:?}"
+printf 'absent\n' >"${TT_TEST_MOUNT_STATE:?}"
 SH
 
 cat >"$fakebin/sudo" <<'SH'
@@ -110,24 +158,74 @@ shift
 exec "$@"
 SH
 
+cat >"$fakebin/nsenter" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "-t" ]] && shift 2
+[[ "${1:-}" == "-m" ]] && shift
+[[ "${1:-}" == "--" ]] && shift
+exec "$@"
+SH
+
+cat >"$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-c" && "${2:-}" == "%u" ]]; then
+  printf '1000\n'
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+SH
+
+cat >"$fakebin/readlink" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-f" ]]; then
+  printf '%s\n' "$2"
+  exit 0
+fi
+exec /usr/bin/readlink "$@"
+SH
+
 cat >"$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${TT_TEST_TMUX_LOG:?}"
-if [[ "$*" == "show-option -gqv @tt_wsl_interop" ]]; then
-  printf '%s\n' "${TT_TEST_STORED_SOCKET:-}"
-fi
+server_state="$(cat "${TT_TEST_SERVER_STATE:?}" 2>/dev/null || printf none)"
+case "$*" in
+  "display-message -p #{pid}")
+    [[ "$server_state" == "live" ]] || exit 1
+    printf '2222\n'
+    ;;
+  "list-panes -a -F #{pane_pid}")
+    [[ "$server_state" == "live" ]] || exit 1
+    printf '3333\n'
+    ;;
+  "show-option -gqv @tt_wsl_interop")
+    printf '%s\n' "${TT_TEST_STORED_SOCKET:-}"
+    ;;
+  new-session*|"new -d "*)
+    printf 'live\n' >"${TT_TEST_SERVER_STATE:?}"
+    ;;
+  "has-session "*)
+    exit 1
+    ;;
+esac
 SH
 chmod +x "$fakebin"/*
 
 state="$temporary/mount.state"
+server_state="$temporary/server.state"
 mount_log="$temporary/mount.log"
+umount_log="$temporary/umount.log"
 sudo_log="$temporary/sudo.log"
 tmux_log="$temporary/tmux.log"
 export PATH="$fakebin:$PATH"
 export TT_TMUX_BIN="$fakebin/tmux"
 export TT_TEST_MOUNT_STATE="$state"
+export TT_TEST_SERVER_STATE="$server_state"
 export TT_TEST_MOUNT_LOG="$mount_log"
+export TT_TEST_UMOUNT_LOG="$umount_log"
 export TT_TEST_SUDO_LOG="$sudo_log"
 export TT_TEST_TMUX_LOG="$tmux_log"
 export WSL_DISTRO_NAME=Ubuntu
@@ -140,28 +238,39 @@ expect_failure() {
 }
 
 : >"$mount_log"
+: >"$umount_log"
 : >"$sudo_log"
 : >"$tmux_log"
 printf 'absent\n' >"$state"
+printf 'live\n' >"$server_state"
 expect_failure env -u WSL_DISTRO_NAME WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
 expect_failure env -u WSL_INTEROP "$temporary/tt" wsl-bridge ensure
 expect_failure env WSL_INTEROP="$runtime/9999_interop" "$temporary/tt" wsl-bridge ensure
 
+printf 'none\n' >"$server_state"
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+[[ ! -s "$mount_log" ]]
+
 rm -rf "$croot"
+rm -rf "$markerroot"
 : >"$mount_log"
+: >"$umount_log"
 : >"$sudo_log"
 : >"$tmux_log"
 printf 'absent\n' >"$state"
+printf 'live\n' >"$server_state"
 WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
-grep -Fq -- "-x $lockroot/tt-wsl-bridge.lock bash -c" "$sudo_log"
+grep -Fq -- "-x $lockroot/tt-wsl-bridge.lock /bin/bash -c" "$sudo_log"
 grep -Fqx -- "-t drvfs -o ro,uid=1000,gid=1000,umask=022,fmask=011 C: $croot" "$mount_log"
 grep -Fqx -- "set-option -gq @tt_wsl_interop $socket" "$tmux_log"
+grep -Fqx -- "2222|222222|mnt:[7001]" "$markerroot/mount-1000"
 if grep -Eq 'set-environment.*(WSL_INTEROP|WSLENV)' "$tmux_log"; then
   printf 'bridge wrote forbidden tmux global environment\n' >&2
   exit 1
 fi
 
 for bad_state in wrong-source writable; do
+  rm -rf "$markerroot"
   : >"$tmux_log"
   printf '%s\n' "$bad_state" >"$state"
   expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
@@ -171,7 +280,30 @@ for bad_state in wrong-source writable; do
   fi
 done
 
+rm -rf "$croot" "$markerroot"
+: >"$mount_log"
+printf 'absent\n' >"$state"
+expect_failure env TT_TEST_PROPAGATION=shared:42 WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+[[ ! -s "$mount_log" ]]
+
+rm "$procroot/3333/ns/mnt"
+ln -s 'mnt:[7002]' "$procroot/3333/ns/mnt"
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+rm "$procroot/3333/ns/mnt"
+ln -s 'mnt:[7001]' "$procroot/3333/ns/mnt"
+
+rm -rf "$croot" "$markerroot"
+: >"$mount_log"
+: >"$tmux_log"
+printf 'absent\n' >"$state"
+printf 'none\n' >"$server_state"
+WSL_INTEROP="$socket" TT_LOGIN_SHELL=/bin/sh "$temporary/tt" shell bridge-create >/dev/null
+grep -Fqx -- "set-option -gq @tt_wsl_interop $socket" "$tmux_log"
+grep -Fqx -- "2222|222222|mnt:[7001]" "$markerroot/mount-1000"
+[[ ! -e "$markerroot/pending-1000" ]]
+
 printf 'valid\n' >"$state"
+printf 'live\n' >"$server_state"
 for command in ls status sync; do
   : >"$sudo_log"
   WSL_INTEROP="$socket" "$temporary/tt" "$command" >/dev/null 2>&1 || true
