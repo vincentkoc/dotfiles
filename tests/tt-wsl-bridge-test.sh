@@ -36,6 +36,7 @@ sed \
   -e "s#/usr/bin/umount#$fakebin/umount#g" \
   -e "s#/usr/bin/stat#$fakebin/stat#g" \
   -e "s#/usr/bin/readlink#$fakebin/readlink#g" \
+  -e "s#/usr/bin/setpriv#$fakebin/setpriv#g" \
   -e "s#/usr/bin/bash#/bin/bash#g" \
   -e "s#/usr/bin/mkdir#/bin/mkdir#g" \
   -e "s#/usr/bin/rm#/bin/rm#g" \
@@ -187,19 +188,45 @@ fi
 exec /usr/bin/readlink "$@"
 SH
 
+cat >"$fakebin/setpriv" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --reuid|--regid)
+      shift 2
+      ;;
+    --clear-groups)
+      shift
+      ;;
+    *)
+      exit 2
+      ;;
+  esac
+done
+exec "$@"
+SH
+
 cat >"$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${TT_TEST_TMUX_LOG:?}"
+if [[ "${1:-}" == "-S" ]]; then
+  shift 2
+fi
 server_state="$(cat "${TT_TEST_SERVER_STATE:?}" 2>/dev/null || printf none)"
 case "$*" in
   "display-message -p #{pid}")
     [[ "$server_state" == "live" ]] || exit 1
     printf '2222\n'
     ;;
-  "list-panes -a -F #{pane_pid}")
+  "display-message -p #{socket_path}")
     [[ "$server_state" == "live" ]] || exit 1
-    printf '3333\n'
+    printf '%s\n' "${TT_TEST_TMUX_SOCKET:?}"
+    ;;
+  "list-panes -a -F #{pane_id}|#{pane_pid}|#{pane_dead}")
+    [[ "$server_state" == "live" ]] || exit 1
+    printf '%b\n' "${TT_TEST_PANE_ROWS:-%1|3333|0}"
     ;;
   "show-option -gqv @tt_wsl_interop")
     printf '%s\n' "${TT_TEST_STORED_SOCKET:-}"
@@ -228,6 +255,7 @@ export TT_TEST_MOUNT_LOG="$mount_log"
 export TT_TEST_UMOUNT_LOG="$umount_log"
 export TT_TEST_SUDO_LOG="$sudo_log"
 export TT_TEST_TMUX_LOG="$tmux_log"
+export TT_TEST_TMUX_SOCKET="$socket"
 export WSL_DISTRO_NAME=Ubuntu
 
 expect_failure() {
@@ -268,6 +296,9 @@ if grep -Eq 'set-environment.*(WSL_INTEROP|WSLENV)' "$tmux_log"; then
   printf 'bridge wrote forbidden tmux global environment\n' >&2
   exit 1
 fi
+
+TT_TEST_PANE_ROWS=$'%1|3333|0\n%2|4444|1' \
+  WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
 
 for bad_state in wrong-source writable; do
   rm -rf "$markerroot"
