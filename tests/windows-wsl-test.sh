@@ -12,4 +12,5 @@ grep -q 'vincent-dotfiles' "$root/windows/install.ps1"
 grep -q 'Documents\\PowerShell' "$root/windows/install.ps1"
 grep -q 'WSL2 is the canonical Unix development environment' "$root/README.md"
 "$root/tests/windows-native-operator-test.sh"
+"$root/tests/tt-wsl-bridge-test.sh"
 echo windows_wsl_test=passed

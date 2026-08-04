@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+valid_socket() {
+  [[ "$1" =~ ^/run/WSL/[0-9]+_interop$ ]] && [[ -S "$1" ]]
+}
+
+valid_c_mount() {
+  local record source fstype options extra
+
+  record="$(findmnt -rn -M /mnt/c -o SOURCE,FSTYPE,OPTIONS 2>/dev/null || true)"
+  [[ -n "$record" && "$record" != *$'\n'* ]] || return 1
+  read -r source fstype options extra <<<"$record"
+  [[ -z "${extra:-}" && "$source" == "C:" ]] || return 1
+  case "$fstype" in
+    drvfs)
+      ;;
+    9p)
+      [[ ",$options," == *",aname=drvfs"* ]] || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ ",$options," == *,ro,* && ",$options," != *,rw,* ]]
+}
+
+socket="${WSL_INTEROP:-}"
+if ! valid_socket "$socket"; then
+  socket="$(tmux show-option -gqv @tt_wsl_interop 2>/dev/null || true)"
+fi
+valid_socket "$socket" || {
+  echo "powershell.exe: no live validated WSL interop socket" >&2
+  exit 126
+}
+valid_c_mount || {
+  echo "powershell.exe: /mnt/c must be a read-only C: drvfs mount" >&2
+  exit 126
+}
+
+target="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+[[ -x "$target" ]] || {
+  echo "powershell.exe: fixed Windows PowerShell path is unavailable" >&2
+  exit 127
+}
+
+export WSL_INTEROP="$socket"
+exec "$target" "$@"
