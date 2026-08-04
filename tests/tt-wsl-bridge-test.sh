@@ -48,6 +48,10 @@ sed \
 sed \
   -e "s#/run/WSL#$runtime#g" \
   -e "s#/mnt/c#$croot#g" \
+  -e "s#exec /init#exec $fakebin/init#g" \
+  -e "s#stat -c %u /init#stat -c %u $fakebin/init#g" \
+  -e "s#-x /init#-x $fakebin/init#g" \
+  -e "s#! -L /init#! -L $fakebin/init#g" \
   "$repo/bin/pwsh.exe" >"$temporary/pwsh.exe"
 chmod +x "$temporary/tt" "$temporary/powershell.exe" "$temporary/pwsh.exe"
 
@@ -61,7 +65,7 @@ make_proc() {
   mkdir -p "$procroot/$pid/ns"
   printf '%s\n' "$comm" >"$procroot/$pid/comm"
   printf '%s (%s) S' "$pid" "$comm" >"$procroot/$pid/stat"
-  for i in {1..18}; do
+  for _ in {1..18}; do
     printf ' 0' >>"$procroot/$pid/stat"
   done
   printf ' %s 0\n' "$starttime" >>"$procroot/$pid/stat"
@@ -106,6 +110,14 @@ case "${1:-}" in
   -g) printf '1000\n' ;;
   *) exit 2 ;;
 esac
+SH
+
+cat >"$fakebin/init" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+target="$1"
+shift
+exec /bin/bash "$target" "$@"
 SH
 
 cat >"$fakebin/findmnt" <<'SH'
@@ -172,7 +184,11 @@ cat >"$fakebin/stat" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "-c" && "${2:-}" == "%u" ]]; then
-  printf '1000\n'
+  if [[ "${3:-}" == "${TT_TEST_INIT_PATH:-}" ]]; then
+    printf '0\n'
+  else
+    printf '1000\n'
+  fi
   exit 0
 fi
 exec /usr/bin/stat "$@"
@@ -256,6 +272,7 @@ export TT_TEST_UMOUNT_LOG="$umount_log"
 export TT_TEST_SUDO_LOG="$sudo_log"
 export TT_TEST_TMUX_LOG="$tmux_log"
 export TT_TEST_TMUX_SOCKET="$socket"
+export TT_TEST_INIT_PATH="$fakebin/init"
 export WSL_DISTRO_NAME=Ubuntu
 
 expect_failure() {
@@ -348,7 +365,10 @@ mkdir -p "$croot/Windows/System32/WindowsPowerShell/v1.0"
 cat >"$croot/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" <<'SH'
 #!/usr/bin/env bash
 printf 'interop=%s\n' "${WSL_INTEROP:-}" >"${TT_TEST_EXE_LOG:?}"
-printf '<%s>\n' "$@" >>"${TT_TEST_EXE_LOG:?}"
+printf 'argc=%s\n' "$#" >>"${TT_TEST_EXE_LOG:?}"
+if [[ "$#" -gt 0 ]]; then
+  printf '<%s>\n' "$@" >>"${TT_TEST_EXE_LOG:?}"
+fi
 exit "${TT_TEST_EXE_STATUS:-0}"
 SH
 chmod +x "$croot/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -384,15 +404,58 @@ rm -rf "$croot/Program Files"
 mkdir -p "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.6.4.0_arm64__8wekyb3d8bbwe"
 cp "$croot/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" \
   "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.6.4.0_arm64__8wekyb3d8bbwe/pwsh.exe"
-chmod +x "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.6.4.0_arm64__8wekyb3d8bbwe/pwsh.exe"
-"$temporary/pwsh.exe" appx
-grep -Fqx '<appx>' "$exe_log"
+chmod 444 "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.6.4.0_arm64__8wekyb3d8bbwe/pwsh.exe"
+"$temporary/pwsh.exe"
+[[ "$(wc -l <"$exe_log" | tr -d ' ')" == "2" ]]
+grep -Fqx "interop=$socket" "$exe_log"
+grep -Fqx 'argc=0' "$exe_log"
+
+# shellcheck disable=SC1003,SC2016
+args=(
+  ""
+  "two words"
+  "single'quote"
+  'double"quote'
+  'trailing\\'
+  '$dollar'
+  ';semicolon'
+  '*wildcard'
+  $'line one\nline two'
+  'naive-cafe'
+  '日本語'
+)
+"$temporary/pwsh.exe" "${args[@]}"
+expected="$temporary/expected-args"
+{
+  printf 'interop=%s\n' "$socket"
+  printf 'argc=%s\n' "${#args[@]}"
+  printf '<%s>\n' "${args[@]}"
+} >"$expected"
+cmp "$expected" "$exe_log"
+
+export TT_TEST_EXE_STATUS=29
+if "$temporary/pwsh.exe" exit-status; then
+  printf 'pwsh wrapper lost child exit status\n' >&2
+  exit 1
+else
+  status="$?"
+fi
+[[ "$status" == "29" ]]
+export TT_TEST_EXE_STATUS=0
+
+saved_socket="$TT_TEST_STORED_SOCKET"
+export TT_TEST_STORED_SOCKET="$runtime/9999_interop"
+expect_failure env -u WSL_INTEROP "$temporary/pwsh.exe" stale-socket
+export TT_TEST_STORED_SOCKET="$saved_socket"
 
 mkdir -p "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.7.0.0_arm64__8wekyb3d8bbwe"
 cp "$croot/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" \
   "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.7.0.0_arm64__8wekyb3d8bbwe/pwsh.exe"
-chmod +x "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.7.0.0_arm64__8wekyb3d8bbwe/pwsh.exe"
+chmod 444 "$croot/Program Files/WindowsApps/Microsoft.PowerShell_7.7.0.0_arm64__8wekyb3d8bbwe/pwsh.exe"
 expect_failure "$temporary/pwsh.exe" ambiguous
+
+rm -rf "$croot/Program Files/WindowsApps/Microsoft.PowerShell_"*
+expect_failure "$temporary/pwsh.exe" missing
 
 printf 'writable\n' >"$state"
 expect_failure "$temporary/powershell.exe" bad-mount
