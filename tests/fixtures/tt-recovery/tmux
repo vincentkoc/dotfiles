@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"$TT_TEST_TMUX_LOG"
+
+command="${1:-}"
+case "$command" in
+  list-sessions)
+    if [[ "${TT_TEST_TMUX_SERVER_RUNNING:-}" == "1" ]]; then
+      printf 'unrelated: 1 windows\n'
+    else
+      exit 1
+    fi
+    ;;
+  has-session)
+    if [[ "${TT_TEST_TMUX_EXISTING_SESSION:-}" == "${*: -1}" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  new-session)
+    if [[ " $* " == *" -P "* ]]; then
+      printf '@1\n'
+    fi
+    ;;
+  list-windows)
+    if [[ " $* " == *" #{window_index}"* ]]; then
+      printf '1\t@1\n'
+    elif [[ " $* " == *" #{window_id}"* ]]; then
+      printf '@1\n'
+    fi
+    ;;
+  list-panes)
+    if [[ " $* " == *" #{pane_index}"* ]]; then
+      printf '0\t%%1\n'
+    elif [[ " $* " == *" #{pane_current_command} "* ]]; then
+      printf 'zsh\n'
+    elif [[ " $* " == *" #{pane_id} "* ]]; then
+      printf '%%1\n'
+    else
+      printf '0: [80x24]\n'
+    fi
+    ;;
+esac
