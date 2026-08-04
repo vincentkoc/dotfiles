@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${TT_TEST_TMUX_LOG:?}"
+if [[ "${1:-}" == "-S" ]]; then
+  shift 2
+fi
+server_state="$(cat "${TT_TEST_SERVER_STATE:?}" 2>/dev/null || printf none)"
+case "$*" in
+  "display-message -p #{pid}")
+    [[ "$server_state" == "live" ]] || exit 1
+    printf '2222\n'
+    ;;
+  "display-message -p #{socket_path}")
+    [[ "$server_state" == "live" ]] || exit 1
+    printf '%s\n' "${TT_TEST_TMUX_SOCKET:?}"
+    ;;
+  "list-panes -a -F #{pane_id}|#{pane_pid}|#{pane_dead}")
+    [[ "$server_state" == "live" ]] || exit 1
+    count=0
+    if [[ -n "${TT_TEST_PANE_CALLS:-}" ]]; then
+      count="$(cat "$TT_TEST_PANE_CALLS" 2>/dev/null || printf 0)"
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$TT_TEST_PANE_CALLS"
+    fi
+    if [[ "${TT_TEST_PANE_CHURN:-}" == "1" && "$count" -ge 3 ]]; then
+      printf '%%1|3333|0\n%%9|9999|1\n'
+    else
+      printf '%b\n' "${TT_TEST_PANE_ROWS:-%1|3333|0}"
+    fi
+    ;;
+  "show-option -gqv @tt_wsl_interop")
+    printf '%s\n' "${TT_TEST_STORED_SOCKET:-}"
+    ;;
+  new-session*|"new -d "*)
+    printf 'live\n' >"${TT_TEST_SERVER_STATE:?}"
+    ;;
+  "has-session "*)
+    exit 1
+    ;;
+  "list-sessions")
+    [[ "$server_state" == "live" ]] || exit 1
+    printf 'test: 1 windows\n'
+    ;;
+  "kill-server")
+    printf 'none\n' >"${TT_TEST_SERVER_STATE:?}"
+    ;;
+  "set-option -gq @tt_wsl_interop "*)
+    if [[ "${TT_TEST_SET_OPTION_FAIL:-}" == "1" ]]; then
+      if [[ -n "${TT_TEST_SERVER_STAT:-}" ]]; then
+        sed 's/ 222222 0$/ 999999 0/' "$TT_TEST_SERVER_STAT" >"$TT_TEST_SERVER_STAT.tmp"
+        /bin/mv -f "$TT_TEST_SERVER_STAT.tmp" "$TT_TEST_SERVER_STAT"
+      fi
+      exit 1
+    fi
+    ;;
+esac

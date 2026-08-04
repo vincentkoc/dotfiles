@@ -2,6 +2,40 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${TT_WSL_BRIDGE_BASH_MATRIX_CHILD:-}" ]]; then
+  python3 - "$repo/tests/tt-wsl-bridge-test.sh" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+
+script = os.path.abspath(sys.argv[1])
+candidates = [shutil.which("bash"), "/bin/bash"]
+seen = set()
+interpreters = []
+
+for candidate in candidates:
+    if not candidate or not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+        continue
+    real = os.path.realpath(candidate)
+    if real in seen:
+        continue
+    seen.add(real)
+    interpreters.append(candidate)
+
+if not interpreters:
+    raise SystemExit("tt-wsl-bridge-test: no executable bash interpreter found")
+
+for interpreter in interpreters:
+    env = os.environ.copy()
+    env["TT_WSL_BRIDGE_BASH_MATRIX_CHILD"] = "1"
+    subprocess.run([interpreter, script], check=True, env=env, timeout=120)
+
+print("tt_wsl_bridge_bash_matrix=passed")
+PY
+  exit 0
+fi
+
 temporary="/tmp/tt-wsl-bridge-test-$$"
 runtime="$temporary/run/WSL"
 croot="$temporary/mnt/c"
@@ -142,27 +176,6 @@ shift
 exec /bin/bash "$target" "$@"
 SH
 
-cat >"$fakebin/findmnt" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "$*" == *"-M / -o PROPAGATION"* ]]; then
-  printf '%s\n' "${TT_TEST_PROPAGATION:-private}"
-  exit 0
-fi
-state="${TT_TEST_MOUNT_STATE:?}"
-value="$(cat "$state" 2>/dev/null || printf absent)"
-[[ "$value" != "absent" ]] || exit 1
-if [[ "$*" == *"-o SOURCE,FSTYPE,OPTIONS"* ]]; then
-  case "$value" in
-    valid) printf 'C: drvfs ro,uid=1000,gid=1000,umask=022,fmask=011\n' ;;
-    valid9p) printf 'C: 9p ro,aname=drvfs;path=C:;uid=1000\n' ;;
-    wrong-source) printf 'D: drvfs ro,uid=1000,gid=1000\n' ;;
-    writable) printf 'C: drvfs rw,uid=1000,gid=1000\n' ;;
-    *) printf '%s\n' "$value" ;;
-  esac
-fi
-SH
-
 cat >"$fakebin/mount" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -200,40 +213,6 @@ set -euo pipefail
 [[ "${1:-}" == "-m" ]] && shift
 [[ "${1:-}" == "--" ]] && shift
 exec "$@"
-SH
-
-cat >"$fakebin/stat" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" == "-c" ]]; then
-  case "${2:-}" in
-    %u)
-      if [[ "${3:-}" == "${TT_TEST_INIT_PATH:-}" || "${3:-}" == "${TT_TEST_MARKER_ROOT:-}"* ]]; then
-        printf '0\n'
-      else
-        printf '1000\n'
-      fi
-      exit 0
-      ;;
-    %a)
-      if /usr/bin/stat -c %a "$3" >/dev/null 2>&1; then
-        /usr/bin/stat -c %a "$3"
-      else
-        /usr/bin/stat -f %Lp "$3"
-      fi
-      exit 0
-      ;;
-    %s)
-      if /usr/bin/stat -c %s "$3" >/dev/null 2>&1; then
-        /usr/bin/stat -c %s "$3"
-      else
-        /usr/bin/stat -f %z "$3"
-      fi
-      exit 0
-      ;;
-  esac
-fi
-exec /usr/bin/stat "$@"
 SH
 
 cat >"$fakebin/mv" <<'SH'
@@ -274,64 +253,13 @@ done
 exec "$@"
 SH
 
-cat >"$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"${TT_TEST_TMUX_LOG:?}"
-if [[ "${1:-}" == "-S" ]]; then
-  shift 2
-fi
-server_state="$(cat "${TT_TEST_SERVER_STATE:?}" 2>/dev/null || printf none)"
-case "$*" in
-  "display-message -p #{pid}")
-    [[ "$server_state" == "live" ]] || exit 1
-    printf '2222\n'
-    ;;
-  "display-message -p #{socket_path}")
-    [[ "$server_state" == "live" ]] || exit 1
-    printf '%s\n' "${TT_TEST_TMUX_SOCKET:?}"
-    ;;
-  "list-panes -a -F #{pane_id}|#{pane_pid}|#{pane_dead}")
-    [[ "$server_state" == "live" ]] || exit 1
-    count=0
-    if [[ -n "${TT_TEST_PANE_CALLS:-}" ]]; then
-      count="$(cat "$TT_TEST_PANE_CALLS" 2>/dev/null || printf 0)"
-      count=$((count + 1))
-      printf '%s\n' "$count" >"$TT_TEST_PANE_CALLS"
-    fi
-    if [[ "${TT_TEST_PANE_CHURN:-}" == "1" && "$count" -ge 3 ]]; then
-      printf '%%1|3333|0\n%%9|9999|1\n'
-    else
-      printf '%b\n' "${TT_TEST_PANE_ROWS:-%1|3333|0}"
-    fi
-    ;;
-  "show-option -gqv @tt_wsl_interop")
-    printf '%s\n' "${TT_TEST_STORED_SOCKET:-}"
-    ;;
-  new-session*|"new -d "*)
-    printf 'live\n' >"${TT_TEST_SERVER_STATE:?}"
-    ;;
-  "has-session "*)
-    exit 1
-    ;;
-  "list-sessions")
-    [[ "$server_state" == "live" ]] || exit 1
-    printf 'test: 1 windows\n'
-    ;;
-  "kill-server")
-    printf 'none\n' >"${TT_TEST_SERVER_STATE:?}"
-    ;;
-  "set-option -gq @tt_wsl_interop "*)
-    if [[ "${TT_TEST_SET_OPTION_FAIL:-}" == "1" ]]; then
-      if [[ -n "${TT_TEST_SERVER_STAT:-}" ]]; then
-        sed 's/ 222222 0$/ 999999 0/' "$TT_TEST_SERVER_STAT" >"$TT_TEST_SERVER_STAT.tmp"
-        /bin/mv -f "$TT_TEST_SERVER_STAT.tmp" "$TT_TEST_SERVER_STAT"
-      fi
-      exit 1
-    fi
-    ;;
-esac
-SH
+fixture_dir="$repo/tests/fixtures/tt-wsl-bridge"
+install -m 0755 "$fixture_dir/findmnt" "$fakebin/findmnt"
+install -m 0755 "$fixture_dir/stat" "$fakebin/stat"
+install -m 0755 "$fixture_dir/tmux" "$fakebin/tmux"
+[[ -x "$fakebin/findmnt" ]]
+[[ -x "$fakebin/stat" ]]
+[[ -x "$fakebin/tmux" ]]
 chmod +x "$fakebin"/*
 
 state="$temporary/mount.state"

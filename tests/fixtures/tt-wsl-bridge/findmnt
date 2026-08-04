@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"-M / -o PROPAGATION"* ]]; then
+  printf '%s\n' "${TT_TEST_PROPAGATION:-private}"
+  exit 0
+fi
+state="${TT_TEST_MOUNT_STATE:?}"
+value="$(cat "$state" 2>/dev/null || printf absent)"
+[[ "$value" != "absent" ]] || exit 1
+if [[ "$*" == *"-o SOURCE,FSTYPE,OPTIONS"* ]]; then
+  case "$value" in
+    valid) printf 'C: drvfs ro,uid=1000,gid=1000,umask=022,fmask=011\n' ;;
+    valid9p) printf 'C: 9p ro,aname=drvfs;path=C:;uid=1000\n' ;;
+    wrong-source) printf 'D: drvfs ro,uid=1000,gid=1000\n' ;;
+    writable) printf 'C: drvfs rw,uid=1000,gid=1000\n' ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+fi

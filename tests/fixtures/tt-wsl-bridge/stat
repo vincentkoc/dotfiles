@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  case "${2:-}" in
+    %u)
+      if [[ "${3:-}" == "${TT_TEST_INIT_PATH:-}" || "${3:-}" == "${TT_TEST_MARKER_ROOT:-}"* ]]; then
+        printf '0\n'
+      else
+        printf '1000\n'
+      fi
+      exit 0
+      ;;
+    %a)
+      if /usr/bin/stat -c %a "$3" >/dev/null 2>&1; then
+        /usr/bin/stat -c %a "$3"
+      else
+        /usr/bin/stat -f %Lp "$3"
+      fi
+      exit 0
+      ;;
+    %s)
+      if /usr/bin/stat -c %s "$3" >/dev/null 2>&1; then
+        /usr/bin/stat -c %s "$3"
+      else
+        /usr/bin/stat -f %z "$3"
+      fi
+      exit 0
+      ;;
+  esac
+fi
+exec /usr/bin/stat "$@"
