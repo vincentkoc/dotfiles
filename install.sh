@@ -936,7 +936,7 @@ main() {
     echo ""
     info "Platform: $(platform_name)"
     if [[ "$(platform_name)" == wsl ]]; then
-        info "WSL is the canonical Git/SSH/agent shell; native Windows receives only the PowerShell bridge"
+        info "WSL is the canonical Linux/tmux shell; native Windows may use the reversible ARM64 operator bootstrap"
     fi
     echo "╔═══════════════════════════════════════════╗"
     echo "║         Dotfiles Installer                ║"

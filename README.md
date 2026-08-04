@@ -41,19 +41,26 @@ mackup restore
 ## Windows and WSL2
 
 WSL2 is the canonical Unix development environment. Run `./install.sh` inside
-WSL, then verify it with `dotfiles-audit`. Keep repositories, Git signing,
-SSH, tmux, Codex CLI, and cleanup inside WSL instead of duplicating them in
-native Windows.
+WSL, then verify it with `dotfiles-audit`. Keep tmux, Linux worktrees, SSH,
+and cleanup inside WSL. Native Windows can also be an intentional ARM64
+operator for Git, Node.js, PowerShell, GitHub CLI, and Codex without mounting
+Windows drives inside WSL.
 
-Native Windows gets a small PowerShell bridge:
+Plan, apply, check, or roll back the native operator setup:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
+powershell -ExecutionPolicy Bypass -File .\windows\native-operator.ps1 -Mode Plan
+powershell -ExecutionPolicy Bypass -File .\windows\native-operator.ps1 -Mode Apply
+powershell -ExecutionPolicy Bypass -File .\windows\native-operator.ps1 -Mode Check
+powershell -ExecutionPolicy Bypass -File .\windows\native-operator.ps1 -Mode Rollback
 ```
 
-It adds `dots`, `wgit`/`wg`, `wcx`/`cxw`, `wssh`, and `wdeepclean` commands
-that execute through the configured WSL distro. Set `DOTFILES_WSL_DISTRO` if
-the distro is not named `Ubuntu`.
+The operator keeps `git`, `node`, `npm`, `npx`, `pwsh`, `gh`, and `codex`
+native. It adds argument-safe WSL bridges for `tt`, explicit-path
+`gwt <wsl-repo-path> ...`, `dots`, `wgit`/`wg`, `wcx`/`cxw`, `wssh`, and
+`wdeepclean`. Set `DOTFILES_WSL_DISTRO` if the distro is not named `Ubuntu`.
+Apply receipts and profile backups live under
+`%LOCALAPPDATA%\vincent-dotfiles\native-operator`.
 
 ## Structure
 

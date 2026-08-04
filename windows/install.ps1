@@ -4,19 +4,25 @@ param(
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $Repo 'windows\Microsoft.PowerShell_profile.ps1'
 if (!(Test-Path $source)) { throw "dotfiles PowerShell profile missing: $source" }
-$profileDir = Split-Path -Parent $PROFILE
-New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
-if ((Test-Path $PROFILE) -and !(Select-String -Quiet -Path $PROFILE -SimpleMatch '# >>> vincent-dotfiles >>>')) {
-    Copy-Item $PROFILE "$PROFILE.pre-dotfiles.$(Get-Date -Format yyyyMMddHHmmss).bak"
-}
 $block = @"
 # >>> vincent-dotfiles >>>
 . '$source'
 # <<< vincent-dotfiles <<<
 "@
-$current = if (Test-Path $PROFILE) { Get-Content -Raw $PROFILE } else { '' }
-$current = [regex]::Replace($current, '(?s)# >>> vincent-dotfiles >>>.*?# <<< vincent-dotfiles <<<\r?\n?', '')
-Set-Content -Path $PROFILE -Value ($current.TrimEnd() + "`r`n`r`n" + $block)
-Write-Output "powershell_profile=ready"
+$profiles = @(
+    (Join-Path $HOME 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
+    (Join-Path $HOME 'Documents\PowerShell\Microsoft.PowerShell_profile.ps1')
+)
+foreach ($profilePath in $profiles) {
+    $profileDir = Split-Path -Parent $profilePath
+    New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+    if ((Test-Path $profilePath) -and !(Select-String -Quiet -Path $profilePath -SimpleMatch '# >>> vincent-dotfiles >>>')) {
+        Copy-Item $profilePath "$profilePath.pre-dotfiles.$(Get-Date -Format yyyyMMddHHmmss).bak"
+    }
+    $current = if (Test-Path $profilePath) { Get-Content -Raw $profilePath } else { '' }
+    $current = [regex]::Replace($current, '(?s)# >>> vincent-dotfiles >>>.*?# <<< vincent-dotfiles <<<\r?\n?', '')
+    Set-Content -Path $profilePath -Value ($current.TrimEnd() + "`r`n`r`n" + $block)
+    Write-Output "powershell_profile=$profilePath"
+}
 $distro = if ($env:DOTFILES_WSL_DISTRO) { $env:DOTFILES_WSL_DISTRO } else { 'Ubuntu' }
 Write-Output "wsl_distro=$distro"
