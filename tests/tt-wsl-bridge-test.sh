@@ -40,6 +40,8 @@ sed \
   -e "s#/usr/bin/bash#/bin/bash#g" \
   -e "s#/usr/bin/mkdir#/bin/mkdir#g" \
   -e "s#/usr/bin/rm#/bin/rm#g" \
+  -e "s#/usr/bin/chmod#/bin/chmod#g" \
+  -e "s#/usr/bin/mv#$fakebin/mv#g" \
   "$repo/bin/tt" >"$temporary/tt"
 sed \
   -e "s#/run/WSL#$runtime#g" \
@@ -71,6 +73,18 @@ make_proc() {
   printf ' %s 0\n' "$starttime" >>"$procroot/$pid/stat"
   ln -s "$namespace" "$procroot/$pid/ns/mnt"
   ln -s "$exe" "$procroot/$pid/exe"
+}
+
+write_proc_stat() {
+  local pid="$1"
+  local comm="$2"
+  local starttime="$3"
+
+  printf '%s (%s) S' "$pid" "$comm" >"$procroot/$pid/stat"
+  for _ in {1..18}; do
+    printf ' 0' >>"$procroot/$pid/stat"
+  done
+  printf ' %s 0\n' "$starttime" >>"$procroot/$pid/stat"
 }
 
 make_proc 1234 bash 111111 'mnt:[7001]' /usr/bin/bash
@@ -183,15 +197,36 @@ SH
 cat >"$fakebin/stat" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${1:-}" == "-c" && "${2:-}" == "%u" ]]; then
-  if [[ "${3:-}" == "${TT_TEST_INIT_PATH:-}" ]]; then
-    printf '0\n'
-  else
-    printf '1000\n'
-  fi
-  exit 0
+if [[ "${1:-}" == "-c" ]]; then
+  case "${2:-}" in
+    %u)
+      if [[ "${3:-}" == "${TT_TEST_INIT_PATH:-}" || "${3:-}" == "${TT_TEST_MARKER_ROOT:-}"* ]]; then
+        printf '0\n'
+      else
+        printf '1000\n'
+      fi
+      exit 0
+      ;;
+    %a)
+      /usr/bin/stat -f %Lp "$3"
+      exit 0
+      ;;
+    %s)
+      /usr/bin/stat -f %z "$3"
+      exit 0
+      ;;
+  esac
 fi
 exec /usr/bin/stat "$@"
+SH
+
+cat >"$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-fT" ]]; then
+  shift
+fi
+exec /bin/mv -f "$@"
 SH
 
 cat >"$fakebin/readlink" <<'SH'
@@ -242,7 +277,17 @@ case "$*" in
     ;;
   "list-panes -a -F #{pane_id}|#{pane_pid}|#{pane_dead}")
     [[ "$server_state" == "live" ]] || exit 1
-    printf '%b\n' "${TT_TEST_PANE_ROWS:-%1|3333|0}"
+    count=0
+    if [[ -n "${TT_TEST_PANE_CALLS:-}" ]]; then
+      count="$(cat "$TT_TEST_PANE_CALLS" 2>/dev/null || printf 0)"
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$TT_TEST_PANE_CALLS"
+    fi
+    if [[ "${TT_TEST_PANE_CHURN:-}" == "1" && "$count" -ge 3 ]]; then
+      printf '%%1|3333|0\n%%9|9999|1\n'
+    else
+      printf '%b\n' "${TT_TEST_PANE_ROWS:-%1|3333|0}"
+    fi
     ;;
   "show-option -gqv @tt_wsl_interop")
     printf '%s\n' "${TT_TEST_STORED_SOCKET:-}"
@@ -252,6 +297,22 @@ case "$*" in
     ;;
   "has-session "*)
     exit 1
+    ;;
+  "list-sessions")
+    [[ "$server_state" == "live" ]] || exit 1
+    printf 'test: 1 windows\n'
+    ;;
+  "kill-server")
+    printf 'none\n' >"${TT_TEST_SERVER_STATE:?}"
+    ;;
+  "set-option -gq @tt_wsl_interop "*)
+    if [[ "${TT_TEST_SET_OPTION_FAIL:-}" == "1" ]]; then
+      if [[ -n "${TT_TEST_SERVER_STAT:-}" ]]; then
+        sed 's/ 222222 0$/ 999999 0/' "$TT_TEST_SERVER_STAT" >"$TT_TEST_SERVER_STAT.tmp"
+        /bin/mv -f "$TT_TEST_SERVER_STAT.tmp" "$TT_TEST_SERVER_STAT"
+      fi
+      exit 1
+    fi
     ;;
 esac
 SH
@@ -273,6 +334,8 @@ export TT_TEST_SUDO_LOG="$sudo_log"
 export TT_TEST_TMUX_LOG="$tmux_log"
 export TT_TEST_TMUX_SOCKET="$socket"
 export TT_TEST_INIT_PATH="$fakebin/init"
+export TT_TEST_MARKER_ROOT="$markerroot"
+export TT_TEST_SERVER_STAT="$procroot/2222/stat"
 export WSL_DISTRO_NAME=Ubuntu
 
 expect_failure() {
@@ -280,6 +343,29 @@ expect_failure() {
     printf 'expected command to fail: %s\n' "$*" >&2
     exit 1
   fi
+}
+
+write_record() {
+  local path="$1"
+  local value="$2"
+  local mode="${3:-600}"
+
+  mkdir -p "$markerroot"
+  printf '%s\n' "$value" >"$path"
+  chmod "$mode" "$path"
+}
+
+reset_bridge_fixture() {
+  rm -rf "$croot" "$markerroot" "$procroot/4444" "$procroot/5555"
+  mkdir -p "$markerroot"
+  chmod 700 "$markerroot"
+  : >"$mount_log"
+  : >"$umount_log"
+  : >"$sudo_log"
+  : >"$tmux_log"
+  printf 'absent\n' >"$state"
+  printf 'live\n' >"$server_state"
+  write_proc_stat 2222 'tmux: server' 222222
 }
 
 : >"$mount_log"
@@ -309,6 +395,11 @@ grep -Fq -- "-x $lockroot/tt-wsl-bridge.lock /bin/bash -c" "$sudo_log"
 grep -Fqx -- "-t drvfs -o ro,uid=1000,gid=1000,umask=022,fmask=011 C: $croot" "$mount_log"
 grep -Fqx -- "set-option -gq @tt_wsl_interop $socket" "$tmux_log"
 grep -Fqx -- "2222|222222|mnt:[7001]" "$markerroot/mount-1000"
+[[ "$(/usr/bin/stat -f %Lp "$markerroot/mount-1000")" == "600" ]]
+marker_mode="$(/usr/bin/stat -f %Lp "$markerroot")"
+(( (8#$marker_mode & 8#022) == 0 ))
+[[ ! -L "$markerroot" ]]
+[[ -z "$(find "$markerroot" -maxdepth 1 -name '.record.*' -print -quit)" ]]
 if grep -Eq 'set-environment.*(WSL_INTEROP|WSLENV)' "$tmux_log"; then
   printf 'bridge wrote forbidden tmux global environment\n' >&2
   exit 1
@@ -349,6 +440,137 @@ WSL_INTEROP="$socket" TT_LOGIN_SHELL=/bin/sh "$temporary/tt" shell bridge-create
 grep -Fqx -- "set-option -gq @tt_wsl_interop $socket" "$tmux_log"
 grep -Fqx -- "2222|222222|mnt:[7001]" "$markerroot/mount-1000"
 [[ ! -e "$markerroot/pending-1000" ]]
+
+reset_bridge_fixture
+chmod 777 "$markerroot"
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+[[ ! -s "$mount_log" ]]
+chmod 700 "$markerroot"
+
+write_record "$markerroot/mount-1000" 'garbage'
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+[[ ! -s "$mount_log" ]]
+
+write_record "$markerroot/mount-1000" '5555|555555|mnt:[8000]' 666
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+[[ ! -s "$mount_log" ]]
+
+write_record "$markerroot/real-record" '5555|555555|mnt:[8000]'
+rm -f "$markerroot/mount-1000"
+ln -s "$markerroot/real-record" "$markerroot/mount-1000"
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+[[ ! -s "$mount_log" ]]
+
+reset_bridge_fixture
+printf 'valid\n' >"$state"
+write_record "$markerroot/mount-1000" '5555|555555|mnt:[7001]'
+WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+[[ ! -s "$umount_log" ]]
+
+reset_bridge_fixture
+printf 'valid\n' >"$state"
+write_record "$markerroot/pending-1000" '5555|555555|mnt:[7001]'
+WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+[[ ! -e "$markerroot/pending-1000" ]]
+[[ ! -s "$umount_log" ]]
+
+reset_bridge_fixture
+printf 'valid\n' >"$state"
+write_record "$markerroot/mount-1000" '5555|555555|mnt:[8000]'
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '5555|555555|mnt:[8000]' "$markerroot/mount-1000"
+[[ ! -s "$umount_log" ]]
+
+reset_bridge_fixture
+write_record "$markerroot/mount-1000" '5555|555555|mnt:[7001]'
+WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+[[ -s "$mount_log" ]]
+
+reset_bridge_fixture
+make_proc 4444 bash 444444 'mnt:[8000]' /usr/bin/bash
+write_record "$markerroot/mount-1000" '4444|444444|mnt:[8000]'
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '4444|444444|mnt:[8000]' "$markerroot/mount-1000"
+[[ ! -s "$mount_log" ]]
+
+reset_bridge_fixture
+make_proc 4444 bash 444444 'mnt:[8000]' /usr/bin/bash
+write_record "$markerroot/mount-1000" '5555|555555|mnt:[8000]'
+expect_failure env WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '5555|555555|mnt:[8000]' "$markerroot/mount-1000"
+[[ ! -s "$mount_log" ]]
+
+rm -rf "$procroot/4444"
+WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+[[ -s "$mount_log" ]]
+
+reset_bridge_fixture
+write_record "$markerroot/pending-1000" '5555|555555|mnt:[8000]'
+WSL_INTEROP="$socket" "$temporary/tt" wsl-bridge ensure
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+[[ ! -e "$markerroot/pending-1000" ]]
+
+reset_bridge_fixture
+pane_calls="$temporary/pane.calls"
+pane_stderr="$temporary/pane.stderr"
+printf '0\n' >"$pane_calls"
+if TT_TEST_PANE_CALLS="$pane_calls" TT_TEST_PANE_CHURN=1 WSL_INTEROP="$socket" \
+  "$temporary/tt" wsl-bridge ensure >/dev/null 2>"$pane_stderr"; then
+  printf 'pane churn unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -Fq -- 'tmux pane set changed during bridge setup' "$pane_stderr"
+if grep -Fq -- 'WSL bridge cleanup failed' "$pane_stderr"; then
+  printf 'pane churn rollback reported a cleanup failure\n' >&2
+  exit 1
+fi
+grep -Fqx -- 'absent' "$state"
+[[ ! -e "$markerroot/mount-1000" ]]
+[[ -s "$umount_log" ]]
+
+reset_bridge_fixture
+identity_stderr="$temporary/identity.stderr"
+if TT_TEST_SET_OPTION_FAIL=1 WSL_INTEROP="$socket" \
+  "$temporary/tt" wsl-bridge ensure >/dev/null 2>"$identity_stderr"; then
+  printf 'server identity mutation unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -Fq -- 'WSL bridge cleanup failed after tmux socket option update' "$identity_stderr"
+grep -Fqx -- 'valid' "$state"
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+[[ ! -s "$umount_log" ]]
+write_proc_stat 2222 'tmux: server' 222222
+
+reset_bridge_fixture
+printf 'valid\n' >"$state"
+write_record "$markerroot/mount-1000" '2222|222222|mnt:[7001]'
+write_proc_stat 2222 'tmux: server' 999999
+expect_failure env WSL_INTEROP="$socket" TT_LOGIN_SHELL=/bin/sh \
+  "$temporary/tt" reset shell reset-proof
+grep -Fqx -- 'valid' "$state"
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+if grep -Fqx -- 'kill-server' "$tmux_log"; then
+  printf 'reset killed a server whose identity could not be validated\n' >&2
+  exit 1
+fi
+write_proc_stat 2222 'tmux: server' 222222
+
+reset_bridge_fixture
+printf 'valid\n' >"$state"
+write_record "$markerroot/mount-1000" '2222|222222|mnt:[7001]'
+WSL_INTEROP="$socket" TT_LOGIN_SHELL=/bin/sh \
+  "$temporary/tt" reset shell reset-proof >/dev/null
+grep -Fqx -- 'valid' "$state"
+grep -Fqx -- 'live' "$server_state"
+grep -Fqx -- '2222|222222|mnt:[7001]' "$markerroot/mount-1000"
+[[ ! -e "$markerroot/pending-1000" ]]
+[[ -s "$mount_log" ]]
+[[ -s "$umount_log" ]]
+grep -Fqx -- 'kill-server' "$tmux_log"
 
 printf 'valid\n' >"$state"
 printf 'live\n' >"$server_state"
