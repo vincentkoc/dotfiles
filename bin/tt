@@ -2174,7 +2174,7 @@ record_snapshot_history() {
   local source="$1"
   local label="$2"
   local max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
-  local dir ts dest newest file count
+  local dir ts dest tmp newest file count
   local -a files=()
 
   [[ -f "$source" ]] || return 0
@@ -2186,7 +2186,7 @@ record_snapshot_history() {
   (( max > 0 )) || return 0
 
   dir="$(snapshot_history_dir "$label")"
-  mkdir -p "$dir"
+  mkdir -p "$dir" || return 1
   newest="$(ls -1t "$dir"/*.tsv 2>/dev/null | head -n 1 || true)"
   if [[ -n "$newest" ]] && cmp -s "$source" "$newest"; then
     return 0
@@ -2197,7 +2197,19 @@ record_snapshot_history() {
   if [[ -e "$dest" ]]; then
     dest="$dir/$ts.$$.tsv"
   fi
-  cp "$source" "$dest"
+  tmp="$(mktemp "$dir/.${ts}.XXXXXX")" || return 1
+  if ! cp "$source" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! python3 -c 'import os, sys; fd = os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$dest"; then
+    rm -f "$tmp"
+    return 1
+  fi
 
   while IFS= read -r file; do
     [[ -n "$file" ]] && files+=("$file")
@@ -2383,124 +2395,35 @@ write_agent_cockpit_state() {
 write_codex_cockpit_snapshot() {
   local output="${1:-}"
   local quiet="${2:-}"
+  local writer status
 
   [[ -n "$output" ]] || output="$(codex_cockpit_snapshot_file)"
   mkdir -p "$(dirname "$output")"
 
-  TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" python3 - "$output" <<'PY'
-import os
-import pathlib
-import re
-import shlex
-import subprocess
-import sys
-import tempfile
-from collections import defaultdict
+  writer="$SCRIPT_DIR/tt-codex-snapshot-writer"
+  if [[ ! -x "$writer" ]]; then
+    printf 'tt codex snapshot failed: missing writer %s\n' "$writer" >&2
+    return 1
+  fi
 
-output = pathlib.Path(sys.argv[1])
-tmux = os.environ.get("TT_TMUX_BIN", "tmux")
-login_shell = os.environ.get("TT_LOGIN_SHELL") or "/bin/zsh"
-sid_re = re.compile(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b")
+  if TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" "$writer" "$output"; then
+    status=0
+  else
+    status=$?
+  fi
 
+  # EX_TEMPFAIL means a live writer owns the host-local flock. It has already
+  # left the current TSV/history untouched, so autosave should simply coalesce.
+  if (( status == 75 )); then
+    if [[ "$quiet" != "--quiet" ]]; then
+      printf 'tt codex snapshot skipped: another writer is active\n' >&2
+    fi
+    return 0
+  fi
+  if (( status != 0 )); then
+    return "$status"
+  fi
 
-def run(args):
-    try:
-        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return ""
-
-
-def clean(value):
-    return (value or "").replace("\t", " ").replace("\n", " ").strip()
-
-
-def descendants(root, children):
-    result = []
-    stack = list(children.get(root, []))
-    while stack:
-        pid = stack.pop(0)
-        result.append(pid)
-        stack.extend(children.get(pid, []))
-    return result
-
-
-ps_children = defaultdict(list)
-ps_command = {}
-for line in run(["ps", "-axo", "pid=,ppid=,command="]).splitlines():
-    match = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)", line)
-    if not match:
-        continue
-    pid, ppid, command = match.groups()
-    pid = int(pid)
-    ppid = int(ppid)
-    ps_children[ppid].append(pid)
-    ps_command[pid] = command
-
-rows = []
-pane_format = "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}"
-for line in run([tmux, "list-panes", "-a", "-F", pane_format]).splitlines():
-    try:
-        target, pane_pid, title, current_command, cwd = line.split("\t", 4)
-    except ValueError:
-        continue
-
-    pane_pid_int = int(pane_pid)
-    codex_commands = []
-    claude_commands = []
-    ids = []
-
-    for pid in [pane_pid_int] + descendants(pane_pid_int, ps_children):
-        command = ps_command.get(pid, "")
-        if "codex" in command and "tokenjuice" not in command:
-            codex_commands.append(command)
-            command_ids = sid_re.findall(command)
-            ids.extend(command_ids)
-            if not command_ids:
-                for lsof_line in run(["lsof", "-w", "-F", "n", "-p", str(pid)]).splitlines():
-                    if not lsof_line.startswith("n/Users/vincentkoc/.codex/sessions/"):
-                        continue
-                    ids.extend(sid_re.findall(lsof_line[1:]))
-        elif re.search(r"(^|/)claude(\s|$)|Claude Code", command):
-            claude_commands.append(command)
-
-    ids = list(dict.fromkeys(ids))
-    kind = "shell"
-    status = "shell"
-    session_id = ""
-    restore = f"cd {shlex.quote(cwd)} && exec {shlex.quote(login_shell)} -il"
-
-    if codex_commands:
-        kind = "codex"
-        command_text = " ".join(codex_commands)
-        dangerous = " --dangerously-bypass-approvals-and-sandbox" if "--dangerously-bypass-approvals-and-sandbox" in command_text else ""
-        if ids:
-            session_id = ids[0]
-            status = "exact"
-            restore = f"cd {shlex.quote(cwd)} && codex resume{dangerous} --no-alt-screen {session_id}"
-        elif "resume --all" in command_text:
-            status = "picker"
-            restore = f"cd {shlex.quote(cwd)} && codex resume --all --no-alt-screen"
-        else:
-            status = "unresolved"
-            restore = f"cd {shlex.quote(cwd)} && codex --no-alt-screen"
-    elif claude_commands:
-        kind = "claude"
-        status = "resume"
-        dangerous = " --dangerously-skip-permissions" if "--dangerously-skip-permissions" in " ".join(claude_commands) else ""
-        restore = f"cd {shlex.quote(cwd)} && claude{dangerous} resume"
-
-    rows.append([target, kind, cwd, title, current_command, session_id, status, restore])
-
-output.parent.mkdir(parents=True, exist_ok=True)
-fd, tmp_name = tempfile.mkstemp(prefix=output.name + ".", dir=str(output.parent))
-with os.fdopen(fd, "w") as handle:
-    handle.write("# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\tstatus\trestore\n")
-    for row in rows:
-        handle.write("\t".join(clean(value) for value in row) + "\n")
-os.replace(tmp_name, output)
-PY
-
-  record_snapshot_history "$output" "codex-cockpit"
   if [[ "$quiet" != "--quiet" ]]; then
     printf 'tt codex snapshot saved: %s\n' "$output" >&2
   fi

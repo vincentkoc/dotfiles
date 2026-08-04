@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Build one Codex cockpit restore map without disturbing tmux."""
+
+import os
+import pathlib
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from collections import defaultdict
+from shutil import copyfileobj
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+
+class SnapshotError(RuntimeError):
+    """Collection failed before a complete replacement snapshot existed."""
+
+
+def positive_env(name, default, minimum=1):
+    value = os.environ.get(name, str(default))
+    try:
+        value = int(value)
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+COMMAND_TIMEOUT_SECONDS = positive_env("TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS", 5)
+TOTAL_TIMEOUT_SECONDS = positive_env("TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS", 30)
+DEADLINE = time.monotonic() + TOTAL_TIMEOUT_SECONDS
+
+OUTPUT = pathlib.Path(sys.argv[1])
+TMUX = os.environ.get("TT_TMUX_BIN", "tmux")
+LOGIN_SHELL = os.environ.get("TT_LOGIN_SHELL") or "/bin/zsh"
+CODEX_SESSIONS_DIR = pathlib.Path.home() / ".codex" / "sessions"
+STATE_HOME = pathlib.Path(
+    os.environ.get("XDG_STATE_HOME", str(pathlib.Path.home() / ".local" / "state"))
+)
+LOCK_PATH = STATE_HOME / "tt" / "codex-cockpit.lock"
+HISTORY_DIR = STATE_HOME / "tt" / "history" / "codex-cockpit"
+SID_RE = re.compile(
+    r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b"
+)
+
+
+def run(args, *, required=True):
+    remaining = DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise SnapshotError("snapshot collection exceeded its total time budget")
+
+    timeout = min(COMMAND_TIMEOUT_SECONDS, remaining)
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        if required:
+            raise SnapshotError(f"missing collector {args[0]}") from error
+        return ""
+    try:
+        stdout, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        raise SnapshotError(f"timed out collecting {' '.join(args[:2])}") from error
+    if process.returncode != 0:
+        if required:
+            raise SnapshotError(f"collector failed: {' '.join(args[:2])}")
+        return ""
+    return stdout
+
+
+def snapshot_history_limit():
+    value = os.environ.get("TT_SNAPSHOT_HISTORY_MAX", "864")
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return 864
+
+
+def files_match(first, second):
+    with first.open("rb") as left, second.open("rb") as right:
+        while True:
+            left_chunk = left.read(1024 * 1024)
+            right_chunk = right.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+def record_snapshot_history():
+    max_history = snapshot_history_limit()
+    if max_history == 0:
+        return
+
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(
+        HISTORY_DIR.glob("*.tsv"), key=lambda path: path.stat().st_mtime, reverse=True
+    )
+    if files and files_match(OUTPUT, files[0]):
+        return
+
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    destination = HISTORY_DIR / f"{timestamp}.tsv"
+    if destination.exists():
+        destination = HISTORY_DIR / f"{timestamp}.{os.getpid()}.tsv"
+
+    temporary_name = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{timestamp}.", dir=str(HISTORY_DIR)
+        )
+        with os.fdopen(fd, "wb") as temporary, OUTPUT.open("rb") as source:
+            copyfileobj(source, temporary)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, destination)
+        temporary_name = None
+    finally:
+        if temporary_name:
+            pathlib.Path(temporary_name).unlink(missing_ok=True)
+
+    files = sorted(
+        HISTORY_DIR.glob("*.tsv"), key=lambda path: path.stat().st_mtime, reverse=True
+    )
+    for stale in files[max_history:]:
+        stale.unlink(missing_ok=True)
+
+
+def clean(value):
+    return (value or "").replace("\t", " ").replace("\n", " ").strip()
+
+
+def descendants(root, children):
+    result = []
+    stack = list(children.get(root, []))
+    while stack:
+        pid = stack.pop(0)
+        result.append(pid)
+        stack.extend(children.get(pid, []))
+    return result
+
+
+def build_rows():
+    ps_children = defaultdict(list)
+    ps_command = {}
+    for line in run(["ps", "-axo", "pid=,ppid=,command="]).splitlines():
+        match = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)", line)
+        if not match:
+            continue
+        pid, ppid, command = match.groups()
+        pid = int(pid)
+        ppid = int(ppid)
+        ps_children[ppid].append(pid)
+        ps_command[pid] = command
+
+    rows = []
+    pane_format = (
+        "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t"
+        "#{pane_title}\t#{pane_current_command}\t#{pane_current_path}"
+    )
+    for line in run([TMUX, "list-panes", "-a", "-F", pane_format]).splitlines():
+        try:
+            target, pane_pid, title, current_command, cwd = line.split("\t", 4)
+            pane_pid_int = int(pane_pid)
+        except ValueError:
+            raise SnapshotError("tmux returned an invalid pane record") from None
+
+        codex_commands = []
+        claude_commands = []
+        ids = []
+
+        for pid in [pane_pid_int] + descendants(pane_pid_int, ps_children):
+            command = ps_command.get(pid, "")
+            if "codex" in command and "tokenjuice" not in command:
+                codex_commands.append(command)
+                command_ids = SID_RE.findall(command)
+                ids.extend(command_ids)
+                if not command_ids:
+                    for lsof_line in run(
+                        ["lsof", "-w", "-F", "n", "-p", str(pid)], required=False
+                    ).splitlines():
+                        if not lsof_line.startswith(f"n{CODEX_SESSIONS_DIR}/"):
+                            continue
+                        ids.extend(SID_RE.findall(lsof_line[1:]))
+            elif re.search(r"(^|/)claude(\s|$)|Claude Code", command):
+                claude_commands.append(command)
+
+        ids = list(dict.fromkeys(ids))
+        kind = "shell"
+        status = "shell"
+        session_id = ""
+        restore = f"cd {shlex.quote(cwd)} && exec {shlex.quote(LOGIN_SHELL)} -il"
+
+        if codex_commands:
+            kind = "codex"
+            command_text = " ".join(codex_commands)
+            dangerous = (
+                " --dangerously-bypass-approvals-and-sandbox"
+                if "--dangerously-bypass-approvals-and-sandbox" in command_text
+                else ""
+            )
+            if ids:
+                session_id = ids[0]
+                status = "exact"
+                restore = (
+                    f"cd {shlex.quote(cwd)} && codex resume{dangerous} "
+                    f"--no-alt-screen {session_id}"
+                )
+            elif "resume --all" in command_text:
+                status = "picker"
+                restore = f"cd {shlex.quote(cwd)} && codex resume --all --no-alt-screen"
+            else:
+                status = "unresolved"
+                restore = f"cd {shlex.quote(cwd)} && codex --no-alt-screen"
+        elif claude_commands:
+            kind = "claude"
+            status = "resume"
+            dangerous = (
+                " --dangerously-skip-permissions"
+                if "--dangerously-skip-permissions" in " ".join(claude_commands)
+                else ""
+            )
+            restore = f"cd {shlex.quote(cwd)} && claude{dangerous} resume"
+
+        rows.append(
+            [target, kind, cwd, title, current_command, session_id, status, restore]
+        )
+    return rows
+
+
+def write_snapshot(rows):
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{OUTPUT.name}.", dir=str(OUTPUT.parent))
+        with os.fdopen(fd, "w") as handle:
+            handle.write(
+                "# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\tstatus\trestore\n"
+            )
+            for row in rows:
+                handle.write("\t".join(clean(value) for value in row) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, OUTPUT)
+        tmp_name = None
+    finally:
+        if tmp_name:
+            pathlib.Path(tmp_name).unlink(missing_ok=True)
+
+
+def acquire_snapshot_lock():
+    if fcntl is None:
+        raise SnapshotError("advisory file locking is unavailable")
+
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handle = LOCK_PATH.open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\t{int(time.time())}\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+    return handle
+
+
+def main():
+    lock = None
+    try:
+        lock = acquire_snapshot_lock()
+        if lock is None:
+            return 75
+        rows = build_rows()
+        write_snapshot(rows)
+        record_snapshot_history()
+    except SnapshotError as error:
+        print(f"tt codex snapshot failed: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"tt codex snapshot failed: {error}", file=sys.stderr)
+        return 1
+    finally:
+        if lock is not None:
+            lock.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
