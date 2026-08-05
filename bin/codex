@@ -53,15 +53,14 @@ fi
 
 if [[ -z "${GITHUB_PAT_TOKEN:-}" ]]; then
   token=""
-  if command -v ghx >/dev/null 2>&1; then
-    token="$(ghx auth token 2>/dev/null || true)"
-  elif command -v gh >/dev/null 2>&1; then
-    token="$(gh auth token 2>/dev/null || true)"
+  gh_bin="$(PATH="$lookup_path" command -v gh || true)"
+  if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
+    token="$("$gh_bin" auth token 2>/dev/null || true)"
   fi
   if [[ -n "$token" ]]; then
     export GITHUB_PAT_TOKEN="$token"
   fi
-  unset token
+  unset gh_bin token
 fi
 
 exec "$real_codex" "$@"
