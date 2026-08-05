@@ -7,7 +7,9 @@ trap 'rm -rf "$temporary"' EXIT
 
 wrapper_dir="$temporary/wrapper"
 backend_dir="$temporary/backend"
+symlink_dir="$temporary/symlink-bin"
 mkdir -p "$wrapper_dir" "$backend_dir"
+ln -s "$wrapper_dir" "$symlink_dir"
 cp "$repo_root/bin/codex" "$wrapper_dir/codex"
 
 cat >"$backend_dir/uname" <<'EOF'
@@ -43,9 +45,21 @@ EOF
 
 chmod +x "$wrapper_dir/codex" "$backend_dir/uname" "$backend_dir/gh" "$backend_dir/ghx" "$backend_dir/codex"
 
-output="$(env -u GITHUB_PAT_TOKEN PATH="$wrapper_dir:$backend_dir:/usr/bin:/bin" "$wrapper_dir/codex" --version)"
-grep -Fq 'version:--version' <<<"$output"
-grep -Fq 'token:injected' <<<"$output"
+long_path="$symlink_dir"
+path_entry_count=1
+for index in {1..41}; do
+  filler="$temporary/filler-$index-with-a-deliberately-long-path-segment"
+  mkdir -p "$filler"
+  long_path="$long_path:$filler"
+  path_entry_count=$((path_entry_count + 1))
+done
+long_path="$long_path:$backend_dir:/usr/bin:/bin"
+path_entry_count=$((path_entry_count + 3))
+[[ "$path_entry_count" -eq 45 ]]
+
+output="$(env -u GITHUB_PAT_TOKEN PATH="$long_path" "$symlink_dir/codex" --version)"
+[[ "$output" == *"version:--version"* ]]
+[[ "$output" == *"token:injected"* ]]
 
 if grep -Fq 'gh auth token' "$repo_root/.zshrc"; then
   printf '.zshrc must not fetch GitHub credentials during startup\n' >&2

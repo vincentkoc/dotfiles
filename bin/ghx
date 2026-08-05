@@ -3,15 +3,26 @@ set -euo pipefail
 
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 lookup_path=""
-IFS=: read -r -a path_entries <<< "${PATH:-}"
-
-for path_entry in "${path_entries[@]}"; do
+path_remaining="${PATH:-}"
+path_done=""
+while :; do
+  case "$path_remaining" in
+    *:*)
+      path_entry="${path_remaining%%:*}"
+      path_remaining="${path_remaining#*:}"
+      ;;
+    *)
+      path_entry="$path_remaining"
+      path_done=1
+      ;;
+  esac
   path_entry="${path_entry:-.}"
-  if [[ -d "$path_entry" ]] && [[ "$(cd -P -- "$path_entry" && pwd)" == "$wrapper_dir" ]]; then
-    continue
+  if [[ ! -d "$path_entry" || ! "$path_entry" -ef "$wrapper_dir" ]]; then
+    lookup_path+="${lookup_path:+:}$path_entry"
   fi
-  lookup_path+="${lookup_path:+:}$path_entry"
+  [[ -z "${path_done:-}" ]] || break
 done
+unset path_done path_entry path_remaining
 
 ghx_bin="$(PATH="$lookup_path" command -v ghx || true)"
 gh_bin="$(PATH="$lookup_path" command -v gh || true)"
