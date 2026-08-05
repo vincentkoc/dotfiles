@@ -16,6 +16,14 @@ done
 ghx_bin="$(PATH="$lookup_path" command -v ghx || true)"
 gh_bin="$(PATH="$lookup_path" command -v gh || true)"
 
+run_native_gh() {
+  if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
+    printf 'ghx: command requires the real GitHub CLI\n' >&2
+    exit 127
+  fi
+  exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
+}
+
 uses_stdin_payload() {
   local arg
   for arg in "$@"; do
@@ -28,14 +36,16 @@ uses_stdin_payload() {
   return 1
 }
 
+# Authentication may prompt, read credentials, or consult the keychain. Keep it
+# out of ghx's daemon protocol and its IPC timeout entirely.
+if [[ "${1:-}" == "auth" ]]; then
+  run_native_gh "$@"
+fi
+
 # ghx's daemon protocol forwards argv, cwd, and output, but not stdin. Sending
 # stdin-backed mutations through it can turn a valid payload into an empty one.
 if uses_stdin_payload "$@"; then
-  if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
-    printf 'ghx: stdin-backed commands require the real GitHub CLI\n' >&2
-    exit 127
-  fi
-  exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
+  run_native_gh "$@"
 fi
 
 if [[ -n "$ghx_bin" && -x "$ghx_bin" ]]; then
@@ -51,4 +61,4 @@ if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
   exit 127
 fi
 
-exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
+run_native_gh "$@"
