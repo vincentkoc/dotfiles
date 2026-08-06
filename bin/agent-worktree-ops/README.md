@@ -23,6 +23,18 @@ Bins in this folder:
     physical-path write-denial sandbox; there is no writable fallback.
   - pass `--machine` for one compact, sorted schema-v1 JSON audit line with
     counts only; it is incompatible with `--apply` and `--list-registered`
+  - machine mode runs every Git, `lsof`, and SQLite-reader child through one
+    bounded supervisor; Git hooks, fsmonitor, pagers, lazy fetches, credential
+    prompts, and tmux probing are disabled for that mode
+  - each machine child is tracked by its positive PID, per-run birth token, and
+    owning `Popen`; timeout recovery signals only that unreaped direct child,
+    never a process group or descendant
+  - a child-only liveness descriptor must reach EOF after reap, so a forked
+    survivor that inherited it fails the audit before JSON is emitted; the
+    in-memory child registry must also be balanced
+  - machine subprocesses have a 30-second deadline and an 8 MiB combined output
+    limit; child descriptors are closed by default except for the exact
+    SQLite protocol descriptors and liveness descriptor passed by the wrapper
   - apply mode revalidates dirtiness, reachability, sessions, tmux panes, and process CWDs
   - removals are serial, non-force `git worktree remove` operations
   - apply exits nonzero when a selected trim or removal fails

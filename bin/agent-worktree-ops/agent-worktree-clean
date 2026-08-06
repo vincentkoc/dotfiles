@@ -2,7 +2,9 @@
 
 import argparse
 import json
+import locale
 import os
+import selectors
 import shutil
 import sqlite3
 import stat
@@ -30,6 +32,9 @@ DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
 DEFAULT_QUARANTINE_ROOT = os.path.join(DEFAULT_CODEX_HOME, "quarantine", "worktrees")
 STATE_READER_MAX_BYTES = 8 * 1024 * 1024
 STATE_READER_SOURCE_MAX_BYTES = 2 * 1024 * 1024
+MACHINE_CHILD_TIMEOUT_SECONDS = 30.0
+MACHINE_CHILD_OUTPUT_MAX_BYTES = 8 * 1024 * 1024
+MACHINE_LIVENESS_EOF_TIMEOUT_SECONDS = 0.25
 STATE_READER_BOOTSTRAP = """\
 import os
 import sys
@@ -56,11 +61,38 @@ namespace = {
 exec(compile(source, source_path, "exec"), namespace)
 """
 
+_MACHINE_SUPERVISOR = None
+
 
 def audit_git_env() -> dict[str, str]:
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     environment["GIT_NO_LAZY_FETCH"] = "1"
+    if _MACHINE_SUPERVISOR is not None:
+        machine_values = (
+            ("core.hooksPath", "/dev/null"),
+            ("core.fsmonitor", "false"),
+            ("core.untrackedCache", "false"),
+            ("gc.auto", "0"),
+            ("maintenance.auto", "false"),
+            ("credential.interactive", "false"),
+            ("core.pager", "cat"),
+        )
+        environment["GIT_CONFIG_COUNT"] = str(len(machine_values))
+        for index, (key, value) in enumerate(machine_values):
+            environment[f"GIT_CONFIG_KEY_{index}"] = key
+            environment[f"GIT_CONFIG_VALUE_{index}"] = value
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        environment["GIT_ATTR_NOSYSTEM"] = "1"
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["GIT_ASKPASS"] = "/usr/bin/false"
+        environment["SSH_ASKPASS"] = "/usr/bin/false"
+        environment["GIT_EDITOR"] = "/usr/bin/false"
+        environment["GIT_SEQUENCE_EDITOR"] = "/usr/bin/false"
+        environment["GIT_PAGER"] = "/usr/bin/cat"
+        environment["PAGER"] = "/usr/bin/cat"
+        environment["GIT_EXTERNAL_DIFF"] = "/usr/bin/false"
     return environment
 
 
@@ -68,7 +100,330 @@ def run_git_audit(
     command: list[str],
     **kwargs,
 ) -> subprocess.CompletedProcess[str]:
+    if _MACHINE_SUPERVISOR is not None:
+        return _MACHINE_SUPERVISOR.run(command, env=audit_git_env(), **kwargs)
     return subprocess.run(command, env=audit_git_env(), **kwargs)
+
+
+@dataclass(frozen=True)
+class MachineChildIdentity:
+    pid: int
+    birth: int
+
+
+@dataclass
+class MachineChildRecord:
+    identity: MachineChildIdentity
+    child: subprocess.Popen
+    reaped: bool = False
+    liveness_eof: bool = False
+
+
+class MachineChildRegistry:
+    def __init__(self) -> None:
+        self._active: dict[int, MachineChildRecord] = {}
+        self._birth = 0
+        self._registered = 0
+        self._completed = 0
+
+    def register(self, child: subprocess.Popen) -> MachineChildIdentity:
+        pid = child.pid
+        if type(pid) is not int or pid <= 0:
+            raise RuntimeError("machine child registry received a malformed PID")
+        if pid in self._active:
+            raise RuntimeError("machine child registry detected a duplicate PID")
+        self._birth += 1
+        identity = MachineChildIdentity(pid=pid, birth=self._birth)
+        self._active[pid] = MachineChildRecord(identity=identity, child=child)
+        self._registered += 1
+        return identity
+
+    def require(self, identity: MachineChildIdentity, child: subprocess.Popen) -> MachineChildRecord:
+        if (
+            not isinstance(identity, MachineChildIdentity)
+            or type(identity.pid) is not int
+            or identity.pid <= 0
+            or type(identity.birth) is not int
+            or identity.birth <= 0
+        ):
+            raise RuntimeError("machine child registry identity is malformed")
+        record = self._active.get(identity.pid)
+        if record is None:
+            raise RuntimeError("machine child registry lost an active child")
+        if record.identity != identity or record.child is not child or child.pid != identity.pid:
+            raise RuntimeError("machine child registry identity mismatch")
+        return record
+
+    def mark_reaped(self, identity: MachineChildIdentity, child: subprocess.Popen) -> None:
+        record = self.require(identity, child)
+        if record.reaped:
+            raise RuntimeError("machine child registry recorded a duplicate reap")
+        if child.returncode is None:
+            raise RuntimeError("machine child registry cannot mark an unreaped child")
+        record.reaped = True
+
+    def mark_liveness_eof(
+        self,
+        identity: MachineChildIdentity,
+        child: subprocess.Popen,
+    ) -> None:
+        record = self.require(identity, child)
+        if record.liveness_eof:
+            raise RuntimeError("machine child registry recorded duplicate liveness EOF")
+        record.liveness_eof = True
+
+    def complete(self, identity: MachineChildIdentity, child: subprocess.Popen) -> None:
+        record = self.require(identity, child)
+        if not record.reaped or not record.liveness_eof:
+            raise RuntimeError("machine child registry completion proof is incomplete")
+        del self._active[identity.pid]
+        self._completed += 1
+
+    def assert_balanced(self) -> None:
+        if self._active:
+            raise RuntimeError("machine child registry still has active children")
+        if self._registered != self._completed:
+            raise RuntimeError("machine child registry is unbalanced")
+
+
+class MachineSubprocessSupervisor:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = MACHINE_CHILD_TIMEOUT_SECONDS,
+        output_limit: int = MACHINE_CHILD_OUTPUT_MAX_BYTES,
+    ) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.output_limit = output_limit
+        self.registry = MachineChildRegistry()
+
+    def execute(
+        self,
+        command: list[str],
+        *,
+        interaction,
+        env: Optional[dict[str, str]] = None,
+        pass_fds: tuple[int, ...] = (),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ):
+        if not command or any(not isinstance(argument, str) for argument in command):
+            raise RuntimeError("machine subprocess command is malformed")
+        liveness_read_fd, liveness_write_fd = os.pipe()
+        child: Optional[subprocess.Popen] = None
+        identity: Optional[MachineChildIdentity] = None
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            child = subprocess.Popen(
+                command,
+                env=env,
+                pass_fds=tuple(sorted(set((*pass_fds, liveness_write_fd)))),
+                close_fds=True,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        except BaseException:
+            os.close(liveness_read_fd)
+            os.close(liveness_write_fd)
+            raise
+        try:
+            identity = self.registry.register(child)
+        except BaseException:
+            os.close(liveness_write_fd)
+            self._stop_unregistered_child(child)
+            os.close(liveness_read_fd)
+            raise
+
+        os.close(liveness_write_fd)
+        result = None
+        failure: Optional[BaseException] = None
+        try:
+            result = interaction(child, deadline)
+            self._wait_until_reaped(child, identity, deadline)
+        except BaseException as error:
+            failure = error
+            try:
+                self._stop_exact_child(child, identity)
+            except BaseException as stop_error:
+                failure = stop_error
+        if child.returncode is None:
+            raise RuntimeError("machine subprocess was not reaped")
+
+        try:
+            self.registry.mark_reaped(identity, child)
+            self._require_liveness_eof(liveness_read_fd)
+            self.registry.mark_liveness_eof(identity, child)
+            self.registry.complete(identity, child)
+        finally:
+            os.close(liveness_read_fd)
+        if failure is not None:
+            raise failure
+        return result, child.returncode
+
+    def run(
+        self,
+        command: list[str],
+        *,
+        stdout=None,
+        stderr=None,
+        text: bool = False,
+        check: bool = False,
+        env: Optional[dict[str, str]] = None,
+        **kwargs,
+    ) -> subprocess.CompletedProcess:
+        if kwargs:
+            unsupported = ", ".join(sorted(kwargs))
+            raise RuntimeError(f"unsupported machine subprocess options: {unsupported}")
+        if stdout not in (None, subprocess.PIPE, subprocess.DEVNULL):
+            raise RuntimeError("unsupported machine stdout target")
+        if stderr not in (None, subprocess.PIPE, subprocess.DEVNULL, subprocess.STDOUT):
+            raise RuntimeError("unsupported machine stderr target")
+
+        popen_stdout = subprocess.PIPE if stdout == subprocess.PIPE else subprocess.DEVNULL
+        popen_stderr = (
+            subprocess.PIPE
+            if stderr == subprocess.PIPE
+            else subprocess.STDOUT
+            if stderr == subprocess.STDOUT
+            else subprocess.DEVNULL
+        )
+
+        def communicate(child: subprocess.Popen, deadline: float):
+            return self._read_limited_output(child, deadline)
+
+        output, returncode = self.execute(
+            command,
+            interaction=communicate,
+            env=env,
+            stdout=popen_stdout,
+            stderr=popen_stderr,
+        )
+        stdout_bytes, stderr_bytes = output
+        encoding = locale.getpreferredencoding(False)
+        stdout_value = stdout_bytes.decode(encoding, errors="strict") if text else stdout_bytes
+        stderr_value = stderr_bytes.decode(encoding, errors="strict") if text else stderr_bytes
+        result = subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout_value if stdout == subprocess.PIPE else None,
+            stderr_value if stderr == subprocess.PIPE else None,
+        )
+        if check and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                command,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        return result
+
+    def _read_limited_output(
+        self,
+        child: subprocess.Popen,
+        deadline: float,
+    ) -> tuple[bytes, bytes]:
+        streams: dict[int, tuple[str, object]] = {}
+        selector = selectors.DefaultSelector()
+        try:
+            for name, stream in (("stdout", child.stdout), ("stderr", child.stderr)):
+                if stream is None:
+                    continue
+                fd = stream.fileno()
+                os.set_blocking(fd, False)
+                streams[fd] = (name, stream)
+                selector.register(fd, selectors.EVENT_READ)
+
+            captured = {"stdout": bytearray(), "stderr": bytearray()}
+            total = 0
+            while streams:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("machine subprocess timed out")
+                events = selector.select(remaining)
+                if not events:
+                    raise TimeoutError("machine subprocess timed out")
+                for key, _ in events:
+                    fd = int(key.fd)
+                    chunk = os.read(fd, min(65536, self.output_limit + 1 - total))
+                    if not chunk:
+                        selector.unregister(fd)
+                        _, stream = streams.pop(fd)
+                        stream.close()
+                        continue
+                    total += len(chunk)
+                    if total > self.output_limit:
+                        raise RuntimeError("machine subprocess output limit exceeded")
+                    name, _ = streams[fd]
+                    captured[name].extend(chunk)
+
+            return bytes(captured["stdout"]), bytes(captured["stderr"])
+        finally:
+            for _, stream in streams.values():
+                stream.close()
+            selector.close()
+
+    def _wait_until_reaped(
+        self,
+        child: subprocess.Popen,
+        identity: MachineChildIdentity,
+        deadline: float,
+    ) -> None:
+        self.registry.require(identity, child)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("machine subprocess timed out")
+        try:
+            child.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as error:
+            raise TimeoutError("machine subprocess timed out") from error
+
+    def _stop_exact_child(
+        self,
+        child: subprocess.Popen,
+        identity: MachineChildIdentity,
+    ) -> None:
+        self.registry.require(identity, child)
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                self.registry.require(identity, child)
+                child.kill()
+                child.wait(timeout=1.0)
+        elif child.returncode is None:
+            child.wait(timeout=1.0)
+
+    def _stop_unregistered_child(self, child: subprocess.Popen) -> None:
+        try:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=1.0)
+        finally:
+            for stream in (child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+
+    def _require_liveness_eof(self, read_fd: int) -> None:
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(read_fd, selectors.EVENT_READ)
+            events = selector.select(MACHINE_LIVENESS_EOF_TIMEOUT_SECONDS)
+            if not events:
+                raise RuntimeError("machine subprocess liveness EOF was not observed")
+            if os.read(read_fd, 1) != b"":
+                raise RuntimeError("machine subprocess liveness channel was malformed")
+        finally:
+            selector.close()
+
+    def assert_complete(self) -> None:
+        self.registry.assert_balanced()
 
 
 @dataclass(frozen=True)
@@ -279,7 +634,23 @@ def progress_iter(items, *, desc: str, total: int, enabled: bool = True):
 
 
 def main() -> int:
+    global _MACHINE_SUPERVISOR
     args = parse_args()
+    if not args.machine:
+        return run_cleaner(args)
+    if _MACHINE_SUPERVISOR is not None:
+        raise RuntimeError("machine subprocess supervisor is already active")
+    supervisor = MachineSubprocessSupervisor()
+    _MACHINE_SUPERVISOR = supervisor
+    try:
+        result = run_cleaner(args)
+        supervisor.assert_complete()
+        return result
+    finally:
+        _MACHINE_SUPERVISOR = None
+
+
+def run_cleaner(args: argparse.Namespace) -> int:
     repo_root = normalize_path(resolve_repo_root(args.repo))
     codex_home = normalize_path(args.codex_home)
     quarantine_root = normalize_path(args.quarantine_root)
@@ -364,6 +735,9 @@ def main() -> int:
         kept_for_safety.append((worktree, "kept"))
 
     if args.machine:
+        if _MACHINE_SUPERVISOR is None:
+            raise RuntimeError("machine subprocess supervisor is unavailable")
+        _MACHINE_SUPERVISOR.assert_complete()
         print_machine_summary(
             managed_worktrees=managed_worktrees,
             report_only=inventory.report_only,
@@ -961,16 +1335,56 @@ def query_recent_session_cwds(
     return accepted
 
 
-def write_all(fd: int, data: bytes) -> None:
+def wait_readable(fd: int, deadline: Optional[float]) -> None:
+    if deadline is None:
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("SQLite child protocol timed out")
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(fd, selectors.EVENT_READ)
+        if not selector.select(remaining):
+            raise TimeoutError("SQLite child protocol timed out")
+    finally:
+        selector.close()
+
+
+def wait_writable(fd: int, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("SQLite child protocol timed out")
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(fd, selectors.EVENT_WRITE)
+        if not selector.select(remaining):
+            raise TimeoutError("SQLite child protocol timed out")
+    finally:
+        selector.close()
+
+
+def write_all(fd: int, data: bytes, *, deadline: Optional[float] = None) -> None:
     offset = 0
+    if deadline is not None:
+        os.set_blocking(fd, False)
     while offset < len(data):
-        written = os.write(fd, data[offset:])
+        if deadline is not None:
+            wait_writable(fd, deadline)
+        try:
+            written = os.write(fd, data[offset:])
+        except BlockingIOError:
+            continue
         if written <= 0:
             raise RuntimeError("failed to write SQLite child result")
         offset += written
 
 
-def write_state_child_payload(fd: int, payload: dict[str, object]) -> None:
+def write_state_child_payload(
+    fd: int,
+    payload: dict[str, object],
+    *,
+    deadline: Optional[float] = None,
+) -> None:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(encoded) > STATE_READER_MAX_BYTES:
         encoded = json.dumps(
@@ -978,14 +1392,15 @@ def write_state_child_payload(fd: int, payload: dict[str, object]) -> None:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-    write_all(fd, struct.pack(">I", len(encoded)))
-    write_all(fd, encoded)
+    write_all(fd, struct.pack(">I", len(encoded)), deadline=deadline)
+    write_all(fd, encoded, deadline=deadline)
 
 
-def read_exact(fd: int, size: int) -> bytes:
+def read_exact(fd: int, size: int, *, deadline: Optional[float] = None) -> bytes:
     chunks: list[bytes] = []
     remaining = size
     while remaining:
+        wait_readable(fd, deadline)
         chunk = os.read(fd, remaining)
         if not chunk:
             raise RuntimeError("SQLite child result was truncated")
@@ -994,12 +1409,13 @@ def read_exact(fd: int, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def read_framed_json(fd: int) -> object:
-    header = read_exact(fd, 4)
+def read_framed_json(fd: int, *, deadline: Optional[float] = None) -> object:
+    header = read_exact(fd, 4, deadline=deadline)
     payload_size = struct.unpack(">I", header)[0]
     if payload_size > STATE_READER_MAX_BYTES:
         raise RuntimeError("SQLite child payload exceeds the size limit")
-    payload_bytes = read_exact(fd, payload_size)
+    payload_bytes = read_exact(fd, payload_size, deadline=deadline)
+    wait_readable(fd, deadline)
     if os.read(fd, 1):
         raise RuntimeError("SQLite child payload has trailing data")
     try:
@@ -1146,54 +1562,101 @@ def run_state_reader_child(
         result_write_fd,
         *(artifact.fd for artifact in opened.artifacts),
     )
-    try:
-        child = subprocess.Popen(
-            [
-                sys.executable,
-                "-I",
-                "-c",
-                STATE_READER_BOOTSTRAP,
-                str(source_fd),
-                str(STATE_READER_SOURCE_MAX_BYTES),
-                "--internal-state-reader",
-                str(opened.fd),
-                str(request_read_fd),
-                str(result_write_fd),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            pass_fds=tuple(sorted(set(pass_fds))),
-        )
-    except OSError as error:
+    command = [
+        sys.executable,
+        "-I",
+        "-c",
+        STATE_READER_BOOTSTRAP,
+        str(source_fd),
+        str(STATE_READER_SOURCE_MAX_BYTES),
+        "--internal-state-reader",
+        str(opened.fd),
+        str(request_read_fd),
+        str(result_write_fd),
+    ]
+
+    if _MACHINE_SUPERVISOR is not None:
+        parent_fds_closed = False
+
+        def exchange_with_state_reader(
+            _child: subprocess.Popen,
+            deadline: float,
+        ) -> object:
+            nonlocal request_write_fd, parent_fds_closed
+            os.close(source_fd)
+            os.close(request_read_fd)
+            os.close(result_write_fd)
+            parent_fds_closed = True
+            try:
+                write_state_child_payload(
+                    request_write_fd,
+                    request,
+                    deadline=deadline,
+                )
+                os.close(request_write_fd)
+                request_write_fd = -1
+                return read_framed_json(result_read_fd, deadline=deadline)
+            finally:
+                if request_write_fd >= 0:
+                    os.close(request_write_fd)
+                    request_write_fd = -1
+                os.close(result_read_fd)
+
+        try:
+            payload, exit_code = _MACHINE_SUPERVISOR.execute(
+                command,
+                interaction=exchange_with_state_reader,
+                pass_fds=tuple(sorted(set(pass_fds))),
+            )
+        except TimeoutError:
+            raise
+        except OSError as error:
+            raise RuntimeError("unable to launch the SQLite reader child") from error
+        finally:
+            if not parent_fds_closed:
+                os.close(source_fd)
+                os.close(request_read_fd)
+                os.close(request_write_fd)
+                os.close(result_read_fd)
+                os.close(result_write_fd)
+    else:
+        try:
+            child = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                pass_fds=tuple(sorted(set(pass_fds))),
+            )
+        except OSError as error:
+            os.close(source_fd)
+            os.close(request_read_fd)
+            os.close(request_write_fd)
+            os.close(result_read_fd)
+            os.close(result_write_fd)
+            raise RuntimeError("unable to launch the SQLite reader child") from error
+
         os.close(source_fd)
         os.close(request_read_fd)
-        os.close(request_write_fd)
-        os.close(result_read_fd)
         os.close(result_write_fd)
-        raise RuntimeError("unable to launch the SQLite reader child") from error
-
-    os.close(source_fd)
-    os.close(request_read_fd)
-    os.close(result_write_fd)
-    protocol_error: Optional[Exception] = None
-    payload: object = None
-    try:
-        write_state_child_payload(request_write_fd, request)
-        os.close(request_write_fd)
-        request_write_fd = -1
-        payload = read_framed_json(result_read_fd)
-    except Exception as error:
-        protocol_error = error
-    finally:
-        if request_write_fd >= 0:
+        protocol_error: Optional[Exception] = None
+        payload = None
+        try:
+            write_state_child_payload(request_write_fd, request)
             os.close(request_write_fd)
-        os.close(result_read_fd)
-        exit_code = child.wait()
+            request_write_fd = -1
+            payload = read_framed_json(result_read_fd)
+        except Exception as error:
+            protocol_error = error
+        finally:
+            if request_write_fd >= 0:
+                os.close(request_write_fd)
+            os.close(result_read_fd)
+            exit_code = child.wait()
 
-    if protocol_error is not None:
-        raise protocol_error
+        if protocol_error is not None:
+            raise protocol_error
     if not isinstance(payload, dict) or type(payload.get("ok")) is not bool:
         raise RuntimeError("SQLite child emitted an invalid result envelope")
 
@@ -1269,15 +1732,20 @@ def is_worktree_dirty(worktree_path: str) -> bool:
 
 
 def collect_owned_worktree_paths(worktrees: list[Worktree]) -> set[str]:
-    return collect_lsof_worktree_paths(worktrees) | collect_tmux_worktree_paths(worktrees)
+    owned = collect_lsof_worktree_paths(worktrees)
+    if _MACHINE_SUPERVISOR is None:
+        owned |= collect_tmux_worktree_paths(worktrees)
+    return owned
 
 
 def collect_lsof_worktree_paths(worktrees: list[Worktree]) -> set[str]:
-    if not shutil.which("lsof"):
+    lsof_path = shutil.which("lsof")
+    if not lsof_path:
         raise RuntimeError("lsof is required to verify live worktree ownership")
     sorted_worktrees = sorted(worktrees, key=lambda worktree: len(worktree.path), reverse=True)
-    result = subprocess.run(
-        ["lsof", "-n", "-w", "-Ffn", "-a", "-d", "cwd"],
+    runner = _MACHINE_SUPERVISOR.run if _MACHINE_SUPERVISOR is not None else subprocess.run
+    result = runner(
+        [lsof_path, "-n", "-w", "-Ffn", "-a", "-d", "cwd"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
