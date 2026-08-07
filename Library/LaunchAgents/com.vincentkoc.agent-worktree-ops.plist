@@ -10,7 +10,7 @@
     <string>/usr/bin/nice</string>
     <string>-n</string>
     <string>20</string>
-    <string>/Users/vincentkoc/Library/Application Support/agent-worktree-ops/agent-worktree-maintain</string>
+    <string>__AGENT_WORKTREE_MAINTAIN__</string>
   </array>
 
   <key>StartInterval</key>
