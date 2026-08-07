@@ -588,7 +588,7 @@ setup_codex_dotfiles() {
     if [[ -x "$df_dir/bin/install-agent-worktree-ops" ]]; then
         info "Installing agent worktree ops runtime"
         bash "$df_dir/bin/install-agent-worktree-ops"
-        success "Agent worktree ops installed"
+        success "Agent worktree ops runtime installed; scheduler state unchanged"
     else
         warn "Agent worktree ops installer missing in dotfiles: $df_dir/bin/install-agent-worktree-ops"
     fi
