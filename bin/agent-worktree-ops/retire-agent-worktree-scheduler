@@ -24,6 +24,9 @@ scratch=""
 expected_plist=""
 restore_temp=""
 created_receipt_dir=""
+quarantine_dir=""
+quarantine_entry=""
+quarantine_dir_identity=""
 gui_available=0
 needs_mutation=0
 current_present=0
@@ -42,9 +45,11 @@ Usage:
   retire-agent-worktree-scheduler --apply
   retire-agent-worktree-scheduler --rollback <receipt-directory>
 
-The default check is read-only. --apply disables and unloads the two known
-legacy labels, then removes only the byte-exact current user plist after a
-private backup. --rollback restores that backup without re-enabling a job.
+The default check is read-only. --apply disables the two known legacy labels,
+refuses any loaded matching job, then removes only the byte-exact current user
+plist after a private backup. --rollback requires both user and GUI launchd
+domains to prove the labels disabled with no matching jobs loaded before
+restoring that backup.
 EOF
 }
 
@@ -115,6 +120,7 @@ cleanup() {
   if [[ -n "$scratch" && -d "$scratch" && ! -L "$scratch" ]]; then
     rmdir "$scratch" >/dev/null 2>&1 || true
   fi
+  cleanup_quarantine_directory
   release_canonical_lock
 }
 trap cleanup EXIT
@@ -223,6 +229,22 @@ EOF
 
 lock_dir_identity() {
   stat -f '%d:%i:%u:%Lp:%HT' "$1"
+}
+
+cleanup_quarantine_directory() {
+  local first_entry
+
+  [[ -n "$quarantine_dir" && -n "$quarantine_dir_identity" ]] || return 0
+  [[ ! -L "$quarantine_dir" && -d "$quarantine_dir" ]] || return 0
+  [[ "$(lock_dir_identity "$quarantine_dir" 2>/dev/null || true)" == "$quarantine_dir_identity" ]] \
+    || return 0
+  first_entry="$(find "$quarantine_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
+  [[ -z "$first_entry" ]] || return 0
+  if rmdir "$quarantine_dir" 2>/dev/null; then
+    quarantine_dir=""
+    quarantine_entry=""
+    quarantine_dir_identity=""
+  fi
 }
 
 lock_pid_identity() {
@@ -409,7 +431,8 @@ inspect_domains() {
       ;;
     125)
       [[ "$launchctl_output" == "Domain does not support specified action." \
-        || "$launchctl_output" == "$(printf 'Bad request.\nDomain does not support specified action.')" ]] \
+        || "$launchctl_output" == "$(printf 'Bad request.\nDomain does not support specified action.')" \
+        || "$launchctl_output" == "Could not print domain: 125: Domain does not support specified action" ]] \
         || die "GUI launchd returned unrecognized rc 125 output: $GUI_DOMAIN"
       gui_available=0
       ;;
@@ -419,18 +442,6 @@ inspect_domains() {
   esac
 }
 
-assert_loaded_job_idle() {
-  local domain="$1"
-  local label="$2"
-  local output="$3"
-
-  if printf '%s\n' "$output" | grep -Eq '(^|[[:space:]])pid = [1-9][0-9]*([[:space:]]|$)|state = running'; then
-    die "legacy job is running and will not be interrupted: $domain/$label"
-  fi
-  printf '%s\n' "$output" | grep -Fq 'state = not running' \
-    || die "legacy job is loaded but its idle state is not proven: $domain/$label"
-}
-
 inspect_job() {
   local domain="$1"
   local label="$2"
@@ -438,8 +449,7 @@ inspect_job() {
   capture_launchctl print "$domain/$label"
   case "$launchctl_rc" in
     0)
-      assert_loaded_job_idle "$domain" "$label" "$launchctl_output"
-      needs_mutation=1
+      die "legacy job is loaded and will not be interrupted: $domain/$label"
       ;;
     113)
       ;;
@@ -477,6 +487,11 @@ inspect_user_scope() {
       fi
     done
   done
+}
+
+require_gui_domain_for_rollback() {
+  (( gui_available == 1 )) \
+    || die "rollback requires an available GUI launchd domain to prove persistent disable state before restoring the RunAtLoad plist: $GUI_DOMAIN"
 }
 
 common_preflight() {
@@ -545,12 +560,11 @@ disable_labels() {
   done
 }
 
-bootout_loaded_jobs() {
+assert_jobs_absent() {
   local domain label
   local domains=("$USER_DOMAIN")
   local labels=("$CURRENT_LABEL" "$OLD_LABEL")
 
-  assert_canonical_lock_owned
   if (( gui_available == 1 )); then
     domains+=("$GUI_DOMAIN")
   fi
@@ -560,16 +574,12 @@ bootout_loaded_jobs() {
       capture_launchctl print "$domain/$label"
       case "$launchctl_rc" in
         0)
-          assert_loaded_job_idle "$domain" "$label" "$launchctl_output"
-          assert_canonical_lock_owned
-          capture_launchctl bootout "$domain/$label"
-          [[ "$launchctl_rc" == "0" ]] \
-            || die "failed to unload idle legacy job $domain/$label (launchctl rc=$launchctl_rc)"
+          die "legacy job is loaded and will not be interrupted: $domain/$label"
           ;;
         113)
           ;;
         *)
-          die "cannot revalidate legacy job before unload (launchctl rc=$launchctl_rc): $domain/$label"
+          die "cannot prove legacy job absent (launchctl rc=$launchctl_rc): $domain/$label"
           ;;
       esac
     done
@@ -585,28 +595,131 @@ verify_jobs_absent_and_disabled() {
     domains+=("$GUI_DOMAIN")
   fi
 
+  assert_jobs_absent
   for domain in "${domains[@]}"; do
     for label in "${labels[@]}"; do
-      capture_launchctl print "$domain/$label"
-      [[ "$launchctl_rc" == "113" ]] \
-        || die "legacy job remains loaded or unverifiable (launchctl rc=$launchctl_rc): $domain/$label"
       is_disabled "$domain" "$label" \
         || die "legacy label is not persistently disabled: $domain/$label"
     done
   done
 }
 
+assert_quarantine_directory_unchanged() {
+  [[ -n "$quarantine_dir" && -n "$quarantine_dir_identity" ]] \
+    || die "quarantine directory state is incomplete"
+  [[ ! -L "$quarantine_dir" && -d "$quarantine_dir" ]] \
+    || die "quarantine directory changed or disappeared: $quarantine_dir"
+  [[ "$(lock_dir_identity "$quarantine_dir" 2>/dev/null || true)" == "$quarantine_dir_identity" ]] \
+    || die "quarantine directory identity changed: $quarantine_dir"
+}
+
+prepare_quarantine_directory() {
+  local target_dir metadata
+
+  target_dir="$(dirname "$CURRENT_PLIST")"
+  [[ ! -L "$target_dir" && -d "$target_dir" ]] \
+    || die "LaunchAgents target is not a real directory: $target_dir"
+
+  quarantine_dir="$(mktemp -d "$target_dir/.agent-worktree-retire.XXXXXX")" \
+    || die "cannot create same-directory quarantine under: $target_dir"
+  chmod 0700 "$quarantine_dir"
+  metadata="$(stat -f '%HT|%u|%Lp' "$quarantine_dir")"
+  [[ "$metadata" == "Directory|$UID_VALUE|700" ]] \
+    || die "quarantine directory has unexpected ownership or mode: $quarantine_dir"
+  [[ "$(stat -f '%d' "$target_dir")" == "$(stat -f '%d' "$quarantine_dir")" ]] \
+    || die "quarantine directory is not on the LaunchAgents filesystem: $quarantine_dir"
+
+  quarantine_dir_identity="$(lock_dir_identity "$quarantine_dir")"
+  quarantine_entry="$quarantine_dir/$CURRENT_LABEL.plist"
+  [[ ! -e "$quarantine_entry" && ! -L "$quarantine_entry" ]] \
+    || die "quarantine destination already exists: $quarantine_entry"
+}
+
+quarantined_entry_matches_expected() {
+  local original_fingerprint="$1"
+  local backup="$2"
+
+  assert_quarantine_directory_unchanged
+  [[ -n "$quarantine_entry" && ! -L "$quarantine_entry" && -f "$quarantine_entry" ]] \
+    || return 1
+  [[ "$(file_fingerprint "$quarantine_entry")" == "$original_fingerprint" ]] \
+    || return 1
+  cmp -s "$quarantine_entry" "$expected_plist" || return 1
+  cmp -s "$quarantine_entry" "$backup"
+}
+
+restore_quarantined_entry_without_clobber() {
+  local reason="$1"
+  local moved_fingerprint quarantine_inode restored_inode
+
+  assert_quarantine_directory_unchanged
+  if [[ -z "$quarantine_entry" || -L "$quarantine_entry" || ! -f "$quarantine_entry" ]]; then
+    die "$reason; non-regular moved entry preserved for inspection: $quarantine_entry"
+  fi
+  moved_fingerprint="$(file_fingerprint "$quarantine_entry")"
+  if [[ -e "$CURRENT_PLIST" || -L "$CURRENT_PLIST" ]]; then
+    die "$reason; current path is occupied and moved entry was preserved: $quarantine_entry"
+  fi
+  [[ "$(stat -f '%d' "$quarantine_entry")" == "$(stat -f '%d' "$(dirname "$CURRENT_PLIST")")" ]] \
+    || die "$reason; moved entry is not on the target filesystem: $quarantine_entry"
+
+  ln "$quarantine_entry" "$CURRENT_PLIST" \
+    || die "$reason; no-clobber restore failed and moved entry was preserved: $quarantine_entry"
+  quarantine_inode="$(stat -f '%d:%i' "$quarantine_entry")"
+  restored_inode="$(stat -f '%d:%i' "$CURRENT_PLIST")"
+  [[ "$quarantine_inode" == "$restored_inode" ]] \
+    || die "$reason; restored path does not reference the moved inode: $quarantine_entry"
+  unlink "$quarantine_entry" \
+    || die "$reason; restore link exists but quarantine entry could not be removed: $quarantine_entry"
+  quarantine_entry=""
+  [[ ! -L "$CURRENT_PLIST" && -f "$CURRENT_PLIST" ]] \
+    || die "$reason; restored path changed after no-clobber recovery: $CURRENT_PLIST"
+  [[ "$(file_fingerprint "$CURRENT_PLIST")" == "$moved_fingerprint" ]] \
+    || die "$reason; restored file changed after no-clobber recovery: $CURRENT_PLIST"
+  cleanup_quarantine_directory
+  die "$reason; moved file was restored without deletion"
+}
+
 remove_current_plist() {
   local original_fingerprint="$1"
+  local backup="$2"
+  local source_device quarantine_device
 
   assert_canonical_lock_owned
   validate_current_plist
   (( current_present == 1 )) || die "current legacy plist disappeared before removal"
   [[ "$current_fingerprint" == "$original_fingerprint" ]] \
-    || die "current legacy plist changed before removal"
-  unlink "$CURRENT_PLIST"
+    || die "current legacy plist changed before quarantine"
+
+  prepare_quarantine_directory
+  validate_current_plist
+  (( current_present == 1 )) || die "current legacy plist disappeared before quarantine"
+  [[ "$current_fingerprint" == "$original_fingerprint" ]] \
+    || die "current legacy plist changed before quarantine"
+  source_device="$(stat -f '%d' "$CURRENT_PLIST")"
+  quarantine_device="$(stat -f '%d' "$quarantine_dir")"
+  [[ "$source_device" == "$quarantine_device" ]] \
+    || die "current plist and quarantine are not on the same filesystem"
+
+  assert_canonical_lock_owned
+  assert_jobs_absent
+  mv "$CURRENT_PLIST" "$quarantine_entry" \
+    || die "failed to atomically quarantine current legacy plist"
+  if ! quarantined_entry_matches_expected "$original_fingerprint" "$backup"; then
+    restore_quarantined_entry_without_clobber \
+      "current legacy plist changed during atomic quarantine"
+  fi
+  if ! quarantined_entry_matches_expected "$original_fingerprint" "$backup"; then
+    restore_quarantined_entry_without_clobber \
+      "quarantined legacy plist changed before deletion"
+  fi
+
+  unlink "$quarantine_entry" \
+    || die "validated quarantined plist could not be deleted: $quarantine_entry"
+  quarantine_entry=""
+  cleanup_quarantine_directory
   [[ ! -e "$CURRENT_PLIST" && ! -L "$CURRENT_PLIST" ]] \
-    || die "current legacy plist remains after unlink: $CURRENT_PLIST"
+    || die "a replacement appeared at the current plist path and was preserved: $CURRENT_PLIST"
 }
 
 run_check() {
@@ -616,14 +729,14 @@ run_check() {
     printf 'scheduler retirement check: safe to apply\n'
     (( current_present == 0 )) \
       || printf 'would back up and remove: %s\n' "$CURRENT_PLIST"
-    printf 'would disable and unload idle legacy labels in: %s' "$USER_DOMAIN"
+    printf 'would disable legacy labels after proving matching jobs absent in: %s' "$USER_DOMAIN"
     (( gui_available == 0 )) || printf ', %s' "$GUI_DOMAIN"
     printf '\n'
   fi
 }
 
 run_apply() {
-  local receipt_dir original_fingerprint
+  local receipt_dir backup original_fingerprint
 
   if (( needs_mutation == 0 )); then
     printf 'scheduler retirement: already retired\n'
@@ -640,6 +753,7 @@ run_apply() {
 
   create_receipt
   receipt_dir="$created_receipt_dir"
+  backup="$receipt_dir/$CURRENT_LABEL.plist.backup"
   original_fingerprint="$current_fingerprint"
   if (( current_present == 1 )); then
     backup_current_plist "$receipt_dir"
@@ -648,12 +762,14 @@ run_apply() {
 
   assert_canonical_lock_owned
   inspect_system_scope
+  assert_jobs_absent
   disable_labels
-  bootout_loaded_jobs
+  inspect_system_scope
+  verify_jobs_absent_and_disabled
   if (( current_present == 1 )); then
     assert_canonical_lock_owned
     inspect_system_scope
-    remove_current_plist "$original_fingerprint"
+    remove_current_plist "$original_fingerprint" "$backup"
   fi
 
   validate_old_plist_absent
@@ -703,6 +819,7 @@ restore_backup_atomically() {
   local target_dir
 
   assert_canonical_lock_owned
+  require_gui_domain_for_rollback
   target_dir="$(dirname "$CURRENT_PLIST")"
   mkdir -p "$target_dir"
   [[ ! -L "$target_dir" && -d "$target_dir" ]] \
@@ -713,6 +830,10 @@ restore_backup_atomically() {
   chmod 0644 "$restore_temp"
   validate_regular_file "$restore_temp" 644 "rollback temporary plist"
   cmp -s "$backup" "$restore_temp" || die "rollback temporary plist is not byte-exact"
+  assert_canonical_lock_owned
+  require_gui_domain_for_rollback
+  inspect_system_scope
+  verify_jobs_absent_and_disabled
   [[ ! -e "$CURRENT_PLIST" && ! -L "$CURRENT_PLIST" ]] \
     || die "rollback target appeared before restore: $CURRENT_PLIST"
   ln "$restore_temp" "$CURRENT_PLIST" \
@@ -740,6 +861,7 @@ run_rollback() {
   acquire_canonical_lock
   assert_canonical_lock_owned
   refresh_scope_state
+  require_gui_domain_for_rollback
   validate_receipt_directory "$rollback_receipt"
   validate_retirement_receipt "$rollback_receipt"
   validate_rollback_backup "$backup"
@@ -756,8 +878,10 @@ run_rollback() {
 
   assert_canonical_lock_owned
   inspect_system_scope
+  assert_jobs_absent
   disable_labels
-  bootout_loaded_jobs
+  inspect_system_scope
+  verify_jobs_absent_and_disabled
   if (( current_present == 0 )); then
     assert_canonical_lock_owned
     inspect_system_scope
@@ -767,7 +891,7 @@ run_rollback() {
   verify_jobs_absent_and_disabled
 
   printf 'status=complete\n' >>"$rollback_record"
-  printf 'scheduler rollback complete; labels remain disabled and unloaded\nrestored=%s\n' "$CURRENT_PLIST"
+  printf 'scheduler rollback complete; labels remain disabled and no matching jobs are loaded\nrestored=%s\n' "$CURRENT_PLIST"
 }
 
 make_expected_plist

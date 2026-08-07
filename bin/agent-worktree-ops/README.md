@@ -31,16 +31,17 @@ Bins in this folder:
   - accepts legacy `--install-only` as an alias for the runtime-only default
 - `retire-agent-worktree-scheduler`
   - checks legacy launchd state without mutation by default
-  - pass `--apply` to persistently disable both known user labels, unload only
-    idle jobs under those exact labels, back up the recognized current plist,
-    and unlink it
+  - pass `--apply` to persistently disable both known user labels after proving
+    no matching job is loaded, back up the recognized current plist, and
+    remove it through a validated same-directory quarantine
   - refuses an active maintainer lock, any system-scoped legacy job or plist,
-    running jobs, symlinks, hard links, unexpected ownership or permissions,
-    unrecognized plist bytes, and the older untracked plist
+    any loaded matching job, symlinks, hard links, unexpected ownership or
+    permissions, unrecognized plist bytes, and the older untracked plist
   - holds the canonical maintainer lock through apply and rollback mutations
   - writes a private receipt and exact backup before mutation
   - pass `--rollback <receipt-directory>` to atomically restore the exact backup
-    as mode `0644`; rollback leaves both labels disabled and unloaded
+    as mode `0644`; rollback refuses unless both user and GUI domains prove the
+    labels disabled with no matching jobs loaded
   - never removes runtime directories, logs, history, or iCloud/Mackup residue
 
 Neither audit nor apply mode prunes Git worktree metadata. Use explicit
