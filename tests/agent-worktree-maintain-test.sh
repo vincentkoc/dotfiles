@@ -13,6 +13,9 @@ state_dir="$temporary/state"
 registered="$temporary/registered"
 mkdir -p "$runtime" "$repo" "$codex_home" "$state_dir" "$registered"
 chmod 700 "$state_dir"
+mkdir -m 700 "$state_dir/log"
+: >"$state_dir/log/agent-worktree-maintain.log"
+chmod 644 "$state_dir/log/agent-worktree-maintain.log"
 cp "$root/bin/agent-worktree-ops/agent-worktree-maintain" "$runtime/agent-worktree-maintain"
 
 cat >"$runtime/agent-worktree-clean" <<'EOF'
@@ -72,6 +75,25 @@ grep -q -- '--skip-legacy-purge' "$temporary/cleaner.args"
 [[ "$(mode_of "$state_dir/log")" == "700" ]]
 [[ "$(mode_of "$state_dir/locks")" == "700" ]]
 [[ "$(mode_of "$log_file")" == "600" ]]
+
+hardlink_state="$temporary/hardlink-state"
+mkdir -m 700 "$hardlink_state" "$hardlink_state/log"
+: >"$temporary/hardlink-anchor"
+chmod 600 "$temporary/hardlink-anchor"
+ln "$temporary/hardlink-anchor" "$hardlink_state/log/agent-worktree-maintain.log"
+set +e
+TEST_REGISTERED="$registered" \
+TEST_CLEANER_ARGS="$temporary/cleaner.args" \
+CODEX_HOME="$codex_home" \
+"$runtime/agent-worktree-maintain" \
+  --repo "$repo" \
+  --codex-home "$codex_home" \
+  --state-dir "$hardlink_state" \
+  --force >"$temporary/hardlink-state.out" 2>&1
+status=$?
+set -e
+[[ "$status" == "73" ]]
+grep -q 'untrusted lock/state path' "$temporary/hardlink-state.out"
 
 lock_dir="$state_dir/locks/agent-worktree-maintain.lock"
 mkdir -m 700 "$lock_dir"

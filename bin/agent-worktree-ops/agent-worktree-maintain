@@ -56,6 +56,17 @@ path_mode() {
   stat -c '%a' "$1" 2>/dev/null
 }
 
+path_link_count() {
+  local value
+
+  value="$(stat -f '%l' "$1" 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  stat -c '%h' "$1" 2>/dev/null
+}
+
 path_is_private() {
   local mode="$1"
   [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
@@ -94,13 +105,26 @@ validate_owned_directory() {
 
 validate_owned_file() {
   local path="$1"
-  local owner mode
+  local owner mode links
 
   [[ -f "$path" && ! -L "$path" ]] || return 1
   owner="$(path_owner_uid "$path")" || return 1
   [[ "$owner" == "$(id -u)" ]] || return 1
+  links="$(path_link_count "$path")" || return 1
+  [[ "$links" == "1" ]] || return 1
   mode="$(path_mode "$path")" || return 1
   path_is_private "$mode"
+}
+
+validate_owned_single_link_file() {
+  local path="$1"
+  local owner links
+
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  owner="$(path_owner_uid "$path")" || return 1
+  [[ "$owner" == "$(id -u)" ]] || return 1
+  links="$(path_link_count "$path")" || return 1
+  [[ "$links" == "1" ]]
 }
 
 fail_lock_state() {
@@ -139,7 +163,7 @@ prepare_private_file() {
   local path="$1"
 
   if [[ -e "$path" || -L "$path" ]]; then
-    if ! validate_owned_file "$path"; then
+    if ! validate_owned_single_link_file "$path"; then
       fail_lock_state "$path"
       return "$LOCK_STATE_ERROR"
     fi
