@@ -15,10 +15,25 @@ gwt_source="$gwt_fixture_root/functions/gwt/gwt.zsh"
 mkdir -p "$home" "$runtime" "${gwt_source:h}"
 cp "$root/functions/gwt/gwt.zsh" "$gwt_source"
 cp "$root/bin/agent-worktree-ops/agent-worktree-clean" "$runtime/agent-worktree-clean"
-chmod +x "$runtime/agent-worktree-clean"
+cp "$root/bin/agent-worktree-ops/agent-worktree-maintain" "$runtime/agent-worktree-maintain"
+chmod +x "$runtime/agent-worktree-clean" "$runtime/agent-worktree-maintain"
 
 fake_bin="$temporary/bin"
 mkdir -p "$fake_bin"
+real_git="$(command -v git)"
+export TEST_REAL_GIT="$real_git"
+export TEST_PRUNE_LOG="$temporary/prune.log"
+cat >"$fake_bin/git" <<'EOF'
+#!/bin/sh
+previous=
+for argument in "$@"; do
+  if [ "$previous" = "worktree" ] && [ "$argument" = "prune" ]; then
+    printf '%s\n' "$*" >>"$TEST_PRUNE_LOG"
+  fi
+  previous="$argument"
+done
+exec "$TEST_REAL_GIT" "$@"
+EOF
 cat >"$fake_bin/lsof" <<'EOF'
 #!/bin/sh
 exit 1
@@ -28,7 +43,7 @@ cat >"$fake_bin/tmux" <<'EOF'
 echo 'no server running' >&2
 exit 1
 EOF
-chmod +x "$fake_bin/lsof" "$fake_bin/tmux"
+chmod +x "$fake_bin/git" "$fake_bin/lsof" "$fake_bin/tmux"
 
 audit_probe_bin="$temporary/audit-probe-bin"
 mkdir -p "$audit_probe_bin"
@@ -185,6 +200,18 @@ git -C "$repo" config remote.origin.url "git@example.test:owner/repo.git"
 print fixture >"$repo/README.md"
 git -C "$repo" add README.md
 git -C "$repo" commit -m fixture >/dev/null
+mkdir -p "$home/.codex"
+/usr/bin/python3 - "$home/.codex/state.sqlite" <<'PY'
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+connection.execute(
+    "CREATE TABLE threads (cwd TEXT, archived INTEGER, updated_at INTEGER)"
+)
+connection.commit()
+connection.close()
+PY
 
 remove_path="$temporary/remove-me"
 apply_path="$temporary/apply-me"
@@ -261,6 +288,46 @@ print(f"{index}\t{stat.S_IMODE(details.st_mode):04o}\t{details.st_mtime_ns}")
 PY
 )" ]]
 
+PATH="$fake_bin:$PATH" \
+HOME="$home" \
+DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt audit --machine --min-age-days 999 --trim-artifacts-age-days 999
+ ' zsh "$gwt_source" "$repo" >"$temporary/gwt-machine.out" 2>"$temporary/gwt-machine.err"
+[[ ! -s "$temporary/gwt-machine.err" ]]
+[[ "$(wc -l <"$temporary/gwt-machine.out" | tr -d ' ')" == "1" ]]
+if grep -Fq "$repo" "$temporary/gwt-machine.out"; then
+  print -u2 'machine audit leaked a repository path'
+  exit 1
+fi
+/usr/bin/python3 - "$temporary/gwt-machine.out" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+line = Path(sys.argv[1]).read_text(encoding="utf-8")
+payload = json.loads(line)
+expected_keys = [
+    "artifact_trim_candidates",
+    "kept_by_recent_sessions",
+    "kept_for_safety",
+    "mode",
+    "recent_sessions_scanned",
+    "registered_non_main_worktrees",
+    "removal_candidates",
+    "report_only_paths",
+    "schema_version",
+]
+assert list(payload) == sorted(expected_keys)
+assert line == json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+assert payload["mode"] == "dry-run"
+assert payload["schema_version"] == 1
+for key, value in payload.items():
+    assert isinstance(value, str if key == "mode" else int)
+PY
+
 git -C "$repo" worktree lock "$remove_path"
 stale_before="$(tree_snapshot "$stale_admin")"
 PATH="$fake_bin:$PATH" \
@@ -278,7 +345,7 @@ grep -Fq "worktree ${stale_path:A}" <<< "$(
 [[ "$stale_before" == "$(tree_snapshot "$stale_admin")" ]]
 git -C "$repo" worktree unlock "$remove_path"
 
-HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+PATH="$fake_bin:$PATH" HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
   source "$1"
   cd "$2"
   gwt rm remove-me
@@ -298,6 +365,33 @@ if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
   exit 1
 fi
 grep -Fq "audit is immutable" "$temporary/audit-apply.out"
+
+if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt audit --machine --apply
+ ' zsh "$gwt_source" "$repo" \
+  >"$temporary/audit-machine-apply.out" \
+  2>"$temporary/audit-machine-apply.err"; then
+  print -u2 'expected gwt audit --machine --apply to fail'
+  exit 1
+fi
+[[ ! -s "$temporary/audit-machine-apply.out" ]]
+grep -Fq "audit is immutable" "$temporary/audit-machine-apply.err"
+
+if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt audit --machine --list-registered
+ ' zsh "$gwt_source" "$repo" \
+  >"$temporary/audit-machine-list.out" \
+  2>"$temporary/audit-machine-list.err"; then
+  print -u2 'expected gwt audit --machine --list-registered to fail'
+  exit 1
+fi
+[[ ! -s "$temporary/audit-machine-list.out" ]]
+grep -Fq -- '--machine cannot be combined with --list-registered' \
+  "$temporary/audit-machine-list.err"
 
 metadata_before="$(git -C "$repo" worktree list --porcelain | shasum -a 256)"
 if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
@@ -378,6 +472,25 @@ if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
 fi
 grep -Fq 'refusing existing path not registered to this repository' "$temporary/new.out"
 
+PATH="$fake_bin:$PATH" \
+HOME="$home" \
+DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt clean \
+    --no-log \
+    --skip-legacy-purge \
+    --min-age-days 999 \
+    --trim-artifacts-age-days 999
+ ' zsh "$gwt_source" "$repo" >"$temporary/clean-real-chain.out"
+grep -Fq 'agent-worktree-maintain: done' "$temporary/clean-real-chain.out"
+grep -Fq "worktree ${stale_path:A}" <<< "$(
+  GIT_OPTIONAL_LOCKS=0 git -C "$repo" worktree list --porcelain
+)"
+[[ "$stale_before" == "$(tree_snapshot "$stale_admin")" ]]
+[[ ! -e "$TEST_PRUNE_LOG" ]]
+
 cat >"$runtime/agent-worktree-maintain" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"$TEST_MAINTAIN_ARGS"
@@ -386,6 +499,7 @@ chmod +x "$runtime/agent-worktree-maintain"
 
 HOME="$home" \
 DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+PATH="$fake_bin:$PATH" \
 TEST_MAINTAIN_ARGS="$temporary/maintain.args" \
 zsh -f -c '
   source "$1"
@@ -396,6 +510,44 @@ zsh -f -c '
 grep -Fq 'running immediate forced maintenance' "$temporary/clean.out"
 grep -Fq -- '--force --min-age-days 7' "$temporary/maintain.args"
 grep -Fq -- "--repo ${repo:A}" "$temporary/maintain.args"
+maintain_args_before="$(shasum -a 256 "$temporary/maintain.args")"
+if HOME="$home" \
+  DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+  PATH="$fake_bin:$PATH" \
+  TEST_MAINTAIN_ARGS="$temporary/maintain.args" \
+  zsh -f -c '
+    source "$1"
+    cd "$2"
+    gwt clean --machine
+  ' zsh "$gwt_source" "$repo" \
+    >"$temporary/clean-machine.out" \
+    2>"$temporary/clean-machine.err"; then
+  print -u2 'expected gwt clean --machine to fail'
+  exit 1
+fi
+[[ ! -s "$temporary/clean-machine.out" ]]
+grep -Fq 'clean does not support audit-only --machine output' \
+  "$temporary/clean-machine.err"
+[[ "$maintain_args_before" == "$(shasum -a 256 "$temporary/maintain.args")" ]]
+grep -Fq "worktree ${stale_path:A}" <<< "$(
+  GIT_OPTIONAL_LOCKS=0 git -C "$repo" worktree list --porcelain
+)"
+[[ ! -e "$TEST_PRUNE_LOG" ]]
+
+PATH="$fake_bin:$PATH" \
+HOME="$home" \
+DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt prune
+ ' zsh "$gwt_source" "$repo"
+grep -Fxq 'worktree prune' "$TEST_PRUNE_LOG"
+if GIT_OPTIONAL_LOCKS=0 git -C "$repo" worktree list --porcelain |
+  grep -Fq "worktree ${stale_path:A}"; then
+  print -u2 'explicit gwt prune left the stale registration behind'
+  exit 1
+fi
 
 authority_tool="authority-probe"
 

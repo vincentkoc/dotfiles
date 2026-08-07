@@ -569,7 +569,7 @@ _gwt_tool_path() {
 _gwt_validate_cleanup_args() {
     local command_name="$1"
     shift
-    local arg
+    local arg machine_mode=false
 
     for arg in "$@"; do
         case "$arg" in
@@ -583,8 +583,16 @@ _gwt_validate_cleanup_args() {
                     return 1
                 fi
                 ;;
+            --machine)
+                machine_mode=true
+                ;;
         esac
     done
+
+    if [[ "$command_name" == "clean" && "$machine_mode" == true ]]; then
+        echo "gwt: clean does not support audit-only --machine output" >&2
+        return 1
+    fi
 }
 
 _gwt_should_use_color() {
@@ -1125,13 +1133,24 @@ EOF
             fi
             ;;
         audit)
-            local repo_root cleaner_path audit_table worktree_count
+            local repo_root cleaner_path audit_table worktree_count machine_mode=false arg
             repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             _gwt_validate_cleanup_args audit "$@" || return 1
             cleaner_path=$(_gwt_tool_path agent-worktree-clean) || {
                 echo "gwt: agent-worktree-clean not found" >&2
                 return 1
             }
+            for arg in "$@"; do
+                if [[ "$arg" == "--machine" ]]; then
+                    machine_mode=true
+                    break
+                fi
+            done
+            if [[ "$machine_mode" == true ]]; then
+                GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 \
+                    "$cleaner_path" --repo "$repo_root" "$@" || return 1
+                return 0
+            fi
             audit_table=$(_gwt_fzf_table "$repo_root" 2>/dev/null || true)
             if [[ -n "$audit_table" ]]; then
                 worktree_count=$(printf '%s\n' "$audit_table" | awk 'NF {count++} END {print count+0}')

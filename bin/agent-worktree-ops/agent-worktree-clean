@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
 import shutil
 import sqlite3
+import stat
+import struct
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 try:
     from tqdm import tqdm
@@ -24,6 +28,33 @@ DEFAULT_MIN_AGE_DAYS = 2
 DEFAULT_TRIM_ARTIFACTS_AGE_DAYS = 0.25
 DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
 DEFAULT_QUARANTINE_ROOT = os.path.join(DEFAULT_CODEX_HOME, "quarantine", "worktrees")
+STATE_READER_MAX_BYTES = 8 * 1024 * 1024
+STATE_READER_SOURCE_MAX_BYTES = 2 * 1024 * 1024
+STATE_READER_BOOTSTRAP = """\
+import os
+import sys
+
+source_fd = int(sys.argv[1])
+source_limit = int(sys.argv[2])
+source = bytearray()
+while len(source) <= source_limit:
+    chunk = os.read(source_fd, min(65536, source_limit + 1 - len(source)))
+    if not chunk:
+        break
+    source.extend(chunk)
+if len(source) > source_limit:
+    raise SystemExit(2)
+source_path = f"/dev/fd/{source_fd}"
+sys.argv = [source_path, *sys.argv[3:]]
+namespace = {
+    "__cached__": None,
+    "__file__": source_path,
+    "__name__": "__main__",
+    "__package__": None,
+    "__spec__": None,
+}
+exec(compile(source, source_path, "exec"), namespace)
+"""
 
 
 def audit_git_env() -> dict[str, str]:
@@ -61,6 +92,45 @@ class Inventory:
     common_dir: str
     worktrees: list[Worktree]
     report_only: list[ReportOnlyPath]
+
+
+@dataclass(frozen=True)
+class StateArtifactIdentity:
+    path: str
+    device: int
+    inode: int
+    mode: int
+    uid: int
+    gid: int
+    links: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True)
+class StateDirectoryIdentity:
+    device: int
+    inode: int
+    mode: int
+    uid: int
+    gid: int
+
+
+@dataclass(frozen=True)
+class OpenStateArtifact:
+    name: str
+    fd: int
+    identity: StateArtifactIdentity
+
+
+@dataclass(frozen=True)
+class OpenStateDirectory:
+    path: str
+    fd: int
+    identity: StateDirectoryIdentity
+    database_name: str
+    artifacts: tuple[OpenStateArtifact, ...]
 
 
 def parse_args() -> argparse.Namespace:
@@ -143,7 +213,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="print registered non-main worktree paths and exit",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--machine",
+        action="store_true",
+        help="print one compact JSON audit summary",
+    )
+    args = parser.parse_args()
+    if args.machine and args.apply:
+        parser.error("--machine is audit-only and cannot be combined with --apply")
+    if args.machine and args.list_registered:
+        parser.error("--machine cannot be combined with --list-registered")
+    return args
 
 
 def positive_int(raw: str) -> int:
@@ -190,7 +270,9 @@ def progress_bar(*, total: int, desc: str):
     return SimpleProgress(total, desc)
 
 
-def progress_iter(items, *, desc: str, total: int):
+def progress_iter(items, *, desc: str, total: int, enabled: bool = True):
+    if not enabled:
+        return items
     if tqdm is not None:
         return tqdm(items, desc=desc, total=total, unit="worktree")
     return items
@@ -204,24 +286,22 @@ def main() -> int:
     shared_node_modules_source = normalize_path(
         args.shared_node_modules_source or os.path.join(repo_root, "node_modules")
     )
-    inventory = build_inventory(repo_root, codex_home)
-    managed_worktrees = inventory.worktrees
     if args.list_registered:
+        inventory = build_inventory(repo_root, codex_home)
+        managed_worktrees = inventory.worktrees
         for worktree in managed_worktrees:
             print(worktree.path)
         return 0
 
-    state_db = find_latest_state_db(codex_home)
-    recent_session_cwds = (
-        read_recent_session_cwds(
-            state_db=state_db,
-            scan_limit=args.scan_limit,
-            keep_limit=args.limit,
-            repo_root=repo_root,
-            worktrees=managed_worktrees,
-        )
-        if state_db
-        else []
+    state_db, _ = discover_state_artifacts(codex_home)
+    inventory = build_inventory(repo_root, codex_home)
+    managed_worktrees = inventory.worktrees
+    recent_session_cwds = read_recent_session_cwds(
+        state_db=state_db,
+        scan_limit=args.scan_limit,
+        keep_limit=args.limit,
+        repo_root=repo_root,
+        worktrees=managed_worktrees,
     )
     keep_paths = select_session_backed_worktrees(managed_worktrees, recent_session_cwds)
     busy_paths = collect_owned_worktree_paths(managed_worktrees)
@@ -238,6 +318,7 @@ def main() -> int:
             dirty_candidates,
             desc="checking clean worktrees",
             total=len(dirty_candidates),
+            enabled=not args.machine,
         )
         if is_worktree_dirty(worktree.path)
     }
@@ -282,23 +363,34 @@ def main() -> int:
             continue
         kept_for_safety.append((worktree, "kept"))
 
-    print_summary(
-        repo_root=repo_root,
-        common_dir=inventory.common_dir,
-        state_db=state_db,
-        managed_worktrees=managed_worktrees,
-        report_only=inventory.report_only,
-        recent_session_cwds=recent_session_cwds,
-        kept_by_session=kept_by_session,
-        kept_for_safety=kept_for_safety,
-        trimmable=trimmable,
-        removable=removable,
-        apply=args.apply,
-        min_age_days=args.min_age_days,
-        trim_artifacts_age_days=args.trim_artifacts_age_days,
-        quarantine_root=quarantine_root,
-        shared_node_modules_source=shared_node_modules_source,
-    )
+    if args.machine:
+        print_machine_summary(
+            managed_worktrees=managed_worktrees,
+            report_only=inventory.report_only,
+            recent_session_cwds=recent_session_cwds,
+            kept_by_session=kept_by_session,
+            kept_for_safety=kept_for_safety,
+            trimmable=trimmable,
+            removable=removable,
+        )
+    else:
+        print_summary(
+            repo_root=repo_root,
+            common_dir=inventory.common_dir,
+            state_db=state_db,
+            managed_worktrees=managed_worktrees,
+            report_only=inventory.report_only,
+            recent_session_cwds=recent_session_cwds,
+            kept_by_session=kept_by_session,
+            kept_for_safety=kept_for_safety,
+            trimmable=trimmable,
+            removable=removable,
+            apply=args.apply,
+            min_age_days=args.min_age_days,
+            trim_artifacts_age_days=args.trim_artifacts_age_days,
+            quarantine_root=quarantine_root,
+            shared_node_modules_source=shared_node_modules_source,
+        )
 
     if not args.apply:
         return 0
@@ -540,26 +632,303 @@ def compute_path_age_days(file_path: str) -> float:
     return age_seconds / 86400
 
 
-def find_latest_state_db(codex_home: str) -> Optional[str]:
-    root = Path(codex_home)
-    candidates = sorted(root.glob("state*.sqlite"), key=lambda candidate: candidate.stat().st_mtime, reverse=True)
-    return str(candidates[0]) if candidates else None
+def select_state_artifact_names(names: list[str]) -> tuple[str, tuple[str, ...]]:
+    databases = sorted(
+        name for name in names if name.startswith("state") and name.endswith(".sqlite")
+    )
+    if len(databases) != 1:
+        raise RuntimeError(
+            f"expected exactly one Codex state*.sqlite database; found {len(databases)}"
+        )
+
+    database_name = databases[0]
+    related_names = {
+        name for name in names if name.startswith("state") and ".sqlite" in name
+    }
+    wal_name = f"{database_name}-wal"
+    shm_name = f"{database_name}-shm"
+    has_wal = wal_name in related_names
+    has_shm = shm_name in related_names
+    if has_wal != has_shm:
+        raise RuntimeError("Codex state WAL and SHM sidecars must both be present or both be absent")
+
+    allowed_names = {database_name}
+    if has_wal:
+        allowed_names.update((wal_name, shm_name))
+    unexpected_names = related_names - allowed_names
+    if unexpected_names:
+        if f"{database_name}-journal" in unexpected_names:
+            raise RuntimeError("Codex state rollback journal is not allowed")
+        raise RuntimeError("unexpected Codex state database artifacts")
+
+    return database_name, tuple(sorted(allowed_names))
 
 
-def read_recent_session_cwds(
+def discover_state_artifacts(codex_home: str) -> tuple[str, tuple[str, ...]]:
+    root = Path(normalize_path(codex_home))
+    try:
+        names = os.listdir(root)
+    except OSError as error:
+        raise RuntimeError("unable to inspect the Codex state directory") from error
+
+    database_name, artifact_names = select_state_artifact_names(names)
+    artifact_paths = tuple(str(root / name) for name in artifact_names)
+    snapshot_state_artifacts(artifact_paths)
+    return str(root / database_name), artifact_paths
+
+
+def state_artifact_identity(path: str, details: os.stat_result) -> StateArtifactIdentity:
+    if not stat.S_ISREG(details.st_mode):
+        raise RuntimeError("Codex state artifacts must be regular non-symlink files")
+    if details.st_uid != os.getuid():
+        raise RuntimeError("Codex state artifacts must be owned by the current user")
+    if details.st_nlink != 1:
+        raise RuntimeError("Codex state artifacts must have exactly one hard link")
+    return StateArtifactIdentity(
+        path=path,
+        device=details.st_dev,
+        inode=details.st_ino,
+        mode=details.st_mode,
+        uid=details.st_uid,
+        gid=details.st_gid,
+        links=details.st_nlink,
+        size=details.st_size,
+        mtime_ns=details.st_mtime_ns,
+        ctime_ns=details.st_ctime_ns,
+    )
+
+
+def snapshot_state_artifact(path: str) -> StateArtifactIdentity:
+    try:
+        details = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise RuntimeError("unable to inspect a Codex state artifact") from error
+    return state_artifact_identity(path, details)
+
+
+def snapshot_state_artifacts(paths: tuple[str, ...]) -> tuple[StateArtifactIdentity, ...]:
+    return tuple(snapshot_state_artifact(path) for path in paths)
+
+
+def state_directory_identity(details: os.stat_result) -> StateDirectoryIdentity:
+    if not stat.S_ISDIR(details.st_mode):
+        raise RuntimeError("Codex state root must be a directory")
+    if details.st_uid != os.getuid():
+        raise RuntimeError("Codex state root must be owned by the current user")
+    return StateDirectoryIdentity(
+        device=details.st_dev,
+        inode=details.st_ino,
+        mode=details.st_mode,
+        uid=details.st_uid,
+        gid=details.st_gid,
+    )
+
+
+def open_state_directory(state_db: str) -> OpenStateDirectory:
+    root_path = normalize_path(str(Path(state_db).parent))
+    expected_database_name = Path(state_db).name
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("platform lacks no-follow directory open support")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(root_path, directory_flags)
+    except OSError as error:
+        raise RuntimeError("unable to anchor the Codex state directory") from error
+
+    opened_artifacts: list[OpenStateArtifact] = []
+    try:
+        directory_details = os.fstat(directory_fd)
+        directory_identity = state_directory_identity(directory_details)
+        path_directory_identity = state_directory_identity(
+            os.stat(root_path, follow_symlinks=False)
+        )
+        if path_directory_identity != directory_identity:
+            raise RuntimeError("Codex state directory identity changed before read")
+
+        database_name, artifact_names = select_state_artifact_names(
+            os.listdir(directory_fd)
+        )
+        if database_name != expected_database_name:
+            raise RuntimeError("Codex state database identity changed before read")
+
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        for name in artifact_names:
+            artifact_path = os.path.join(root_path, name)
+            before = state_artifact_identity(
+                artifact_path,
+                os.stat(name, dir_fd=directory_fd, follow_symlinks=False),
+            )
+            try:
+                artifact_fd = os.open(name, file_flags, dir_fd=directory_fd)
+            except OSError as error:
+                raise RuntimeError("unable to anchor a Codex state artifact") from error
+            try:
+                opened = state_artifact_identity(artifact_path, os.fstat(artifact_fd))
+                after = state_artifact_identity(
+                    artifact_path,
+                    os.stat(name, dir_fd=directory_fd, follow_symlinks=False),
+                )
+                if before != opened or opened != after:
+                    raise RuntimeError("Codex state artifact identity changed before read")
+            except Exception:
+                os.close(artifact_fd)
+                raise
+            opened_artifacts.append(
+                OpenStateArtifact(name=name, fd=artifact_fd, identity=opened)
+            )
+
+        return OpenStateDirectory(
+            path=root_path,
+            fd=directory_fd,
+            identity=directory_identity,
+            database_name=database_name,
+            artifacts=tuple(opened_artifacts),
+        )
+    except Exception:
+        for artifact in opened_artifacts:
+            os.close(artifact.fd)
+        os.close(directory_fd)
+        raise
+
+
+def revalidate_open_state(opened: OpenStateDirectory) -> None:
+    if state_directory_identity(os.fstat(opened.fd)) != opened.identity:
+        raise RuntimeError("Codex state directory identity changed during read")
+    try:
+        path_identity = state_directory_identity(
+            os.stat(opened.path, follow_symlinks=False)
+        )
+    except OSError as error:
+        raise RuntimeError("unable to revalidate the Codex state directory") from error
+    if path_identity != opened.identity:
+        raise RuntimeError("Codex state directory identity changed during read")
+
+    database_name, artifact_names = select_state_artifact_names(os.listdir(opened.fd))
+    if (
+        database_name != opened.database_name
+        or artifact_names != tuple(artifact.name for artifact in opened.artifacts)
+    ):
+        raise RuntimeError("Codex state artifact set changed during read")
+
+    for artifact in opened.artifacts:
+        try:
+            path_details = os.stat(
+                artifact.name,
+                dir_fd=opened.fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise RuntimeError("unable to revalidate a Codex state artifact") from error
+        path_identity = state_artifact_identity(artifact.identity.path, path_details)
+        fd_identity = state_artifact_identity(
+            artifact.identity.path,
+            os.fstat(artifact.fd),
+        )
+        if path_identity != artifact.identity or fd_identity != artifact.identity:
+            raise RuntimeError("Codex state artifact identity changed during read")
+
+
+def close_open_state(opened: OpenStateDirectory) -> None:
+    for artifact in opened.artifacts:
+        os.close(artifact.fd)
+    os.close(opened.fd)
+
+
+def open_regular_fd_counts() -> dict[tuple[int, int], int]:
+    fd_root = "/dev/fd" if os.path.isdir("/dev/fd") else "/proc/self/fd"
+    try:
+        names = os.listdir(fd_root)
+    except OSError as error:
+        raise RuntimeError("unable to inspect SQLite file descriptors") from error
+
+    counts: dict[tuple[int, int], int] = {}
+    for name in names:
+        try:
+            fd = int(name)
+            details = os.fstat(fd)
+        except (OSError, ValueError):
+            continue
+        if not stat.S_ISREG(details.st_mode):
+            continue
+        identity = (details.st_dev, details.st_ino)
+        counts[identity] = counts.get(identity, 0) + 1
+    return counts
+
+
+def require_new_open_fd(
+    artifact: OpenStateArtifact,
+    baseline: dict[tuple[int, int], int],
+) -> None:
+    current = open_regular_fd_counts()
+    identity = (artifact.identity.device, artifact.identity.inode)
+    if current.get(identity, 0) <= baseline.get(identity, 0):
+        raise RuntimeError("SQLite did not open the anchored Codex state artifact")
+
+
+def state_database_uri(database_name: str) -> str:
+    return f"file:{quote(database_name, safe='')}?mode=ro"
+
+
+def query_recent_session_cwds(
     *,
-    state_db: str,
+    opened: OpenStateDirectory,
     scan_limit: int,
     keep_limit: int,
     repo_root: str,
-    worktrees: list[Worktree],
+    worktree_paths: list[str],
 ) -> list[str]:
-    repo_paths = [repo_root, *[worktree.path for worktree in worktrees]]
+    os.fchdir(opened.fd)
+    repo_paths = [repo_root, *worktree_paths]
     seen: set[str] = set()
     accepted: list[str] = []
 
-    connection = sqlite3.connect(state_db)
+    baseline_fds = open_regular_fd_counts()
+    database_artifact = next(
+        artifact
+        for artifact in opened.artifacts
+        if artifact.name == opened.database_name
+    )
     try:
+        connection = sqlite3.connect(
+            state_database_uri(opened.database_name),
+            uri=True,
+            timeout=0.0,
+        )
+    except sqlite3.Error as error:
+        raise RuntimeError("unable to open the Codex state database read-only") from error
+    try:
+        require_new_open_fd(database_artifact, baseline_fds)
+        connection.execute("PRAGMA query_only = ON")
+        query_only = connection.execute("PRAGMA query_only").fetchone()
+        if query_only != (1,):
+            raise RuntimeError("failed to enable SQLite query_only mode")
+
+        table_rows = connection.execute(
+            "SELECT type FROM sqlite_schema WHERE name = 'threads'"
+        ).fetchall()
+        if table_rows != [("table",)]:
+            raise RuntimeError("Codex state database is missing the threads table")
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info('threads')")
+            if len(row) > 1
+        }
+        required_columns = {"archived", "cwd", "updated_at"}
+        if not required_columns.issubset(columns):
+            raise RuntimeError("Codex state threads table is missing required columns")
+
+        wal_artifact = next(
+            (
+                artifact
+                for artifact in opened.artifacts
+                if artifact.name == f"{opened.database_name}-wal"
+            ),
+            None,
+        )
+        if wal_artifact is not None:
+            require_new_open_fd(wal_artifact, baseline_fds)
+
         cursor = connection.execute(
             """
             SELECT cwd
@@ -573,6 +942,10 @@ def read_recent_session_cwds(
             (scan_limit,),
         )
         for (cwd,) in cursor:
+            if not isinstance(cwd, str):
+                raise RuntimeError("Codex state threads.cwd must contain text")
+            if not os.path.isabs(cwd):
+                raise RuntimeError("Codex state threads.cwd must contain absolute paths")
             normalized_cwd = normalize_path(cwd)
             if normalized_cwd in seen:
                 continue
@@ -586,6 +959,285 @@ def read_recent_session_cwds(
         connection.close()
 
     return accepted
+
+
+def write_all(fd: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(fd, data[offset:])
+        if written <= 0:
+            raise RuntimeError("failed to write SQLite child result")
+        offset += written
+
+
+def write_state_child_payload(fd: int, payload: dict[str, object]) -> None:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > STATE_READER_MAX_BYTES:
+        encoded = json.dumps(
+            {"error": "SQLite child result exceeds the size limit", "ok": False},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    write_all(fd, struct.pack(">I", len(encoded)))
+    write_all(fd, encoded)
+
+
+def read_exact(fd: int, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            raise RuntimeError("SQLite child result was truncated")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def read_framed_json(fd: int) -> object:
+    header = read_exact(fd, 4)
+    payload_size = struct.unpack(">I", header)[0]
+    if payload_size > STATE_READER_MAX_BYTES:
+        raise RuntimeError("SQLite child payload exceeds the size limit")
+    payload_bytes = read_exact(fd, payload_size)
+    if os.read(fd, 1):
+        raise RuntimeError("SQLite child payload has trailing data")
+    try:
+        return json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("SQLite child payload is not valid JSON") from error
+
+
+def parse_state_reader_request(
+    request: object,
+    *,
+    directory_fd: int,
+) -> tuple[OpenStateDirectory, int, int, str, list[str]]:
+    if not isinstance(request, dict) or set(request) != {
+        "artifact_fds",
+        "database_name",
+        "keep_limit",
+        "repo_root",
+        "scan_limit",
+        "schema_version",
+        "worktree_paths",
+    }:
+        raise RuntimeError("SQLite child request has an invalid schema")
+    if type(request["schema_version"]) is not int or request["schema_version"] != 1:
+        raise RuntimeError("SQLite child request has an unsupported schema")
+    if (
+        type(request["scan_limit"]) is not int
+        or request["scan_limit"] <= 0
+        or type(request["keep_limit"]) is not int
+        or request["keep_limit"] <= 0
+        or not isinstance(request["repo_root"], str)
+        or not isinstance(request["database_name"], str)
+        or not isinstance(request["worktree_paths"], list)
+        or any(not isinstance(path, str) for path in request["worktree_paths"])
+        or not isinstance(request["artifact_fds"], dict)
+    ):
+        raise RuntimeError("SQLite child request has invalid field types")
+
+    directory_identity = state_directory_identity(os.fstat(directory_fd))
+    database_name, artifact_names = select_state_artifact_names(os.listdir(directory_fd))
+    if database_name != request["database_name"]:
+        raise RuntimeError("SQLite child database name changed before read")
+    if set(request["artifact_fds"]) != set(artifact_names):
+        raise RuntimeError("SQLite child artifact set changed before read")
+
+    artifacts: list[OpenStateArtifact] = []
+    for name in artifact_names:
+        artifact_fd = request["artifact_fds"][name]
+        if type(artifact_fd) is not int or artifact_fd < 0:
+            raise RuntimeError("SQLite child artifact descriptor is invalid")
+        fd_identity = state_artifact_identity(name, os.fstat(artifact_fd))
+        path_identity = state_artifact_identity(
+            name,
+            os.stat(name, dir_fd=directory_fd, follow_symlinks=False),
+        )
+        if fd_identity != path_identity:
+            raise RuntimeError("SQLite child artifact identity changed before read")
+        artifacts.append(
+            OpenStateArtifact(name=name, fd=artifact_fd, identity=fd_identity)
+        )
+
+    return (
+        OpenStateDirectory(
+            path="",
+            fd=directory_fd,
+            identity=directory_identity,
+            database_name=database_name,
+            artifacts=tuple(artifacts),
+        ),
+        request["scan_limit"],
+        request["keep_limit"],
+        request["repo_root"],
+        request["worktree_paths"],
+    )
+
+
+def run_internal_state_reader(argv: list[str]) -> int:
+    if len(argv) != 3:
+        return 2
+    try:
+        directory_fd, request_fd, result_fd = (int(value) for value in argv)
+        request = read_framed_json(request_fd)
+        opened, scan_limit, keep_limit, repo_root, worktree_paths = (
+            parse_state_reader_request(request, directory_fd=directory_fd)
+        )
+        cwds = query_recent_session_cwds(
+            opened=opened,
+            scan_limit=scan_limit,
+            keep_limit=keep_limit,
+            repo_root=repo_root,
+            worktree_paths=worktree_paths,
+        )
+        payload: dict[str, object] = {"cwds": cwds, "ok": True}
+        exit_code = 0
+    except BaseException as error:
+        payload = {
+            "error": f"{type(error).__name__}: {error}",
+            "ok": False,
+        }
+        exit_code = 1
+    try:
+        write_state_child_payload(result_fd, payload)
+    except BaseException:
+        return 1
+    return exit_code
+
+
+def run_state_reader_child(
+    *,
+    opened: OpenStateDirectory,
+    scan_limit: int,
+    keep_limit: int,
+    repo_root: str,
+    worktrees: list[Worktree],
+) -> list[str]:
+    request_read_fd, request_write_fd = os.pipe()
+    result_read_fd, result_write_fd = os.pipe()
+    source_fd = os.open(__file__, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    source_details = os.fstat(source_fd)
+    if not stat.S_ISREG(source_details.st_mode):
+        os.close(source_fd)
+        os.close(request_read_fd)
+        os.close(request_write_fd)
+        os.close(result_read_fd)
+        os.close(result_write_fd)
+        raise RuntimeError("cleaner source is not a regular file")
+    os.lseek(source_fd, 0, os.SEEK_SET)
+
+    request = {
+        "artifact_fds": {
+            artifact.name: artifact.fd for artifact in opened.artifacts
+        },
+        "database_name": opened.database_name,
+        "keep_limit": keep_limit,
+        "repo_root": repo_root,
+        "scan_limit": scan_limit,
+        "schema_version": 1,
+        "worktree_paths": [worktree.path for worktree in worktrees],
+    }
+    pass_fds = (
+        source_fd,
+        opened.fd,
+        request_read_fd,
+        result_write_fd,
+        *(artifact.fd for artifact in opened.artifacts),
+    )
+    try:
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                STATE_READER_BOOTSTRAP,
+                str(source_fd),
+                str(STATE_READER_SOURCE_MAX_BYTES),
+                "--internal-state-reader",
+                str(opened.fd),
+                str(request_read_fd),
+                str(result_write_fd),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            pass_fds=tuple(sorted(set(pass_fds))),
+        )
+    except OSError as error:
+        os.close(source_fd)
+        os.close(request_read_fd)
+        os.close(request_write_fd)
+        os.close(result_read_fd)
+        os.close(result_write_fd)
+        raise RuntimeError("unable to launch the SQLite reader child") from error
+
+    os.close(source_fd)
+    os.close(request_read_fd)
+    os.close(result_write_fd)
+    protocol_error: Optional[Exception] = None
+    payload: object = None
+    try:
+        write_state_child_payload(request_write_fd, request)
+        os.close(request_write_fd)
+        request_write_fd = -1
+        payload = read_framed_json(result_read_fd)
+    except Exception as error:
+        protocol_error = error
+    finally:
+        if request_write_fd >= 0:
+            os.close(request_write_fd)
+        os.close(result_read_fd)
+        exit_code = child.wait()
+
+    if protocol_error is not None:
+        raise protocol_error
+    if not isinstance(payload, dict) or type(payload.get("ok")) is not bool:
+        raise RuntimeError("SQLite child emitted an invalid result envelope")
+
+    if payload["ok"] is False:
+        if set(payload) != {"error", "ok"} or not isinstance(payload.get("error"), str):
+            raise RuntimeError("SQLite child emitted an invalid error envelope")
+        raise RuntimeError(f"SQLite child failed: {payload['error']}")
+    if exit_code != 0:
+        raise RuntimeError("SQLite child exited unexpectedly")
+    if set(payload) != {"cwds", "ok"} or not isinstance(payload.get("cwds"), list):
+        raise RuntimeError("SQLite child emitted an invalid success envelope")
+
+    cwds = payload["cwds"]
+    if (
+        len(cwds) > keep_limit
+        or any(not isinstance(cwd, str) for cwd in cwds)
+        or len(set(cwds)) != len(cwds)
+    ):
+        raise RuntimeError("SQLite child emitted invalid session paths")
+    return cwds
+
+
+def read_recent_session_cwds(
+    *,
+    state_db: str,
+    scan_limit: int,
+    keep_limit: int,
+    repo_root: str,
+    worktrees: list[Worktree],
+) -> list[str]:
+    opened = open_state_directory(state_db)
+    try:
+        try:
+            return run_state_reader_child(
+                opened=opened,
+                scan_limit=scan_limit,
+                keep_limit=keep_limit,
+                repo_root=repo_root,
+                worktrees=worktrees,
+            )
+        finally:
+            revalidate_open_state(opened)
+    finally:
+        close_open_state(opened)
 
 
 def select_session_backed_worktrees(worktrees: list[Worktree], recent_session_cwds: list[str]) -> set[str]:
@@ -764,11 +1416,35 @@ def path_is_dir(raw_path: str) -> bool:
     return os.path.isdir(raw_path)
 
 
+def print_machine_summary(
+    *,
+    managed_worktrees: list[Worktree],
+    report_only: list[ReportOnlyPath],
+    recent_session_cwds: list[str],
+    kept_by_session: list[Worktree],
+    kept_for_safety: list[tuple[Worktree, str]],
+    trimmable: list[Worktree],
+    removable: list[Worktree],
+) -> None:
+    payload = {
+        "artifact_trim_candidates": len(trimmable),
+        "kept_by_recent_sessions": len(kept_by_session),
+        "kept_for_safety": len(kept_for_safety),
+        "mode": "dry-run",
+        "recent_sessions_scanned": len(recent_session_cwds),
+        "registered_non_main_worktrees": len(managed_worktrees),
+        "removal_candidates": len(removable),
+        "report_only_paths": len(report_only),
+        "schema_version": 1,
+    }
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
 def print_summary(
     *,
     repo_root: str,
     common_dir: str,
-    state_db: Optional[str],
+    state_db: str,
     managed_worktrees: list[Worktree],
     report_only: list[ReportOnlyPath],
     recent_session_cwds: list[str],
@@ -997,17 +1673,16 @@ def revalidate_candidate(
     if current.path in owned_paths:
         return "busy"
 
-    state_db = find_latest_state_db(codex_home)
-    if state_db:
-        session_cwds = read_recent_session_cwds(
-            state_db=state_db,
-            scan_limit=scan_limit,
-            keep_limit=session_limit,
-            repo_root=repo_root,
-            worktrees=inventory.worktrees,
-        )
-        if current.path in select_session_backed_worktrees(inventory.worktrees, session_cwds):
-            return "recent-session"
+    state_db, _ = discover_state_artifacts(codex_home)
+    session_cwds = read_recent_session_cwds(
+        state_db=state_db,
+        scan_limit=scan_limit,
+        keep_limit=session_limit,
+        repo_root=repo_root,
+        worktrees=inventory.worktrees,
+    )
+    if current.path in select_session_backed_worktrees(inventory.worktrees, session_cwds):
+        return "recent-session"
 
     if current.detached and not include_detached:
         return "detached"
@@ -1058,6 +1733,8 @@ def run_text(command: list[str]) -> str:
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) >= 2 and sys.argv[1] == "--internal-state-reader":
+            raise SystemExit(run_internal_state_reader(sys.argv[2:]))
         raise SystemExit(main())
     except KeyboardInterrupt:
         raise SystemExit(130)
