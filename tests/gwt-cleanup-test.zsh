@@ -30,8 +30,31 @@ exit 1
 EOF
 chmod +x "$fake_bin/lsof" "$fake_bin/tmux"
 
+audit_probe_bin="$temporary/audit-probe-bin"
+mkdir -p "$audit_probe_bin"
+cat >"$audit_probe_bin/git" <<'EOF'
+#!/bin/sh
+printf '%s\t%s\n' \
+  "${GIT_OPTIONAL_LOCKS-unset}" \
+  "${GIT_NO_LAZY_FETCH-unset}" \
+  >"$TEST_GIT_AUDIT_ENV"
+EOF
+chmod +x "$audit_probe_bin/git"
+
+PATH="$audit_probe_bin:$PATH" \
+HOME="$home" \
+TEST_GIT_AUDIT_ENV="$temporary/git-audit-env.out" \
+zsh -f -c '
+  source "$1"
+  unset GIT_OPTIONAL_LOCKS GIT_NO_LAZY_FETCH
+  _gwt_git_audit status
+  (( ${+GIT_OPTIONAL_LOCKS} == 0 ))
+  (( ${+GIT_NO_LAZY_FETCH} == 0 ))
+ ' zsh "$gwt_source"
+grep -Fxq $'0\t1' "$temporary/git-audit-env.out"
+
 metadata_snapshot() {
-  GIT_OPTIONAL_LOCKS=0 python3 - "$1" <<'PY'
+  GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 python3 - "$1" <<'PY'
 import hashlib
 import json
 import os
@@ -43,6 +66,7 @@ from pathlib import Path
 repo = Path(sys.argv[1])
 environment = os.environ.copy()
 environment["GIT_OPTIONAL_LOCKS"] = "0"
+environment["GIT_NO_LAZY_FETCH"] = "1"
 common_dir = Path(
     subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -132,6 +156,7 @@ tracked.write_bytes(tracked.read_bytes())
 os.utime(tracked, ns=(details.st_atime_ns, details.st_mtime_ns + 5_000_000_000))
 environment = os.environ.copy()
 environment["GIT_OPTIONAL_LOCKS"] = "0"
+environment["GIT_NO_LAZY_FETCH"] = "1"
 index = Path(
     subprocess.check_output(
         [
@@ -176,6 +201,7 @@ index_before="$(invalidate_index_stat_cache "$remove_path")"
 metadata_before="$(metadata_snapshot "$repo")"
 PATH="$fake_bin:$PATH" \
 GIT_OPTIONAL_LOCKS=caller-value \
+GIT_NO_LAZY_FETCH=caller-lazy-value \
 "$runtime/agent-worktree-clean" \
   --repo "$repo" \
   --codex-home "$home/.codex" \
@@ -204,9 +230,10 @@ DOTFILES_WORKTREES_ROOT="$worktrees_root" \
 zsh -f -c '
   source "$1"
   cd "$2"
-  unset GIT_OPTIONAL_LOCKS
+  unset GIT_OPTIONAL_LOCKS GIT_NO_LAZY_FETCH
   gwt audit --min-age-days 999 --trim-artifacts-age-days 999
   (( ${+GIT_OPTIONAL_LOCKS} == 0 ))
+  (( ${+GIT_NO_LAZY_FETCH} == 0 ))
  ' zsh "$gwt_source" "$repo" >"$temporary/gwt-audit-unset.out"
 [[ "$metadata_before" == "$(metadata_snapshot "$repo")" ]]
 
@@ -214,11 +241,13 @@ PATH="$fake_bin:$PATH" \
 HOME="$home" \
 DOTFILES_WORKTREES_ROOT="$worktrees_root" \
 GIT_OPTIONAL_LOCKS=caller-value \
+GIT_NO_LAZY_FETCH=caller-lazy-value \
 zsh -f -c '
   source "$1"
   cd "$2"
   gwt audit --min-age-days 999 --trim-artifacts-age-days 999
   [[ "$GIT_OPTIONAL_LOCKS" == "caller-value" ]]
+  [[ "$GIT_NO_LAZY_FETCH" == "caller-lazy-value" ]]
  ' zsh "$gwt_source" "$repo" >"$temporary/gwt-audit-custom.out"
 [[ "$metadata_before" == "$(metadata_snapshot "$repo")" ]]
 [[ "$index_before" == "$(python3 - "${index_before%%$'\t'*}" <<'PY'

@@ -192,6 +192,7 @@ class WorktreeCleanerTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
         environment["GIT_OPTIONAL_LOCKS"] = "caller-value"
+        environment["GIT_NO_LAZY_FETCH"] = "caller-lazy-value"
 
         before = snapshot_worktree_metadata(self.repo)
         index_before = path_metadata(removable_index)
@@ -221,6 +222,7 @@ class WorktreeCleanerTests(unittest.TestCase):
         stale_before = snapshot_tree(stale_admin)
         apply_environment = environment.copy()
         apply_environment.pop("GIT_OPTIONAL_LOCKS")
+        apply_environment.pop("GIT_NO_LAZY_FETCH")
         apply = subprocess.run(
             [
                 str(CLEANER_PATH),
@@ -322,13 +324,21 @@ class WorktreeCleanerTests(unittest.TestCase):
         self.assertEqual(command[:4], ["git", "-C", "/tmp/example", "status"])
         self.assertNotIn("diff", command)
 
-    def test_readonly_git_env_is_command_local(self) -> None:
-        with mock.patch.dict(os.environ, {"GIT_OPTIONAL_LOCKS": "caller-value"}):
+    def test_audit_git_env_is_command_local(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GIT_OPTIONAL_LOCKS": "caller-value",
+                "GIT_NO_LAZY_FETCH": "caller-lazy-value",
+            },
+        ):
             with mock.patch.object(CLEANER.subprocess, "run") as run:
-                CLEANER.run_git_readonly(["git", "status"], check=False)
+                CLEANER.run_git_audit(["git", "status"], check=False)
 
             self.assertEqual(os.environ["GIT_OPTIONAL_LOCKS"], "caller-value")
+            self.assertEqual(os.environ["GIT_NO_LAZY_FETCH"], "caller-lazy-value")
             self.assertEqual(run.call_args.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+            self.assertEqual(run.call_args.kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
 
     def test_live_ownership_probe_failures_are_fatal(self) -> None:
         worktree = CLEANER.Worktree("/tmp/example", "abc", "refs/heads/test", False, 10)
