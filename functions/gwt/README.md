@@ -20,7 +20,14 @@ Key responsibilities:
 - shared `node_modules` bootstrap for pnpm repos
 - pretty/default worktree listing with `--raw`, `--plain`, `--color`, and `--no-color`
 - unified worktree discovery across:
-  - `~/.codex/worktrees/<repo-slug>`
-  - `<repo>/.claude/worktrees`
-  - `<repo>/.worktrees`
+  - the current repository's registered Git worktrees
 - agent worktree cleanup front doors
+
+Cleanup behavior:
+
+- `gwt audit` is metadata-immutable, rejects `--apply`, and reports foreign or stale paths.
+- `gwt clean` deliberately runs pressure maintenance immediately with `--force`.
+- Both cleanup wrappers reject repository/Codex-home scope overrides.
+- `gwt rm` resolves targets to an absolute path registered to the current Git common dir.
+- `gwt rm` never prunes unrelated stale worktree registrations.
+- `gwt prune` is the only wrapper command that prunes worktree metadata.

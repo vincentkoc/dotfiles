@@ -120,7 +120,6 @@ _gwt_cleanup_failed_worktree() {
     fi
 
     git worktree remove --force "$worktree_path" >/dev/null 2>&1 || rm -rf "$worktree_path"
-    git worktree prune >/dev/null 2>&1 || true
 }
 
 _gwt_sparse_profile_file() {
@@ -397,12 +396,6 @@ _gwt_sparse_register_shell_hook() {
     _gwt_sparse_sync_shell_env
 }
 
-_gwt_repo_local_worktree_roots() {
-    local repo_root="$1"
-    printf '%s\n' "$repo_root/.claude/worktrees"
-    printf '%s\n' "$repo_root/.worktrees"
-}
-
 _gwt_codex_repo_worktree_root() {
     local repo_root="$1"
     local repo_slug root
@@ -413,8 +406,7 @@ _gwt_codex_repo_worktree_root() {
 
 _gwt_discover_worktree_paths() {
     local repo_root="${1:-}"
-    local codex_repo_root local_root worktree_path
-    local discovered
+    local worktree_path main_worktree
 
     if [[ -z "$repo_root" ]]; then
         repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
@@ -422,27 +414,48 @@ _gwt_discover_worktree_paths() {
         repo_root=$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
     fi
 
-    discovered=$({
-        git -C "$repo_root" worktree list --porcelain 2>/dev/null | awk '/^worktree / {print substr($0, 10)}'
-
-        codex_repo_root=$(_gwt_codex_repo_worktree_root "$repo_root" 2>/dev/null || true)
-        if [[ -n "$codex_repo_root" && -d "$codex_repo_root" ]]; then
-            find "$codex_repo_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null
-        fi
-
-        while IFS= read -r local_root; do
-            [[ -d "$local_root" ]] || continue
-            find "$local_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null
-        done < <(_gwt_repo_local_worktree_roots "$repo_root")
-    } | awk 'NF && !seen[$0]++') || return 1
-
-    while IFS= read -r worktree_path; do
+    main_worktree=$(git -C "$repo_root" worktree list --porcelain 2>/dev/null \
+        | awk '/^worktree / {print substr($0, 10); exit}') || return 1
+    git -C "$repo_root" worktree list --porcelain 2>/dev/null \
+        | awk '/^worktree / {print substr($0, 10)}' \
+        | while IFS= read -r worktree_path; do
         [[ -n "$worktree_path" && -d "$worktree_path" ]] || continue
-        [[ "$worktree_path" == "$repo_root" ]] && continue
+        [[ "$worktree_path" == "$main_worktree" ]] && continue
         printf '%s\n' "$worktree_path"
-    done <<< "$discovered"
+    done
 
     return 0
+}
+
+_gwt_common_dir() {
+    local repo_path="$1"
+    local common_dir
+
+    common_dir=$(git -C "$repo_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    [[ -n "$common_dir" ]] || return 1
+    (cd "$common_dir" 2>/dev/null && pwd -P)
+}
+
+_gwt_registered_worktree_path() {
+    local repo_root="$1"
+    local target_path="$2"
+    local repo_common target_common registered_path
+
+    target_path=$(cd "$target_path" 2>/dev/null && pwd -P) || return 1
+    repo_common=$(_gwt_common_dir "$repo_root") || return 1
+    target_common=$(_gwt_common_dir "$target_path") || return 1
+    [[ "$repo_common" == "$target_common" ]] || return 1
+
+    while IFS= read -r registered_path; do
+        [[ -d "$registered_path" ]] || continue
+        registered_path=$(cd "$registered_path" 2>/dev/null && pwd -P) || continue
+        if [[ "$registered_path" == "$target_path" ]]; then
+            printf '%s\n' "$target_path"
+            return 0
+        fi
+    done < <(git -C "$repo_root" worktree list --porcelain 2>/dev/null | awk '/^worktree / {print substr($0, 10)}')
+
+    return 1
 }
 
 _gwt_gitdir_for_path() {
@@ -487,25 +500,6 @@ _gwt_worktree_branch_label() {
     printf '%s\n' "unmanaged"
 }
 
-_gwt_worktree_source_label() {
-    local repo_root="$1"
-    local worktree_path="$2"
-    local codex_repo_root
-
-    codex_repo_root=$(_gwt_codex_repo_worktree_root "$repo_root" 2>/dev/null || true)
-    if [[ "$worktree_path" == "$repo_root" ]]; then
-        printf '%s\n' "main"
-    elif [[ -n "$codex_repo_root" && "$worktree_path" == "$codex_repo_root/"* ]]; then
-        printf '%s\n' "codex"
-    elif [[ "$worktree_path" == "$repo_root/.claude/worktrees/"* ]]; then
-        printf '%s\n' "claude"
-    elif [[ "$worktree_path" == "$repo_root/.worktrees/"* ]]; then
-        printf '%s\n' "local"
-    else
-        printf '%s\n' "git"
-    fi
-}
-
 _gwt_tool_path() {
     local tool_name="$1"
     local candidate
@@ -521,6 +515,27 @@ _gwt_tool_path() {
     done
 
     return 1
+}
+
+_gwt_validate_cleanup_args() {
+    local command_name="$1"
+    shift
+    local arg
+
+    for arg in "$@"; do
+        case "$arg" in
+            --repo|--repo=*|--codex-home|--codex-home=*)
+                echo "gwt: $command_name controls repository scope; '$arg' is not allowed" >&2
+                return 1
+                ;;
+            --apply|--apply=*|-a)
+                if [[ "$command_name" == "audit" ]]; then
+                    echo "gwt: audit is immutable; use 'gwt clean' for apply mode" >&2
+                    return 1
+                fi
+                ;;
+        esac
+    done
 }
 
 _gwt_should_use_color() {
@@ -928,7 +943,7 @@ Commands:
   gwt new <branch> [start-point] [--profile <name>|--full]
   gwt ls [--raw|--plain|--color|--no-color]
   gwt audit [agent-worktree-clean args...]
-  gwt clean [agent-worktree-maintain args...]
+  gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
   gwt prune                         Prune stale worktree metadata
@@ -1063,6 +1078,7 @@ EOF
         audit)
             local repo_root cleaner_path audit_table worktree_count
             repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            _gwt_validate_cleanup_args audit "$@" || return 1
             cleaner_path=$(_gwt_tool_path agent-worktree-clean) || {
                 echo "gwt: agent-worktree-clean not found" >&2
                 return 1
@@ -1087,10 +1103,12 @@ EOF
         clean)
             local repo_root maintainer_path
             repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            _gwt_validate_cleanup_args clean "$@" || return 1
             maintainer_path=$(_gwt_tool_path agent-worktree-maintain) || {
                 echo "gwt: agent-worktree-maintain not found" >&2
                 return 1
             }
+            echo "gwt: running immediate forced maintenance for $repo_root"
             "$maintainer_path" --repo "$repo_root" --force "$@" || return 1
             ;;
         new|add)
@@ -1141,9 +1159,23 @@ EOF
             worktree_path="$worktree_parent/$branch_slug"
             mkdir -p "$worktree_parent" || return 1
 
-            if [[ -d "$worktree_path" ]]; then
-                echo "gwt: worktree already exists at $worktree_path"
-                cd "$worktree_path" || return 1
+            if [[ -e "$worktree_path" || -L "$worktree_path" ]]; then
+                local existing_path existing_branch
+                if [[ ! -d "$worktree_path" ]]; then
+                    echo "gwt: existing worktree path is not a directory: $worktree_path" >&2
+                    return 1
+                fi
+                existing_path=$(_gwt_registered_worktree_path "$repo_root" "$worktree_path" 2>/dev/null) || {
+                    echo "gwt: refusing existing path not registered to this repository: $worktree_path" >&2
+                    return 1
+                }
+                existing_branch=$(_gwt_worktree_branch_label "$existing_path")
+                if [[ "$existing_branch" != "$branch" ]]; then
+                    echo "gwt: existing worktree branch '$existing_branch' does not match '$branch'" >&2
+                    return 1
+                fi
+                echo "gwt: worktree already exists at $existing_path"
+                cd "$existing_path" || return 1
                 _gwt_tmux_sync_context
                 return 0
             fi
@@ -1227,7 +1259,7 @@ EOF
         rm|remove)
             local target=""
             local force_remove=false
-            local arg target_path main_worktree
+            local arg target_path main_worktree repo_root current_path
 
             for arg in "$@"; do
                 case "$arg" in
@@ -1246,13 +1278,20 @@ EOF
                 return 1
             fi
 
-            main_worktree=$(git worktree list | head -n 1 | awk '{print $1}')
+            repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            target_path=$(_gwt_registered_worktree_path "$repo_root" "$target_path" 2>/dev/null) || {
+                echo "gwt: refusing path not registered to this repository: $target_path" >&2
+                return 1
+            }
+            main_worktree=$(git worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
+            main_worktree=$(cd "$main_worktree" 2>/dev/null && pwd -P) || return 1
             if [[ "$target_path" == "$main_worktree" ]]; then
                 echo "gwt: refusing to remove the main worktree ($target_path)"
                 return 1
             fi
 
-            if [[ "$(pwd)/" == "$target_path/"* ]]; then
+            current_path=$(pwd -P) || return 1
+            if [[ "$current_path/" == "$target_path/"* ]]; then
                 echo "gwt: cannot remove the worktree you are currently in"
                 return 1
             fi
@@ -1268,7 +1307,6 @@ EOF
                 git worktree remove "$target_path" || return 1
             fi
 
-            git worktree prune
             _gwt_tmux_sync_context
             ;;
         prune)

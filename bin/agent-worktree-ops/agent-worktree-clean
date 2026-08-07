@@ -7,7 +7,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -34,13 +33,28 @@ class Worktree:
     branch_ref: Optional[str]
     detached: bool
     age_days: float
+    locked: bool = False
+
+
+@dataclass(frozen=True)
+class ReportOnlyPath:
+    path: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Inventory:
+    common_dir: str
+    worktrees: list[Worktree]
+    report_only: list[ReportOnlyPath]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
-            "Remove clean, idle agent worktrees not referenced by the last N Codex sessions. "
-            "Dry-run by default."
+            "Audit registered worktrees and serially remove clean, idle candidates with "
+            "non-force git worktree remove. Dry-run by default."
         )
     )
     parser.add_argument("--apply", action="store_true", help="remove eligible worktrees")
@@ -75,7 +89,10 @@ def parse_args() -> argparse.Namespace:
         "--delete-workers",
         type=positive_int,
         default=DEFAULT_DELETE_WORKERS,
-        help=f"parallel workers for deletion when --apply is set (default: {DEFAULT_DELETE_WORKERS})",
+        help=(
+            "parallel workers for purging legacy quarantine entries "
+            f"(compatibility option; default: {DEFAULT_DELETE_WORKERS})"
+        ),
     )
     parser.add_argument(
         "--min-age-days",
@@ -95,12 +112,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quarantine-root",
         default=DEFAULT_QUARANTINE_ROOT,
-        help="where removable worktrees are moved before async purge",
+        help="legacy quarantine directory to purge after apply (new removals are not quarantined)",
     )
     parser.add_argument(
         "--shared-node-modules-source",
         default=None,
         help="shared repo node_modules directory to symlink stale worktrees back to",
+    )
+    parser.add_argument(
+        "--list-registered",
+        action="store_true",
+        help="print registered non-main worktree paths and exit",
     )
     return parser.parse_args()
 
@@ -159,17 +181,17 @@ def main() -> int:
     args = parse_args()
     repo_root = normalize_path(resolve_repo_root(args.repo))
     codex_home = normalize_path(args.codex_home)
-    codex_worktrees_root = normalize_path(os.path.join(codex_home, "worktrees"))
-    repo_slug = resolve_repo_slug(repo_root)
-    codex_repo_root = normalize_path(os.path.join(codex_worktrees_root, repo_slug))
     quarantine_root = normalize_path(args.quarantine_root)
     shared_node_modules_source = normalize_path(
         args.shared_node_modules_source or os.path.join(repo_root, "node_modules")
     )
-    run(["git", "-C", repo_root, "worktree", "prune", "--expire", "now"])
-    codex_repo_worktrees = discover_directory_worktrees(codex_repo_root)
-    local_repo_worktrees = discover_local_repo_worktrees(repo_root)
-    managed_worktrees = dedupe_worktrees([*codex_repo_worktrees, *local_repo_worktrees])
+    inventory = build_inventory(repo_root, codex_home)
+    managed_worktrees = inventory.worktrees
+    if args.list_registered:
+        for worktree in managed_worktrees:
+            print(worktree.path)
+        return 0
+
     state_db = find_latest_state_db(codex_home)
     recent_session_cwds = (
         read_recent_session_cwds(
@@ -183,7 +205,7 @@ def main() -> int:
         else []
     )
     keep_paths = select_session_backed_worktrees(managed_worktrees, recent_session_cwds)
-    busy_paths = collect_busy_worktree_paths(managed_worktrees)
+    busy_paths = collect_owned_worktree_paths(managed_worktrees)
     dirty_candidates = [
         worktree
         for worktree in managed_worktrees
@@ -215,12 +237,19 @@ def main() -> int:
         if worktree.path in busy_paths:
             kept_for_safety.append((worktree, "busy"))
             continue
+        if worktree.locked:
+            kept_for_safety.append((worktree, "locked"))
+            continue
         if worktree.detached and not args.include_detached:
             if worktree.age_days >= args.trim_artifacts_age_days:
                 trimmable.append(worktree)
                 kept_for_safety.append((worktree, "detached-trim-only"))
             else:
                 kept_for_safety.append((worktree, "detached"))
+            continue
+        reachability_reason = unsafe_reachability_reason(worktree)
+        if reachability_reason:
+            kept_for_safety.append((worktree, reachability_reason))
             continue
         if worktree.age_days >= args.min_age_days:
             removable.append(worktree)
@@ -236,8 +265,10 @@ def main() -> int:
 
     print_summary(
         repo_root=repo_root,
+        common_dir=inventory.common_dir,
         state_db=state_db,
         managed_worktrees=managed_worktrees,
+        report_only=inventory.report_only,
         recent_session_cwds=recent_session_cwds,
         kept_by_session=kept_by_session,
         kept_for_safety=kept_for_safety,
@@ -253,23 +284,22 @@ def main() -> int:
     if not args.apply:
         return 0
 
-    with progress_bar(total=len(trimmable), desc="trimming artifacts") as progress:
-        with ThreadPoolExecutor(max_workers=args.delete_workers) as executor:
-            futures = [
-                executor.submit(trim_worktree_artifacts, worktree.path, shared_node_modules_source)
-                for worktree in trimmable
-            ]
-            for future in as_completed(futures):
-                future.result()
-                progress.update(1)
-
-    with progress_bar(total=len(removable), desc="quarantining worktrees") as progress:
-        with ThreadPoolExecutor(max_workers=args.delete_workers) as executor:
-            futures = [executor.submit(quarantine_worktree_tree, worktree.path, quarantine_root) for worktree in removable]
-            for future in as_completed(futures):
-                future.result()
-                progress.update(1)
-    run(["git", "-C", repo_root, "worktree", "prune", "--expire", "now"])
+    apply_trims(
+        repo_root=repo_root,
+        codex_home=codex_home,
+        candidates=trimmable,
+        shared_node_modules_source=shared_node_modules_source,
+        session_limit=args.limit,
+        scan_limit=args.scan_limit,
+    )
+    apply_removals(
+        repo_root=repo_root,
+        codex_home=codex_home,
+        candidates=removable,
+        include_detached=args.include_detached,
+        session_limit=args.limit,
+        scan_limit=args.scan_limit,
+    )
     spawn_async_purge(
         codex_home=codex_home,
         quarantine_root=quarantine_root,
@@ -314,6 +344,7 @@ def parse_git_worktrees(porcelain: str) -> list[Worktree]:
                 "branch_ref": None,
                 "detached": False,
                 "age_days": compute_path_age_days(normalize_path(line.removeprefix("worktree "))),
+                "locked": False,
             }
             continue
         if current is None:
@@ -324,6 +355,8 @@ def parse_git_worktrees(porcelain: str) -> list[Worktree]:
             current["branch_ref"] = line.removeprefix("branch ")
         elif line == "detached":
             current["detached"] = True
+        elif line == "locked" or line.startswith("locked "):
+            current["locked"] = True
 
     if current:
         worktrees.append(to_worktree(current))
@@ -370,86 +403,95 @@ def slug_from_origin(origin: str) -> str:
     return slug or ""
 
 
-def discover_directory_worktrees(root_path: str) -> list[Worktree]:
-    worktrees: list[Worktree] = []
-    if not path_is_dir(root_path):
-        return worktrees
-    for entry in Path(root_path).iterdir():
-        if not entry.is_dir():
+def build_inventory(repo_root: str, codex_home: str) -> Inventory:
+    repo_root = normalize_path(repo_root)
+    common_dir = resolve_common_dir(repo_root)
+    registered = parse_git_worktrees(
+        run_text(["git", "-C", repo_root, "worktree", "list", "--porcelain"])
+    )
+    if not registered:
+        raise RuntimeError(f"no registered worktrees found for {repo_root}")
+
+    main_path = registered[0].path
+    registered_by_path = {worktree.path: worktree for worktree in registered}
+    report_only: list[ReportOnlyPath] = []
+    managed: list[Worktree] = []
+
+    for worktree in registered[1:]:
+        if not path_is_dir(worktree.path):
+            report_only.append(ReportOnlyPath(worktree.path, "stale-registration"))
             continue
-        worktree = inspect_directory_worktree(str(entry))
-        if worktree is not None:
-            worktrees.append(worktree)
-    return worktrees
+        candidate_common_dir = try_resolve_common_dir(worktree.path)
+        if candidate_common_dir != common_dir:
+            report_only.append(ReportOnlyPath(worktree.path, "registry-common-dir-mismatch"))
+            continue
+        managed.append(worktree)
+
+    for candidate_path in discover_candidate_directories(main_path, codex_home):
+        if candidate_path == main_path or candidate_path in registered_by_path:
+            continue
+        candidate_common_dir = try_resolve_common_dir(candidate_path)
+        if candidate_common_dir is None:
+            report_only.append(ReportOnlyPath(candidate_path, "non-git"))
+        elif candidate_common_dir != common_dir:
+            report_only.append(ReportOnlyPath(candidate_path, "foreign-common-dir"))
+        else:
+            report_only.append(ReportOnlyPath(candidate_path, "unregistered"))
+
+    return Inventory(
+        common_dir=common_dir,
+        worktrees=sorted(managed, key=lambda worktree: worktree.path),
+        report_only=dedupe_report_only(report_only),
+    )
 
 
-def discover_local_repo_worktrees(repo_root: str) -> list[Worktree]:
-    worktrees: list[Worktree] = []
-    for root_path in (
+def discover_candidate_directories(repo_root: str, codex_home: str) -> list[str]:
+    repo_slug = resolve_repo_slug(repo_root)
+    roots = [
+        os.path.join(codex_home, "worktrees", repo_slug),
         os.path.join(repo_root, ".claude", "worktrees"),
         os.path.join(repo_root, ".worktrees"),
-    ):
-        worktrees.extend(discover_directory_worktrees(root_path))
-    return worktrees
+    ]
+    candidates: list[str] = []
+    for root_path in roots:
+        root = Path(root_path)
+        if not root.is_dir():
+            continue
+        for entry in root.iterdir():
+            if entry.is_dir():
+                candidates.append(normalize_path(str(entry)))
+    return sorted(set(candidates))
 
 
-def inspect_directory_worktree(candidate_path: str) -> Optional[Worktree]:
-    normalized_path = normalize_path(candidate_path)
+def resolve_common_dir(repo_path: str) -> str:
     result = subprocess.run(
-        ["git", "-C", normalized_path, "rev-parse", "--is-inside-work-tree"],
+        ["git", "-C", repo_path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
         check=False,
     )
-    if result.returncode != 0 or result.stdout.strip() != "true":
-        return Worktree(
-            path=normalized_path,
-            head="",
-            branch_ref=None,
-            detached=True,
-            age_days=compute_path_age_days(normalized_path),
-        )
+    if result.returncode == 0 and result.stdout.strip():
+        return normalize_path(result.stdout.strip())
 
-    head_result = subprocess.run(
-        ["git", "-C", normalized_path, "rev-parse", "HEAD"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
-    if head_result.returncode != 0:
+    common_dir = run_text(["git", "-C", repo_path, "rev-parse", "--git-common-dir"])
+    if os.path.isabs(common_dir):
+        return normalize_path(common_dir)
+    return normalize_path(os.path.join(repo_path, common_dir))
+
+
+def try_resolve_common_dir(repo_path: str) -> Optional[str]:
+    try:
+        return resolve_common_dir(repo_path)
+    except RuntimeError:
         return None
 
-    branch_result = subprocess.run(
-        ["git", "-C", normalized_path, "symbolic-ref", "--quiet", "--short", "HEAD"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
-    branch_ref = None
-    detached = True
-    if branch_result.returncode == 0:
-        branch_name = branch_result.stdout.strip()
-        if branch_name:
-            branch_ref = f"refs/heads/{branch_name}"
-            detached = False
 
-    return Worktree(
-        path=normalized_path,
-        head=head_result.stdout.strip(),
-        branch_ref=branch_ref,
-        detached=detached,
-        age_days=compute_path_age_days(normalized_path),
-    )
-
-
-def dedupe_worktrees(worktrees: list[Worktree]) -> list[Worktree]:
-    deduped: dict[str, Worktree] = {}
-    for worktree in worktrees:
-        deduped[worktree.path] = worktree
-    return list(deduped.values())
+def dedupe_report_only(paths: list[ReportOnlyPath]) -> list[ReportOnlyPath]:
+    deduped: dict[str, ReportOnlyPath] = {}
+    for item in paths:
+        deduped[item.path] = item
+    return [deduped[path] for path in sorted(deduped)]
 
 
 def to_worktree(raw: dict[str, object]) -> Worktree:
@@ -459,11 +501,15 @@ def to_worktree(raw: dict[str, object]) -> Worktree:
         branch_ref=str(raw["branch_ref"]) if raw["branch_ref"] else None,
         detached=bool(raw["detached"]),
         age_days=float(raw["age_days"]),
+        locked=bool(raw.get("locked", False)),
     )
 
 
 def compute_path_age_days(file_path: str) -> float:
-    stats = os.stat(file_path)
+    try:
+        stats = os.stat(file_path)
+    except FileNotFoundError:
+        return 0.0
     age_seconds = max(0.0, time.time() - stats.st_mtime)
     return age_seconds / 86400
 
@@ -530,23 +576,27 @@ def select_session_backed_worktrees(worktrees: list[Worktree], recent_session_cw
 
 
 def is_worktree_dirty(worktree_path: str) -> bool:
-    inside_repo_result = subprocess.run(
-        ["git", "-C", worktree_path, "rev-parse", "--is-inside-work-tree"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
+    status = run_text(
+        [
+            "git",
+            "-C",
+            worktree_path,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ]
     )
-    if inside_repo_result.returncode != 0 or inside_repo_result.stdout.strip() != "true":
-        return False
-    if has_changes(["git", "-C", worktree_path, "diff", "--quiet", "--ignore-submodules", "--"]):
-        return True
-    if has_changes(["git", "-C", worktree_path, "diff", "--cached", "--quiet", "--ignore-submodules", "--"]):
-        return True
-    return bool(run_text(["git", "-C", worktree_path, "ls-files", "--others", "--exclude-standard"]))
+    return bool(status)
 
 
-def collect_busy_worktree_paths(worktrees: list[Worktree]) -> set[str]:
+def collect_owned_worktree_paths(worktrees: list[Worktree]) -> set[str]:
+    return collect_lsof_worktree_paths(worktrees) | collect_tmux_worktree_paths(worktrees)
+
+
+def collect_lsof_worktree_paths(worktrees: list[Worktree]) -> set[str]:
+    if not shutil.which("lsof"):
+        raise RuntimeError("lsof is required to verify live worktree ownership")
     sorted_worktrees = sorted(worktrees, key=lambda worktree: len(worktree.path), reverse=True)
     result = subprocess.run(
         ["lsof", "-n", "-w", "-Ffn", "-a", "-d", "cwd"],
@@ -571,6 +621,119 @@ def collect_busy_worktree_paths(worktrees: list[Worktree]) -> set[str]:
     return busy_paths
 
 
+def collect_tmux_worktree_paths(worktrees: list[Worktree]) -> set[str]:
+    if not shutil.which("tmux"):
+        return set()
+    sorted_worktrees = sorted(worktrees, key=lambda worktree: len(worktree.path), reverse=True)
+    result = subprocess.run(
+        ["tmux", "list-panes", "-a", "-F", "#{pane_current_path}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip().lower()
+        if "no server running" in stderr or "failed to connect to server" in stderr:
+            return set()
+        raise RuntimeError(result.stderr.strip() or "failed to inspect tmux worktree ownership")
+
+    busy_paths: set[str] = set()
+    for raw_path in result.stdout.splitlines():
+        if not raw_path.strip():
+            continue
+        cwd_path = normalize_path(raw_path.strip())
+        for worktree in sorted_worktrees:
+            if is_path_inside(worktree.path, cwd_path):
+                busy_paths.add(worktree.path)
+                break
+    return busy_paths
+
+
+def unsafe_reachability_reason(worktree: Worktree) -> Optional[str]:
+    if worktree.detached:
+        if commit_reachable_from_other_ref(worktree, exclude_ref=None):
+            return None
+        return "detached-unreachable"
+
+    if not worktree.branch_ref:
+        return "unknown-branch"
+
+    branch_name = worktree.branch_ref.removeprefix("refs/heads/")
+    upstream_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            worktree.path,
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if upstream_result.returncode == 0 and upstream_result.stdout.strip():
+        upstream = upstream_result.stdout.strip()
+        if is_ancestor(worktree.path, worktree.head, upstream):
+            return None
+        return "unmerged-upstream"
+
+    configured_remote = git_config(worktree.path, f"branch.{branch_name}.remote")
+    configured_merge = git_config(worktree.path, f"branch.{branch_name}.merge")
+    if configured_remote or configured_merge:
+        return "upstream-missing"
+
+    if commit_reachable_from_other_ref(worktree, exclude_ref=worktree.branch_ref):
+        return None
+    return "unreachable-no-upstream"
+
+
+def git_config(worktree_path: str, key: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", worktree_path, "config", "--get", key],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def is_ancestor(worktree_path: str, commit: str, ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", worktree_path, "merge-base", "--is-ancestor", commit, ref],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise RuntimeError(f"failed to compare {commit} with {ref} in {worktree_path}")
+
+
+def commit_reachable_from_other_ref(worktree: Worktree, exclude_ref: Optional[str]) -> bool:
+    refs = run_text(
+        [
+            "git",
+            "-C",
+            worktree.path,
+            "for-each-ref",
+            "--contains",
+            worktree.head,
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ]
+    )
+    return any(ref and ref != exclude_ref for ref in refs.splitlines())
+
+
 def path_is_dir(raw_path: str) -> bool:
     return os.path.isdir(raw_path)
 
@@ -578,8 +741,10 @@ def path_is_dir(raw_path: str) -> bool:
 def print_summary(
     *,
     repo_root: str,
+    common_dir: str,
     state_db: Optional[str],
     managed_worktrees: list[Worktree],
+    report_only: list[ReportOnlyPath],
     recent_session_cwds: list[str],
     kept_by_session: list[Worktree],
     kept_for_safety: list[tuple[Worktree, str]],
@@ -592,12 +757,15 @@ def print_summary(
     shared_node_modules_source: str,
 ) -> None:
     print(f"repo root: {repo_root}")
+    print(f"git common dir: {common_dir}")
     print(f"codex state: {state_db or '(not found)'}")
-    print(f"managed worktrees: {len(managed_worktrees)}")
+    print(f"registered non-main worktrees: {len(managed_worktrees)}")
+    print(f"report-only paths: {len(report_only)}")
     print(f"recent sessions scanned: {len(recent_session_cwds)}")
     print(f"min age days: {min_age_days:g}")
     print(f"trim artifacts age days: {trim_artifacts_age_days:g}")
-    print(f"quarantine root: {quarantine_root}")
+    print(f"legacy quarantine purge root: {quarantine_root}")
+    print("removal strategy: serial non-force git worktree remove")
     print(f"shared node_modules source: {shared_node_modules_source}")
     print(f"shared node_modules exists: {'yes' if path_is_dir(shared_node_modules_source) else 'no'}")
     print(f"kept by recent sessions: {len(kept_by_session)}")
@@ -605,6 +773,11 @@ def print_summary(
     print(f"eligible for artifact trim: {len(trimmable)}")
     print(f"eligible for removal: {len(removable)}")
     print(f"mode: {'apply' if apply else 'dry-run'}")
+
+    if report_only:
+        print("\nReport-only paths:")
+        for item in report_only:
+            print(f"note  {item.path}  ({item.reason})")
 
     if kept_by_session:
         print("\nKept by recent sessions:")
@@ -635,25 +808,6 @@ def simplify_branch_label(worktree: Worktree) -> str:
     if worktree.detached:
         return "detached"
     return "unknown"
-
-
-def has_changes(command: list[str]) -> bool:
-    result = subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        return False
-    if result.returncode == 1:
-        return True
-    raise RuntimeError(result.stderr.strip() or f"{' '.join(command)} failed")
-
-
-def delete_worktree_tree(worktree_path: str) -> None:
-    delete_paths([worktree_path])
 
 
 def trim_worktree_artifacts(worktree_path: str, shared_node_modules_source: str) -> None:
@@ -700,14 +854,120 @@ def delete_paths(paths: list[str]) -> None:
     )
 
 
-def quarantine_worktree_tree(worktree_path: str, quarantine_root: str) -> str:
-    os.makedirs(quarantine_root, exist_ok=True)
-    quarantine_path = os.path.join(
-        quarantine_root,
-        f"{int(time.time() * 1000)}-{os.getpid()}-{os.path.basename(worktree_path)}",
+def apply_trims(
+    *,
+    repo_root: str,
+    codex_home: str,
+    candidates: list[Worktree],
+    shared_node_modules_source: str,
+    session_limit: int,
+    scan_limit: int,
+) -> None:
+    with progress_bar(total=len(candidates), desc="trimming artifacts") as progress:
+        for candidate in candidates:
+            reason = revalidate_candidate(
+                repo_root=repo_root,
+                codex_home=codex_home,
+                expected=candidate,
+                require_reachable=False,
+                include_detached=True,
+                session_limit=session_limit,
+                scan_limit=scan_limit,
+            )
+            if reason:
+                print(f"skip  {candidate.path}  (changed: {reason})")
+            else:
+                trim_worktree_artifacts(candidate.path, shared_node_modules_source)
+            progress.update(1)
+
+
+def apply_removals(
+    *,
+    repo_root: str,
+    codex_home: str,
+    candidates: list[Worktree],
+    include_detached: bool,
+    session_limit: int,
+    scan_limit: int,
+) -> None:
+    with progress_bar(total=len(candidates), desc="removing worktrees") as progress:
+        for candidate in candidates:
+            reason = revalidate_candidate(
+                repo_root=repo_root,
+                codex_home=codex_home,
+                expected=candidate,
+                require_reachable=True,
+                include_detached=include_detached,
+                session_limit=session_limit,
+                scan_limit=scan_limit,
+            )
+            if reason:
+                print(f"skip  {candidate.path}  (changed: {reason})")
+                progress.update(1)
+                continue
+
+            result = subprocess.run(
+                ["git", "-C", repo_root, "worktree", "remove", candidate.path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                print(
+                    f"skip  {candidate.path}  "
+                    f"(remove-failed: {result.stderr.strip() or result.returncode})"
+                )
+            else:
+                print(f"drop  {candidate.path}")
+            progress.update(1)
+
+
+def revalidate_candidate(
+    *,
+    repo_root: str,
+    codex_home: str,
+    expected: Worktree,
+    require_reachable: bool,
+    include_detached: bool,
+    session_limit: int,
+    scan_limit: int,
+) -> Optional[str]:
+    inventory = build_inventory(repo_root, codex_home)
+    current = next(
+        (worktree for worktree in inventory.worktrees if worktree.path == expected.path),
+        None,
     )
-    shutil.move(worktree_path, quarantine_path)
-    return quarantine_path
+    if current is None:
+        return "no-longer-registered"
+    if current.head != expected.head or current.branch_ref != expected.branch_ref:
+        return "head-or-branch-changed"
+    if current.locked:
+        return "locked"
+    if is_worktree_dirty(current.path):
+        return "dirty"
+
+    owned_paths = collect_owned_worktree_paths(inventory.worktrees)
+    if current.path in owned_paths:
+        return "busy"
+
+    state_db = find_latest_state_db(codex_home)
+    if state_db:
+        session_cwds = read_recent_session_cwds(
+            state_db=state_db,
+            scan_limit=scan_limit,
+            keep_limit=session_limit,
+            repo_root=repo_root,
+            worktrees=inventory.worktrees,
+        )
+        if current.path in select_session_backed_worktrees(inventory.worktrees, session_cwds):
+            return "recent-session"
+
+    if current.detached and not include_detached:
+        return "detached"
+    if require_reachable:
+        return unsafe_reachability_reason(current)
+    return None
 
 
 def spawn_async_purge(*, codex_home: str, quarantine_root: str, delete_workers: int) -> None:
@@ -747,12 +1007,6 @@ def run_text(command: list[str]) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"{' '.join(command)} failed")
     return result.stdout.strip()
-
-
-def run(command: list[str]) -> None:
-    result = subprocess.run(command, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"{' '.join(command)} failed with exit code {result.returncode}")
 
 
 if __name__ == "__main__":
