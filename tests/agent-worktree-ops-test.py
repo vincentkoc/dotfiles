@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from importlib.machinery import SourceFileLoader
@@ -1027,6 +1028,352 @@ class WorktreeCleanerTests(unittest.TestCase):
                                     with mock.patch.object(CLEANER, "spawn_async_purge") as spawn:
                                         self.assertEqual(CLEANER.main(), 1)
         spawn.assert_called_once()
+
+    def test_machine_registry_rejects_duplicate_lost_and_mismatched_children(self) -> None:
+        registry = CLEANER.MachineChildRegistry()
+        first = SimpleNamespace(pid=12345, returncode=None)
+        identity = registry.register(first)
+
+        with self.assertRaisesRegex(RuntimeError, "duplicate PID"):
+            registry.register(SimpleNamespace(pid=12345, returncode=None))
+        with self.assertRaisesRegex(RuntimeError, "identity mismatch"):
+            registry.require(
+                CLEANER.MachineChildIdentity(identity.pid, identity.birth + 1),
+                first,
+            )
+
+        del registry._active[identity.pid]
+        with self.assertRaisesRegex(RuntimeError, "lost an active child"):
+            registry.require(identity, first)
+        with self.assertRaisesRegex(RuntimeError, "unbalanced"):
+            registry.assert_balanced()
+
+        malformed = CLEANER.MachineChildRegistry()
+        with self.assertRaisesRegex(RuntimeError, "malformed PID"):
+            malformed.register(SimpleNamespace(pid=0, returncode=None))
+
+    def test_machine_supervisor_observes_eof_and_balances_registry(self) -> None:
+        supervisor = CLEANER.MachineSubprocessSupervisor(timeout_seconds=1.0)
+        result = supervisor.run(
+            [sys.executable, "-c", "print('ok')"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(result.stdout, "ok\n")
+        self.assertEqual(result.stderr, "")
+        supervisor.assert_complete()
+
+    def test_machine_supervisor_bounds_output_and_registration_failure(self) -> None:
+        supervisor = CLEANER.MachineSubprocessSupervisor(
+            timeout_seconds=1.0,
+            output_limit=1024,
+        )
+        with self.assertRaisesRegex(RuntimeError, "output limit"):
+            supervisor.run(
+                [sys.executable, "-c", "print('x' * 2048)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        supervisor.assert_complete()
+
+        launched: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def capture_popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            launched.append(child)
+            return child
+
+        supervisor = CLEANER.MachineSubprocessSupervisor(timeout_seconds=1.0)
+        with mock.patch.object(CLEANER.subprocess, "Popen", side_effect=capture_popen):
+            with mock.patch.object(
+                supervisor.registry,
+                "register",
+                side_effect=RuntimeError("registry rejected child"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "registry rejected"):
+                    supervisor.run(
+                        [sys.executable, "-c", "import time; time.sleep(5)"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+        self.assertEqual(len(launched), 1)
+        self.assertIsNotNone(launched[0].poll())
+
+    def test_machine_supervisor_controller_exception_stops_only_exact_child(self) -> None:
+        supervisor = CLEANER.MachineSubprocessSupervisor(timeout_seconds=1.0)
+        sibling = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        real_kill = os.kill
+        signals: list[tuple[int, int]] = []
+
+        def guarded_kill(pid: int, signal_number: int) -> None:
+            self.assertGreater(pid, 0)
+            signals.append((pid, signal_number))
+            real_kill(pid, signal_number)
+
+        try:
+            with mock.patch.object(CLEANER.os, "kill", side_effect=guarded_kill):
+                with self.assertRaisesRegex(RuntimeError, "controller failed"):
+                    supervisor.execute(
+                        [sys.executable, "-c", "import time; time.sleep(5)"],
+                        interaction=lambda _child, _deadline: (_ for _ in ()).throw(
+                            RuntimeError("controller failed")
+                        ),
+                    )
+            self.assertIsNone(sibling.poll())
+            self.assertTrue(signals)
+            self.assertTrue(all(pid != sibling.pid for pid, _ in signals))
+            supervisor.assert_complete()
+        finally:
+            sibling.terminate()
+            sibling.wait(timeout=2)
+
+    def test_machine_supervisor_timeout_uses_no_group_or_negative_pid_signal(self) -> None:
+        supervisor = CLEANER.MachineSubprocessSupervisor(timeout_seconds=0.05)
+        real_kill = os.kill
+        signals: list[tuple[int, int]] = []
+
+        def guarded_kill(pid: int, signal_number: int) -> None:
+            self.assertGreater(pid, 0)
+            signals.append((pid, signal_number))
+            real_kill(pid, signal_number)
+
+        with mock.patch.object(CLEANER.os, "kill", side_effect=guarded_kill):
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                supervisor.run(
+                    [sys.executable, "-c", "import time; time.sleep(5)"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+        self.assertTrue(signals)
+        supervisor.assert_complete()
+
+    def test_machine_supervisor_rejects_inherited_fd_survivor_without_signaling_descendant(
+        self,
+    ) -> None:
+        supervisor = CLEANER.MachineSubprocessSupervisor(timeout_seconds=1.0)
+        script = (
+            "import os,time\n"
+            "pid=os.fork()\n"
+            "if pid == 0:\n"
+            "    os.close(1)\n"
+            "    os.close(2)\n"
+            "    time.sleep(0.6)\n"
+            "    os._exit(0)\n"
+            "os._exit(0)\n"
+        )
+        real_kill = os.kill
+        signals: list[tuple[int, int]] = []
+
+        def guarded_kill(pid: int, signal_number: int) -> None:
+            signals.append((pid, signal_number))
+            real_kill(pid, signal_number)
+
+        try:
+            with mock.patch.object(CLEANER.os, "kill", side_effect=guarded_kill):
+                with self.assertRaisesRegex(RuntimeError, "liveness EOF"):
+                    supervisor.run(
+                        [sys.executable, "-c", script],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+            self.assertEqual(signals, [])
+        finally:
+            time.sleep(0.7)
+
+    def test_machine_supervisor_preserves_only_explicit_child_descriptors(self) -> None:
+        supervisor = CLEANER.MachineSubprocessSupervisor(timeout_seconds=1.0)
+        extra_read_fd, extra_write_fd = os.pipe()
+        script = (
+            "import json,os\n"
+            "opened=[]\n"
+            "for fd in range(3, 64):\n"
+            "    try:\n"
+            "        os.fstat(fd)\n"
+            "    except OSError:\n"
+            "        continue\n"
+            "    opened.append(fd)\n"
+            "print(json.dumps(opened))\n"
+        )
+        try:
+            output, exit_code = supervisor.execute(
+                [sys.executable, "-c", script],
+                interaction=lambda child, deadline: supervisor._read_limited_output(
+                    child,
+                    deadline,
+                ),
+                pass_fds=(extra_read_fd,),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        finally:
+            os.close(extra_read_fd)
+            os.close(extra_write_fd)
+
+        stdout_bytes, stderr_bytes = output
+        opened = json.loads(stdout_bytes)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr_bytes, b"")
+        self.assertEqual(len(opened), 2)
+        self.assertIn(extra_read_fd, opened)
+        supervisor.assert_complete()
+
+    def test_machine_git_lsof_and_sqlite_hangs_are_bounded(self) -> None:
+        previous = CLEANER._MACHINE_SUPERVISOR
+        supervisor = CLEANER.MachineSubprocessSupervisor(timeout_seconds=0.05)
+        CLEANER._MACHINE_SUPERVISOR = supervisor
+        try:
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                CLEANER.run_git_audit(
+                    [sys.executable, "-c", "import time; time.sleep(5)"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            supervisor.assert_complete()
+
+            hanging_lsof = self.base / "hanging-lsof"
+            hanging_lsof.write_text(
+                f"#!{sys.executable}\nimport time\ntime.sleep(5)\n",
+                encoding="utf-8",
+            )
+            os.chmod(hanging_lsof, 0o755)
+            with mock.patch.object(CLEANER.shutil, "which", return_value=str(hanging_lsof)):
+                with self.assertRaisesRegex(TimeoutError, "timed out"):
+                    CLEANER.collect_lsof_worktree_paths([])
+            supervisor.assert_complete()
+
+            opened = CLEANER.open_state_directory(str(self.state_db))
+            try:
+                with mock.patch.object(
+                    CLEANER,
+                    "STATE_READER_BOOTSTRAP",
+                    "import time; time.sleep(5)",
+                ):
+                    with self.assertRaisesRegex(TimeoutError, "timed out"):
+                        CLEANER.run_state_reader_child(
+                            opened=opened,
+                            scan_limit=10,
+                            keep_limit=5,
+                            repo_root=str(self.repo),
+                            worktrees=[],
+                        )
+                    large_worktrees = [
+                        CLEANER.Worktree(
+                            path=f"/tmp/stalled-reader-{index}-{'x' * 512}",
+                            head="a" * 40,
+                            branch_ref=f"refs/heads/stalled-{index}",
+                            detached=False,
+                            age_days=1,
+                        )
+                        for index in range(8192)
+                    ]
+                    with self.assertRaisesRegex(TimeoutError, "timed out"):
+                        CLEANER.run_state_reader_child(
+                            opened=opened,
+                            scan_limit=10,
+                            keep_limit=5,
+                            repo_root=str(self.repo),
+                            worktrees=large_worktrees,
+                        )
+            finally:
+                CLEANER.close_open_state(opened)
+            supervisor.assert_complete()
+        finally:
+            CLEANER._MACHINE_SUPERVISOR = previous
+
+    def test_machine_git_environment_disables_implicit_exec_surfaces(self) -> None:
+        previous = CLEANER._MACHINE_SUPERVISOR
+        CLEANER._MACHINE_SUPERVISOR = CLEANER.MachineSubprocessSupervisor()
+        try:
+            environment = CLEANER.audit_git_env()
+        finally:
+            CLEANER._MACHINE_SUPERVISOR = previous
+
+        self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(environment["GIT_ASKPASS"], "/usr/bin/false")
+        self.assertEqual(environment["SSH_ASKPASS"], "/usr/bin/false")
+        self.assertEqual(environment["GIT_PAGER"], "/usr/bin/cat")
+        self.assertEqual(environment["GIT_EDITOR"], "/usr/bin/false")
+        self.assertEqual(environment["GIT_SEQUENCE_EDITOR"], "/usr/bin/false")
+        configured = {
+            environment[f"GIT_CONFIG_KEY_{index}"]: environment[f"GIT_CONFIG_VALUE_{index}"]
+            for index in range(int(environment["GIT_CONFIG_COUNT"]))
+        }
+        self.assertEqual(configured["core.hooksPath"], "/dev/null")
+        self.assertEqual(configured["core.fsmonitor"], "false")
+        self.assertEqual(configured["credential.interactive"], "false")
+
+    def test_machine_mode_skips_tmux_probe(self) -> None:
+        previous = CLEANER._MACHINE_SUPERVISOR
+        CLEANER._MACHINE_SUPERVISOR = CLEANER.MachineSubprocessSupervisor()
+        try:
+            with mock.patch.object(
+                CLEANER,
+                "collect_lsof_worktree_paths",
+                return_value=set(),
+            ):
+                with mock.patch.object(CLEANER, "collect_tmux_worktree_paths") as tmux_probe:
+                    self.assertEqual(CLEANER.collect_owned_worktree_paths([]), set())
+            tmux_probe.assert_not_called()
+        finally:
+            CLEANER._MACHINE_SUPERVISOR = previous
+
+    def test_machine_json_waits_for_liveness_proof_and_does_not_touch_logs(self) -> None:
+        log_dir = self.codex_home / "log"
+        log_dir.mkdir()
+        sentinel = log_dir / "sentinel.log"
+        sentinel.write_text("do not touch\n", encoding="utf-8")
+        before = path_metadata(sentinel)
+
+        fake_bin = self.base / "forking-lsof-bin"
+        fake_bin.mkdir()
+        fake_lsof = fake_bin / "lsof"
+        fake_lsof.write_text(
+            f"#!{sys.executable}\n"
+            "import os,time\n"
+            "pid=os.fork()\n"
+            "if pid == 0:\n"
+            "    os.close(1)\n"
+            "    os.close(2)\n"
+            "    time.sleep(0.6)\n"
+            "    os._exit(0)\n"
+            "os._exit(1)\n",
+            encoding="utf-8",
+        )
+        os.chmod(fake_lsof, 0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+        try:
+            result = subprocess.run(
+                [
+                    str(CLEANER_PATH),
+                    "--repo",
+                    str(self.repo),
+                    "--codex-home",
+                    str(self.codex_home),
+                    "--machine",
+                ],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("liveness EOF", result.stderr)
+            self.assertEqual(before, path_metadata(sentinel))
+        finally:
+            time.sleep(0.7)
 
 
 if __name__ == "__main__":
