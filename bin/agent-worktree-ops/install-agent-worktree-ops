@@ -84,6 +84,10 @@ launchctl bootout "$DOMAIN/$OLD_LABEL" >/dev/null 2>&1 || true
 rm -f "$OLD_PLIST_TARGET"
 rm -rf "$OLD_RUNTIME_DIR"
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  printf 'install-agent-worktree-ops: failed to unload %s/%s\n' "$DOMAIN" "$LABEL" >&2
+  exit 1
+fi
 
 if (( install_only == 1 )); then
   printf 'agent-worktree-ops installed without loading %s\n' "$LABEL"
