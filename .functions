@@ -167,12 +167,53 @@ repo() {
 }
 
 # Modular shell bundles.
-_dotfiles_functions_root="${DOTFILES_FUNCTIONS_ROOT:-$HOME/functions}"
-if [[ ! -d "$_dotfiles_functions_root" ]]; then
-    _dotfiles_functions_root="${DOTFILES_DIR:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles}/functions"
+_dotfiles_functions_physical_dir() {
+    [[ -d "$1" ]] || return 1
+    (builtin cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
+_dotfiles_functions_is_clouddocs() {
+    case "$1" in
+        *"/Library/Mobile Documents/com~apple~CloudDocs"|*"/Library/Mobile Documents/com~apple~CloudDocs/"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+_dotfiles_functions_root=""
+_dotfiles_functions_default="$HOME/functions"
+_dotfiles_functions_explicit="${DOTFILES_FUNCTIONS_ROOT:-}"
+
+if [[ -n "$_dotfiles_functions_explicit" && "$_dotfiles_functions_explicit" != "$_dotfiles_functions_default" ]]; then
+    _dotfiles_functions_candidate=$(_dotfiles_functions_physical_dir "$_dotfiles_functions_explicit" 2>/dev/null || true)
+    if [[ -n "$_dotfiles_functions_candidate" ]] && ! _dotfiles_functions_is_clouddocs "$_dotfiles_functions_candidate"; then
+        _dotfiles_functions_root="$_dotfiles_functions_candidate"
+    fi
+fi
+
+if [[ -z "$_dotfiles_functions_root" ]]; then
+    for _dotfiles_functions_candidate in \
+        "$HOME/GIT/_Perso/dotfiles/functions" \
+        "$HOME/.dotfiles/functions"; do
+        _dotfiles_functions_candidate=$(_dotfiles_functions_physical_dir "$_dotfiles_functions_candidate" 2>/dev/null || true)
+        if [[ -n "$_dotfiles_functions_candidate" ]] && ! _dotfiles_functions_is_clouddocs "$_dotfiles_functions_candidate"; then
+            _dotfiles_functions_root="$_dotfiles_functions_candidate"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$_dotfiles_functions_root" ]]; then
+    _dotfiles_functions_candidate=$(_dotfiles_functions_physical_dir "$_dotfiles_functions_default" 2>/dev/null || true)
+    if [[ -n "$_dotfiles_functions_candidate" ]] && ! _dotfiles_functions_is_clouddocs "$_dotfiles_functions_candidate"; then
+        _dotfiles_functions_root="$_dotfiles_functions_candidate"
+    fi
 fi
 typeset -a _dotfiles_functions_modules
-if [[ -n "${ZSH_VERSION:-}" ]]; then
+if [[ -z "$_dotfiles_functions_root" ]]; then
+    _dotfiles_functions_modules=()
+elif [[ -n "${ZSH_VERSION:-}" ]]; then
     _dotfiles_functions_modules=("$_dotfiles_functions_root"/**/*.zsh(N))
     _dotfiles_functions_modules=(${(o)_dotfiles_functions_modules})
 else
@@ -182,7 +223,9 @@ for _dotfiles_functions_module in "${_dotfiles_functions_modules[@]}"; do
     [[ -r "$_dotfiles_functions_module" ]] || continue
     source "$_dotfiles_functions_module"
 done
-unset _dotfiles_functions_root _dotfiles_functions_module _dotfiles_functions_modules
+unset _dotfiles_functions_root _dotfiles_functions_default _dotfiles_functions_explicit
+unset _dotfiles_functions_candidate _dotfiles_functions_module _dotfiles_functions_modules
+unset -f _dotfiles_functions_physical_dir _dotfiles_functions_is_clouddocs 2>/dev/null || true
 
 # Extract most known archives with one command
 extract () {

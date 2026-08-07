@@ -15,4 +15,10 @@ Add new shell features here as focused folders instead of growing `.functions` i
 Install/runtime notes:
 
 - installer symlinks this directory to `~/functions`
-- `.functions` prefers `DOTFILES_FUNCTIONS_ROOT`, then falls back to the dotfiles repo copy
+- a custom `DOTFILES_FUNCTIONS_ROOT` wins when its physical path is local
+- otherwise `.functions` prefers `~/GIT/_Perso/dotfiles/functions`, then
+  `~/.dotfiles/functions`, before a local physical `~/functions`
+- the generated `DOTFILES_FUNCTIONS_ROOT=~/functions` default does not override
+  either canonical checkout
+- if none of those roots exists, modular functions stay unloaded
+- CloudDocs paths and symlinks resolving into CloudDocs are never module roots

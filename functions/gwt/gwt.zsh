@@ -1,6 +1,49 @@
 [[ -n "${DOTFILES_GWT_LOADED:-}" ]] && return 0
 typeset -g DOTFILES_GWT_LOADED=1
 
+_gwt_physical_source_path() {
+    local source_path="$1"
+    local source_target=""
+    local source_dir=""
+
+    if [[ "$source_path" != /* ]]; then
+        source_path="$PWD/$source_path"
+    fi
+
+    while [[ -L "$source_path" ]]; do
+        source_target=$(readlink "$source_path") || return 1
+        if [[ "$source_target" == /* ]]; then
+            source_path="$source_target"
+        else
+            source_path="$(dirname "$source_path")/$source_target"
+        fi
+    done
+
+    source_dir=$(builtin cd -P -- "$(dirname "$source_path")" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s\n' "$source_dir" "$(basename "$source_path")"
+}
+
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+    _gwt_loaded_source="${(%):-%x}"
+else
+    _gwt_loaded_source="${BASH_SOURCE[0]:-$0}"
+fi
+DOTFILES_GWT_SOURCE_PATH=$(_gwt_physical_source_path "$_gwt_loaded_source") || return 1
+DOTFILES_GWT_CHECKOUT_ROOT=$(
+    builtin cd -P -- "$(dirname "$DOTFILES_GWT_SOURCE_PATH")/../.." 2>/dev/null && pwd -P
+) || return 1
+unset _gwt_loaded_source
+unset -f _gwt_physical_source_path 2>/dev/null || true
+
+_gwt_path_is_clouddocs() {
+    case "$1" in
+        *"/Library/Mobile Documents/com~apple~CloudDocs"|*"/Library/Mobile Documents/com~apple~CloudDocs/"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 _gwt_slug_from_origin() {
     local origin="$1"
     local cleaned slug
@@ -504,15 +547,17 @@ _gwt_tool_path() {
     local tool_name="$1"
     local candidate
 
-    for candidate in \
-        "$HOME/Library/Application Support/agent-worktree-ops/$tool_name" \
-        "$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/bin/agent-worktree-ops/$tool_name" \
-        "$HOME/bin/$tool_name"; do
-        if [[ -x "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
+    candidate="$DOTFILES_GWT_CHECKOUT_ROOT/bin/agent-worktree-ops/$tool_name"
+    if ! _gwt_path_is_clouddocs "$DOTFILES_GWT_CHECKOUT_ROOT" && [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    candidate="$HOME/Library/Application Support/agent-worktree-ops/$tool_name"
+    if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
 
     return 1
 }
