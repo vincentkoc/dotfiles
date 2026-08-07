@@ -586,7 +586,7 @@ assert_jobs_absent() {
   done
 }
 
-verify_jobs_absent_and_disabled() {
+verify_labels_disabled() {
   local domain label
   local domains=("$USER_DOMAIN")
   local labels=("$CURRENT_LABEL" "$OLD_LABEL")
@@ -595,13 +595,25 @@ verify_jobs_absent_and_disabled() {
     domains+=("$GUI_DOMAIN")
   fi
 
-  assert_jobs_absent
   for domain in "${domains[@]}"; do
     for label in "${labels[@]}"; do
       is_disabled "$domain" "$label" \
         || die "legacy label is not persistently disabled: $domain/$label"
     done
   done
+}
+
+verify_jobs_absent_and_disabled() {
+  assert_jobs_absent
+  verify_labels_disabled
+}
+
+rediscover_disable_and_refuse_loaded() {
+  assert_canonical_lock_owned
+  inspect_domains
+  disable_labels
+  verify_labels_disabled
+  assert_jobs_absent
 }
 
 assert_quarantine_directory_unchanged() {
@@ -709,11 +721,16 @@ remove_current_plist() {
     restore_quarantined_entry_without_clobber \
       "current legacy plist changed during atomic quarantine"
   fi
+  assert_canonical_lock_owned
+  inspect_system_scope
+  rediscover_disable_and_refuse_loaded
+  inspect_system_scope
   if ! quarantined_entry_matches_expected "$original_fingerprint" "$backup"; then
     restore_quarantined_entry_without_clobber \
       "quarantined legacy plist changed before deletion"
   fi
 
+  assert_canonical_lock_owned
   unlink "$quarantine_entry" \
     || die "validated quarantined plist could not be deleted: $quarantine_entry"
   quarantine_entry=""
@@ -775,8 +792,12 @@ run_apply() {
   validate_old_plist_absent
   [[ ! -e "$CURRENT_PLIST" && ! -L "$CURRENT_PLIST" ]] \
     || die "current legacy plist remains after retirement"
+  assert_canonical_lock_owned
   inspect_system_scope
-  verify_jobs_absent_and_disabled
+  rediscover_disable_and_refuse_loaded
+  inspect_system_scope
+  [[ ! -e "$CURRENT_PLIST" && ! -L "$CURRENT_PLIST" ]] \
+    || die "a replacement appeared before retirement completion and was preserved: $CURRENT_PLIST"
   printf 'status=complete\n' >>"$receipt_dir/receipt.txt"
   printf 'scheduler retirement complete\n'
 }

@@ -34,6 +34,8 @@ set -euo pipefail
 state="${TEST_LAUNCHCTL_STATE:?}"
 current_plist="${TEST_CURRENT_PLIST:?}"
 log="${TEST_MV_LOG:?}"
+launchctl_log="${TEST_LAUNCHCTL_LOG:?}"
+uid_value="${TEST_UID:?}"
 printf '%s\n' "$*" >>"$log"
 
 if [[ $# -eq 2 && "$1" == "$current_plist" && ! -f "$state/mv-race-fired" ]]; then
@@ -55,6 +57,15 @@ if [[ $# -eq 2 && "$1" == "$current_plist" && ! -f "$state/mv-race-fired" ]]; th
     /bin/mv "$@"
     printf 'occupied-current-replacement\n' >"$current_plist"
     chmod 0644 "$current_plist"
+    touch "$state/mv-race-fired"
+    exit 0
+  elif [[ -f "$state/gui-transition-unavailable" ]]; then
+    gui_probe_count="$(grep -Ec "^print gui/$uid_value$" "$launchctl_log" || true)"
+    [[ "$gui_probe_count" == "2" ]] || exit 97
+    /bin/mv "$@"
+    unlink "$state/gui-transition-unavailable"
+    loaded_key="$(printf '%s' "gui/$uid_value/com.vincentkoc.agent-worktree-ops" | tr '/.' '__')"
+    printf 'idle\n' >"$state/loaded.$loaded_key"
     touch "$state/mv-race-fired"
     exit 0
   fi
@@ -110,6 +121,10 @@ case "$command" in
       exit 0
     fi
     if [[ "$target" == "gui/$uid_value" ]]; then
+      if [[ -f "$state/gui-transition-unavailable" ]]; then
+        printf 'Could not print domain: 125: Domain does not support specified action\n' >&2
+        exit 125
+      fi
       if [[ -f "$state/gui-unavailable-live" ]]; then
         printf 'Could not print domain: 125: Domain does not support specified action\n' >&2
         exit 125
@@ -327,8 +342,8 @@ launchctl_mutation_count() {
 assert_no_success_claim() {
   local output="$1"
 
-  if grep -Eq 'scheduler rollback complete|labels remain disabled' "$output"; then
-    printf 'failed rollback must not claim completion or durable disable state\n' >&2
+  if grep -Eq 'scheduler retirement complete|scheduler rollback complete|labels remain disabled' "$output"; then
+    printf 'failed operation must not claim completion or durable disable state\n' >&2
     exit 1
   fi
 }
@@ -347,13 +362,15 @@ assert_fails_with() {
 
 assert_headless_apply_and_rollback_refusal() {
   local marker="$1"
-  local output receipt mutations_before mutations_after
+  local output receipt mutations_before mutations_after headless_gui_probe_count
 
   touch "$case_state/$marker"
   output="$(invoke --apply)"
   grep -Fq 'scheduler retirement complete' <<<"$output"
   receipt="$(sed -n 's/^receipt=//p' <<<"$output")"
   [[ -n "$receipt" && -d "$receipt" && ! -e "$case_plist" ]]
+  headless_gui_probe_count="$(grep -Ec "^print gui/$real_uid$" "$case_log" || true)"
+  (( headless_gui_probe_count >= 4 ))
   grep -Fxq "disable user/$real_uid/$current_label" "$case_log"
   grep -Fxq "disable user/$real_uid/$old_label" "$case_log"
   mutations_before="$(launchctl_mutation_count)"
@@ -405,6 +422,8 @@ backup="$receipt/$current_label.plist.backup"
 cmp -s "$backup" "$case_root/original.plist"
 [[ ! -e "$case_plist" ]]
 [[ ! -e "$case_lock" ]]
+gui_probe_count="$(grep -Ec "^print gui/$real_uid$" "$case_log" || true)"
+(( gui_probe_count >= 4 ))
 for domain in "user/$real_uid" "gui/$real_uid"; do
   for label in "$current_label" "$old_label"; do
     grep -Fxq "disable $domain/$label" "$case_log"
@@ -623,6 +642,49 @@ preserved_quarantine="$(
 [[ -n "$preserved_quarantine" ]]
 grep -Fxq 'invalid-quarantined-replacement' "$preserved_quarantine"
 [[ ! -e "$case_lock" ]]
+
+new_case gui-transition-after-quarantine
+cp "$case_plist" "$case_root/original.plist"
+touch "$case_state/gui-transition-unavailable"
+assert_fails_with \
+  "legacy job is loaded and will not be interrupted: gui/$real_uid/$current_label" \
+  invoke --apply
+[[ ! -e "$case_plist" && ! -e "$case_lock" ]]
+transition_quarantine="$(
+  find "$case_home/Library/LaunchAgents" \
+    -path '*/.agent-worktree-retire.*/*.plist' -type f -print -quit
+)"
+[[ -n "$transition_quarantine" ]]
+cmp -s "$transition_quarantine" "$case_root/original.plist"
+[[ "$(stat -f '%Lp' "$(dirname "$transition_quarantine")")" == "700" ]]
+transition_receipt="$(find "$case_receipts" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+grep -Fxq 'status=prepared' "$transition_receipt/receipt.txt"
+if grep -Fxq 'status=complete' "$transition_receipt/receipt.txt"; then
+  printf 'GUI transition race must not complete retirement\n' >&2
+  exit 1
+fi
+for label in "$current_label" "$old_label"; do
+  target="gui/$real_uid/$label"
+  grep -Fxq "disable $target" "$case_log"
+  [[ -f "$case_state/disabled.$(printf '%s' "$target" | tr '/.' '__')" ]]
+done
+grep -Fxq "print-disabled gui/$real_uid" "$case_log"
+loaded_key="$(printf '%s' "gui/$real_uid/$current_label" | tr '/.' '__')"
+[[ -f "$case_state/loaded.$loaded_key" ]]
+[[ "$(grep -Ec "^print gui/$real_uid$" "$case_log")" == "3" ]]
+gui_disable_line="$(
+  grep -n "^disable gui/$real_uid/$current_label$" "$case_log" | sed -n '1s/:.*//p'
+)"
+gui_loaded_print_line="$(
+  grep -n "^print gui/$real_uid/$current_label$" "$case_log" | tail -n 1 | cut -d: -f1
+)"
+[[ -n "$gui_disable_line" && -n "$gui_loaded_print_line" ]]
+(( gui_disable_line < gui_loaded_print_line ))
+if grep -Eq '^bootout ' "$case_log"; then
+  printf 'GUI transition race must never trigger bootout\n' >&2
+  exit 1
+fi
+assert_no_success_claim "$case_root/failure.out"
 
 new_case gui-unavailable
 assert_headless_apply_and_rollback_refusal gui-unavailable

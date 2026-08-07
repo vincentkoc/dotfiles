@@ -38,6 +38,7 @@ Bins in this folder:
     any loaded matching job, symlinks, hard links, unexpected ownership or
     permissions, unrecognized plist bytes, and the older untracked plist
   - holds the canonical maintainer lock through apply and rollback mutations
+  - re-discovers GUI availability after quarantine and before completion
   - writes a private receipt and exact backup before mutation
   - pass `--rollback <receipt-directory>` to atomically restore the exact backup
     as mode `0644`; rollback refuses unless both user and GUI domains prove the
