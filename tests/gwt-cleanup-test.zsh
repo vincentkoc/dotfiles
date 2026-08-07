@@ -17,6 +17,142 @@ cp "$root/functions/gwt/gwt.zsh" "$gwt_source"
 cp "$root/bin/agent-worktree-ops/agent-worktree-clean" "$runtime/agent-worktree-clean"
 chmod +x "$runtime/agent-worktree-clean"
 
+fake_bin="$temporary/bin"
+mkdir -p "$fake_bin"
+cat >"$fake_bin/lsof" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+cat >"$fake_bin/tmux" <<'EOF'
+#!/bin/sh
+echo 'no server running' >&2
+exit 1
+EOF
+chmod +x "$fake_bin/lsof" "$fake_bin/tmux"
+
+metadata_snapshot() {
+  GIT_OPTIONAL_LOCKS=0 python3 - "$1" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+environment = os.environ.copy()
+environment["GIT_OPTIONAL_LOCKS"] = "0"
+common_dir = Path(
+    subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        env=environment,
+        text=True,
+    ).strip()
+)
+worktrees_dir = common_dir / "worktrees"
+
+
+def metadata(path):
+    details = path.lstat()
+    if path.is_symlink():
+        kind = "symlink"
+        content = os.readlink(path).encode()
+    elif path.is_dir():
+        kind = "directory"
+        content = b""
+    else:
+        kind = "file"
+        content = path.read_bytes()
+    return {
+        "type": kind,
+        "mode": stat.S_IMODE(details.st_mode),
+        "size": details.st_size,
+        "mtime_ns": details.st_mtime_ns,
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+snapshot = {"common_dir": metadata(common_dir), "worktrees": {}}
+if worktrees_dir.exists():
+    for path in [worktrees_dir, *sorted(worktrees_dir.rglob("*"))]:
+        relative = "." if path == worktrees_dir else str(path.relative_to(worktrees_dir))
+        snapshot["worktrees"][relative] = metadata(path)
+print(json.dumps(snapshot, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+tree_snapshot() {
+  python3 - "$1" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+snapshot = {}
+if root.exists():
+    for path in [root, *sorted(root.rglob("*"))]:
+        details = path.lstat()
+        if path.is_symlink():
+            kind = "symlink"
+            content = os.readlink(path).encode()
+        elif path.is_dir():
+            kind = "directory"
+            content = b""
+        else:
+            kind = "file"
+            content = path.read_bytes()
+        relative = "." if path == root else str(path.relative_to(root))
+        snapshot[relative] = {
+            "type": kind,
+            "mode": stat.S_IMODE(details.st_mode),
+            "size": details.st_size,
+            "mtime_ns": details.st_mtime_ns,
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+print(json.dumps(snapshot, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+invalidate_index_stat_cache() {
+  python3 - "$1" <<'PY'
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+worktree = Path(sys.argv[1])
+tracked = worktree / "README.md"
+details = tracked.stat()
+tracked.write_bytes(tracked.read_bytes())
+os.utime(tracked, ns=(details.st_atime_ns, details.st_mtime_ns + 5_000_000_000))
+environment = os.environ.copy()
+environment["GIT_OPTIONAL_LOCKS"] = "0"
+index = Path(
+    subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+        ],
+        env=environment,
+        text=True,
+    ).strip()
+)
+os.chmod(index, 0o644)
+details = index.stat()
+print(f"{index}\t{stat.S_IMODE(details.st_mode):04o}\t{details.st_mtime_ns}")
+PY
+}
+
 git init -b main "$repo" >/dev/null
 git -C "$repo" config user.name "Worktree Test"
 git -C "$repo" config user.email "worktree@example.test"
@@ -26,10 +162,92 @@ git -C "$repo" add README.md
 git -C "$repo" commit -m fixture >/dev/null
 
 remove_path="$temporary/remove-me"
+apply_path="$temporary/apply-me"
 stale_path="$temporary/stale"
+foreign_row="$home/.codex/worktrees/owner-repo/foreign-row"
 git -C "$repo" worktree add -b remove-me "$remove_path" main >/dev/null
+git -C "$repo" worktree add -b apply-me "$apply_path" main >/dev/null
 git -C "$repo" worktree add -b stale "$stale_path" main >/dev/null
+stale_admin="$(GIT_OPTIONAL_LOCKS=0 git -C "$stale_path" rev-parse --path-format=absolute --git-dir)"
 rm -rf "$stale_path"
+git init -b main "$foreign_row" >/dev/null
+
+index_before="$(invalidate_index_stat_cache "$remove_path")"
+metadata_before="$(metadata_snapshot "$repo")"
+PATH="$fake_bin:$PATH" \
+GIT_OPTIONAL_LOCKS=caller-value \
+"$runtime/agent-worktree-clean" \
+  --repo "$repo" \
+  --codex-home "$home/.codex" \
+  --min-age-days 999 \
+  --trim-artifacts-age-days 999 \
+  >"$temporary/direct-audit.out"
+[[ "$metadata_before" == "$(metadata_snapshot "$repo")" ]]
+if [[ -d "$foreign_row/.git" ]]; then
+  grep -Fq "${foreign_row:A}  (foreign-common-dir)" "$temporary/direct-audit.out"
+fi
+[[ "$index_before" == "$(python3 - "${index_before%%$'\t'*}" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+index = Path(sys.argv[1])
+details = index.stat()
+print(f"{index}\t{stat.S_IMODE(details.st_mode):04o}\t{details.st_mtime_ns}")
+PY
+)" ]]
+[[ "$(printf '%s\n' "$index_before" | cut -f2)" == "0644" ]]
+
+PATH="$fake_bin:$PATH" \
+HOME="$home" \
+DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+zsh -f -c '
+  source "$1"
+  cd "$2"
+  unset GIT_OPTIONAL_LOCKS
+  gwt audit --min-age-days 999 --trim-artifacts-age-days 999
+  (( ${+GIT_OPTIONAL_LOCKS} == 0 ))
+ ' zsh "$gwt_source" "$repo" >"$temporary/gwt-audit-unset.out"
+[[ "$metadata_before" == "$(metadata_snapshot "$repo")" ]]
+
+PATH="$fake_bin:$PATH" \
+HOME="$home" \
+DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+GIT_OPTIONAL_LOCKS=caller-value \
+zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt audit --min-age-days 999 --trim-artifacts-age-days 999
+  [[ "$GIT_OPTIONAL_LOCKS" == "caller-value" ]]
+ ' zsh "$gwt_source" "$repo" >"$temporary/gwt-audit-custom.out"
+[[ "$metadata_before" == "$(metadata_snapshot "$repo")" ]]
+[[ "$index_before" == "$(python3 - "${index_before%%$'\t'*}" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+index = Path(sys.argv[1])
+details = index.stat()
+print(f"{index}\t{stat.S_IMODE(details.st_mode):04o}\t{details.st_mtime_ns}")
+PY
+)" ]]
+
+git -C "$repo" worktree lock "$remove_path"
+stale_before="$(tree_snapshot "$stale_admin")"
+PATH="$fake_bin:$PATH" \
+"$runtime/agent-worktree-clean" \
+  --repo "$repo" \
+  --codex-home "$home/.codex" \
+  --min-age-days 0 \
+  --trim-artifacts-age-days 999 \
+  --apply \
+  >"$temporary/direct-apply.out"
+[[ ! -d "$apply_path" ]]
+grep -Fq "worktree ${stale_path:A}" <<< "$(
+  GIT_OPTIONAL_LOCKS=0 git -C "$repo" worktree list --porcelain
+)"
+[[ "$stale_before" == "$(tree_snapshot "$stale_admin")" ]]
+git -C "$repo" worktree unlock "$remove_path"
 
 HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
   source "$1"
@@ -38,7 +256,9 @@ HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
  ' zsh "$gwt_source" "$repo"
 
 [[ ! -d "$remove_path" ]]
-git -C "$repo" worktree list --porcelain | grep -Fq "worktree ${stale_path:A}"
+grep -Fq "worktree ${stale_path:A}" <<< "$(
+  GIT_OPTIONAL_LOCKS=0 git -C "$repo" worktree list --porcelain
+)"
 
 if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
   source "$1"
