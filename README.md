@@ -67,7 +67,7 @@ Apply receipts and profile backups live under
 ```
 .zshrc / .exports / .aliases / .functions   # Shell entrypoints
 functions/                                  # Modular sourced shell features
-bin/agent-worktree-ops/                     # Agent worktree cleanup tools
+bin/agent-worktree-ops/                     # Worktree cleanup and legacy scheduler retirement
 bin/terminal-sync                           # Ghostty/full font pack/tmux parity audit and repair
 bin/dotfiles-platform                       # macOS/Linux/WSL platform detection
 bin/dotfiles-audit                          # portable shell/link/tool audit

@@ -2,11 +2,9 @@
 
 set -euo pipefail
 
-install_only=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-only)
-      install_only=1
       shift
       ;;
     --help|-h)
@@ -14,7 +12,7 @@ while [[ $# -gt 0 ]]; do
 Usage: install-agent-worktree-ops [--install-only]
 
 Options:
-  --install-only  Install runtime files and plist without loading the LaunchAgent.
+  --install-only  Legacy alias; runtime-only installation is now the default.
 EOF
       exit 0
       ;;
@@ -33,16 +31,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOTFILES_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUNTIME_DIR="$HOME/Library/Application Support/agent-worktree-ops"
-OLD_RUNTIME_DIR="$HOME/Library/Application Support/codex-worktree-maintain"
-PLIST_SOURCE="$DOTFILES_DIR/Library/LaunchAgents/com.vincentkoc.agent-worktree-ops.plist"
-PLIST_TARGET="$HOME/Library/LaunchAgents/com.vincentkoc.agent-worktree-ops.plist"
-OLD_PLIST_TARGET="$HOME/Library/LaunchAgents/com.vincentkoc.codex-worktree-maintain.plist"
-LABEL="com.vincentkoc.agent-worktree-ops"
-OLD_LABEL="com.vincentkoc.codex-worktree-maintain"
-DOMAIN="gui/$(id -u)"
-rendered_plist=""
 
-mkdir -p "$RUNTIME_DIR" "$HOME/Library/LaunchAgents"
+mkdir -p "$RUNTIME_DIR"
 
 install_atomic() {
   local source="$1"
@@ -55,45 +45,9 @@ install_atomic() {
   mv -f "$temporary" "$target"
 }
 
-xml_escape() {
-  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
-}
-
-cleanup_rendered_plist() {
-  [[ -z "$rendered_plist" ]] || rm -f "$rendered_plist"
-}
-trap cleanup_rendered_plist EXIT
-
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-clean" "$RUNTIME_DIR/agent-worktree-clean"
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-maintain" "$RUNTIME_DIR/agent-worktree-maintain"
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-purge" "$RUNTIME_DIR/agent-worktree-purge"
+install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/retire-agent-worktree-scheduler" "$RUNTIME_DIR/retire-agent-worktree-scheduler"
 
-runtime_maintainer="$(
-  printf '%s' "$RUNTIME_DIR/agent-worktree-maintain" \
-    | xml_escape \
-    | sed -e 's/[&|]/\\&/g'
-)"
-rendered_plist="$(mktemp "$HOME/Library/LaunchAgents/.agent-worktree-ops.XXXXXX")"
-sed "s|__AGENT_WORKTREE_MAINTAIN__|$runtime_maintainer|" "$PLIST_SOURCE" >"$rendered_plist"
-plutil -lint "$rendered_plist" >/dev/null
-chmod 0644 "$rendered_plist"
-mv -f "$rendered_plist" "$PLIST_TARGET"
-rendered_plist=""
-
-launchctl bootout "$DOMAIN/$OLD_LABEL" >/dev/null 2>&1 || true
-rm -f "$OLD_PLIST_TARGET"
-rm -rf "$OLD_RUNTIME_DIR"
-launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  printf 'install-agent-worktree-ops: failed to unload %s/%s\n' "$DOMAIN" "$LABEL" >&2
-  exit 1
-fi
-
-if (( install_only == 1 )); then
-  printf 'agent-worktree-ops installed without loading %s\n' "$LABEL"
-  exit 0
-fi
-
-launchctl bootstrap "$DOMAIN" "$PLIST_TARGET"
-launchctl print "$DOMAIN/$LABEL" >/dev/null
-printf 'agent-worktree-ops loaded: %s/%s\n' "$DOMAIN" "$LABEL"
+printf 'agent-worktree-ops runtime installed; scheduler state unchanged\n'

@@ -26,8 +26,22 @@ Bins in this folder:
 - `agent-worktree-purge`
   - background purge of entries left in the legacy quarantine directory
 - `install-agent-worktree-ops`
-  - atomically install runtime copies, render a machine-local plist, and reload launchd
-  - pass `--install-only` to install and ensure the LaunchAgent is unloaded
+  - atomically installs runtime copies only
+  - never creates, loads, unloads, enables, disables, or removes a LaunchAgent
+  - accepts legacy `--install-only` as an alias for the runtime-only default
+- `retire-agent-worktree-scheduler`
+  - checks legacy launchd state without mutation by default
+  - pass `--apply` to persistently disable both known user labels, unload only
+    idle jobs under those exact labels, back up the recognized current plist,
+    and unlink it
+  - refuses an active maintainer lock, any system-scoped legacy job or plist,
+    running jobs, symlinks, hard links, unexpected ownership or permissions,
+    unrecognized plist bytes, and the older untracked plist
+  - holds the canonical maintainer lock through apply and rollback mutations
+  - writes a private receipt and exact backup before mutation
+  - pass `--rollback <receipt-directory>` to atomically restore the exact backup
+    as mode `0644`; rollback leaves both labels disabled and unloaded
+  - never removes runtime directories, logs, history, or iCloud/Mackup residue
 
 Neither audit nor apply mode prunes Git worktree metadata. Use explicit
 `git worktree prune` or `gwt prune` only after reviewing stale registrations.
