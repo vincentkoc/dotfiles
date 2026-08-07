@@ -72,9 +72,110 @@ grep -q -- '--apply' "$temporary/cleaner.args"
 grep -q -- '--skip-legacy-purge' "$temporary/cleaner.args"
 [[ ! -e "$codex_home/log/agent-worktree-maintain.log" ]]
 [[ ! -e "$state_dir/locks/agent-worktree-maintain.lock" ]]
+[[ ! -e "$codex_home/locks/agent-worktree-maintain.lock" ]]
 [[ "$(mode_of "$state_dir/log")" == "700" ]]
 [[ "$(mode_of "$state_dir/locks")" == "700" ]]
 [[ "$(mode_of "$log_file")" == "600" ]]
+
+legacy_codex_home="$temporary/legacy-codex"
+legacy_state_dir="$temporary/legacy-state"
+legacy_lock_dir="$legacy_codex_home/locks/agent-worktree-maintain.lock"
+mkdir -m 755 "$legacy_codex_home" "$legacy_codex_home/locks" "$legacy_lock_dir"
+mkdir -m 700 "$legacy_state_dir"
+printf '%s\n' "$$" >"$legacy_lock_dir/pid"
+chmod 644 "$legacy_lock_dir/pid"
+TEST_REGISTERED="$registered" \
+TEST_CLEANER_ARGS="$temporary/legacy-cleaner.args" \
+CODEX_HOME="$legacy_codex_home" \
+"$runtime/agent-worktree-maintain" \
+  --repo "$repo" \
+  --codex-home "$legacy_codex_home" \
+  --state-dir "$legacy_state_dir" \
+  --force \
+  --no-log >"$temporary/legacy-contention.out"
+grep -q "already running (pid=$$)" "$temporary/legacy-contention.out"
+[[ "$(mode_of "$legacy_lock_dir")" == "755" ]]
+[[ "$(mode_of "$legacy_lock_dir/pid")" == "644" ]]
+[[ ! -e "$legacy_state_dir/locks/agent-worktree-maintain.lock" ]]
+rm "$legacy_lock_dir/pid"
+rmdir "$legacy_lock_dir"
+
+unsafe_codex_home="$temporary/unsafe-codex"
+unsafe_state_dir="$temporary/unsafe-state"
+unsafe_lock_dir="$unsafe_codex_home/locks/agent-worktree-maintain.lock"
+mkdir -m 755 "$unsafe_codex_home" "$unsafe_codex_home/locks" "$unsafe_lock_dir"
+chmod 777 "$unsafe_lock_dir"
+mkdir -m 700 "$unsafe_state_dir"
+printf '%s\n' "$$" >"$unsafe_lock_dir/pid"
+chmod 644 "$unsafe_lock_dir/pid"
+set +e
+TEST_REGISTERED="$registered" \
+TEST_CLEANER_ARGS="$temporary/unsafe-cleaner.args" \
+CODEX_HOME="$unsafe_codex_home" \
+"$runtime/agent-worktree-maintain" \
+  --repo "$repo" \
+  --codex-home "$unsafe_codex_home" \
+  --state-dir "$unsafe_state_dir" \
+  --force \
+  --no-log >"$temporary/unsafe-lock.out" 2>&1
+status=$?
+set -e
+[[ "$status" == "73" ]]
+grep -q 'untrusted lock/state path' "$temporary/unsafe-lock.out"
+[[ -d "$unsafe_lock_dir" ]]
+
+no_log_codex_home="$temporary/no-log-codex"
+no_log_state_dir="$temporary/no-log-state"
+fake_bin="$temporary/fake-bin"
+release_log="$temporary/release-order"
+mkdir -m 700 "$no_log_codex_home" "$no_log_state_dir"
+mkdir "$fake_bin"
+cat >"$fake_bin/rmdir" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >>"$TEST_RMDIR_LOG"
+exec /bin/rmdir "$@"
+EOF
+chmod +x "$fake_bin/rmdir"
+TEST_REGISTERED="$registered" \
+TEST_CLEANER_ARGS="$temporary/no-log-cleaner.args" \
+TEST_RMDIR_LOG="$release_log" \
+CODEX_HOME="$no_log_codex_home" \
+PATH="$fake_bin:$PATH" \
+"$runtime/agent-worktree-maintain" \
+  --repo "$repo" \
+  --codex-home "$no_log_codex_home" \
+  --state-dir "$no_log_state_dir" \
+  --force \
+  --skip-legacy-purge \
+  --no-log >"$temporary/no-log.out"
+grep -q 'agent-worktree-maintain: start ' "$temporary/no-log.out"
+grep -q 'agent-worktree-maintain: done' "$temporary/no-log.out"
+[[ ! -e "$no_log_state_dir/log" ]]
+[[ ! -e "$no_log_codex_home/log" ]]
+expected_release_order="$no_log_state_dir/locks/agent-worktree-maintain.lock
+$no_log_codex_home/locks/agent-worktree-maintain.lock"
+[[ "$(cat "$release_log")" == "$expected_release_order" ]]
+: >"$release_log"
+set +e
+TEST_REGISTERED="$registered" \
+TEST_CLEANER_ARGS="$temporary/no-log-cleaner.args" \
+TEST_CLEANER_EXIT=42 \
+TEST_RMDIR_LOG="$release_log" \
+CODEX_HOME="$no_log_codex_home" \
+PATH="$fake_bin:$PATH" \
+"$runtime/agent-worktree-maintain" \
+  --repo "$repo" \
+  --codex-home "$no_log_codex_home" \
+  --state-dir "$no_log_state_dir" \
+  --force \
+  --skip-legacy-purge \
+  --no-log >"$temporary/no-log-failure.out" 2>&1
+status=$?
+set -e
+[[ "$status" == "42" ]]
+grep -q 'failed status=42' "$temporary/no-log-failure.out"
+[[ ! -e "$no_log_state_dir/log" ]]
+[[ ! -e "$no_log_codex_home/log" ]]
 
 hardlink_state="$temporary/hardlink-state"
 mkdir -m 700 "$hardlink_state" "$hardlink_state/log"
@@ -102,6 +203,7 @@ chmod 600 "$lock_dir/pid"
 run_maintainer
 grep -q "already running (pid=$$)" "$log_file"
 [[ -d "$lock_dir" ]]
+[[ ! -e "$codex_home/locks/agent-worktree-maintain.lock" ]]
 rm "$lock_dir/pid"
 rmdir "$lock_dir"
 

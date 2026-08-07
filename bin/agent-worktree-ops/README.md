@@ -15,11 +15,14 @@ Bins in this folder:
 - `agent-worktree-maintain`
   - pressure-aware maintenance runner using the cleaner's registered inventory
   - pass `--state-dir` to keep its private lock and log outside `~/.codex`
+  - always coordinates through the canonical Codex lock first; a distinct
+    state directory adds a second private lock acquired after it
   - explicit state directories must already exist, be owned by the current user,
     use private permissions, and not be symlinks
   - verified same-user lock contention is a successful skip; malformed or
     untrusted lock state exits with status 73
   - pass `--skip-legacy-purge` to forward the cleaner's purge opt-out
+  - pass `--no-log` to emit output for ephemeral capture without creating a log
 - `agent-worktree-purge`
   - background purge of entries left in the legacy quarantine directory
 - `install-agent-worktree-ops`

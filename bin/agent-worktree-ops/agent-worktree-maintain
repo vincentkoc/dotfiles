@@ -31,7 +31,9 @@ force=0
 state_dir=""
 state_dir_explicit=0
 skip_legacy_purge=0
-lock_owned=0
+no_log=0
+owned_lock_dirs=()
+contention_pid=""
 LOCK_STATE_ERROR=73
 
 path_owner_uid() {
@@ -71,6 +73,12 @@ path_is_private() {
   local mode="$1"
   [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
   (( (8#$mode & 077) == 0 ))
+}
+
+path_has_no_group_or_other_write() {
+  local mode="$1"
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 022) == 0 ))
 }
 
 path_has_no_symlink_components() {
@@ -127,6 +135,24 @@ validate_owned_single_link_file() {
   [[ "$links" == "1" ]]
 }
 
+validate_compatible_directory() {
+  local path="$1"
+  local mode
+
+  validate_owned_directory "$path" 0 || return 1
+  mode="$(path_mode "$path")" || return 1
+  path_has_no_group_or_other_write "$mode"
+}
+
+validate_compatible_file() {
+  local path="$1"
+  local mode
+
+  validate_owned_single_link_file "$path" || return 1
+  mode="$(path_mode "$path")" || return 1
+  path_has_no_group_or_other_write "$mode"
+}
+
 fail_lock_state() {
   echo "agent-worktree-maintain: untrusted lock/state path: $1" >&2
   return "$LOCK_STATE_ERROR"
@@ -159,6 +185,21 @@ ensure_private_directory() {
   fi
 }
 
+ensure_coordination_directory() {
+  local path="$1"
+
+  if [[ ! -e "$path" ]]; then
+    if ! mkdir -m 700 "$path"; then
+      fail_lock_state "$path"
+      return "$LOCK_STATE_ERROR"
+    fi
+  fi
+  if ! validate_compatible_directory "$path"; then
+    fail_lock_state "$path"
+    return "$LOCK_STATE_ERROR"
+  fi
+}
+
 prepare_private_file() {
   local path="$1"
 
@@ -184,96 +225,108 @@ prepare_private_file() {
 }
 
 validate_lock_contents() {
+  local lock_path="$1"
+  local allow_legacy_modes="$2"
   local entries=()
-  local pid_file="$lock_dir/pid"
+  local pid_file="$lock_path/pid"
 
-  if ! validate_owned_directory "$lock_dir" 1; then
-    fail_lock_state "$lock_dir"
+  if (( allow_legacy_modes == 1 )); then
+    if ! validate_compatible_directory "$lock_path"; then
+      fail_lock_state "$lock_path"
+      return "$LOCK_STATE_ERROR"
+    fi
+  elif ! validate_owned_directory "$lock_path" 1; then
+    fail_lock_state "$lock_path"
     return "$LOCK_STATE_ERROR"
   fi
   shopt -s nullglob dotglob
-  entries=("$lock_dir"/*)
+  entries=("$lock_path"/*)
   shopt -u nullglob dotglob
   if (( ${#entries[@]} != 1 )) || [[ "${entries[0]}" != "$pid_file" ]]; then
-    fail_lock_state "$lock_dir"
+    fail_lock_state "$lock_path"
     return "$LOCK_STATE_ERROR"
   fi
-  if ! validate_owned_file "$pid_file"; then
+  if (( allow_legacy_modes == 1 )); then
+    if ! validate_compatible_file "$pid_file"; then
+      fail_lock_state "$pid_file"
+      return "$LOCK_STATE_ERROR"
+    fi
+  elif ! validate_owned_file "$pid_file"; then
     fail_lock_state "$pid_file"
     return "$LOCK_STATE_ERROR"
   fi
 }
 
 create_lock() {
-  mkdir -m 700 "$lock_dir" 2>/dev/null || return 1
-  if ! printf '%s\n' "$$" >"$lock_dir/pid"; then
-    rmdir "$lock_dir" 2>/dev/null || true
-    fail_lock_state "$lock_dir/pid"
+  local lock_path="$1"
+
+  mkdir -m 700 "$lock_path" 2>/dev/null || return 1
+  if ! printf '%s\n' "$$" >"$lock_path/pid"; then
+    rmdir "$lock_path" 2>/dev/null || true
+    fail_lock_state "$lock_path/pid"
     return "$LOCK_STATE_ERROR"
   fi
-  chmod 600 "$lock_dir/pid" || {
-    rm -f "$lock_dir/pid"
-    rmdir "$lock_dir" 2>/dev/null || true
-    fail_lock_state "$lock_dir/pid"
+  chmod 600 "$lock_path/pid" || {
+    rm -f "$lock_path/pid"
+    rmdir "$lock_path" 2>/dev/null || true
+    fail_lock_state "$lock_path/pid"
     return "$LOCK_STATE_ERROR"
   }
-  validate_lock_contents || return "$LOCK_STATE_ERROR"
-  lock_owned=1
+  validate_lock_contents "$lock_path" 0 || return "$LOCK_STATE_ERROR"
+  owned_lock_dirs+=("$lock_path")
   return 0
 }
 
 inspect_existing_lock() {
+  local lock_path="$1"
+  local allow_legacy_modes="$2"
   local owner_pid process_uid
 
-  validate_lock_contents || return "$LOCK_STATE_ERROR"
-  owner_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+  validate_lock_contents "$lock_path" "$allow_legacy_modes" || return "$LOCK_STATE_ERROR"
+  owner_pid="$(cat "$lock_path/pid" 2>/dev/null || true)"
   [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] || {
-    fail_lock_state "$lock_dir/pid"
+    fail_lock_state "$lock_path/pid"
     return "$LOCK_STATE_ERROR"
   }
 
   process_uid="$(ps -o uid= -p "$owner_pid" 2>/dev/null | tr -d '[:space:]' || true)"
   if [[ -n "$process_uid" ]]; then
     [[ "$process_uid" == "$(id -u)" ]] || {
-      fail_lock_state "$lock_dir/pid"
+      fail_lock_state "$lock_path/pid"
       return "$LOCK_STATE_ERROR"
     }
-    if kill -0 "$owner_pid" 2>/dev/null; then
-      return 10
-    fi
-    process_uid="$(ps -o uid= -p "$owner_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ -z "$process_uid" ]] || {
-      fail_lock_state "$lock_dir/pid"
-      return "$LOCK_STATE_ERROR"
-    }
+    contention_pid="$owner_pid"
+    return 10
   fi
 
-  rm -f "$lock_dir/pid" || {
-    fail_lock_state "$lock_dir/pid"
+  rm -f "$lock_path/pid" || {
+    fail_lock_state "$lock_path/pid"
     return "$LOCK_STATE_ERROR"
   }
-  rmdir "$lock_dir" || {
-    fail_lock_state "$lock_dir"
+  rmdir "$lock_path" || {
+    fail_lock_state "$lock_path"
     return "$LOCK_STATE_ERROR"
   }
   return 0
 }
 
 acquire_lock() {
+  local lock_path="$1"
+  local allow_legacy_modes="$2"
   local status
 
-  if create_lock; then
+  if create_lock "$lock_path"; then
     return 0
   else
     status=$?
   fi
   (( status == LOCK_STATE_ERROR )) && return "$status"
 
-  if inspect_existing_lock; then
-    if create_lock; then
+  if inspect_existing_lock "$lock_path" "$allow_legacy_modes"; then
+    if create_lock "$lock_path"; then
       return 0
     fi
-    fail_lock_state "$lock_dir"
+    fail_lock_state "$lock_path"
     return "$LOCK_STATE_ERROR"
   else
     status=$?
@@ -282,17 +335,19 @@ acquire_lock() {
   return "$status"
 }
 
-cleanup_lock() {
-  local owner_pid
+cleanup_locks() {
+  local index lock_path owner_pid
 
-  (( lock_owned == 1 )) || return 0
-  if ! validate_lock_contents >/dev/null 2>&1; then
-    return 0
-  fi
-  owner_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
-  [[ "$owner_pid" == "$$" ]] || return 0
-  rm -f "$lock_dir/pid" 2>/dev/null || return 0
-  rmdir "$lock_dir" 2>/dev/null || true
+  for (( index=${#owned_lock_dirs[@]} - 1; index >= 0; index-- )); do
+    lock_path="${owned_lock_dirs[$index]}"
+    if ! validate_lock_contents "$lock_path" 0 >/dev/null 2>&1; then
+      continue
+    fi
+    owner_pid="$(cat "$lock_path/pid" 2>/dev/null || true)"
+    [[ "$owner_pid" == "$$" ]] || continue
+    rm -f "$lock_path/pid" 2>/dev/null || continue
+    rmdir "$lock_path" 2>/dev/null || true
+  done
 }
 
 list_managed_worktrees() {
@@ -325,6 +380,16 @@ sum_real_node_modules_kib() {
       fi
     done
   done <<< "$managed_worktrees" | awk '{sum += $1} END {print sum + 0}'
+}
+
+emit_status() {
+  local message="$1"
+
+  if (( no_log == 1 )); then
+    echo "$message"
+  else
+    echo "$message" >>"$log_file"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -382,6 +447,10 @@ while [[ $# -gt 0 ]]; do
       skip_legacy_purge=1
       shift
       ;;
+    --no-log)
+      no_log=1
+      shift
+      ;;
     --help|-h)
       cat <<'EOF'
 Usage: agent-worktree-maintain [options]
@@ -402,6 +471,7 @@ Options:
   --max-dist-gib <n>       Run cleanup when top-level worktree dist exceeds this GiB cap.
   --force                  Run cleanup even below the threshold.
   --skip-legacy-purge      Do not start the cleaner's legacy quarantine purge.
+  --no-log                 Write status and cleaner output to stdout/stderr only.
 EOF
       exit 0
       ;;
@@ -414,6 +484,11 @@ done
 
 if (( state_dir_explicit == 0 )); then
   state_dir="$codex_home"
+fi
+
+if ! validate_compatible_directory "$codex_home"; then
+  fail_lock_state "$codex_home"
+  exit "$LOCK_STATE_ERROR"
 fi
 
 if (( state_dir_explicit == 1 )); then
@@ -429,28 +504,61 @@ else
   }
 fi
 
-lock_parent="$state_dir/locks"
-lock_dir="$lock_parent/agent-worktree-maintain.lock"
+canonical_lock_parent="$codex_home/locks"
+canonical_lock_dir="$canonical_lock_parent/agent-worktree-maintain.lock"
+private_lock_parent="$state_dir/locks"
+private_lock_dir="$private_lock_parent/agent-worktree-maintain.lock"
 log_dir="$state_dir/log"
 log_file="$log_dir/agent-worktree-maintain.log"
+separate_private_lock=0
+if [[ ! "$state_dir" -ef "$codex_home" ]]; then
+  separate_private_lock=1
+fi
 
-ensure_private_directory "$log_dir" || exit "$LOCK_STATE_ERROR"
-ensure_private_directory "$lock_parent" || exit "$LOCK_STATE_ERROR"
-prepare_private_file "$log_file" || exit "$LOCK_STATE_ERROR"
+ensure_coordination_directory "$canonical_lock_parent" || exit "$LOCK_STATE_ERROR"
+if (( separate_private_lock == 1 )); then
+  ensure_private_directory "$private_lock_parent" || exit "$LOCK_STATE_ERROR"
+fi
+if (( no_log == 0 )); then
+  ensure_private_directory "$log_dir" || exit "$LOCK_STATE_ERROR"
+  prepare_private_file "$log_file" || exit "$LOCK_STATE_ERROR"
+fi
 
-if acquire_lock; then
+trap cleanup_locks EXIT
+
+if acquire_lock "$canonical_lock_dir" 1; then
   :
 else
   lock_status=$?
   if (( lock_status == 10 )); then
-    owner_pid="$(cat "$lock_dir/pid")"
-    echo "[$(date '+%F %T')] agent-worktree-maintain: already running (pid=$owner_pid)" >>"$log_file"
+    contention_message="[$(date '+%F %T')] agent-worktree-maintain: already running (pid=$contention_pid)"
+    if (( no_log == 1 )); then
+      echo "$contention_message"
+    else
+      echo "$contention_message" >>"$log_file"
+    fi
     exit 0
   fi
   exit "$lock_status"
 fi
 
-trap cleanup_lock EXIT
+if (( separate_private_lock == 1 )); then
+  if acquire_lock "$private_lock_dir" 0; then
+    :
+  else
+    lock_status=$?
+    if (( lock_status == 10 )); then
+      contention_message="[$(date '+%F %T')] agent-worktree-maintain: already running (pid=$contention_pid)"
+      if (( no_log == 1 )); then
+        echo "$contention_message"
+      else
+        echo "$contention_message" >>"$log_file"
+      fi
+      exit 0
+    fi
+    exit "$lock_status"
+  fi
+fi
 
 managed_worktrees="$(list_managed_worktrees)"
 worktree_count="$(printf '%s\n' "$managed_worktrees" | awk 'NF {count++} END {print count + 0}')"
@@ -485,11 +593,14 @@ elif awk "BEGIN { exit !($dist_gib >= $max_dist_gib) }"; then
 fi
 
 if (( should_skip == 1 )); then
-  echo "[$(date '+%F %T')] agent-worktree-maintain: skip $skip_reason repo=$repo" >>"$log_file"
+  emit_status "[$(date '+%F %T')] agent-worktree-maintain: skip $skip_reason repo=$repo"
   exit 0
 fi
 
-{
+run_cleanup() {
+  local status
+  local cleaner_args=()
+
   echo "[$(date '+%F %T')] agent-worktree-maintain: start count=$worktree_count threshold=$threshold free_gib=$free_gib min_free_gib=$min_free_gib real_node_modules_gib=$real_node_modules_gib max_real_node_modules_gib=$max_real_node_modules_gib dist_gib=$dist_gib max_dist_gib=$max_dist_gib repo=$repo"
   cleaner_args=(
     --repo "$repo" \
@@ -508,6 +619,12 @@ fi
   else
     status=$?
     echo "[$(date '+%F %T')] agent-worktree-maintain: failed status=$status"
-    exit "$status"
+    return "$status"
   fi
-} >>"$log_file" 2>&1
+}
+
+if (( no_log == 1 )); then
+  run_cleanup
+else
+  run_cleanup >>"$log_file" 2>&1
+fi
