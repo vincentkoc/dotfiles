@@ -28,50 +28,11 @@ max_real_node_modules_gib="$DEFAULT_MAX_REAL_NODE_MODULES_GIB"
 max_dist_gib="$DEFAULT_MAX_DIST_GIB"
 force=0
 
-repo_slug_from_origin() {
-  local origin="$1"
-  local cleaned slug
-
-  [[ -n "$origin" ]] || return 1
-
-  cleaned="${origin%.git}"
-  cleaned="${cleaned#ssh://}"
-  cleaned="${cleaned#https://}"
-  cleaned="${cleaned#http://}"
-  cleaned="${cleaned#*:*@}"
-  cleaned="${cleaned#git@}"
-  if [[ "${cleaned%%/*}" == *:* ]]; then
-    cleaned="${cleaned/:/\/}"
-  fi
-  cleaned="${cleaned#*/}"
-  slug=$(printf '%s' "$cleaned" | tr -s '/' '-' | tr -cd '[:alnum:]._-')
-  [[ -n "$slug" ]] || return 1
-  printf '%s\n' "$slug"
-}
-
-resolve_repo_slug() {
-  local origin=""
-  origin="$(git -C "$repo" config --get remote.origin.url 2>/dev/null || true)"
-  if [[ -n "$origin" ]]; then
-    repo_slug_from_origin "$origin" && return 0
-  fi
-  basename "$repo"
-}
-
 list_managed_worktrees() {
-  local repo_slug codex_repo_root root
-
-  repo_slug="$(resolve_repo_slug)"
-  codex_repo_root="$codex_home/worktrees/$repo_slug"
-
-  {
-    git -C "$repo" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}'
-    [[ -d "$codex_repo_root" ]] && find "$codex_repo_root" -mindepth 1 -maxdepth 1 -type d -print
-    for root in "$repo/.claude/worktrees" "$repo/.worktrees"; do
-      [[ -d "$root" ]] || continue
-      find "$root" -mindepth 1 -maxdepth 1 -type d -print
-    done
-  } | awk 'NF && !seen[$0]++'
+  "$DEFAULT_CLEANER" \
+    --repo "$repo" \
+    --codex-home "$codex_home" \
+    --list-registered
 }
 
 sum_real_node_modules_kib() {
@@ -156,7 +117,7 @@ Options:
   --min-age-days <n>       Minimum worktree age before cleanup.
   --trim-artifacts-age-days <n>
                            Minimum worktree age before trimming node_modules/dist.
-  --delete-workers <n>     Parallel delete workers for the cleaner.
+  --delete-workers <n>     Parallel workers for purging legacy quarantine entries.
   --threshold <n>          Minimum agent worktree count before apply mode runs.
   --min-free-gib <n>       Run cleanup when free disk falls below this GiB floor.
   --max-real-node-modules-gib <n>
