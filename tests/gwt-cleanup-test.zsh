@@ -47,7 +47,7 @@ TEST_GIT_AUDIT_ENV="$temporary/git-audit-env.out" \
 zsh -f -c '
   source "$1"
   unset GIT_OPTIONAL_LOCKS GIT_NO_LAZY_FETCH
-  _gwt_git_audit status
+  _gwt_git_probe status
   (( ${+GIT_OPTIONAL_LOCKS} == 0 ))
   (( ${+GIT_NO_LAZY_FETCH} == 0 ))
  ' zsh "$gwt_source"
