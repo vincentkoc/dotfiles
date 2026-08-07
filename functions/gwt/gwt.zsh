@@ -542,6 +542,27 @@ _gwt_tool_path() {
     return 1
 }
 
+_gwt_validate_cleanup_args() {
+    local command_name="$1"
+    shift
+    local arg
+
+    for arg in "$@"; do
+        case "$arg" in
+            --repo|--repo=*|--codex-home|--codex-home=*)
+                echo "gwt: $command_name controls repository scope; '$arg' is not allowed" >&2
+                return 1
+                ;;
+            --apply|--apply=*|-a)
+                if [[ "$command_name" == "audit" ]]; then
+                    echo "gwt: audit is immutable; use 'gwt clean' for apply mode" >&2
+                    return 1
+                fi
+                ;;
+        esac
+    done
+}
+
 _gwt_should_use_color() {
     local mode="${1:-auto}"
 
@@ -1082,6 +1103,7 @@ EOF
         audit)
             local repo_root cleaner_path audit_table worktree_count
             repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            _gwt_validate_cleanup_args audit "$@" || return 1
             cleaner_path=$(_gwt_tool_path agent-worktree-clean) || {
                 echo "gwt: agent-worktree-clean not found" >&2
                 return 1
@@ -1106,6 +1128,7 @@ EOF
         clean)
             local repo_root maintainer_path
             repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            _gwt_validate_cleanup_args clean "$@" || return 1
             maintainer_path=$(_gwt_tool_path agent-worktree-maintain) || {
                 echo "gwt: agent-worktree-maintain not found" >&2
                 return 1
@@ -1261,7 +1284,7 @@ EOF
         rm|remove)
             local target=""
             local force_remove=false
-            local arg target_path main_worktree repo_root
+            local arg target_path main_worktree repo_root current_path
 
             for arg in "$@"; do
                 case "$arg" in
@@ -1292,7 +1315,8 @@ EOF
                 return 1
             fi
 
-            if [[ "$(pwd)/" == "$target_path/"* ]]; then
+            current_path=$(pwd -P) || return 1
+            if [[ "$current_path/" == "$target_path/"* ]]; then
                 echo "gwt: cannot remove the worktree you are currently in"
                 return 1
             fi

@@ -53,8 +53,8 @@ class Inventory:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Remove clean, idle agent worktrees not referenced by the last N Codex sessions. "
-            "Dry-run by default."
+            "Audit registered worktrees and serially remove clean, idle candidates with "
+            "non-force git worktree remove. Dry-run by default."
         )
     )
     parser.add_argument("--apply", action="store_true", help="remove eligible worktrees")
@@ -89,7 +89,10 @@ def parse_args() -> argparse.Namespace:
         "--delete-workers",
         type=positive_int,
         default=DEFAULT_DELETE_WORKERS,
-        help=f"parallel workers for deletion when --apply is set (default: {DEFAULT_DELETE_WORKERS})",
+        help=(
+            "parallel workers for purging legacy quarantine entries "
+            f"(compatibility option; default: {DEFAULT_DELETE_WORKERS})"
+        ),
     )
     parser.add_argument(
         "--min-age-days",
@@ -109,7 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quarantine-root",
         default=DEFAULT_QUARANTINE_ROOT,
-        help="where removable worktrees are moved before async purge",
+        help="legacy quarantine directory to purge after apply (new removals are not quarantined)",
     )
     parser.add_argument(
         "--shared-node-modules-source",
@@ -286,12 +289,16 @@ def main() -> int:
         codex_home=codex_home,
         candidates=trimmable,
         shared_node_modules_source=shared_node_modules_source,
+        session_limit=args.limit,
+        scan_limit=args.scan_limit,
     )
     apply_removals(
         repo_root=repo_root,
         codex_home=codex_home,
         candidates=removable,
         include_detached=args.include_detached,
+        session_limit=args.limit,
+        scan_limit=args.scan_limit,
     )
     spawn_async_purge(
         codex_home=codex_home,
@@ -768,7 +775,8 @@ def print_summary(
     print(f"recent sessions scanned: {len(recent_session_cwds)}")
     print(f"min age days: {min_age_days:g}")
     print(f"trim artifacts age days: {trim_artifacts_age_days:g}")
-    print(f"quarantine root: {quarantine_root}")
+    print(f"legacy quarantine purge root: {quarantine_root}")
+    print("removal strategy: serial non-force git worktree remove")
     print(f"shared node_modules source: {shared_node_modules_source}")
     print(f"shared node_modules exists: {'yes' if path_is_dir(shared_node_modules_source) else 'no'}")
     print(f"kept by recent sessions: {len(kept_by_session)}")
@@ -863,6 +871,8 @@ def apply_trims(
     codex_home: str,
     candidates: list[Worktree],
     shared_node_modules_source: str,
+    session_limit: int,
+    scan_limit: int,
 ) -> None:
     with progress_bar(total=len(candidates), desc="trimming artifacts") as progress:
         for candidate in candidates:
@@ -872,6 +882,8 @@ def apply_trims(
                 expected=candidate,
                 require_reachable=False,
                 include_detached=True,
+                session_limit=session_limit,
+                scan_limit=scan_limit,
             )
             if reason:
                 print(f"skip  {candidate.path}  (changed: {reason})")
@@ -886,6 +898,8 @@ def apply_removals(
     codex_home: str,
     candidates: list[Worktree],
     include_detached: bool,
+    session_limit: int,
+    scan_limit: int,
 ) -> None:
     with progress_bar(total=len(candidates), desc="removing worktrees") as progress:
         for candidate in candidates:
@@ -895,6 +909,8 @@ def apply_removals(
                 expected=candidate,
                 require_reachable=True,
                 include_detached=include_detached,
+                session_limit=session_limit,
+                scan_limit=scan_limit,
             )
             if reason:
                 print(f"skip  {candidate.path}  (changed: {reason})")
@@ -925,6 +941,8 @@ def revalidate_candidate(
     expected: Worktree,
     require_reachable: bool,
     include_detached: bool,
+    session_limit: int,
+    scan_limit: int,
 ) -> Optional[str]:
     inventory = build_inventory(repo_root, codex_home)
     current = next(
@@ -948,8 +966,8 @@ def revalidate_candidate(
     if state_db:
         session_cwds = read_recent_session_cwds(
             state_db=state_db,
-            scan_limit=DEFAULT_SCAN_LIMIT,
-            keep_limit=DEFAULT_SESSION_LIMIT,
+            scan_limit=scan_limit,
+            keep_limit=session_limit,
             repo_root=repo_root,
             worktrees=inventory.worktrees,
         )

@@ -201,6 +201,7 @@ fi
   echo "[$(date '+%F %T')] agent-worktree-maintain: start count=$worktree_count threshold=$threshold free_gib=$free_gib min_free_gib=$min_free_gib real_node_modules_gib=$real_node_modules_gib max_real_node_modules_gib=$max_real_node_modules_gib dist_gib=$dist_gib max_dist_gib=$max_dist_gib repo=$repo"
   "$DEFAULT_CLEANER" \
     --repo "$repo" \
+    --codex-home "$codex_home" \
     --limit "$session_limit" \
     --min-age-days "$min_age_days" \
     --trim-artifacts-age-days "$trim_artifacts_age_days" \

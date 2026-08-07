@@ -251,8 +251,36 @@ class WorktreeCleanerTests(unittest.TestCase):
                 expected=expected,
                 require_reachable=True,
                 include_detached=False,
+                session_limit=30,
+                scan_limit=200,
             )
         self.assertEqual(reason, "dirty")
+
+    def test_apply_revalidation_preserves_session_limits(self) -> None:
+        target = self.slug_root / "limits"
+        add_worktree(self.repo, target, "limits")
+        expected = CLEANER.build_inventory(str(self.repo), str(self.codex_home)).worktrees[0]
+
+        with mock.patch.object(CLEANER, "collect_owned_worktree_paths", return_value=set()):
+            with mock.patch.object(CLEANER, "find_latest_state_db", return_value="/tmp/state.sqlite"):
+                with mock.patch.object(
+                    CLEANER,
+                    "read_recent_session_cwds",
+                    return_value=[],
+                ) as read_sessions:
+                    reason = CLEANER.revalidate_candidate(
+                        repo_root=str(self.repo),
+                        codex_home=str(self.codex_home),
+                        expected=expected,
+                        require_reachable=False,
+                        include_detached=False,
+                        session_limit=7,
+                        scan_limit=13,
+                    )
+
+        self.assertIsNone(reason)
+        self.assertEqual(read_sessions.call_args.kwargs["keep_limit"], 7)
+        self.assertEqual(read_sessions.call_args.kwargs["scan_limit"], 13)
 
 
 if __name__ == "__main__":

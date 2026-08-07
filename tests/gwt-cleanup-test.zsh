@@ -35,6 +35,43 @@ HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
 [[ ! -d "$remove_path" ]]
 git -C "$repo" worktree list --porcelain | grep -Fq "worktree ${stale_path:A}"
 
+if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt audit --apply
+' zsh "$root/functions/gwt/gwt.zsh" "$repo" >"$temporary/audit-apply.out" 2>&1; then
+  print -u2 'expected gwt audit --apply to fail'
+  exit 1
+fi
+grep -Fq "audit is immutable" "$temporary/audit-apply.out"
+
+for command_name in audit clean; do
+  if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+    source "$1"
+    cd "$2"
+    gwt "$3" --repo "$4"
+  ' zsh "$root/functions/gwt/gwt.zsh" "$repo" "$command_name" "$temporary/other"; then
+    print -u2 "expected gwt $command_name --repo to fail"
+    exit 1
+  fi
+done >"$temporary/scope.out" 2>&1
+grep -Fq 'controls repository scope' "$temporary/scope.out"
+
+current_path="$temporary/current"
+current_link="$temporary/current-link"
+git -C "$repo" worktree add -b current "$current_path" main >/dev/null
+ln -s "$current_path" "$current_link"
+if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt rm current
+' zsh "$root/functions/gwt/gwt.zsh" "$current_link" >"$temporary/current.out" 2>&1; then
+  print -u2 'expected removal from a symlinked current worktree to fail'
+  exit 1
+fi
+grep -Fq 'cannot remove the worktree you are currently in' "$temporary/current.out"
+[[ -d "$current_path" ]]
+
 git init -b main "$foreign" >/dev/null
 git -C "$foreign" config user.name "Worktree Test"
 git -C "$foreign" config user.email "worktree@example.test"

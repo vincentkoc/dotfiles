@@ -25,8 +25,9 @@ Key responsibilities:
 
 Cleanup behavior:
 
-- `gwt audit` is metadata-immutable and reports foreign or stale paths without acting on them.
+- `gwt audit` is metadata-immutable, rejects `--apply`, and reports foreign or stale paths.
 - `gwt clean` deliberately runs pressure maintenance immediately with `--force`.
+- Both cleanup wrappers reject repository/Codex-home scope overrides.
 - `gwt rm` resolves targets to an absolute path registered to the current Git common dir.
 - `gwt rm` never prunes unrelated stale worktree registrations.
 - `gwt prune` is the only wrapper command that prunes worktree metadata.

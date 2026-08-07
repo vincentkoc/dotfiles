@@ -33,6 +33,7 @@ CODEX_HOME="$codex_home" \
 
 grep -q 'start count=1 ' "$codex_home/log/agent-worktree-maintain.log"
 grep -q -- "--repo $repo" "$temporary/cleaner.args"
+grep -q -- "--codex-home $codex_home" "$temporary/cleaner.args"
 grep -q -- '--apply' "$temporary/cleaner.args"
 
 printf 'agent worktree maintainer tests passed\n'
