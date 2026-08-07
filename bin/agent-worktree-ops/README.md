@@ -8,6 +8,21 @@ Bins in this folder:
   - dry-run/apply cleanup of idle worktrees and stale artifacts
   - only registered, non-main worktrees from the selected Git common dir are actionable
   - foreign, unregistered, non-Git, and stale-registration paths are report-only
+  - requires exactly one same-user, single-link `state*.sqlite` database; accepts
+    either the database alone or the database with both `-wal` and `-shm`
+    sidecars, and refuses ambiguous, asymmetric, journaled, or unexpected state
+    artifacts before classifying worktrees
+  - retains no-follow descriptors for the state directory and every accepted
+    artifact, then reads a relative SQLite `mode=ro` URI from an isolated child
+    anchored to that directory
+  - enables and verifies `query_only`, verifies the `threads` schema and the
+    database/WAL descriptors SQLite opened, then rechecks the anchored directory
+    and artifact identities after the child exits
+  - SQLite `mode=ro` alone may update an active WAL `-shm` file. Scheduled
+    zero-touch audits must additionally run inside the private scheduler's
+    physical-path write-denial sandbox; there is no writable fallback.
+  - pass `--machine` for one compact, sorted schema-v1 JSON audit line with
+    counts only; it is incompatible with `--apply` and `--list-registered`
   - apply mode revalidates dirtiness, reachability, sessions, tmux panes, and process CWDs
   - removals are serial, non-force `git worktree remove` operations
   - apply exits nonzero when a selected trim or removal fails
