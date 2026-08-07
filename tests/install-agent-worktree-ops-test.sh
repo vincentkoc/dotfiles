@@ -2,10 +2,14 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+test_script="$root/tests/install-agent-worktree-ops-test.sh"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 
 fake_bin="$temporary/bin"
+valid_plist="$temporary/valid.plist"
+malformed_plist="$temporary/malformed.plist"
+plutil_fallback_log="${TEST_PLUTIL_FALLBACK_LOG:-$temporary/plutil-fallback.log}"
 linux_home="$temporary/linux home"
 linux_plist="$linux_home/Library/LaunchAgents/com.vincentkoc.agent-worktree-ops.plist"
 linux_runtime="$linux_home/Library/Application Support/agent-worktree-ops"
@@ -45,11 +49,31 @@ case "$1" in
 esac
 EOF
 
-if ! command -v plutil >/dev/null 2>&1; then
+cat >"$valid_plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.test</string>
+</dict>
+</plist>
+EOF
+printf '<plist>' >"$malformed_plist"
+
+plutil_compatible=0
+if command -v plutil >/dev/null 2>&1 \
+  && plutil -lint "$valid_plist" >/dev/null 2>&1 \
+  && ! plutil -lint "$malformed_plist" >/dev/null 2>&1; then
+  plutil_compatible=1
+fi
+
+if (( plutil_compatible == 0 )); then
   cat >"$fake_bin/plutil" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $# -eq 2 && "$1" == "-lint" ]]
+printf '%s\n' "$2" >>"${TEST_PLUTIL_FALLBACK_LOG:?}"
 python3 - "$2" <<'PY'
 import plistlib
 import sys
@@ -59,12 +83,16 @@ with open(sys.argv[1], "rb") as plist:
 PY
 EOF
   chmod +x "$fake_bin/plutil"
+fi
 
-  printf '<plist>' >"$temporary/malformed.plist"
-  if PATH="$fake_bin:$PATH" plutil -lint "$temporary/malformed.plist" >/dev/null 2>&1; then
-    printf 'fallback plutil must reject malformed XML\n' >&2
-    exit 1
-  fi
+TEST_PLUTIL_FALLBACK_LOG="$plutil_fallback_log" \
+  PATH="$fake_bin:$PATH" \
+  plutil -lint "$valid_plist" >/dev/null
+if TEST_PLUTIL_FALLBACK_LOG="$plutil_fallback_log" \
+  PATH="$fake_bin:$PATH" \
+  plutil -lint "$malformed_plist" >/dev/null 2>&1; then
+  printf 'plist validator must reject malformed XML\n' >&2
+  exit 1
 fi
 
 chmod +x "$fake_bin/uname" "$fake_bin/launchctl"
@@ -92,12 +120,15 @@ PATH="$fake_bin:$PATH" \
 TEST_UNAME_SYSTEM=Darwin \
 TEST_LAUNCHCTL_LOG="$launchctl_log" \
 TEST_LAUNCHCTL_STATE="$launchctl_state" \
+TEST_PLUTIL_FALLBACK_LOG="$plutil_fallback_log" \
 "$root/bin/agent-worktree-ops/install-agent-worktree-ops" --install-only
 
 plist="$home/Library/LaunchAgents/com.vincentkoc.agent-worktree-ops.plist"
 runtime="$home/Library/Application Support/agent-worktree-ops"
 [[ -f "$plist" && ! -L "$plist" ]]
-PATH="$fake_bin:$PATH" plutil -lint "$plist" >/dev/null
+TEST_PLUTIL_FALLBACK_LOG="$plutil_fallback_log" \
+  PATH="$fake_bin:$PATH" \
+  plutil -lint "$plist" >/dev/null
 grep -Fq "$runtime/agent-worktree-maintain" "$plist"
 [[ -x "$runtime/agent-worktree-clean" ]]
 [[ -x "$runtime/agent-worktree-maintain" ]]
@@ -118,6 +149,7 @@ if HOME="$home" \
   TEST_LAUNCHCTL_LOG="$launchctl_log" \
   TEST_LAUNCHCTL_STATE="$launchctl_state" \
   TEST_FAIL_BOOTOUT=1 \
+  TEST_PLUTIL_FALLBACK_LOG="$plutil_fallback_log" \
   "$root/bin/agent-worktree-ops/install-agent-worktree-ops" --install-only \
   >"$temporary/failed.out" 2>&1; then
   printf 'install-only must fail when the LaunchAgent remains loaded\n' >&2
@@ -125,5 +157,28 @@ if HOME="$home" \
 fi
 [[ -e "$launchctl_state" ]]
 grep -Fq 'failed to unload' "$temporary/failed.out"
+
+if [[ "${TEST_SKIP_INCOMPATIBLE_PLUTIL_REGRESSION:-0}" != "1" ]]; then
+  incompatible_bin="$temporary/incompatible-bin"
+  incompatible_fallback_log="$temporary/incompatible-fallback.log"
+  incompatible_output="$temporary/incompatible.out"
+  mkdir -p "$incompatible_bin"
+  cat >"$incompatible_bin/plutil" <<'EOF'
+#!/usr/bin/env bash
+exit 64
+EOF
+  chmod +x "$incompatible_bin/plutil"
+
+  if ! PATH="$incompatible_bin:$PATH" \
+    TEST_PLUTIL_FALLBACK_LOG="$incompatible_fallback_log" \
+    TEST_SKIP_INCOMPATIBLE_PLUTIL_REGRESSION=1 \
+    "$test_script" >"$incompatible_output" 2>&1; then
+    cat "$incompatible_output" >&2
+    printf 'installer tests must tolerate an incompatible plutil command\n' >&2
+    exit 1
+  fi
+  [[ -s "$incompatible_fallback_log" ]]
+  grep -Fxq 'agent worktree installer tests passed' "$incompatible_output"
+fi
 
 printf 'agent worktree installer tests passed\n'
