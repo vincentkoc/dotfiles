@@ -124,6 +124,39 @@ set -e
 grep -q 'untrusted lock/state path' "$temporary/unsafe-lock.out"
 [[ -d "$unsafe_lock_dir" ]]
 
+probe_codex_home="$temporary/probe-codex"
+probe_state_dir="$temporary/probe-state"
+probe_lock_dir="$probe_codex_home/locks/agent-worktree-maintain.lock"
+probe_bin="$temporary/probe-bin"
+probe_cleaner_args="$temporary/probe-cleaner.args"
+mkdir -m 700 "$probe_codex_home" "$probe_codex_home/locks" "$probe_lock_dir"
+mkdir -m 700 "$probe_state_dir" "$probe_bin"
+printf '%s\n' "$$" >"$probe_lock_dir/pid"
+chmod 600 "$probe_lock_dir/pid"
+cat >"$probe_bin/ps" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+chmod +x "$probe_bin/ps"
+set +e
+TEST_REGISTERED="$registered" \
+TEST_CLEANER_ARGS="$probe_cleaner_args" \
+CODEX_HOME="$probe_codex_home" \
+PATH="$probe_bin:$PATH" \
+"$runtime/agent-worktree-maintain" \
+  --repo "$repo" \
+  --codex-home "$probe_codex_home" \
+  --state-dir "$probe_state_dir" \
+  --force \
+  --no-log >"$temporary/probe-error.out" 2>&1
+status=$?
+set -e
+[[ "$status" == "73" ]]
+grep -q 'untrusted lock/state path' "$temporary/probe-error.out"
+[[ -d "$probe_lock_dir" ]]
+[[ "$(cat "$probe_lock_dir/pid")" == "$$" ]]
+[[ ! -e "$probe_cleaner_args" ]]
+
 no_log_codex_home="$temporary/no-log-codex"
 no_log_state_dir="$temporary/no-log-state"
 fake_bin="$temporary/fake-bin"

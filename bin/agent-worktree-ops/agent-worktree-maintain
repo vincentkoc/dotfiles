@@ -280,7 +280,7 @@ create_lock() {
 inspect_existing_lock() {
   local lock_path="$1"
   local allow_legacy_modes="$2"
-  local owner_pid process_uid
+  local owner_pid process_output process_status process_uid
 
   validate_lock_contents "$lock_path" "$allow_legacy_modes" || return "$LOCK_STATE_ERROR"
   owner_pid="$(cat "$lock_path/pid" 2>/dev/null || true)"
@@ -289,14 +289,27 @@ inspect_existing_lock() {
     return "$LOCK_STATE_ERROR"
   }
 
-  process_uid="$(ps -o uid= -p "$owner_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-  if [[ -n "$process_uid" ]]; then
+  if process_output="$(ps -o uid= -p "$owner_pid" 2>/dev/null)"; then
+    process_status=0
+  else
+    process_status=$?
+  fi
+  process_uid="$(printf '%s' "$process_output" | tr -d '[:space:]')"
+  if (( process_status == 0 )); then
+    [[ "$process_uid" =~ ^[0-9]+$ ]] || {
+      fail_lock_state "$lock_path/pid"
+      return "$LOCK_STATE_ERROR"
+    }
     [[ "$process_uid" == "$(id -u)" ]] || {
       fail_lock_state "$lock_path/pid"
       return "$LOCK_STATE_ERROR"
     }
     contention_pid="$owner_pid"
     return 10
+  fi
+  if (( process_status != 1 )) || [[ -n "$process_uid" ]]; then
+    fail_lock_state "$lock_path/pid"
+    return "$LOCK_STATE_ERROR"
   fi
 
   rm -f "$lock_path/pid" || {
