@@ -407,6 +407,116 @@ class WorktreeCleanerTests(unittest.TestCase):
                             CLEANER.parse_args()
                 self.assertNotEqual(raised.exception.code, 0)
 
+    def test_skip_legacy_purge_flag_prevents_spawn(self) -> None:
+        with mock.patch.object(
+            CLEANER.sys,
+            "argv",
+            ["agent-worktree-clean", "--skip-legacy-purge"],
+        ):
+            self.assertTrue(CLEANER.parse_args().skip_legacy_purge)
+
+        args = SimpleNamespace(
+            repo=str(self.repo),
+            codex_home=str(self.codex_home),
+            quarantine_root=str(self.codex_home / "quarantine"),
+            shared_node_modules_source=str(self.repo / "node_modules"),
+            list_registered=False,
+            scan_limit=200,
+            limit=30,
+            min_age_days=2,
+            trim_artifacts_age_days=0.25,
+            include_detached=False,
+            apply=True,
+            delete_workers=4,
+            skip_legacy_purge=True,
+        )
+        inventory = CLEANER.Inventory(
+            common_dir=str(self.repo / ".git"),
+            worktrees=[],
+            report_only=[],
+        )
+        with mock.patch.object(CLEANER, "parse_args", return_value=args):
+            with mock.patch.object(CLEANER, "build_inventory", return_value=inventory):
+                with mock.patch.object(CLEANER, "find_latest_state_db", return_value=None):
+                    with mock.patch.object(CLEANER, "collect_owned_worktree_paths", return_value=set()):
+                        with mock.patch.object(CLEANER, "print_summary"):
+                            with mock.patch.object(CLEANER, "apply_trims", return_value=0):
+                                with mock.patch.object(CLEANER, "apply_removals", return_value=0):
+                                    with mock.patch.object(CLEANER, "spawn_async_purge") as spawn:
+                                        self.assertEqual(CLEANER.main(), 0)
+        spawn.assert_not_called()
+
+    def test_delete_failure_is_reported(self) -> None:
+        failed_remove = SimpleNamespace(returncode=5, stdout="", stderr="permission denied")
+        with mock.patch.object(CLEANER.subprocess, "run", return_value=failed_remove):
+            self.assertFalse(CLEANER.delete_paths(["/tmp/example"]))
+
+    def test_apply_aggregates_trim_and_removal_failures(self) -> None:
+        candidate = CLEANER.Worktree(
+            path="/tmp/example",
+            head="abc",
+            branch_ref="refs/heads/example",
+            detached=False,
+            age_days=10,
+        )
+        failed_remove = SimpleNamespace(returncode=1, stdout="", stderr="refused")
+
+        with mock.patch.object(CLEANER, "progress_bar", return_value=mock.MagicMock()):
+            with mock.patch.object(CLEANER, "revalidate_candidate", return_value=None):
+                with mock.patch.object(CLEANER, "trim_worktree_artifacts", return_value=False):
+                    trim_failures = CLEANER.apply_trims(
+                        repo_root="/tmp/repo",
+                        codex_home="/tmp/codex",
+                        candidates=[candidate],
+                        shared_node_modules_source="/tmp/repo/node_modules",
+                        session_limit=30,
+                        scan_limit=200,
+                    )
+                with mock.patch.object(CLEANER.subprocess, "run", return_value=failed_remove):
+                    removal_failures = CLEANER.apply_removals(
+                        repo_root="/tmp/repo",
+                        codex_home="/tmp/codex",
+                        candidates=[candidate],
+                        include_detached=False,
+                        session_limit=30,
+                        scan_limit=200,
+                    )
+
+        self.assertEqual(trim_failures, 1)
+        self.assertEqual(removal_failures, 1)
+
+    def test_main_returns_nonzero_when_selected_mutations_fail(self) -> None:
+        args = SimpleNamespace(
+            repo=str(self.repo),
+            codex_home=str(self.codex_home),
+            quarantine_root=str(self.codex_home / "quarantine"),
+            shared_node_modules_source=str(self.repo / "node_modules"),
+            list_registered=False,
+            scan_limit=200,
+            limit=30,
+            min_age_days=2,
+            trim_artifacts_age_days=0.25,
+            include_detached=False,
+            apply=True,
+            delete_workers=4,
+            skip_legacy_purge=False,
+        )
+        inventory = CLEANER.Inventory(
+            common_dir=str(self.repo / ".git"),
+            worktrees=[],
+            report_only=[],
+        )
+        with mock.patch.object(CLEANER, "parse_args", return_value=args):
+            with mock.patch.object(CLEANER, "build_inventory", return_value=inventory):
+                with mock.patch.object(CLEANER, "find_latest_state_db", return_value=None):
+                    with mock.patch.object(CLEANER, "collect_owned_worktree_paths", return_value=set()):
+                        with mock.patch.object(CLEANER, "print_summary"):
+                            with mock.patch.object(CLEANER, "apply_trims", return_value=1):
+                                with mock.patch.object(CLEANER, "apply_removals", return_value=2):
+                                    with mock.patch.object(CLEANER, "spawn_async_purge") as spawn:
+                                        self.assertEqual(CLEANER.main(), 1)
+        spawn.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
