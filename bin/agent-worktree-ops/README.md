@@ -16,7 +16,7 @@ Bins in this folder:
   - background purge of entries left in the legacy quarantine directory
 - `install-agent-worktree-ops`
   - atomically install runtime copies, render a machine-local plist, and reload launchd
-  - pass `--install-only` to leave the LaunchAgent unloaded
+  - pass `--install-only` to install and ensure the LaunchAgent is unloaded
 
 Neither audit nor apply mode prunes Git worktree metadata. Use explicit
 `git worktree prune` or `gwt prune` only after reviewing stale registrations.

@@ -83,13 +83,13 @@ rendered_plist=""
 launchctl bootout "$DOMAIN/$OLD_LABEL" >/dev/null 2>&1 || true
 rm -f "$OLD_PLIST_TARGET"
 rm -rf "$OLD_RUNTIME_DIR"
+launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 
 if (( install_only == 1 )); then
   printf 'agent-worktree-ops installed without loading %s\n' "$LABEL"
   exit 0
 fi
 
-launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 launchctl bootstrap "$DOMAIN" "$PLIST_TARGET"
 launchctl print "$DOMAIN/$LABEL" >/dev/null
 printf 'agent-worktree-ops loaded: %s/%s\n' "$DOMAIN" "$LABEL"
