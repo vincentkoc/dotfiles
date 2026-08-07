@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import importlib.util
 import io
 import os
@@ -53,6 +54,72 @@ def add_worktree(repo: Path, path: Path, branch: str, start: str = "main") -> No
     git(repo, "worktree", "add", "-b", branch, str(path), start)
 
 
+def path_metadata(path: Path) -> tuple[str, int, int, int, str]:
+    stats = path.lstat()
+    if path.is_symlink():
+        kind = "symlink"
+        content = os.readlink(path).encode()
+    elif path.is_dir():
+        kind = "directory"
+        content = b""
+    else:
+        kind = "file"
+        content = path.read_bytes()
+    return (
+        kind,
+        stats.st_mode,
+        stats.st_size,
+        stats.st_mtime_ns,
+        hashlib.sha256(content).hexdigest(),
+    )
+
+
+def snapshot_tree(root: Path) -> dict[str, tuple[str, int, int, int, str]]:
+    if not root.exists():
+        return {}
+    paths = [root, *sorted(root.rglob("*"))]
+    return {
+        "." if path == root else str(path.relative_to(root)): path_metadata(path)
+        for path in paths
+    }
+
+
+def snapshot_worktree_metadata(repo: Path) -> dict[str, object]:
+    common_dir = Path(
+        git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+    )
+    return {
+        "common_dir": path_metadata(common_dir),
+        "worktrees": snapshot_tree(common_dir / "worktrees"),
+    }
+
+
+def worktree_index(worktree: Path) -> Path:
+    return Path(
+        git(
+            worktree,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+        ).stdout.strip()
+    )
+
+
+def invalidate_index_stat_cache(worktree: Path) -> Path:
+    tracked_file = worktree / "README.md"
+    original = tracked_file.read_bytes()
+    original_stats = tracked_file.stat()
+    tracked_file.write_bytes(original)
+    os.utime(
+        tracked_file,
+        ns=(original_stats.st_atime_ns, original_stats.st_mtime_ns + 5_000_000_000),
+    )
+    index = worktree_index(worktree)
+    os.chmod(index, 0o644)
+    return index
+
+
 class WorktreeCleanerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -102,7 +169,16 @@ class WorktreeCleanerTests(unittest.TestCase):
         stale = self.slug_root / "stale"
         add_worktree(self.repo, removable, "removable")
         add_worktree(self.repo, stale, "stale")
+        stale_admin = Path(
+            git(
+                stale,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+            ).stdout.strip()
+        )
         shutil.rmtree(stale)
+        removable_index = invalidate_index_stat_cache(removable)
 
         fake_bin = self.base / "bin"
         fake_bin.mkdir()
@@ -115,8 +191,11 @@ class WorktreeCleanerTests(unittest.TestCase):
         os.chmod(fake_bin / "tmux", 0o755)
         environment = os.environ.copy()
         environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+        environment["GIT_OPTIONAL_LOCKS"] = "caller-value"
+        environment["GIT_NO_LAZY_FETCH"] = "caller-lazy-value"
 
-        before = git(self.repo, "worktree", "list", "--porcelain").stdout
+        before = snapshot_worktree_metadata(self.repo)
+        index_before = path_metadata(removable_index)
         audit = subprocess.run(
             [
                 str(CLEANER_PATH),
@@ -136,9 +215,15 @@ class WorktreeCleanerTests(unittest.TestCase):
             check=True,
         )
         self.assertIn("mode: dry-run", audit.stdout)
-        self.assertEqual(before, git(self.repo, "worktree", "list", "--porcelain").stdout)
+        self.assertEqual(before, snapshot_worktree_metadata(self.repo))
+        self.assertEqual(index_before, path_metadata(removable_index))
+        self.assertEqual(removable_index.stat().st_mode & 0o777, 0o644)
 
-        subprocess.run(
+        stale_before = snapshot_tree(stale_admin)
+        apply_environment = environment.copy()
+        apply_environment.pop("GIT_OPTIONAL_LOCKS")
+        apply_environment.pop("GIT_NO_LAZY_FETCH")
+        apply = subprocess.run(
             [
                 str(CLEANER_PATH),
                 "--repo",
@@ -151,15 +236,16 @@ class WorktreeCleanerTests(unittest.TestCase):
                 "999",
                 "--apply",
             ],
-            env=environment,
+            env=apply_environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             check=True,
         )
         after = git(self.repo, "worktree", "list", "--porcelain").stdout
-        self.assertFalse(removable.exists())
+        self.assertFalse(removable.exists(), apply.stdout)
         self.assertIn(f"worktree {CLEANER.normalize_path(str(stale))}", after)
+        self.assertEqual(stale_before, snapshot_tree(stale_admin))
 
     def test_reachability_matrix(self) -> None:
         safe_upstream = self.slug_root / "safe-upstream"
@@ -229,6 +315,30 @@ class WorktreeCleanerTests(unittest.TestCase):
         git(parent, "commit", "-am", "add submodule")
         (parent / "vendor" / "child" / "README.md").write_text("dirty\n", encoding="utf-8")
         self.assertTrue(CLEANER.is_worktree_dirty(str(parent)))
+
+    def test_dirty_probe_uses_status_without_git_diff(self) -> None:
+        with mock.patch.object(CLEANER, "run_text", return_value="") as run_text:
+            self.assertFalse(CLEANER.is_worktree_dirty("/tmp/example"))
+
+        command = run_text.call_args.args[0]
+        self.assertEqual(command[:4], ["git", "-C", "/tmp/example", "status"])
+        self.assertNotIn("diff", command)
+
+    def test_audit_git_env_is_command_local(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GIT_OPTIONAL_LOCKS": "caller-value",
+                "GIT_NO_LAZY_FETCH": "caller-lazy-value",
+            },
+        ):
+            with mock.patch.object(CLEANER.subprocess, "run") as run:
+                CLEANER.run_git_audit(["git", "status"], check=False)
+
+            self.assertEqual(os.environ["GIT_OPTIONAL_LOCKS"], "caller-value")
+            self.assertEqual(os.environ["GIT_NO_LAZY_FETCH"], "caller-lazy-value")
+            self.assertEqual(run.call_args.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+            self.assertEqual(run.call_args.kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
 
     def test_live_ownership_probe_failures_are_fatal(self) -> None:
         worktree = CLEANER.Worktree("/tmp/example", "abc", "refs/heads/test", False, 10)

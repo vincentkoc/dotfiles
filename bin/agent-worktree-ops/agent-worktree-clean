@@ -26,6 +26,20 @@ DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
 DEFAULT_QUARANTINE_ROOT = os.path.join(DEFAULT_CODEX_HOME, "quarantine", "worktrees")
 
 
+def audit_git_env() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    return environment
+
+
+def run_git_audit(
+    command: list[str],
+    **kwargs,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, env=audit_git_env(), **kwargs)
+
+
 @dataclass(frozen=True)
 class Worktree:
     path: str
@@ -365,7 +379,7 @@ def parse_git_worktrees(porcelain: str) -> list[Worktree]:
 
 
 def resolve_repo_slug(repo_root: str) -> str:
-    origin_result = subprocess.run(
+    origin_result = run_git_audit(
         ["git", "-C", repo_root, "config", "--get", "remote.origin.url"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -464,7 +478,7 @@ def discover_candidate_directories(repo_root: str, codex_home: str) -> list[str]
 
 
 def resolve_common_dir(repo_path: str) -> str:
-    result = subprocess.run(
+    result = run_git_audit(
         ["git", "-C", repo_path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -660,7 +674,7 @@ def unsafe_reachability_reason(worktree: Worktree) -> Optional[str]:
         return "unknown-branch"
 
     branch_name = worktree.branch_ref.removeprefix("refs/heads/")
-    upstream_result = subprocess.run(
+    upstream_result = run_git_audit(
         [
             "git",
             "-C",
@@ -692,7 +706,7 @@ def unsafe_reachability_reason(worktree: Worktree) -> Optional[str]:
 
 
 def git_config(worktree_path: str, key: str) -> str:
-    result = subprocess.run(
+    result = run_git_audit(
         ["git", "-C", worktree_path, "config", "--get", key],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -703,7 +717,7 @@ def git_config(worktree_path: str, key: str) -> str:
 
 
 def is_ancestor(worktree_path: str, commit: str, ref: str) -> bool:
-    result = subprocess.run(
+    result = run_git_audit(
         ["git", "-C", worktree_path, "merge-base", "--is-ancestor", commit, ref],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -997,7 +1011,8 @@ def spawn_async_purge(*, codex_home: str, quarantine_root: str, delete_workers: 
 
 
 def run_text(command: list[str]) -> str:
-    result = subprocess.run(
+    runner = run_git_audit if command and command[0] == "git" else subprocess.run
+    result = runner(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

@@ -35,6 +35,10 @@ DOTFILES_GWT_CHECKOUT_ROOT=$(
 unset _gwt_loaded_source
 unset -f _gwt_physical_source_path 2>/dev/null || true
 
+_gwt_git_probe() {
+    GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 command git "$@"
+}
+
 _gwt_path_is_clouddocs() {
     case "$1" in
         *"/Library/Mobile Documents/com~apple~CloudDocs"|*"/Library/Mobile Documents/com~apple~CloudDocs/"*)
@@ -79,11 +83,11 @@ _gwt_repo_slug() {
     local top origin slug
 
     if [[ -n "$repo_root" ]]; then
-        top=$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
-        origin=$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)
+        top=$(_gwt_git_probe -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+        origin=$(_gwt_git_probe -C "$repo_root" config --get remote.origin.url 2>/dev/null || true)
     else
-        top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
-        origin=$(git config --get remote.origin.url 2>/dev/null || true)
+        top=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
+        origin=$(_gwt_git_probe config --get remote.origin.url 2>/dev/null || true)
     fi
 
     if [[ -n "$origin" ]]; then
@@ -138,10 +142,10 @@ _gwt_worktree_source_checkout_risk() {
     local promisor_filter=""
     local -a reasons
 
-    repo_root=$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
-    shallow=$(git -C "$repo_root" rev-parse --is-shallow-repository 2>/dev/null || echo false)
-    promisor=$(git -C "$repo_root" config --bool remote.origin.promisor 2>/dev/null || echo false)
-    promisor_filter=$(git -C "$repo_root" config --get remote.origin.partialclonefilter 2>/dev/null || true)
+    repo_root=$(_gwt_git_probe -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+    shallow=$(_gwt_git_probe -C "$repo_root" rev-parse --is-shallow-repository 2>/dev/null || echo false)
+    promisor=$(_gwt_git_probe -C "$repo_root" config --bool remote.origin.promisor 2>/dev/null || echo false)
+    promisor_filter=$(_gwt_git_probe -C "$repo_root" config --get remote.origin.partialclonefilter 2>/dev/null || true)
 
     [[ "$shallow" == "true" ]] && reasons+=("shallow=true")
     [[ "$promisor" == "true" ]] && reasons+=("promisor=true")
@@ -156,7 +160,7 @@ _gwt_cleanup_failed_worktree() {
     local repo_root=""
 
     [[ -n "$worktree_path" ]] || return 0
-    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null || true)
     if [[ -n "$repo_root" && "$worktree_path" == "$repo_root" ]]; then
         echo "gwt: refusing to clean up the main worktree ($worktree_path)" >&2
         return 1
@@ -215,7 +219,7 @@ _gwt_sparse_apply_profile() {
     local profile="$2"
     local repo_root repo_dir profile_file mode
 
-    repo_root=$(git -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
+    repo_root=$(_gwt_git_probe -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
     repo_dir=$(_gwt_sparse_repo_dir "$repo_root") || return 1
     _gwt_sparse_enable_worktree_config "$repo_root" || return 1
 
@@ -251,7 +255,7 @@ _gwt_sparse_apply_default_profile() {
     local explicit_profile="${2:-}"
     local repo_root default_profile
 
-    repo_root=$(git -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
+    repo_root=$(_gwt_git_probe -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
 
     if [[ -n "$explicit_profile" ]]; then
         _gwt_sparse_apply_profile "$worktree_path" "$explicit_profile" || return 1
@@ -268,15 +272,15 @@ _gwt_sparse_status() {
     local repo_root repo_dir repo_slug sparse_enabled current_profile profile_file
 
     if [[ -z "$worktree_path" ]]; then
-        worktree_path=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+        worktree_path=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
     fi
 
-    repo_root=$(git -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
+    repo_root=$(_gwt_git_probe -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
     repo_slug=$(_gwt_repo_slug "$repo_root") || return 1
     repo_dir=$(_gwt_sparse_repo_dir "$repo_root") || return 1
-    sparse_enabled=$(git -C "$worktree_path" config --bool core.sparseCheckout 2>/dev/null || echo false)
-    current_profile=$(git -C "$worktree_path" config --worktree --get dotfiles.sparseProfile 2>/dev/null || true)
-    profile_file=$(git -C "$worktree_path" config --worktree --get dotfiles.sparseProfileFile 2>/dev/null || true)
+    sparse_enabled=$(_gwt_git_probe -C "$worktree_path" config --bool core.sparseCheckout 2>/dev/null || echo false)
+    current_profile=$(_gwt_git_probe -C "$worktree_path" config --worktree --get dotfiles.sparseProfile 2>/dev/null || true)
+    profile_file=$(_gwt_git_probe -C "$worktree_path" config --worktree --get dotfiles.sparseProfileFile 2>/dev/null || true)
 
     if [[ -z "$current_profile" ]]; then
         if [[ "$sparse_enabled" == "true" ]]; then
@@ -305,9 +309,9 @@ _gwt_sparse_add_paths() {
         return 1
     }
 
-    repo_root=$(git -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
+    repo_root=$(_gwt_git_probe -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
     _gwt_sparse_enable_worktree_config "$repo_root" || return 1
-    if [[ "$(git -C "$worktree_path" config --bool core.sparseCheckout 2>/dev/null || echo false)" != "true" ]]; then
+    if [[ "$(_gwt_git_probe -C "$worktree_path" config --bool core.sparseCheckout 2>/dev/null || echo false)" != "true" ]]; then
         git -C "$worktree_path" sparse-checkout init --cone --sparse-index || return 1
     fi
     git -C "$worktree_path" sparse-checkout add "$@" || return 1
@@ -452,14 +456,14 @@ _gwt_discover_worktree_paths() {
     local worktree_path main_worktree
 
     if [[ -z "$repo_root" ]]; then
-        repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+        repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
     else
-        repo_root=$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+        repo_root=$(_gwt_git_probe -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
     fi
 
-    main_worktree=$(git -C "$repo_root" worktree list --porcelain 2>/dev/null \
+    main_worktree=$(_gwt_git_probe -C "$repo_root" worktree list --porcelain 2>/dev/null \
         | awk '/^worktree / {print substr($0, 10); exit}') || return 1
-    git -C "$repo_root" worktree list --porcelain 2>/dev/null \
+    _gwt_git_probe -C "$repo_root" worktree list --porcelain 2>/dev/null \
         | awk '/^worktree / {print substr($0, 10)}' \
         | while IFS= read -r worktree_path; do
         [[ -n "$worktree_path" && -d "$worktree_path" ]] || continue
@@ -474,7 +478,7 @@ _gwt_common_dir() {
     local repo_path="$1"
     local common_dir
 
-    common_dir=$(git -C "$repo_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    common_dir=$(_gwt_git_probe -C "$repo_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
     [[ -n "$common_dir" ]] || return 1
     (cd "$common_dir" 2>/dev/null && pwd -P)
 }
@@ -496,7 +500,7 @@ _gwt_registered_worktree_path() {
             printf '%s\n' "$target_path"
             return 0
         fi
-    done < <(git -C "$repo_root" worktree list --porcelain 2>/dev/null | awk '/^worktree / {print substr($0, 10)}')
+    done < <(_gwt_git_probe -C "$repo_root" worktree list --porcelain 2>/dev/null | awk '/^worktree / {print substr($0, 10)}')
 
     return 1
 }
@@ -709,7 +713,7 @@ _gwt_find_path() {
         return 0
     fi
 
-    repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+    repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
 
     while IFS= read -r worktree_path; do
         branch=$(_gwt_worktree_branch_label "$worktree_path")
@@ -730,9 +734,9 @@ _gwt_fzf_table() {
     local table
 
     if [[ -z "$repo_root" ]]; then
-        repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+        repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
     else
-        repo_root=$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+        repo_root=$(_gwt_git_probe -C "$repo_root" rev-parse --show-toplevel 2>/dev/null) || return 1
     fi
     codex_repo_root=$(_gwt_codex_repo_worktree_root "$repo_root" 2>/dev/null || true)
 
@@ -783,26 +787,26 @@ _gwt_default_start_point() {
 
     local remote="origin"
     local remote_head=""
-    if remote_head=$(git symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null); then
+    if remote_head=$(_gwt_git_probe symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null); then
         git fetch --quiet "$remote" "${remote_head#${remote}/}" >/dev/null 2>&1 || true
-        if git show-ref --verify --quiet "refs/remotes/$remote_head"; then
+        if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$remote_head"; then
             printf '%s\n' "$remote_head"
             return 0
         fi
     fi
 
-    if git show-ref --verify --quiet "refs/remotes/$remote/main"; then
+    if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$remote/main"; then
         git fetch --quiet "$remote" main >/dev/null 2>&1 || true
         printf '%s\n' "$remote/main"
         return 0
     fi
 
     local upstream=""
-    if upstream=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null); then
+    if upstream=$(_gwt_git_probe rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null); then
         local up_remote="${upstream%%/*}"
         local up_branch="${upstream#*/}"
         git fetch --quiet "$up_remote" "$up_branch" >/dev/null 2>&1 || true
-        if git show-ref --verify --quiet "refs/remotes/$upstream"; then
+        if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$upstream"; then
             printf '%s\n' "$upstream"
             return 0
         fi
@@ -853,7 +857,7 @@ _gwt_resolve_start_point() {
             fi
         fi
 
-        if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+        if _gwt_git_probe rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
             if [[ "$candidate" != "$requested" ]]; then
                 echo "gwt: start-point '$requested' not found, using '$candidate'" >&2
             fi
@@ -880,7 +884,7 @@ _gwt_shared_install_source() {
     local main_worktree=""
     local worktrees_root=""
 
-    main_worktree=$(git worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
+    main_worktree=$(_gwt_git_probe worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
     if [[ -n "$main_worktree" && -d "$main_worktree/node_modules" ]]; then
         printf '%s\n' "$main_worktree"
         return 0
@@ -1080,7 +1084,7 @@ EOF
             _gwt_tmux_sync_context
             ;;
         *)
-            if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+            if ! _gwt_git_probe rev-parse --is-inside-work-tree > /dev/null 2>&1; then
                 echo "gwt: not inside a git repository"
                 return 1
             fi
@@ -1092,7 +1096,7 @@ EOF
             ;;
         ls|list)
             local repo_root list_table color_mode="auto"
-            repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --raw)
@@ -1122,7 +1126,7 @@ EOF
             ;;
         audit)
             local repo_root cleaner_path audit_table worktree_count
-            repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             _gwt_validate_cleanup_args audit "$@" || return 1
             cleaner_path=$(_gwt_tool_path agent-worktree-clean) || {
                 echo "gwt: agent-worktree-clean not found" >&2
@@ -1143,11 +1147,12 @@ EOF
                 _gwt_render_ls "$repo_root" "$(printf '%s\n' "$audit_table" | sed -n '1,12p')" "auto"
             fi
             printf '\n'
-            "$cleaner_path" --repo "$repo_root" "$@" || return 1
+            GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 \
+                "$cleaner_path" --repo "$repo_root" "$@" || return 1
             ;;
         clean)
             local repo_root maintainer_path
-            repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             _gwt_validate_cleanup_args clean "$@" || return 1
             maintainer_path=$(_gwt_tool_path agent-worktree-maintain) || {
                 echo "gwt: agent-worktree-maintain not found" >&2
@@ -1195,7 +1200,7 @@ EOF
             fi
 
             root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
-            repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             repo_slug=$(_gwt_repo_slug) || return 1
             branch_slug=$(printf '%s' "$branch" | tr '/' '-' | tr -cd '[:alnum:]._-')
             [[ -z "$branch_slug" ]] && branch_slug="$branch"
@@ -1240,7 +1245,7 @@ EOF
                 fi
             fi
 
-            if git show-ref --verify --quiet "refs/heads/$branch"; then
+            if _gwt_git_probe show-ref --verify --quiet "refs/heads/$branch"; then
                 if [[ "$use_sparse" == true ]]; then
                     git worktree add --no-checkout "$worktree_path" "$branch" || return 1
                 else
@@ -1280,7 +1285,7 @@ EOF
 
             if [[ -z "$target" ]]; then
                 if command -v fzf > /dev/null 2>&1; then
-                    selected=$(_gwt_fzf_table "$(git rev-parse --show-toplevel 2>/dev/null)" | fzf \
+                    selected=$(_gwt_fzf_table "$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null)" | fzf \
                         --delimiter=$'\t' \
                         --with-nth=2,3,4,5 \
                         --prompt='worktree> ' \
@@ -1323,12 +1328,12 @@ EOF
                 return 1
             fi
 
-            repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+            repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             target_path=$(_gwt_registered_worktree_path "$repo_root" "$target_path" 2>/dev/null) || {
                 echo "gwt: refusing path not registered to this repository: $target_path" >&2
                 return 1
             }
-            main_worktree=$(git worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
+            main_worktree=$(_gwt_git_probe worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
             main_worktree=$(cd "$main_worktree" 2>/dev/null && pwd -P) || return 1
             if [[ "$target_path" == "$main_worktree" ]]; then
                 echo "gwt: refusing to remove the main worktree ($target_path)"
@@ -1341,7 +1346,7 @@ EOF
                 return 1
             fi
 
-            if ! $force_remove && [[ -n "$(git -C "$target_path" status --porcelain 2>/dev/null)" ]]; then
+            if ! $force_remove && [[ -n "$(_gwt_git_probe -C "$target_path" status --porcelain 2>/dev/null)" ]]; then
                 echo "gwt: worktree has uncommitted changes. Re-run with --force to remove."
                 return 1
             fi
@@ -1367,7 +1372,7 @@ EOF
                     _gwt_tmux_sync_context
                     ;;
                 list|profiles)
-                    _gwt_sparse_list_profiles "$(git rev-parse --show-toplevel)" || return 1
+                    _gwt_sparse_list_profiles "$(_gwt_git_probe rev-parse --show-toplevel)" || return 1
                     _gwt_tmux_sync_context
                     ;;
                 set)
@@ -1375,17 +1380,17 @@ EOF
                         echo "Usage: gwt sparse set <profile>"
                         return 1
                     }
-                    _gwt_sparse_apply_profile "$(git rev-parse --show-toplevel)" "$1" || return 1
+                    _gwt_sparse_apply_profile "$(_gwt_git_probe rev-parse --show-toplevel)" "$1" || return 1
                     _gwt_sparse_sync_shell_env
                     _gwt_tmux_sync_context
                     ;;
                 add|expand)
-                    _gwt_sparse_add_paths "$(git rev-parse --show-toplevel)" "$@" || return 1
+                    _gwt_sparse_add_paths "$(_gwt_git_probe rev-parse --show-toplevel)" "$@" || return 1
                     _gwt_sparse_sync_shell_env
                     _gwt_tmux_sync_context
                     ;;
                 full|disable)
-                    _gwt_sparse_apply_profile "$(git rev-parse --show-toplevel)" "full" || return 1
+                    _gwt_sparse_apply_profile "$(_gwt_git_probe rev-parse --show-toplevel)" "full" || return 1
                     _gwt_sparse_sync_shell_env
                     _gwt_tmux_sync_context
                     ;;
