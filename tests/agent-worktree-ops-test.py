@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import SimpleNamespace
@@ -231,7 +233,7 @@ class WorktreeCleanerTests(unittest.TestCase):
     def test_live_ownership_probe_failures_are_fatal(self) -> None:
         worktree = CLEANER.Worktree("/tmp/example", "abc", "refs/heads/test", False, 10)
         failed = SimpleNamespace(returncode=2, stdout="", stderr="permission denied")
-        with mock.patch.object(CLEANER, "shutil_which", return_value="/usr/bin/tool"):
+        with mock.patch.object(CLEANER.shutil, "which", return_value="/usr/bin/tool"):
             with mock.patch.object(CLEANER.subprocess, "run", return_value=failed):
                 with self.assertRaisesRegex(RuntimeError, "lsof"):
                     CLEANER.collect_lsof_worktree_paths([worktree])
@@ -281,6 +283,19 @@ class WorktreeCleanerTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertEqual(read_sessions.call_args.kwargs["keep_limit"], 7)
         self.assertEqual(read_sessions.call_args.kwargs["scan_limit"], 13)
+
+    def test_argparse_rejects_abbreviated_apply_and_repo_flags(self) -> None:
+        for abbreviated in ("--app", "--rep"):
+            with self.subTest(abbreviated=abbreviated):
+                with mock.patch.object(
+                    CLEANER.sys,
+                    "argv",
+                    ["agent-worktree-clean", abbreviated, "/tmp/other"],
+                ):
+                    with redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            CLEANER.parse_args()
+                self.assertNotEqual(raised.exception.code, 0)
 
 
 if __name__ == "__main__":

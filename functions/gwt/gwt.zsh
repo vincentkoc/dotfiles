@@ -396,12 +396,6 @@ _gwt_sparse_register_shell_hook() {
     _gwt_sparse_sync_shell_env
 }
 
-_gwt_repo_local_worktree_roots() {
-    local repo_root="$1"
-    printf '%s\n' "$repo_root/.claude/worktrees"
-    printf '%s\n' "$repo_root/.worktrees"
-}
-
 _gwt_codex_repo_worktree_root() {
     local repo_root="$1"
     local repo_slug root
@@ -504,25 +498,6 @@ _gwt_worktree_branch_label() {
     fi
 
     printf '%s\n' "unmanaged"
-}
-
-_gwt_worktree_source_label() {
-    local repo_root="$1"
-    local worktree_path="$2"
-    local codex_repo_root
-
-    codex_repo_root=$(_gwt_codex_repo_worktree_root "$repo_root" 2>/dev/null || true)
-    if [[ "$worktree_path" == "$repo_root" ]]; then
-        printf '%s\n' "main"
-    elif [[ -n "$codex_repo_root" && "$worktree_path" == "$codex_repo_root/"* ]]; then
-        printf '%s\n' "codex"
-    elif [[ "$worktree_path" == "$repo_root/.claude/worktrees/"* ]]; then
-        printf '%s\n' "claude"
-    elif [[ "$worktree_path" == "$repo_root/.worktrees/"* ]]; then
-        printf '%s\n' "local"
-    else
-        printf '%s\n' "git"
-    fi
 }
 
 _gwt_tool_path() {

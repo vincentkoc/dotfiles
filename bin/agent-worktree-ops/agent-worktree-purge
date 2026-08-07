@@ -16,7 +16,10 @@ DEFAULT_QUARANTINE_ROOT = os.path.join(DEFAULT_CODEX_HOME, "quarantine", "worktr
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Purge quarantined agent worktree directories.")
+    parser = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Purge quarantined agent worktree directories.",
+    )
     parser.add_argument(
         "--quarantine-root",
         default=DEFAULT_QUARANTINE_ROOT,

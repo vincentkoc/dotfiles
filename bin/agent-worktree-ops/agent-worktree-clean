@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -43,15 +44,14 @@ class ReportOnlyPath:
 
 @dataclass(frozen=True)
 class Inventory:
-    repo_root: str
     common_dir: str
-    main_path: str
     worktrees: list[Worktree]
     report_only: list[ReportOnlyPath]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
             "Audit registered worktrees and serially remove clean, idle candidates with "
             "non-force git worktree remove. Dry-run by default."
@@ -439,9 +439,7 @@ def build_inventory(repo_root: str, codex_home: str) -> Inventory:
             report_only.append(ReportOnlyPath(candidate_path, "unregistered"))
 
     return Inventory(
-        repo_root=repo_root,
         common_dir=common_dir,
-        main_path=main_path,
         worktrees=sorted(managed, key=lambda worktree: worktree.path),
         report_only=dedupe_report_only(report_only),
     )
@@ -597,7 +595,7 @@ def collect_owned_worktree_paths(worktrees: list[Worktree]) -> set[str]:
 
 
 def collect_lsof_worktree_paths(worktrees: list[Worktree]) -> set[str]:
-    if not shutil_which("lsof"):
+    if not shutil.which("lsof"):
         raise RuntimeError("lsof is required to verify live worktree ownership")
     sorted_worktrees = sorted(worktrees, key=lambda worktree: len(worktree.path), reverse=True)
     result = subprocess.run(
@@ -624,7 +622,7 @@ def collect_lsof_worktree_paths(worktrees: list[Worktree]) -> set[str]:
 
 
 def collect_tmux_worktree_paths(worktrees: list[Worktree]) -> set[str]:
-    if not shutil_which("tmux"):
+    if not shutil.which("tmux"):
         return set()
     sorted_worktrees = sorted(worktrees, key=lambda worktree: len(worktree.path), reverse=True)
     result = subprocess.run(
@@ -650,15 +648,6 @@ def collect_tmux_worktree_paths(worktrees: list[Worktree]) -> set[str]:
                 busy_paths.add(worktree.path)
                 break
     return busy_paths
-
-
-def shutil_which(command: str) -> Optional[str]:
-    path = os.environ.get("PATH", os.defpath)
-    for directory in path.split(os.pathsep):
-        candidate = os.path.join(directory or ".", command)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
 
 
 def unsafe_reachability_reason(worktree: Worktree) -> Optional[str]:
@@ -1018,12 +1007,6 @@ def run_text(command: list[str]) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"{' '.join(command)} failed")
     return result.stdout.strip()
-
-
-def run(command: list[str]) -> None:
-    result = subprocess.run(command, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"{' '.join(command)} failed with exit code {result.returncode}")
 
 
 if __name__ == "__main__":

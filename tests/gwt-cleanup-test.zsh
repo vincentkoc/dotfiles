@@ -11,6 +11,8 @@ foreign="$temporary/foreign"
 worktrees_root="$home/worktrees"
 runtime="$home/Library/Application Support/agent-worktree-ops"
 mkdir -p "$home" "$runtime"
+cp "$root/bin/agent-worktree-ops/agent-worktree-clean" "$runtime/agent-worktree-clean"
+chmod +x "$runtime/agent-worktree-clean"
 
 git init -b main "$repo" >/dev/null
 git -C "$repo" config user.name "Worktree Test"
@@ -44,6 +46,28 @@ if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
   exit 1
 fi
 grep -Fq "audit is immutable" "$temporary/audit-apply.out"
+
+metadata_before="$(git -C "$repo" worktree list --porcelain | shasum -a 256)"
+if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt audit --app
+' zsh "$root/functions/gwt/gwt.zsh" "$repo" >"$temporary/audit-app.out" 2>&1; then
+  print -u2 'expected abbreviated --app to fail'
+  exit 1
+fi
+if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
+  source "$1"
+  cd "$2"
+  gwt audit --rep "$3"
+' zsh "$root/functions/gwt/gwt.zsh" "$repo" "$temporary/other" >"$temporary/audit-rep.out" 2>&1; then
+  print -u2 'expected abbreviated --rep to fail'
+  exit 1
+fi
+metadata_after="$(git -C "$repo" worktree list --porcelain | shasum -a 256)"
+[[ "$metadata_before" == "$metadata_after" ]]
+grep -Fq 'unrecognized arguments: --app' "$temporary/audit-app.out"
+grep -Fq 'unrecognized arguments: --rep' "$temporary/audit-rep.out"
 
 for command_name in audit clean; do
   if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" zsh -f -c '
