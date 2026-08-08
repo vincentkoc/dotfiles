@@ -14,21 +14,37 @@ The installer bootstraps dependencies and links core shell dotfiles.
 Git uses the dedicated SSH signing-only key at
 `~/.ssh/git_signing_vincentkoc_ieee`. Keep a local `.ssh/allowed_signers` file
 in the dotfiles root. It is intentionally ignored from git, and the installer
-will stop if it is missing.
+will stop if it is missing or does not contain exactly one canonical entry for
+the signing identity. The entry authorizes Git signatures and signed fleet
+cleanup bundles:
 
-Create it with:
+```text
+vincentkoc@ieee.org namespaces="fleet-cleanup-bundle-v1,git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMYJHwFnesHbwtPLErQBRMffbET0Wrbzh+PjkndZRNyy
+```
+
+The expected fingerprint remains
+`SHA256:OIEOnMWCJeKhWpBNlB42wwPuUG5gsC8Crq1ibnt7ylQ`. Verify the public key,
+then create a new trust file. Fleet Git config must use the stable literal
+`~/GIT/_Perso/dotfiles/.ssh/allowed_signers`; resolve it only when accessing
+the filesystem:
 
 ```bash
-dotfiles_root="$HOME/.dotfiles"
-if [[ "$(uname)" == "Darwin" ]]; then
-  dotfiles_root="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
-fi
-mkdir -p "$dotfiles_root/.ssh"
-printf '%s namespaces="git" %s\n' \
-  "$(git config --file "$dotfiles_root/.gitconfig" --get user.email)" \
-  "$(cat ~/.ssh/git_signing_vincentkoc_ieee.pub)" \
-  > "$dotfiles_root/.ssh/allowed_signers"
+allowed_signers="$HOME/GIT/_Perso/dotfiles/.ssh/allowed_signers"
+ssh-keygen -lf ~/.ssh/git_signing_vincentkoc_ieee.pub
+test ! -e "$allowed_signers" || {
+  printf 'refusing to overwrite existing signer entries: %s\n' "$allowed_signers" >&2
+  exit 1
+}
+mkdir -p "$(dirname "$allowed_signers")"
+umask 077
+printf '%s\n' \
+  'vincentkoc@ieee.org namespaces="fleet-cleanup-bundle-v1,git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMYJHwFnesHbwtPLErQBRMffbET0Wrbzh+PjkndZRNyy' \
+  > "$allowed_signers"
 ```
+
+If the file already contains unrelated signer entries, preserve them and
+replace only the entry for `vincentkoc@ieee.org` and the key above. The private
+fleet bootstrap performs that normalization atomically.
 
 Optional: restore additional app configs managed via Mackup.
 

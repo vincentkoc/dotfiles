@@ -3,8 +3,13 @@
 set -euo pipefail
 
 git_config="${HOME}/.gitconfig"
-ssh_key="${HOME}/.ssh/id_ed25519"
-ssh_allowed_signers="${HOME}/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.ssh/allowed_signers"
+ssh_key="${HOME}/.ssh/git_signing_vincentkoc_ieee"
+ssh_key_config='~/.ssh/git_signing_vincentkoc_ieee'
+ssh_signing_principal='vincentkoc@ieee.org'
+ssh_signing_namespaces='fleet-cleanup-bundle-v1,git'
+ssh_signing_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMYJHwFnesHbwtPLErQBRMffbET0Wrbzh+PjkndZRNyy'
+ssh_signing_fingerprint='SHA256:OIEOnMWCJeKhWpBNlB42wwPuUG5gsC8Crq1ibnt7ylQ'
+ssh_allowed_signers_config='~/GIT/_Perso/dotfiles/.ssh/allowed_signers'
 gpg_program="/opt/homebrew/bin/gpg"
 gpg_key_id="FB4C24AE87080A95"
 
@@ -12,7 +17,7 @@ usage() {
   cat <<'EOF'
 usage: git-signing-mode <ssh|gpg|status>
 
-  ssh    use SSH commit/tag signing with ~/.ssh/id_ed25519
+  ssh    use SSH commit/tag signing with ~/.ssh/git_signing_vincentkoc_ieee
   gpg    switch Git back to OpenPGP signing with the saved key id
   status show the active signing-related Git config
 EOF
@@ -29,20 +34,85 @@ show_status() {
   git config --global --show-origin --get-regexp '^(user.signingkey|commit.gpgsign|tag.gpgsign|gpg\.format|gpg\.program|gpg\.ssh\.allowedSignersFile)$' || true
 }
 
+canonical_ssh_allowed_signer() {
+  printf '%s namespaces="%s" %s\n' \
+    "$ssh_signing_principal" \
+    "$ssh_signing_namespaces" \
+    "$ssh_signing_public_key"
+}
+
+ssh_allowed_signer_ready() {
+  local path="$1" expected canonical_count matching_count
+  expected="$(canonical_ssh_allowed_signer)"
+  canonical_count="$(grep -Fxc "$expected" "$path" || true)"
+  matching_count="$(
+    awk \
+      -v principal="$ssh_signing_principal" \
+      -v key_type="${ssh_signing_public_key%% *}" \
+      -v key_blob="${ssh_signing_public_key#* }" \
+      '
+      $1 == principal {
+        for (field = 2; field < NF; field++) {
+          if ($field == key_type && $(field + 1) == key_blob) {
+            count++
+          }
+        }
+      }
+      END { print count + 0 }
+      ' \
+      "$path"
+  )"
+  [[ "$canonical_count" == 1 && "$matching_count" == 1 ]]
+}
+
 set_ssh_mode() {
+  local configured_allowed_signers derived_public_key observed_fingerprint observed_public_key
+  local ssh_allowed_signers="$HOME/GIT/_Perso/dotfiles/.ssh/allowed_signers"
+  configured_allowed_signers="$(
+    git config --global --get gpg.ssh.allowedSignersFile 2>/dev/null || true
+  )"
+  if [[ -n "$configured_allowed_signers" &&
+    "$configured_allowed_signers" != "$ssh_allowed_signers_config" ]]; then
+    echo "git-signing-mode: allowed signers config drift; expected ${ssh_allowed_signers_config}" >&2
+    exit 1
+  fi
   if [[ ! -f "${ssh_key}" ]]; then
     echo "git-signing-mode: missing SSH private key at ${ssh_key}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${ssh_key}.pub" ]]; then
+    echo "git-signing-mode: missing SSH public key at ${ssh_key}.pub" >&2
+    exit 1
+  fi
+  observed_public_key="$(awk 'NF >= 2 { print $1 " " $2; exit }' "${ssh_key}.pub")"
+  observed_fingerprint="$(
+    ssh-keygen -lf "${ssh_key}.pub" 2>/dev/null |
+      awk '{print $2}' || true
+  )"
+  derived_public_key="$(
+    ssh-keygen -y -f "$ssh_key" </dev/null 2>/dev/null |
+      awk 'NF >= 2 { print $1 " " $2; exit }' || true
+  )"
+  if [[ "$observed_public_key" != "$ssh_signing_public_key" ||
+    "$derived_public_key" != "$ssh_signing_public_key" ||
+    "$observed_fingerprint" != "$ssh_signing_fingerprint" ]]; then
+    echo "git-signing-mode: signing key drift; expected ${ssh_signing_fingerprint}" >&2
     exit 1
   fi
   if [[ ! -f "${ssh_allowed_signers}" ]]; then
     echo "git-signing-mode: missing allowed signers file at ${ssh_allowed_signers}" >&2
     exit 1
   fi
+  if ! ssh_allowed_signer_ready "${ssh_allowed_signers}"; then
+    echo "git-signing-mode: allowed signers drift at ${ssh_allowed_signers}" >&2
+    echo "expected exactly one entry: $(canonical_ssh_allowed_signer)" >&2
+    exit 1
+  fi
 
   git config --global gpg.format ssh
   git config --global gpg.program "${gpg_program}"
-  git config --global gpg.ssh.allowedSignersFile "${ssh_allowed_signers}"
-  git config --global user.signingkey "${ssh_key}"
+  git config --global gpg.ssh.allowedSignersFile "${ssh_allowed_signers_config}"
+  git config --global user.signingkey "${ssh_key_config}"
   git config --global commit.gpgsign true
   git config --global tag.gpgsign true
 
@@ -89,4 +159,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

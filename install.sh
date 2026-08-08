@@ -12,6 +12,12 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+SSH_SIGNING_PRINCIPAL='vincentkoc@ieee.org'
+SSH_SIGNING_NAMESPACES='fleet-cleanup-bundle-v1,git'
+SSH_SIGNING_PUBLIC_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMYJHwFnesHbwtPLErQBRMffbET0Wrbzh+PjkndZRNyy'
+SSH_SIGNING_FINGERPRINT='SHA256:OIEOnMWCJeKhWpBNlB42wwPuUG5gsC8Crq1ibnt7ylQ'
+SSH_ALLOWED_SIGNERS_CONFIG='~/GIT/_Perso/dotfiles/.ssh/allowed_signers'
+
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -498,8 +504,16 @@ setup_spec_symlink() {
     success "Symlinked ~/.spec to $sync_dir"
 }
 
+canonical_ssh_allowed_signer() {
+    printf '%s namespaces="%s" %s\n' \
+        "$SSH_SIGNING_PRINCIPAL" \
+        "$SSH_SIGNING_NAMESPACES" \
+        "$SSH_SIGNING_PUBLIC_KEY"
+}
+
 ensure_ssh_signing_trust_file() {
     local df_dir signing_format allowed_signers ssh_pub_key user_email
+    local configured_allowed_signers public_key fingerprint expected canonical_count matching_count
     df_dir="$(dotfiles_dir)"
     signing_format="$(git config --file "$df_dir/.gitconfig" --get gpg.format 2>/dev/null || true)"
 
@@ -507,35 +521,73 @@ ensure_ssh_signing_trust_file() {
         return
     fi
 
-    allowed_signers="$df_dir/.ssh/allowed_signers"
-    if [[ -f "$allowed_signers" ]]; then
-        success "SSH signing trust file present"
-        return
+    configured_allowed_signers="$(
+        git config --file "$df_dir/.gitconfig" --get gpg.ssh.allowedSignersFile 2>/dev/null || true
+    )"
+    if [[ "$configured_allowed_signers" != "$SSH_ALLOWED_SIGNERS_CONFIG" ]]; then
+        warn "Git allowed signers config drift: expected $SSH_ALLOWED_SIGNERS_CONFIG"
+        return 1
     fi
-
+    allowed_signers="$HOME/GIT/_Perso/dotfiles/.ssh/allowed_signers"
     ssh_pub_key="$HOME/.ssh/git_signing_vincentkoc_ieee.pub"
     user_email="$(git config --file "$df_dir/.gitconfig" --get user.email 2>/dev/null || true)"
     if [[ -z "$user_email" ]]; then
         user_email="$(git config --global --get user.email 2>/dev/null || true)"
     fi
+    expected="$(canonical_ssh_allowed_signer)"
 
-    warn "Missing SSH signing trust file: $allowed_signers"
-    if [[ -f "$ssh_pub_key" && -n "$user_email" ]]; then
-        cat <<EOF
-Create it with:
-  mkdir -p "$df_dir/.ssh"
-  printf '%s namespaces=\"git\" %s\n' "$user_email" "\$(cat \"$ssh_pub_key\")" > "$allowed_signers"
-
-Then rerun:
-  "$df_dir/install.sh"
-EOF
-    else
+    if [[ "$user_email" != "$SSH_SIGNING_PRINCIPAL" ]]; then
+        warn "Git signing principal drift: expected $SSH_SIGNING_PRINCIPAL"
+        return 1
+    fi
+    if [[ ! -f "$ssh_pub_key" ]]; then
         warn "Expected SSH public key not found at $ssh_pub_key"
-        warn "Expected Git email not found in $df_dir/.gitconfig or global git config"
-        info "Create $allowed_signers manually once your SSH key and Git email are set"
+        return 1
+    fi
+    public_key="$(awk 'NF >= 2 { print $1 " " $2; exit }' "$ssh_pub_key")"
+    fingerprint="$(ssh-keygen -lf "$ssh_pub_key" 2>/dev/null | awk '{print $2}')"
+    if [[ "$public_key" != "$SSH_SIGNING_PUBLIC_KEY" || "$fingerprint" != "$SSH_SIGNING_FINGERPRINT" ]]; then
+        warn "SSH signing public key drift: expected $SSH_SIGNING_FINGERPRINT"
+        return 1
     fi
 
-    return 0
+    if [[ -f "$allowed_signers" ]]; then
+        canonical_count="$(grep -Fxc "$expected" "$allowed_signers" || true)"
+        matching_count="$(
+            awk \
+                -v principal="$SSH_SIGNING_PRINCIPAL" \
+                -v key_type="${SSH_SIGNING_PUBLIC_KEY%% *}" \
+                -v key_blob="${SSH_SIGNING_PUBLIC_KEY#* }" \
+                '
+                $1 == principal {
+                    for (field = 2; field < NF; field++) {
+                        if ($field == key_type && $(field + 1) == key_blob) {
+                            count++
+                        }
+                    }
+                }
+                END { print count + 0 }
+                ' \
+                "$allowed_signers"
+        )"
+        if [[ "$canonical_count" == 1 && "$matching_count" == 1 ]]; then
+            success "SSH signing trust file authorizes Git and fleet cleanup bundles"
+            return 0
+        fi
+        warn "SSH signing trust file drift: $allowed_signers"
+    else
+        warn "Missing SSH signing trust file: $allowed_signers"
+    fi
+
+    cat <<EOF
+Expected exactly one canonical entry:
+  $expected
+
+Preserve unrelated entries, replace any entry for this principal and key,
+then rerun:
+  "$df_dir/install.sh"
+EOF
+    return 1
 }
 
 setup_codex_dotfiles() {
