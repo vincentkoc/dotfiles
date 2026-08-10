@@ -24,15 +24,23 @@ case "$command" in
     fi
     ;;
   list-windows)
-    if [[ " $* " == *" #{window_index}"* ]]; then
-      printf '1\t@1\n'
+    if [[ " $* " == *" #{window_id}"*"#{window_index}"* ]]; then
+      first_window_index="${TT_TEST_TMUX_FIRST_WINDOW_INDEX:-0}"
+      printf '@1\t%s\n' "$first_window_index"
+      printf '@2\t2\n@3\t3\n@4\t4\n@5\t5\n'
+    elif [[ " $* " == *" #{window_index}"* ]]; then
+      printf '1\t@1\n2\t@2\n3\t@3\n4\t@4\n5\t@5\n'
     elif [[ " $* " == *" #{window_id}"* ]]; then
-      printf '@1\n'
+      printf '@1\n@2\n@3\n@4\n@5\n'
     fi
     ;;
   list-panes)
     if [[ " $* " == *" #{pane_index}"* ]]; then
-      printf '0\t%%1\n'
+      if [[ " $* " == *" -t @5 "* ]]; then
+        printf '0\t%%25\n'
+      else
+        printf '0\t%%1\n'
+      fi
     elif [[ " $* " == *" #{pane_current_command} "* ]]; then
       printf 'zsh\n'
     elif [[ " $* " == *" #{pane_id} "* ]]; then

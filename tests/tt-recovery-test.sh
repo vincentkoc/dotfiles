@@ -38,7 +38,8 @@ snapshot="$temporary/cockpit.tsv"
 cp "$repo/tests/fixtures/tt-recovery/tmux" "$fake_tmux"
 chmod +x "$fake_tmux"
 
-printf 'cockpit:1.1\tcodex\t%s\tL1.1\tcodex\tfake-session\texact\tfake-session\n' "$temporary" >"$snapshot"
+printf 'cockpit:1.1\tcodex\t%s\tops.1\tcodex\tfake-session-1\texact\tfake-session-1\n' "$temporary" >"$snapshot"
+printf 'cockpit:5.1\tcodex\t%s\tL4.1\tcodex\tfake-session-5\texact\tfake-session-5\n' "$temporary" >>"$snapshot"
 env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
@@ -56,7 +57,9 @@ grep -Eq '^new-session .* -s cockpit ' "$tmux_log"
 grep -Eq '^set-option -t cockpit base-index 1$' "$tmux_log"
 grep -Eq '^set-option -t cockpit pane-base-index 1$' "$tmux_log"
 grep -Eq '^move-window -s @1 -t cockpit:1$' "$tmux_log"
-grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session; exec /bin/sh -il$' "$tmux_log"
+grep -Eq '^new-window .* -n L4 ' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session-1; exec /bin/sh -il$' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %25 -c .*codex resume --no-alt-screen fake-session-5; exec /bin/sh -il$' "$tmux_log"
 if grep -Eq '^(set|set-option|set-hook) -g' "$tmux_log"; then
   printf 'recovery rewrote global server configuration\n' >&2
   exit 1
@@ -69,6 +72,7 @@ env -u TMUX \
   TT_TMUX_BIN="$fake_tmux" \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
+  TT_TEST_TMUX_FIRST_WINDOW_INDEX=1 \
   "$tt" recover cockpit "$snapshot"
 
 if grep -Eq '(^| )(kill-server|kill-session)( |$)' "$tmux_log"; then
@@ -77,8 +81,13 @@ if grep -Eq '(^| )(kill-server|kill-session)( |$)' "$tmux_log"; then
 fi
 grep -Eq '^set-option -t cockpit base-index 1$' "$tmux_log"
 grep -Eq '^set-option -t cockpit pane-base-index 1$' "$tmux_log"
-grep -Eq '^move-window -s @1 -t cockpit:1$' "$tmux_log"
-grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session; exec /bin/sh -il$' "$tmux_log"
+if grep -Eq '^move-window -s @1 -t cockpit:1$' "$tmux_log"; then
+  printf 'recovery moved a first window already at index 1\n' >&2
+  exit 1
+fi
+grep -Eq '^new-window .* -n L4 ' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %1 -c .*codex resume --no-alt-screen fake-session-1; exec /bin/sh -il$' "$tmux_log"
+grep -Eq '^respawn-pane -k -t %25 -c .*codex resume --no-alt-screen fake-session-5; exec /bin/sh -il$' "$tmux_log"
 
 : >"$tmux_log"
 agent_manifest="$temporary/agents.tsv"
@@ -112,6 +121,7 @@ env -u TMUX \
   TT_TMUX_BIN="$fake_tmux" \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
+  TT_TEST_TMUX_FIRST_WINDOW_INDEX=1 \
   "$tt" recover agents "$agent_manifest" factory2
 
 if grep -Eq '(^| )(kill-server|kill-session)( |$)' "$tmux_log"; then
@@ -120,7 +130,10 @@ if grep -Eq '(^| )(kill-server|kill-session)( |$)' "$tmux_log"; then
 fi
 grep -Eq '^set-option -t factory2 base-index 1$' "$tmux_log"
 grep -Eq '^set-option -t factory2 pane-base-index 1$' "$tmux_log"
-grep -Eq '^move-window -s @1 -t factory2:1$' "$tmux_log"
+if grep -Eq '^move-window -s @1 -t factory2:1$' "$tmux_log"; then
+  printf 'agent recovery moved a first window already at index 1\n' >&2
+  exit 1
+fi
 grep -Eq '^respawn-pane -k -t %1 -c .*printf ready; exec /bin/sh -il$' "$tmux_log"
 
 : >"$tmux_log"
