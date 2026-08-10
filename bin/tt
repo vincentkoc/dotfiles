@@ -1233,17 +1233,33 @@ label_grid_window() {
   fi
 }
 
+cockpit_window_names() {
+  printf '%s\n' ops L1 L2 L3 L4
+}
+
+cockpit_topology_label() {
+  cockpit_window_names | paste -sd/ -
+}
+
+is_cockpit_window_name() {
+  local candidate="$1"
+  local expected
+
+  while IFS= read -r expected; do
+    [[ "$candidate" == "$expected" ]] && return 0
+  done < <(cockpit_window_names)
+  return 1
+}
+
 refresh_ops_labels() {
   local session="$1"
   local window_id window_name
 
   while IFS=$'\t' read -r window_id window_name; do
     [[ -n "$window_id" && -n "$window_name" ]] || continue
-    case "$window_name" in
-      ops|L1|L2|L3)
-        label_grid_window "$window_id" "$window_name"
-        ;;
-    esac
+    if is_cockpit_window_name "$window_name"; then
+      label_grid_window "$window_id" "$window_name"
+    fi
   done < <("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}	#W' 2>/dev/null)
 }
 
@@ -1277,16 +1293,24 @@ schedule_ops_shell_upgrade() {
 
 ops_session_valid() {
   local session="$1"
-  local window_count bad_count window_id window_name
+  local expected_names expected_count window_count bad_count window_id window_name
 
+  expected_names="$(cockpit_window_names | paste -sd' ' -)"
+  expected_count="$(cockpit_window_names | wc -l | tr -d ' ')"
   window_count="$("$TMUX_BIN" list-windows -t "$session" -F '#W' 2>/dev/null | wc -l | tr -d ' ')"
-  [[ "$window_count" == "4" ]] || return 1
+  [[ "$window_count" == "$expected_count" ]] || return 1
 
-  bad_count="$("$TMUX_BIN" list-windows -t "$session" -F '#W #{window_panes}' 2>/dev/null | awk '
-    $1 !~ /^(ops|L[123])$/ || $2 != 6 { bad++ }
+  bad_count="$("$TMUX_BIN" list-windows -t "$session" -F '#W #{window_panes}' 2>/dev/null | awk -v expected="$expected_names" '
+    BEGIN {
+      count = split(expected, names, " ")
+      for (i = 1; i <= count; i++) allowed[names[i]] = 1
+    }
+    !($1 in allowed) || $2 != 6 { bad++ }
     { seen[$1]++ }
     END {
-      if (seen["ops"] != 1 || seen["L1"] != 1 || seen["L2"] != 1 || seen["L3"] != 1) bad++
+      for (name in allowed) {
+        if (seen[name] != 1) bad++
+      }
       print bad + 0
     }')"
   [[ "$bad_count" == "0" ]] || return 1
@@ -1383,12 +1407,13 @@ create_ops_detached() {
   build_studio_layout "$window_id" "$bootstrap_command"
   label_grid_window "$window_id" ops
 
-  for window in L1 L2 L3; do
+  while IFS= read -r window; do
+    [[ "$window" == "ops" ]] && continue
     "$TMUX_BIN" new-window -d -t "$session:" -n "$window" -c "$start_dir" "$bootstrap_command"
     window_id="$session:$window"
     build_studio_layout "$window_id" "$bootstrap_command"
     label_grid_window "$window_id" "$window"
-  done
+  done < <(cockpit_window_names)
 
   if [[ "$skip_shell_upgrade" != "--no-shell-upgrade" ]]; then
     schedule_ops_shell_upgrade "$session"
@@ -3109,13 +3134,18 @@ tmux_server_running() {
 set_recovery_session_indices() {
   local session="$1"
   local first_window_id="$2"
+  local first_window_index
 
   # `base-index` and `pane-base-index` are window options. Keep them local to
-  # the recovered session, then explicitly move the initial window to :1.
+  # the recovered session, then move the initial window only when needed.
   # Existing live sessions retain their indexing and layout.
   "$TMUX_BIN" set-option -t "$session" base-index 1
   "$TMUX_BIN" set-option -t "$session" pane-base-index 1
-  "$TMUX_BIN" move-window -s "$first_window_id" -t "$session:1"
+  first_window_index="$("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}	#{window_index}' 2>/dev/null |
+    awk -F $'\t' -v wanted="$first_window_id" '$1 == wanted { print $2; exit }')"
+  if [[ "$first_window_index" != "1" ]]; then
+    "$TMUX_BIN" move-window -s "$first_window_id" -t "$session:1"
+  fi
 }
 
 recovery_pane_target() {
@@ -3545,9 +3575,10 @@ prompt_session_name() {
 }
 
 run_menu() {
-  local session selection summary
+  local session selection summary cockpit_option
   local -a options=()
 
+  cockpit_option="new     [cockpit] $(cockpit_topology_label) cockpit"
   while IFS= read -r session; do
     [[ -n "$session" ]] || continue
     summary="$(session_summary "$session")"
@@ -3555,7 +3586,7 @@ run_menu() {
   done < <(list_sessions)
 
   options+=("new     [ai]     agent cockpit (3x2)")
-  options+=("new     [cockpit] ops/L1/L2/L3 cockpit")
+  options+=("$cockpit_option")
   options+=("new     [shell]  normal tmux session")
   options+=("new     [mobile] phone-sized tmux session")
   options+=("reset   [ai]     kill server + fresh agent cockpit")
@@ -3589,7 +3620,7 @@ run_menu() {
       [[ -n "$session" ]] || exit 1
       create_studio "$session"
       ;;
-    "new     [cockpit] ops/L1/L2/L3 cockpit")
+    "$cockpit_option")
       session="$(prompt_session_name "cockpit session" "cockpit")"
       [[ -n "$session" ]] || exit 1
       create_ops "$session"
