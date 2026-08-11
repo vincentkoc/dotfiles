@@ -141,7 +141,9 @@ PATH="$fake_bin:$PATH" \
   "$tt" codex-snapshot "$snapshot" --quiet
 [[ "$(cksum "$snapshot")" == "$before_snapshot" ]]
 [[ "$(find "$history_dir" -maxdepth 1 -type f -name '*.tsv' | wc -l | tr -d ' ')" == "$before_history" ]]
-[[ ! -s "$tmux_log" ]]
+# A short-lived lock owner is retried within the bounded budget, then a full
+# collection runs. The unchanged manifest still does not create history churn.
+[[ -s "$tmux_log" ]]
 wait "$lock_holder"
 
 # A timed-out collection does not replace the current TSV or create history.
