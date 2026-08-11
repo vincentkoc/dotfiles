@@ -2285,12 +2285,31 @@ count_snapshot_history() {
   find "$dir" -maxdepth 1 -type f -name '*.tsv' 2>/dev/null | wc -l | tr -d ' '
 }
 
+portable_stat_value() {
+  local bsd_format="$1"
+  local gnu_format="$2"
+  local path="$3"
+  local value
+
+  if value="$(stat -f "$bsd_format" -- "$path" 2>/dev/null)" &&
+    [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if value="$(stat -c "$gnu_format" -- "$path" 2>/dev/null)" &&
+    [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
+}
+
 file_age_seconds() {
   local file="$1"
   local now mtime
   [[ -f "$file" ]] || return 1
   now="$(date +%s)"
-  mtime="$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || true)"
+  mtime="$(portable_stat_value %m %Y "$file" 2>/dev/null || true)"
   [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "$((now - mtime))"
 }
@@ -3284,11 +3303,11 @@ clear_agent_autosave_hooks() {
 }
 
 codex_snapshot_timer_file_uid() {
-  stat -f %u "$1" 2>/dev/null || stat -c %u "$1" 2>/dev/null
+  portable_stat_value %u %u "$1"
 }
 
 codex_snapshot_timer_file_size() {
-  stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null
+  portable_stat_value %z %s "$1"
 }
 
 codex_snapshot_timer_log() {
