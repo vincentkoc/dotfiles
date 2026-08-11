@@ -51,6 +51,25 @@ wait_until() {
   return 1
 }
 
+portable_stat_value() {
+  local bsd_format="$1"
+  local gnu_format="$2"
+  local path="$3"
+  local value
+
+  if value="$(stat -f "$bsd_format" -- "$path" 2>/dev/null)" &&
+    [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  if value="$(stat -c "$gnu_format" -- "$path" 2>/dev/null)" &&
+    [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
+}
+
 start_case() {
   local name="$1"
   CASE_DIR="$temporary/$name"
@@ -228,7 +247,7 @@ token="$(timer_token)"
 server_pid="$("$tmux_bin" -L "$CASE_SOCKET" display-message -p '#{pid}')"
 [[ "$(awk -F '\t' '{print $1, $3, $4}' "$state_file")" == "v1 $server_pid $(id -u)" ]]
 [[ "$(timer_max_age)" == "7" ]]
-[[ "$(stat -f %Lp "$state_file" 2>/dev/null || stat -c %a "$state_file")" == "600" ]]
+[[ "$(portable_stat_value %Lp %a "$state_file")" == "600" ]]
 kill -0 "$pid"
 timer_process_matches "$pid" "$token"
 timer_has_server_ancestor "$pid" "$server_pid"
@@ -346,8 +365,7 @@ export TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=220
 touch "$CASE_FAIL"
 sleep 5
 rm -f "$CASE_FAIL"
-log_size="$(stat -f %z "$CASE_STATE/tt/codex-cockpit.timer.log" 2>/dev/null ||
-  stat -c %s "$CASE_STATE/tt/codex-cockpit.timer.log")"
+log_size="$(portable_stat_value %z %s "$CASE_STATE/tt/codex-cockpit.timer.log")"
 (( log_size <= 1024 ))
 
 case_tt autosave off
