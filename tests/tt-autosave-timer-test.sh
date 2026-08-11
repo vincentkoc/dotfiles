@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_tt="$repo/bin/tt"
@@ -9,6 +9,7 @@ temporary="$(mktemp -d)"
 production_before="$temporary/production.before"
 production_after="$temporary/production.after"
 case_sockets=()
+case_socket_paths=()
 unrelated_pid=""
 
 if [[ -z "$tmux_bin" ]]; then
@@ -25,17 +26,56 @@ production_snapshot() {
 }
 
 cleanup() {
-  local socket
+  local index socket socket_path
   if [[ -n "$unrelated_pid" ]]; then
     kill "$unrelated_pid" 2>/dev/null || true
     wait "$unrelated_pid" 2>/dev/null || true
   fi
-  for socket in "${case_sockets[@]}"; do
+  for index in "${!case_sockets[@]}"; do
+    socket="${case_sockets[$index]}"
+    socket_path="${case_socket_paths[$index]:-}"
     "$tmux_bin" -L "$socket" kill-server 2>/dev/null || true
+    if [[ -n "$socket_path" && "${socket_path##*/}" == "$socket" ]]; then
+      rm -f -- "$socket_path"
+    fi
   done
   rm -rf "$temporary"
 }
 trap cleanup EXIT
+
+failure_diagnostics() {
+  local status="$1"
+  local line="$2"
+  local command="$3"
+  local file
+
+  trap - ERR
+  set +e
+  printf 'tt_autosave_timer_test=failed status=%s line=%s command=%q\n' \
+    "$status" "$line" "$command" >&2
+  printf 'case_dir=%s socket=%s socket_path=%s\n' \
+    "${CASE_DIR:-unset}" "${CASE_SOCKET:-unset}" "${CASE_SOCKET_PATH:-unset}" >&2
+  for file in \
+    "${CASE_EVENTS:-}" \
+    "${CASE_STATE:-}/tt/codex-cockpit.timer.pid" \
+    "${CASE_STATE:-}/tt/codex-cockpit.timer.log"; do
+    if [[ -n "$file" && -f "$file" ]]; then
+      printf '%s\n' "== $file ==" >&2
+      sed -n '1,240p' "$file" >&2
+    fi
+  done
+  if [[ -n "${CASE_SOCKET:-}" ]]; then
+    printf '%s\n' "== tmux $CASE_SOCKET ==" >&2
+    "$tmux_bin" -L "$CASE_SOCKET" list-sessions \
+      -F 's|#{session_id}|#{session_name}|#{session_windows}|#{session_attached}' >&2
+    "$tmux_bin" -L "$CASE_SOCKET" list-windows -a \
+      -F 'w|#{session_id}|#{window_id}|#{window_index}|#{window_name}|#{window_layout}' >&2
+    "$tmux_bin" -L "$CASE_SOCKET" list-panes -a \
+      -F 'p|#{session_id}|#{window_id}|#{pane_id}|#{pane_index}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' >&2
+  fi
+  exit "$status"
+}
+trap 'failure_diagnostics "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 wait_until() {
   local attempts="$1"
@@ -133,6 +173,8 @@ SH
   } >"$CASE_DIR/bin/tt-codex-snapshot-writer"
   chmod +x "$CASE_TT" "$CASE_DIR/bin/tt-codex-snapshot-writer" "$CASE_DIR/bin/tt-codex-snapshot-writer.real"
   "$tmux_bin" -L "$CASE_SOCKET" new-session -d -s timer-test 'exec sleep 300'
+  CASE_SOCKET_PATH="$("$tmux_bin" -L "$CASE_SOCKET" display-message -p '#{socket_path}')"
+  case_socket_paths+=("$CASE_SOCKET_PATH")
   "$tmux_bin" -L "$CASE_SOCKET" set-option -t timer-test @tt_profile studio
 }
 
