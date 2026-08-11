@@ -2362,7 +2362,7 @@ apply_agent_manifest_metadata() {
 write_agent_cockpit_state() {
   local output="${1:-}"
   local quiet="${2:-}"
-  local seed tmp session profile window pane window_panes dir start_command current_command live_title base_title seed_title seed_command command kind
+  local seed tmp panes session profile window pane window_panes dir start_command current_command live_title base_title seed_title seed_command command kind
   local rows=0
 
   [[ -n "$output" ]] || output="$(agent_cockpit_state_file)"
@@ -2373,7 +2373,13 @@ write_agent_cockpit_state() {
 
   mkdir -p "$(dirname "$output")"
   tmp="$output.$$"
+  panes="$tmp.panes"
   printf '# session\tpane\tdir\ttitle\tcommand\n' > "$tmp"
+  if ! "$TMUX_BIN" list-panes -a -F '#{session_name}	#{@tt_profile}	#{window_index}	#{pane_index}	#{window_panes}	#{pane_current_path}	#{pane_start_command}	#{pane_current_command}	#{pane_title}	#{@tt_base_title}' >"$panes" 2>/dev/null; then
+    rm -f "$tmp" "$panes"
+    printf 'tt snapshot failed: could not list tmux panes\n' >&2
+    return 1
+  fi
 
   while IFS=$'\t' read -r session profile window pane window_panes dir start_command current_command live_title base_title || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" ]] || continue
@@ -2409,7 +2415,8 @@ write_agent_cockpit_state() {
     "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_command "$command" 2>/dev/null || true
     "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_kind "$kind" 2>/dev/null || true
     set_pane_git_label "$session:1.$pane" "$dir"
-  done < <("$TMUX_BIN" list-panes -a -F '#{session_name}	#{@tt_profile}	#{window_index}	#{pane_index}	#{window_panes}	#{pane_current_path}	#{pane_start_command}	#{pane_current_command}	#{pane_title}	#{@tt_base_title}' 2>/dev/null || true)
+  done <"$panes"
+  rm -f "$panes"
 
   if (( rows == 0 )); then
     rm -f "$tmp"
@@ -2429,7 +2436,7 @@ write_agent_cockpit_state() {
 write_codex_cockpit_snapshot() {
   local output="${1:-}"
   local quiet="${2:-}"
-  local writer status
+  local writer status attempts delay attempt=1
 
   [[ -n "$output" ]] || output="$(codex_cockpit_snapshot_file)"
   mkdir -p "$(dirname "$output")"
@@ -2440,19 +2447,28 @@ write_codex_cockpit_snapshot() {
     return 1
   fi
 
-  if TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" "$writer" "$output"; then
-    status=0
-  else
-    status=$?
-  fi
+  attempts="${TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS:-5}"
+  delay="${TT_CODEX_SNAPSHOT_LOCK_RETRY_DELAY_SECONDS:-1}"
+  case "$attempts" in ''|*[!0-9]*) attempts=5 ;; esac
+  case "$delay" in ''|*[!0-9.]*) delay=1 ;; esac
+  (( attempts > 0 )) || attempts=1
 
-  # EX_TEMPFAIL means a live writer owns the host-local flock. It has already
-  # left the current TSV/history untouched, so autosave should simply coalesce.
+  while (( attempt <= attempts )); do
+    if TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" "$writer" "$output"; then
+      status=0
+    else
+      status=$?
+    fi
+    (( status == 75 && attempt < attempts )) || break
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+
   if (( status == 75 )); then
     if [[ "$quiet" != "--quiet" ]]; then
-      printf 'tt codex snapshot skipped: another writer is active\n' >&2
+      printf 'tt codex snapshot failed: writer remained busy after %s attempts\n' "$attempts" >&2
     fi
-    return 0
+    return 75
   fi
   if (( status != 0 )); then
     return "$status"
@@ -2462,6 +2478,17 @@ write_codex_cockpit_snapshot() {
     printf 'tt codex snapshot saved: %s\n' "$output" >&2
   fi
   refresh_agent_window_state
+}
+
+autosave_snapshot_cycle() {
+  local writer="$SCRIPT_DIR/tt-codex-snapshot-writer"
+
+  if [[ ! -x "$writer" ]]; then
+    printf 'tt autosave failed: missing executable writer %s\n' "$writer" >&2
+    return 1
+  fi
+  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet || return
+  write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet
 }
 
 show_codex_snapshot() {
@@ -2535,16 +2562,24 @@ popup_view() {
 
 status_report() {
   local snapshot agent_snapshot timer="stopped" autosave="off"
-  local snapshot_age agent_age history_count history_max
+  local snapshot_age agent_age history_count history_max success_age="missing" identity
   local panes codex claude exact unresolved shell waiting spinning menu_left menu_right static_status mouse copy_modes mobile_mode
 
   snapshot="$(codex_cockpit_snapshot_file)"
   agent_snapshot="$(agent_cockpit_state_file)"
   history_max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
 
-  if codex_snapshot_timer_health; then
+  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  if [[ -n "$identity" ]]; then
+    codex_snapshot_timer_success_fresh "$identity" || true
+    if [[ "$TT_TIMER_SUCCESS_AGE" =~ ^[0-9]+$ ]]; then
+      success_age="$(human_age "$TT_TIMER_SUCCESS_AGE") ago"
+    fi
+  fi
+  if [[ -n "$identity" ]] && codex_snapshot_timer_identity_valid "$identity"; then
+    TT_TIMER_PID="${identity%%$'\t'*}"
     timer="running pid=$TT_TIMER_PID"
-    if agent_autosave_hooks_healthy; then
+    if codex_snapshot_timer_success_fresh "$identity" && agent_autosave_hooks_healthy; then
       autosave="on"
     else
       autosave="degraded"
@@ -2594,11 +2629,14 @@ status_report() {
     static_status="shell-backed format found"
   fi
   mouse="$("$TMUX_BIN" show -gqv mouse 2>/dev/null || printf 'unknown')"
-  copy_modes="$("$TMUX_BIN" list-panes -a -F '#{pane_in_mode}' 2>/dev/null | awk '$1 == "1" {n++} END {print n+0}')"
+  copy_modes="$("$TMUX_BIN" list-panes -a -F '#{pane_in_mode}' 2>/dev/null |
+    awk '$1 == "1" {n++} END {print n+0}' || true)"
+  [[ -n "$copy_modes" ]] || copy_modes=0
   mobile_mode="direct pane attach"
 
   printf 'autosave: %s\n' "$autosave"
   printf 'timer: %s\n' "$timer"
+  printf 'last success: %s\n' "$success_age"
   printf 'snapshot: %s (%s)\n' "$snapshot" "$snapshot_age"
   printf 'agent snapshot: %s (%s)\n' "$agent_snapshot" "$agent_age"
   printf 'history: %s/%s codex-cockpit files\n' "$history_count" "$history_max"
@@ -2802,13 +2840,17 @@ codex_snapshot_timer_loop() {
   local token="${1:-}"
   local expected_server_pid="${2:-}"
   local expected_uid="${3:-}"
+  local success_epoch="${4:-}"
+  local max_age="${5:-}"
   local interval="${TT_CODEX_SNAPSHOT_INTERVAL:-300}"
   local minimum="${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}"
-  local stop_requested=0
+  local stop_requested=0 failed=0 sleeper=""
 
   [[ "$token" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
   [[ "$expected_server_pid" =~ ^[0-9]+$ ]] || return 2
   [[ "$expected_uid" =~ ^[0-9]+$ ]] || return 2
+  [[ "$success_epoch" =~ ^[0-9]+$ ]] || return 2
+  [[ "$max_age" =~ ^[0-9]+$ ]] || return 2
   [[ "$(id -u)" == "$expected_uid" ]] || return 2
 
   case "$interval" in
@@ -2824,13 +2866,13 @@ codex_snapshot_timer_loop() {
   TT_TIMER_LOOP_TOKEN="$token"
   TT_TIMER_LOOP_SERVER_PID="$expected_server_pid"
   TT_TIMER_LOOP_UID="$expected_uid"
-  trap 'stop_requested=1' TERM INT
+  trap 'stop_requested=1; [[ -z "${sleeper:-}" ]] || kill "$sleeper" 2>/dev/null || true' TERM INT
   trap ':' HUP
   trap 'codex_snapshot_timer_cleanup "$TT_TIMER_LOOP_TOKEN" "$TT_TIMER_LOOP_SERVER_PID" "$TT_TIMER_LOOP_UID"' EXIT
 
   codex_snapshot_timer_server_matches "$expected_server_pid" || return 1
   [[ "$(codex_snapshot_timer_desired_token 2>/dev/null || true)" == "$token" ]] || return 1
-  codex_snapshot_timer_write_state "$$" "$expected_server_pid" "$expected_uid" "$token" || return 1
+  codex_snapshot_timer_write_state "$$" "$expected_server_pid" "$expected_uid" "$token" "$success_epoch" "$max_age" || return 1
   codex_snapshot_timer_log "start pid=$$ server=$expected_server_pid token=$token"
 
   while (( stop_requested == 0 )); do
@@ -2842,10 +2884,34 @@ codex_snapshot_timer_loop() {
       codex_snapshot_timer_log "stop pid=$$ reason=generation-changed"
       break
     fi
-    if ! write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet; then
-      codex_snapshot_timer_log "snapshot-failed pid=$$"
+    sleep "$interval" &
+    sleeper=$!
+    wait "$sleeper" 2>/dev/null || true
+    sleeper=""
+    (( stop_requested == 0 )) || break
+    if ! codex_snapshot_timer_server_matches "$expected_server_pid"; then
+      codex_snapshot_timer_log "stop pid=$$ reason=server-mismatch"
+      break
     fi
-    sleep "$interval" || true
+    if [[ "$(codex_snapshot_timer_desired_token 2>/dev/null || true)" != "$token" ]]; then
+      codex_snapshot_timer_log "stop pid=$$ reason=generation-changed"
+      break
+    fi
+    if autosave_snapshot_cycle; then
+      success_epoch="$(date +%s)"
+      if ! codex_snapshot_timer_write_state "$$" "$expected_server_pid" "$expected_uid" "$token" "$success_epoch" "$max_age"; then
+        codex_snapshot_timer_log "cycle-failed pid=$$ reason=state-write"
+        failed=1
+        continue
+      fi
+      if (( failed != 0 )); then
+        codex_snapshot_timer_log "recovered pid=$$"
+      fi
+      failed=0
+    else
+      codex_snapshot_timer_log "cycle-failed pid=$$ reason=snapshot"
+      failed=1
+    fi
   done
 }
 
@@ -3139,23 +3205,41 @@ agent_autosave_hooks_healthy() {
 }
 
 install_agent_autosave_hooks() {
-  local self stopped_identity=""
+  local self stopped_identity="" identity success_epoch max_age hooks_were_healthy=0 started_new=0
   self="$(tt_self_command)"
 
-  install_agent_status_menu
-  clear_legacy_shell_status_widgets
-  set_agent_window_status_formats
-  sync_pane_markers all
-  refresh_agent_window_state
-  enforce_static_tmux_status --quiet || true
+  [[ -x "$SCRIPT_DIR/tt-codex-snapshot-writer" ]] || {
+    printf 'tt autosave failed: missing executable writer %s\n' "$SCRIPT_DIR/tt-codex-snapshot-writer" >&2
+    return 1
+  }
+  autosave_snapshot_cycle || return
+  success_epoch="$(date +%s)"
+  max_age="$(codex_snapshot_timer_max_age)"
+  agent_autosave_hooks_healthy && hooks_were_healthy=1
 
   if ! codex_snapshot_timer_lock_acquire; then
     echo "tt: timed out waiting for autosave timer control lock" >&2
     return 1
   fi
-  if ! start_codex_snapshot_timer_locked || ! set_agent_autosave_hooks "$self"; then
-    unset_agent_autosave_hooks
-    stopped_identity="$(stop_codex_snapshot_timer_locked 2>/dev/null || true)"
+  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  if [[ -n "$identity" ]] && codex_snapshot_timer_identity_valid "$identity"; then
+    codex_snapshot_timer_rewrite_success "$identity" "$success_epoch" "$max_age" || {
+      codex_snapshot_timer_lock_release
+      echo "tt: autosave was not enabled; timer state refresh failed" >&2
+      return 1
+    }
+  elif ! start_codex_snapshot_timer_locked "$success_epoch" "$max_age"; then
+    codex_snapshot_timer_lock_release
+    echo "tt: autosave was not enabled; timer failed health checks" >&2
+    return 1
+  else
+    started_new=1
+  fi
+  if ! set_agent_autosave_hooks "$self"; then
+    (( hooks_were_healthy != 0 )) || unset_agent_autosave_hooks
+    if (( started_new != 0 )); then
+      stopped_identity="$(stop_codex_snapshot_timer_locked 2>/dev/null || true)"
+    fi
     codex_snapshot_timer_lock_release
     if [[ -n "$stopped_identity" ]]; then
       codex_snapshot_timer_stop_identity "$stopped_identity"
@@ -3165,6 +3249,13 @@ install_agent_autosave_hooks() {
     return 1
   fi
   codex_snapshot_timer_lock_release
+
+  install_agent_status_menu
+  clear_legacy_shell_status_widgets
+  set_agent_window_status_formats
+  sync_pane_markers all
+  refresh_agent_window_state
+  enforce_static_tmux_status --quiet || true
 }
 
 clear_agent_autosave_hooks() {
@@ -3223,14 +3314,15 @@ codex_snapshot_timer_log() {
 
 codex_snapshot_timer_read_state() {
   local state_file="${1:-$(codex_cockpit_timer_pid_file)}"
-  local version pid server_pid uid token extra
+  local version pid server_pid uid token success_epoch max_age extra
 
   [[ -f "$state_file" && ! -L "$state_file" ]] || return 1
   [[ "$(codex_snapshot_timer_file_uid "$state_file" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
-  IFS=$'\t' read -r version pid server_pid uid token extra <"$state_file" || return 1
+  IFS=$'\t' read -r version pid server_pid uid token success_epoch max_age extra <"$state_file" || return 1
   [[ "$version" == "v1" && "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ &&
-    "$uid" =~ ^[0-9]+$ && "$token" =~ ^[A-Za-z0-9._-]+$ && -z "${extra:-}" ]] || return 1
-  printf '%s\t%s\t%s\t%s\n' "$pid" "$server_pid" "$uid" "$token"
+    "$uid" =~ ^[0-9]+$ && "$token" =~ ^[A-Za-z0-9._-]+$ &&
+    "$success_epoch" =~ ^[0-9]+$ && "$max_age" =~ ^[0-9]+$ && -z "${extra:-}" ]] || return 1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$server_pid" "$uid" "$token" "$success_epoch" "$max_age"
 }
 
 codex_snapshot_timer_write_state() {
@@ -3238,6 +3330,8 @@ codex_snapshot_timer_write_state() {
   local server_pid="$2"
   local uid="$3"
   local token="$4"
+  local success_epoch="$5"
+  local max_age="$6"
   local state_file dir tmp
 
   state_file="$(codex_cockpit_timer_pid_file)"
@@ -3245,11 +3339,44 @@ codex_snapshot_timer_write_state() {
   mkdir -p "$dir" || return 1
   tmp="$(mktemp "$dir/.timer-state.XXXXXX")" || return 1
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  if ! printf 'v1\t%s\t%s\t%s\t%s\n' "$pid" "$server_pid" "$uid" "$token" >"$tmp" ||
+  if ! printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$server_pid" "$uid" "$token" "$success_epoch" "$max_age" >"$tmp" ||
     ! mv -f "$tmp" "$state_file"; then
     rm -f "$tmp"
     return 1
   fi
+}
+
+codex_snapshot_timer_max_age() {
+  local interval="${TT_CODEX_SNAPSHOT_INTERVAL:-300}"
+  local minimum="${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}"
+  local timeout="${TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS:-30}"
+  case "$interval" in ''|*[!0-9]*) interval=300 ;; esac
+  case "$minimum" in ''|*[!0-9]*) minimum=30 ;; esac
+  case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
+  (( interval >= minimum )) || interval="$minimum"
+  printf '%s\n' "$((interval * 2 + timeout))"
+}
+
+codex_snapshot_timer_success_fresh() {
+  local identity="$1"
+  local pid server_pid uid token success_epoch max_age extra now
+  TT_TIMER_SUCCESS_AGE=""
+  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
+  [[ "$success_epoch" =~ ^[0-9]+$ && "$max_age" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  TT_TIMER_SUCCESS_AGE=$((now - success_epoch))
+  (( TT_TIMER_SUCCESS_AGE >= 0 && TT_TIMER_SUCCESS_AGE <= max_age ))
+}
+
+codex_snapshot_timer_rewrite_success() {
+  local identity="$1"
+  local success_epoch="$2"
+  local max_age="$3"
+  local pid server_pid uid token ignored current
+  IFS=$'\t' read -r pid server_pid uid token ignored <<<"$identity"
+  current="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  [[ "$current" == "$identity" ]] || return 1
+  codex_snapshot_timer_write_state "$pid" "$server_pid" "$uid" "$token" "$success_epoch" "$max_age"
 }
 
 codex_snapshot_timer_server_pid() {
@@ -3299,11 +3426,12 @@ codex_snapshot_timer_has_server_ancestor() {
 
 codex_snapshot_timer_identity_valid() {
   local identity="$1"
-  local pid server_pid uid token extra command desired current_server
+  local pid server_pid uid token success_epoch max_age extra command desired current_server
 
-  IFS=$'\t' read -r pid server_pid uid token extra <<<"$identity"
+  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
   [[ "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ && "$uid" =~ ^[0-9]+$ &&
-    "$token" =~ ^[A-Za-z0-9._-]+$ && -z "${extra:-}" ]] || return 1
+    "$token" =~ ^[A-Za-z0-9._-]+$ && "$success_epoch" =~ ^[0-9]+$ &&
+    "$max_age" =~ ^[0-9]+$ && -z "${extra:-}" ]] || return 1
   [[ "$uid" == "$(id -u)" ]] || return 1
   current_server="$(codex_snapshot_timer_server_pid 2>/dev/null || true)"
   [[ "$server_pid" == "$current_server" ]] || return 1
@@ -3322,6 +3450,7 @@ codex_snapshot_timer_health() {
   identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
   [[ -n "$identity" ]] || return 1
   codex_snapshot_timer_identity_valid "$identity" || return 1
+  codex_snapshot_timer_success_fresh "$identity" || return 1
   TT_TIMER_PID="${identity%%$'\t'*}"
 }
 
@@ -3382,6 +3511,8 @@ codex_snapshot_timer_launch_command() {
   local token="$1"
   local server_pid="$2"
   local uid="$3"
+  local success_epoch="$4"
+  local max_age="$5"
   local self command state_home
 
   self="$(tt_self_command)"
@@ -3394,11 +3525,17 @@ codex_snapshot_timer_launch_command() {
   command+=" TT_CODEX_SNAPSHOT_INTERVAL_MIN=$(shell_quote "${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}")"
   command+=" TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=$(shell_quote "${TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES:-65536}")"
   command+=" TT_SNAPSHOT_HISTORY_MAX=$(shell_quote "${TT_SNAPSHOT_HISTORY_MAX:-864}")"
-  command+=" $self codex-snapshot-loop $(shell_quote "$token") $server_pid $uid"
+  command+=" TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS=$(shell_quote "${TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS:-5}")"
+  command+=" TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS=$(shell_quote "${TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS:-30}")"
+  command+=" TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS=$(shell_quote "${TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS:-5}")"
+  command+=" TT_CODEX_SNAPSHOT_LOCK_RETRY_DELAY_SECONDS=$(shell_quote "${TT_CODEX_SNAPSHOT_LOCK_RETRY_DELAY_SECONDS:-1}")"
+  command+=" $self codex-snapshot-loop $(shell_quote "$token") $server_pid $uid $success_epoch $max_age"
   printf '%s\n' "$command"
 }
 
 start_codex_snapshot_timer_locked() {
+  local success_epoch="$1"
+  local max_age="$2"
   local state_file server_pid uid token command attempt identity
 
   if codex_snapshot_timer_health; then
@@ -3410,9 +3547,9 @@ start_codex_snapshot_timer_locked() {
   uid="$(id -u)"
   token="v1-$(date +%s)-$$-${RANDOM:-0}-${server_pid}"
   "$TMUX_BIN" set-option -gq @tt_codex_snapshot_timer_token "$token" || return 1
-  command="$(codex_snapshot_timer_launch_command "$token" "$server_pid" "$uid")"
+  command="$(codex_snapshot_timer_launch_command "$token" "$server_pid" "$uid" "$success_epoch" "$max_age")"
   if ! "$TMUX_BIN" run-shell -b "$command"; then
-    "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
+    codex_snapshot_timer_unset_token_if_matches "$token" 2>/dev/null || true
     return 1
   fi
 
@@ -3425,16 +3562,25 @@ start_codex_snapshot_timer_locked() {
     sleep 0.1
     attempt=$((attempt + 1))
   done
-  "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
+  codex_snapshot_timer_unset_token_if_matches "$token" 2>/dev/null || true
   codex_snapshot_timer_log "start-failed server=$server_pid token=$token"
-  [[ -f "$state_file" ]] || return 1
+  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  if [[ -n "$identity" ]] && [[ "$(printf '%s\n' "$identity" | cut -f4)" == "$token" ]]; then
+    rm -f "$state_file"
+    codex_snapshot_timer_stop_identity "$identity"
+  fi
   return 1
 }
 
 stop_codex_snapshot_timer_locked() {
-  local identity=""
+  local identity="" pid server_pid uid token rest
   identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
-  "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
+  if [[ -n "$identity" ]]; then
+    IFS=$'\t' read -r pid server_pid uid token rest <<<"$identity"
+    codex_snapshot_timer_unset_token_if_matches "$token" 2>/dev/null || true
+  else
+    "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
+  fi
   if [[ -z "$identity" ]]; then
     # Legacy pid-only records are retired without signalling an unproven process.
     if [[ -f "$(codex_cockpit_timer_pid_file)" && ! -L "$(codex_cockpit_timer_pid_file)" &&
@@ -3446,13 +3592,23 @@ stop_codex_snapshot_timer_locked() {
   printf '%s\n' "$identity"
 }
 
+codex_snapshot_timer_unset_token_if_matches() {
+  local expected="$1"
+  local current
+  expected="${expected%%$'\t'*}"
+  current="$(codex_snapshot_timer_desired_token 2>/dev/null || true)"
+  [[ -n "$expected" && "$current" == "$expected" ]] || return 0
+  "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token
+}
+
 codex_snapshot_timer_stop_identity() {
   local identity="$1"
-  local pid server_pid uid token extra attempt current command
+  local pid server_pid uid token success_epoch max_age extra attempt current command
 
-  IFS=$'\t' read -r pid server_pid uid token extra <<<"$identity"
+  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
   [[ "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ && "$uid" == "$(id -u)" &&
-    "$token" =~ ^[A-Za-z0-9._-]+$ && -z "${extra:-}" ]] || return 0
+    "$token" =~ ^[A-Za-z0-9._-]+$ && "$success_epoch" =~ ^[0-9]+$ &&
+    "$max_age" =~ ^[0-9]+$ && -z "${extra:-}" ]] || return 0
   kill -0 "$pid" 2>/dev/null || return 0
   [[ "$(codex_snapshot_timer_process_uid "$pid" 2>/dev/null || true)" == "$uid" ]] || return 0
   command="$(codex_snapshot_timer_process_command "$pid" 2>/dev/null || true)"
@@ -3479,11 +3635,19 @@ codex_snapshot_timer_remove_identity_state() {
 
   if codex_snapshot_timer_lock_acquire; then
     identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
-    if [[ "$identity" == "$expected" ]]; then
+    if codex_snapshot_timer_same_owner "$identity" "$expected"; then
       rm -f "$(codex_cockpit_timer_pid_file)"
     fi
     codex_snapshot_timer_lock_release
   fi
+}
+
+codex_snapshot_timer_same_owner() {
+  local first="$1" second="$2"
+  local fpid fserver fuid ftoken ignored spid sserver suid stoken
+  IFS=$'\t' read -r fpid fserver fuid ftoken ignored <<<"$first"
+  IFS=$'\t' read -r spid sserver suid stoken ignored <<<"$second"
+  [[ "$fpid" == "$spid" && "$fserver" == "$sserver" && "$fuid" == "$suid" && "$ftoken" == "$stoken" ]]
 }
 
 codex_snapshot_timer_cleanup() {
@@ -3495,9 +3659,10 @@ codex_snapshot_timer_cleanup() {
 
   if codex_snapshot_timer_lock_acquire; then
     identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
-    if [[ "$identity" == "$expected" ]]; then
+    if codex_snapshot_timer_same_owner "$identity" "$expected"; then
       rm -f "$(codex_cockpit_timer_pid_file)"
     fi
+    codex_snapshot_timer_unset_token_if_matches "$token" 2>/dev/null || true
     codex_snapshot_timer_lock_release
   fi
 }
@@ -4192,7 +4357,7 @@ case "${1:-}" in
     codex_restore_execute "${2:-preview}" "${3:-}" "${4:-}" "${5:-}"
     ;;
   codex-snapshot-loop)
-    codex_snapshot_timer_loop "${2:-}" "${3:-}" "${4:-}"
+    codex_snapshot_timer_loop "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}"
     ;;
   mosh-attn)
     sync_mosh_attention_panes "${2:-}"
@@ -4215,8 +4380,6 @@ case "${1:-}" in
     case "${2:-on}" in
       on)
         install_agent_autosave_hooks
-        write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
-        write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet
         ;;
       off)
         clear_agent_autosave_hooks

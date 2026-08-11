@@ -2,7 +2,8 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tt="$repo/bin/tt"
+source_tt="$repo/bin/tt"
+source_writer="$repo/bin/tt-codex-snapshot-writer"
 tmux_bin="${TT_TEST_REAL_TMUX_BIN:-$(command -v tmux || true)}"
 temporary="$(mktemp -d)"
 production_before="$temporary/production.before"
@@ -55,24 +56,65 @@ start_case() {
   CASE_DIR="$temporary/$name"
   CASE_SOCKET="tt-autosave-$name-$$"
   CASE_TMUX="$CASE_DIR/tmux"
+  CASE_TT="$CASE_DIR/bin/tt"
   CASE_STATE="$CASE_DIR/state"
-  CASE_FAIL="$CASE_DIR/fail-snapshot"
+  CASE_FAIL="$CASE_DIR/fail-agent"
+  CASE_FAIL_CODEX="$CASE_DIR/fail-codex"
+  CASE_BUSY_CODEX="$CASE_DIR/busy-codex"
   CASE_FAIL_HOOK="$CASE_DIR/fail-hook"
-  mkdir -p "$CASE_DIR"
+  CASE_EVENTS="$CASE_DIR/events"
+  mkdir -p "$CASE_DIR/bin"
   case_sockets+=("$CASE_SOCKET")
 
-  cat >"$CASE_TMUX" <<SH
-#!/usr/bin/env bash
-if [[ "\${1:-}" == "list-panes" && -e $(printf '%q' "$CASE_FAIL") ]]; then
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'events=%q\n' "$CASE_EVENTS"
+    printf 'fail_agent=%q\n' "$CASE_FAIL"
+    printf 'fail_hook=%q\n' "$CASE_FAIL_HOOK"
+    printf 'real_tmux=%q\n' "$tmux_bin"
+    printf 'socket=%q\n' "$CASE_SOCKET"
+    cat <<'SH'
+printf 'tmux:%s\n' "${1:-}" >>"$events"
+if [[ "${1:-}" == "list-panes" && -e "$fail_agent" ]]; then
   exit 1
 fi
-if [[ "\${1:-}" == "set-hook" && -e $(printf '%q' "$CASE_FAIL_HOOK") ]]; then
+if [[ "${1:-}" == "set-hook" && -e "$fail_hook" ]]; then
   exit 1
 fi
-exec $(printf '%q' "$tmux_bin") -L $(printf '%q' "$CASE_SOCKET") "\$@"
+exec "$real_tmux" -L "$socket" "$@"
 SH
+  } >"$CASE_TMUX"
   chmod +x "$CASE_TMUX"
+  cp "$source_tt" "$CASE_TT"
+  cp "$source_writer" "$CASE_DIR/bin/tt-codex-snapshot-writer.real"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'events=%q\n' "$CASE_EVENTS"
+    printf 'fail_codex=%q\n' "$CASE_FAIL_CODEX"
+    printf 'busy_codex=%q\n' "$CASE_BUSY_CODEX"
+    printf 'real_writer=%q\n' "$CASE_DIR/bin/tt-codex-snapshot-writer.real"
+    cat <<'SH'
+printf 'codex:start\n' >>"$events"
+if [[ -e "$fail_codex" ]]; then
+  exit 1
+fi
+if [[ -s "$busy_codex" ]]; then
+  remaining="$(cat "$busy_codex")"
+  if [[ "$remaining" =~ ^[0-9]+$ ]] && (( remaining > 0 )); then
+    printf '%s\n' "$((remaining - 1))" >"$busy_codex"
+    exit 75
+  fi
+fi
+if "$real_writer" "$@"; then
+  printf 'codex:success\n' >>"$events"
+else
+  exit $?
+fi
+SH
+  } >"$CASE_DIR/bin/tt-codex-snapshot-writer"
+  chmod +x "$CASE_TT" "$CASE_DIR/bin/tt-codex-snapshot-writer" "$CASE_DIR/bin/tt-codex-snapshot-writer.real"
   "$tmux_bin" -L "$CASE_SOCKET" new-session -d -s timer-test 'exec sleep 300'
+  "$tmux_bin" -L "$CASE_SOCKET" set-option -t timer-test @tt_profile studio
 }
 
 case_tt() {
@@ -82,9 +124,12 @@ case_tt() {
     TT_TMUX_BIN="$CASE_TMUX" \
     TT_CODEX_SNAPSHOT_INTERVAL=1 \
     TT_CODEX_SNAPSHOT_INTERVAL_MIN=1 \
-    TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=220 \
+    TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=1024 \
     TT_SNAPSHOT_HISTORY_MAX=2 \
-    "$tt" "$@"
+    TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS=1 \
+    TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS=4 \
+    TT_CODEX_SNAPSHOT_LOCK_RETRY_DELAY_SECONDS=0.1 \
+    "$CASE_TT" "$@"
 }
 
 timer_state_file() {
@@ -97,6 +142,14 @@ timer_pid() {
 
 timer_token() {
   awk -F '\t' '$1 == "v1" {print $5}' "$(timer_state_file)"
+}
+
+timer_success_epoch() {
+  awk -F '\t' '$1 == "v1" {print $6}' "$(timer_state_file)"
+}
+
+timer_max_age() {
+  awk -F '\t' '$1 == "v1" {print $7}' "$(timer_state_file)"
 }
 
 timer_process_matches() {
@@ -121,13 +174,50 @@ timer_has_server_ancestor() {
 
 status_has() {
   local status
-  status="$(case_tt status)"
-  grep -Fq "$1" <<<"$status"
+  if ! status="$(case_tt status 2>&1)"; then
+    printf 'tt status failed unexpectedly:\n%s\n' "$status" >&2
+    return 1
+  fi
+  [[ "$status" == *"$1"* ]]
+}
+
+autosave_residue_absent() {
+  [[ ! -e "$(timer_state_file)" ]] &&
+    [[ -z "$("$tmux_bin" -L "$CASE_SOCKET" show-options -gqv @tt_codex_snapshot_timer_token)" ]] &&
+    ! "$tmux_bin" -L "$CASE_SOCKET" show-hooks -g 2>/dev/null | grep -q '\[9[01]\].*snapshot --quiet'
 }
 
 production_snapshot >"$production_before"
 
+start_case missing-writer
+chmod -x "$CASE_DIR/bin/tt-codex-snapshot-writer"
+if case_tt autosave on 2>/dev/null; then
+  printf 'autosave on succeeded without an executable writer\n' >&2
+  exit 1
+fi
+autosave_residue_absent
+
+start_case initial-agent-failure
+touch "$CASE_FAIL"
+if case_tt autosave on 2>/dev/null; then
+  printf 'autosave on succeeded after agent collection failed\n' >&2
+  exit 1
+fi
+autosave_residue_absent
+[[ ! -e "$CASE_STATE/tt/codex-cockpit.tsv" ]]
+
+start_case initial-codex-failure
+touch "$CASE_FAIL_CODEX"
+if case_tt autosave on 2>/dev/null; then
+  printf 'autosave on succeeded after Codex collection failed\n' >&2
+  exit 1
+fi
+autosave_residue_absent
+[[ -f "$CASE_STATE/tt/agent-cockpit.tsv" ]]
+[[ ! -e "$CASE_STATE/tt/codex-cockpit.tsv" ]]
+
 start_case primary
+printf '2\n' >"$CASE_BUSY_CODEX"
 
 # The starter shell exits, but the tmux-server-owned timer remains live.
 (case_tt autosave on)
@@ -137,11 +227,20 @@ pid="$(timer_pid)"
 token="$(timer_token)"
 server_pid="$("$tmux_bin" -L "$CASE_SOCKET" display-message -p '#{pid}')"
 [[ "$(awk -F '\t' '{print $1, $3, $4}' "$state_file")" == "v1 $server_pid $(id -u)" ]]
+[[ "$(timer_max_age)" == "3" ]]
+[[ "$(stat -f %Lp "$state_file" 2>/dev/null || stat -c %a "$state_file")" == "600" ]]
 kill -0 "$pid"
 timer_process_matches "$pid" "$token"
 timer_has_server_ancestor "$pid" "$server_pid"
 status_has 'autosave: on'
 status_has "timer: running pid=$pid"
+status_has 'last success: '
+[[ "$(grep -c '^codex:start$' "$CASE_EVENTS")" -ge 3 ]]
+agent_line="$(grep -n '^tmux:list-panes$' "$CASE_EVENTS" | sed -n '1s/:.*//p')"
+codex_line="$(grep -n '^codex:start$' "$CASE_EVENTS" | sed -n '1s/:.*//p')"
+success_line="$(grep -n '^codex:success$' "$CASE_EVENTS" | sed -n '1s/:.*//p')"
+hook_line="$(grep -n '^tmux:set-hook$' "$CASE_EVENTS" | sed -n '1s/:.*//p')"
+(( agent_line < codex_line && codex_line < success_line && success_line < hook_line ))
 
 # Concurrent enable calls converge on the same healthy generation.
 case_tt autosave on &
@@ -158,10 +257,19 @@ wait "$on_two"
 kill -HUP "$pid"
 sleep 0.2
 kill -0 "$pid"
+before_failure_epoch="$(timer_success_epoch)"
 touch "$CASE_FAIL"
-wait_until 50 grep -Fq 'snapshot-failed' "$CASE_STATE/tt/codex-cockpit.timer.log"
+wait_until 50 grep -Fq 'cycle-failed' "$CASE_STATE/tt/codex-cockpit.timer.log"
 kill -0 "$pid"
+sleep 3.2
+status_has 'autosave: degraded'
+[[ "$(timer_pid)" == "$pid" ]]
+[[ "$(timer_success_epoch)" == "$before_failure_epoch" ]]
 rm -f "$CASE_FAIL"
+wait_until 50 grep -Fq 'recovered' "$CASE_STATE/tt/codex-cockpit.timer.log"
+wait_until 50 status_has 'autosave: on'
+[[ "$(timer_pid)" == "$pid" ]]
+(( $(timer_success_epoch) > before_failure_epoch ))
 
 # Two timer intervals observe live state changes; history remains capped.
 snapshot="$CASE_STATE/tt/codex-cockpit.tsv"
@@ -237,12 +345,13 @@ kill -0 "$pid"
 status_has 'autosave: on'
 
 # Repeated errors cap the lifecycle log instead of growing without bound.
+export TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=220
 touch "$CASE_FAIL"
 sleep 5
 rm -f "$CASE_FAIL"
 log_size="$(stat -f %z "$CASE_STATE/tt/codex-cockpit.timer.log" 2>/dev/null ||
   stat -c %s "$CASE_STATE/tt/codex-cockpit.timer.log")"
-(( log_size <= 220 ))
+(( log_size <= 1024 ))
 
 case_tt autosave off
 wait_until 50 test ! -e "$state_file"
@@ -259,7 +368,8 @@ death_state="$(timer_state_file)"
 death_pid="$(timer_pid)"
 kill -0 "$death_pid"
 "$tmux_bin" -L "$CASE_SOCKET" kill-server
-wait_until 50 test ! -e "$death_state"
+wait_until 100 test ! -e "$death_state"
+wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' sh "$death_pid"
 if kill -0 "$death_pid" 2>/dev/null; then
   printf 'timer survived the tmux server it belonged to\n' >&2
   exit 1
