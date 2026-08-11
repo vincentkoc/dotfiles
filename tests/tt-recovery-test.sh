@@ -72,6 +72,7 @@ env -u TMUX \
   TT_TMUX_BIN="$fake_tmux" \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
+  TT_TEST_TMUX_SERVER_RUNNING=1 \
   TT_TEST_TMUX_FIRST_WINDOW_INDEX=1 \
   "$tt" recover cockpit "$snapshot"
 
@@ -121,6 +122,7 @@ env -u TMUX \
   TT_TMUX_BIN="$fake_tmux" \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
+  TT_TEST_TMUX_SERVER_RUNNING=1 \
   TT_TEST_TMUX_FIRST_WINDOW_INDEX=1 \
   "$tt" recover agents "$agent_manifest" factory2
 
