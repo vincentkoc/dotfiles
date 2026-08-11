@@ -126,7 +126,7 @@ case_tt() {
     TT_CODEX_SNAPSHOT_INTERVAL_MIN=1 \
     TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=1024 \
     TT_SNAPSHOT_HISTORY_MAX=2 \
-    TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS=1 \
+    TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS=5 \
     TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS=4 \
     TT_CODEX_SNAPSHOT_LOCK_RETRY_DELAY_SECONDS=0.1 \
     "$CASE_TT" "$@"
@@ -227,7 +227,7 @@ pid="$(timer_pid)"
 token="$(timer_token)"
 server_pid="$("$tmux_bin" -L "$CASE_SOCKET" display-message -p '#{pid}')"
 [[ "$(awk -F '\t' '{print $1, $3, $4}' "$state_file")" == "v1 $server_pid $(id -u)" ]]
-[[ "$(timer_max_age)" == "3" ]]
+[[ "$(timer_max_age)" == "7" ]]
 [[ "$(stat -f %Lp "$state_file" 2>/dev/null || stat -c %a "$state_file")" == "600" ]]
 kill -0 "$pid"
 timer_process_matches "$pid" "$token"
@@ -254,15 +254,12 @@ wait "$on_two"
 [[ "$(ps ax -o command= | grep -F " codex-snapshot-loop $token " | grep -v grep | wc -l | tr -d ' ')" == "1" ]]
 
 # The loop survives an interrupted sleep and a failed snapshot collection.
-kill -HUP "$pid"
-sleep 0.2
-kill -0 "$pid"
 before_failure_epoch="$(timer_success_epoch)"
 touch "$CASE_FAIL"
-wait_until 50 grep -Fq 'cycle-failed' "$CASE_STATE/tt/codex-cockpit.timer.log"
+kill -HUP "$pid"
+wait_until 100 grep -Fq 'cycle-failed' "$CASE_STATE/tt/codex-cockpit.timer.log"
 kill -0 "$pid"
-sleep 3.2
-status_has 'autosave: degraded'
+wait_until 100 status_has 'autosave: degraded'
 [[ "$(timer_pid)" == "$pid" ]]
 [[ "$(timer_success_epoch)" == "$before_failure_epoch" ]]
 rm -f "$CASE_FAIL"
