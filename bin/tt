@@ -1738,6 +1738,15 @@ codex_cockpit_timer_pid_file() {
   printf '%s\n' "$state_home/tt/codex-cockpit.timer.pid"
 }
 
+codex_cockpit_timer_lock_dir() {
+  printf '%s.control.lock\n' "$(codex_cockpit_timer_pid_file)"
+}
+
+codex_cockpit_timer_log_file() {
+  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  printf '%s\n' "$state_home/tt/codex-cockpit.timer.log"
+}
+
 pane_notes_dir() {
   local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
   printf '%s\n' "$state_home/tt/pane-notes"
@@ -2525,24 +2534,24 @@ popup_view() {
 }
 
 status_report() {
-  local snapshot agent_snapshot pid_file pid timer="stopped" autosave="off"
+  local snapshot agent_snapshot timer="stopped" autosave="off"
   local snapshot_age agent_age history_count history_max
   local panes codex claude exact unresolved shell waiting spinning menu_left menu_right static_status mouse copy_modes mobile_mode
 
   snapshot="$(codex_cockpit_snapshot_file)"
   agent_snapshot="$(agent_cockpit_state_file)"
-  pid_file="$(codex_cockpit_timer_pid_file)"
   history_max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
 
-  if [[ -f "$pid_file" ]]; then
-    pid="$(cat "$pid_file" 2>/dev/null || true)"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q 'codex-snapshot-loop'; then
-      timer="running pid=$pid"
+  if codex_snapshot_timer_health; then
+    timer="running pid=$TT_TIMER_PID"
+    if agent_autosave_hooks_healthy; then
+      autosave="on"
+    else
+      autosave="degraded"
     fi
-  fi
-
-  if "$TMUX_BIN" show-hooks -g 2>/dev/null | grep -q 'codex-snapshot --quiet'; then
-    autosave="on"
+  elif agent_autosave_hooks_present || codex_snapshot_timer_desired_token >/dev/null 2>&1 ||
+    [[ -e "$(codex_cockpit_timer_pid_file)" ]]; then
+    autosave="degraded"
   fi
 
   if [[ -f "$snapshot" ]]; then
@@ -2790,20 +2799,53 @@ refresh_agent_window_state() {
 }
 
 codex_snapshot_timer_loop() {
+  local token="${1:-}"
+  local expected_server_pid="${2:-}"
+  local expected_uid="${3:-}"
   local interval="${TT_CODEX_SNAPSHOT_INTERVAL:-300}"
+  local minimum="${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}"
+  local stop_requested=0
+
+  [[ "$token" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
+  [[ "$expected_server_pid" =~ ^[0-9]+$ ]] || return 2
+  [[ "$expected_uid" =~ ^[0-9]+$ ]] || return 2
+  [[ "$(id -u)" == "$expected_uid" ]] || return 2
 
   case "$interval" in
-    ''|*[!0-9]*)
-      interval=300
-      ;;
+    ''|*[!0-9]*) interval=300 ;;
   esac
-  if (( interval < 30 )); then
-    interval=30
+  case "$minimum" in
+    ''|*[!0-9]*) minimum=30 ;;
+  esac
+  if (( interval < minimum )); then
+    interval="$minimum"
   fi
 
-  while true; do
-    write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet || true
-    sleep "$interval"
+  TT_TIMER_LOOP_TOKEN="$token"
+  TT_TIMER_LOOP_SERVER_PID="$expected_server_pid"
+  TT_TIMER_LOOP_UID="$expected_uid"
+  trap 'stop_requested=1' TERM INT
+  trap ':' HUP
+  trap 'codex_snapshot_timer_cleanup "$TT_TIMER_LOOP_TOKEN" "$TT_TIMER_LOOP_SERVER_PID" "$TT_TIMER_LOOP_UID"' EXIT
+
+  codex_snapshot_timer_server_matches "$expected_server_pid" || return 1
+  [[ "$(codex_snapshot_timer_desired_token 2>/dev/null || true)" == "$token" ]] || return 1
+  codex_snapshot_timer_write_state "$$" "$expected_server_pid" "$expected_uid" "$token" || return 1
+  codex_snapshot_timer_log "start pid=$$ server=$expected_server_pid token=$token"
+
+  while (( stop_requested == 0 )); do
+    if ! codex_snapshot_timer_server_matches "$expected_server_pid"; then
+      codex_snapshot_timer_log "stop pid=$$ reason=server-mismatch"
+      break
+    fi
+    if [[ "$(codex_snapshot_timer_desired_token 2>/dev/null || true)" != "$token" ]]; then
+      codex_snapshot_timer_log "stop pid=$$ reason=generation-changed"
+      break
+    fi
+    if ! write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet; then
+      codex_snapshot_timer_log "snapshot-failed pid=$$"
+    fi
+    sleep "$interval" || true
   done
 }
 
@@ -3048,30 +3090,22 @@ install_agent_status_menu() {
   "$TMUX_BIN" set-hook -g "after-select-window[92]" "run-shell -b '$self attention-reset #{pane_id}'" 2>/dev/null || true
 }
 
-install_agent_autosave_hooks() {
-  local self
-  self="$(tt_self_command)"
+set_agent_autosave_hooks() {
+  local self="$1"
 
-  "$TMUX_BIN" set-hook -g "after-new-session[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "after-new-window[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "after-split-window[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "after-kill-pane[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "pane-exited[90]" "run-shell -b '$self snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "after-new-session[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "after-new-window[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "after-split-window[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "after-kill-pane[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
-  "$TMUX_BIN" set-hook -g "pane-exited[91]" "run-shell -b '$self codex-snapshot --quiet'" 2>/dev/null || true
-  install_agent_status_menu
-  clear_legacy_shell_status_widgets
-  set_agent_window_status_formats
-  sync_pane_markers all
-  refresh_agent_window_state
-  enforce_static_tmux_status --quiet || true
-  start_codex_snapshot_timer
+  "$TMUX_BIN" set-hook -g "after-new-session[90]" "run-shell -b '$self snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "after-new-window[90]" "run-shell -b '$self snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "after-split-window[90]" "run-shell -b '$self snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "after-kill-pane[90]" "run-shell -b '$self snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "pane-exited[90]" "run-shell -b '$self snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "after-new-session[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "after-new-window[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "after-split-window[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "after-kill-pane[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
+    "$TMUX_BIN" set-hook -g "pane-exited[91]" "run-shell -b '$self codex-snapshot --quiet'"
 }
 
-clear_agent_autosave_hooks() {
+unset_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -gu "after-new-session[90]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "after-new-window[90]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "after-split-window[90]" 2>/dev/null || true
@@ -3082,6 +3116,71 @@ clear_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -gu "after-split-window[91]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "after-kill-pane[91]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "pane-exited[91]" 2>/dev/null || true
+}
+
+agent_autosave_hooks_present() {
+  local hook
+  for hook in after-new-session after-new-window after-split-window after-kill-pane pane-exited; do
+    if "$TMUX_BIN" show-hooks -g "$hook" 2>/dev/null |
+      grep -q '\[9[01]\].*run-shell.*snapshot --quiet'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+agent_autosave_hooks_healthy() {
+  local hook hooks
+  for hook in after-new-session after-new-window after-split-window after-kill-pane pane-exited; do
+    hooks="$("$TMUX_BIN" show-hooks -g "$hook" 2>/dev/null || true)"
+    printf '%s\n' "$hooks" | grep -q '\[90\].*run-shell.* snapshot --quiet' || return 1
+    printf '%s\n' "$hooks" | grep -q '\[91\].*run-shell.* codex-snapshot --quiet' || return 1
+  done
+}
+
+install_agent_autosave_hooks() {
+  local self stopped_identity=""
+  self="$(tt_self_command)"
+
+  install_agent_status_menu
+  clear_legacy_shell_status_widgets
+  set_agent_window_status_formats
+  sync_pane_markers all
+  refresh_agent_window_state
+  enforce_static_tmux_status --quiet || true
+
+  if ! codex_snapshot_timer_lock_acquire; then
+    echo "tt: timed out waiting for autosave timer control lock" >&2
+    return 1
+  fi
+  if ! start_codex_snapshot_timer_locked || ! set_agent_autosave_hooks "$self"; then
+    unset_agent_autosave_hooks
+    stopped_identity="$(stop_codex_snapshot_timer_locked 2>/dev/null || true)"
+    codex_snapshot_timer_lock_release
+    if [[ -n "$stopped_identity" ]]; then
+      codex_snapshot_timer_stop_identity "$stopped_identity"
+      codex_snapshot_timer_remove_identity_state "$stopped_identity"
+    fi
+    echo "tt: autosave was not enabled; timer or hooks failed health checks" >&2
+    return 1
+  fi
+  codex_snapshot_timer_lock_release
+}
+
+clear_agent_autosave_hooks() {
+  local stopped_identity=""
+
+  if ! codex_snapshot_timer_lock_acquire; then
+    echo "tt: timed out waiting for autosave timer control lock" >&2
+    return 1
+  fi
+  unset_agent_autosave_hooks
+  stopped_identity="$(stop_codex_snapshot_timer_locked 2>/dev/null || true)"
+  codex_snapshot_timer_lock_release
+  if [[ -n "$stopped_identity" ]]; then
+    codex_snapshot_timer_stop_identity "$stopped_identity"
+    codex_snapshot_timer_remove_identity_state "$stopped_identity"
+  fi
   install_agent_status_menu
 
   # Remove the unindexed hooks from early versions of this script if they are still present.
@@ -3091,40 +3190,316 @@ clear_agent_autosave_hooks() {
   "$TMUX_BIN" set-hook -gu "after-kill-pane[0]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "pane-exited[0]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "window-layout-changed[0]" 2>/dev/null || true
-  stop_codex_snapshot_timer
 }
 
-start_codex_snapshot_timer() {
-  local pid_file pid self
+codex_snapshot_timer_file_uid() {
+  stat -f %u "$1" 2>/dev/null || stat -c %u "$1" 2>/dev/null
+}
 
-  pid_file="$(codex_cockpit_timer_pid_file)"
-  mkdir -p "$(dirname "$pid_file")"
-  if [[ -f "$pid_file" ]]; then
-    pid="$(cat "$pid_file" 2>/dev/null || true)"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-      if ps -p "$pid" -o command= 2>/dev/null | grep -q 'codex-snapshot-loop'; then
-        return 0
+codex_snapshot_timer_file_size() {
+  stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null
+}
+
+codex_snapshot_timer_log() {
+  local message="$1"
+  local log max size tmp
+  log="$(codex_cockpit_timer_log_file)"
+  max="${TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES:-65536}"
+  case "$max" in
+    ''|*[!0-9]*) max=65536 ;;
+  esac
+  mkdir -p "$(dirname "$log")" 2>/dev/null || return 0
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message" >>"$log" 2>/dev/null || return 0
+  size="$(codex_snapshot_timer_file_size "$log" 2>/dev/null || printf '0')"
+  if [[ "$size" =~ ^[0-9]+$ ]] && (( size > max )); then
+    tmp="$(mktemp "$(dirname "$log")/.timer-log.XXXXXX" 2>/dev/null || true)"
+    if [[ -n "$tmp" ]]; then
+      tail -c "$((max / 2))" "$log" >"$tmp" 2>/dev/null || true
+      chmod 600 "$tmp" 2>/dev/null || true
+      mv -f "$tmp" "$log" 2>/dev/null || rm -f "$tmp"
+    fi
+  fi
+}
+
+codex_snapshot_timer_read_state() {
+  local state_file="${1:-$(codex_cockpit_timer_pid_file)}"
+  local version pid server_pid uid token extra
+
+  [[ -f "$state_file" && ! -L "$state_file" ]] || return 1
+  [[ "$(codex_snapshot_timer_file_uid "$state_file" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
+  IFS=$'\t' read -r version pid server_pid uid token extra <"$state_file" || return 1
+  [[ "$version" == "v1" && "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ &&
+    "$uid" =~ ^[0-9]+$ && "$token" =~ ^[A-Za-z0-9._-]+$ && -z "${extra:-}" ]] || return 1
+  printf '%s\t%s\t%s\t%s\n' "$pid" "$server_pid" "$uid" "$token"
+}
+
+codex_snapshot_timer_write_state() {
+  local pid="$1"
+  local server_pid="$2"
+  local uid="$3"
+  local token="$4"
+  local state_file dir tmp
+
+  state_file="$(codex_cockpit_timer_pid_file)"
+  dir="$(dirname "$state_file")"
+  mkdir -p "$dir" || return 1
+  tmp="$(mktemp "$dir/.timer-state.XXXXXX")" || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! printf 'v1\t%s\t%s\t%s\t%s\n' "$pid" "$server_pid" "$uid" "$token" >"$tmp" ||
+    ! mv -f "$tmp" "$state_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+codex_snapshot_timer_server_pid() {
+  local pid
+  pid="$("$TMUX_BIN" display-message -p '#{pid}' 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+codex_snapshot_timer_server_matches() {
+  local expected="$1"
+  [[ "$(codex_snapshot_timer_server_pid 2>/dev/null || true)" == "$expected" ]]
+}
+
+codex_snapshot_timer_desired_token() {
+  local token
+  token="$("$TMUX_BIN" show-options -gqv @tt_codex_snapshot_timer_token 2>/dev/null || true)"
+  [[ "$token" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  printf '%s\n' "$token"
+}
+
+codex_snapshot_timer_process_uid() {
+  ps -p "$1" -o uid= 2>/dev/null | tr -d '[:space:]'
+}
+
+codex_snapshot_timer_process_command() {
+  ps -p "$1" -o command= 2>/dev/null
+}
+
+codex_snapshot_timer_has_server_ancestor() {
+  local pid="$1"
+  local server_pid="$2"
+  local current="$pid"
+  local parent
+  local depth=0
+
+  while [[ "$current" =~ ^[0-9]+$ ]] && (( current > 1 && depth < 64 )); do
+    parent="$(ps -p "$current" -o ppid= 2>/dev/null | tr -d '[:space:]')"
+    [[ "$parent" =~ ^[0-9]+$ ]] || return 1
+    [[ "$parent" == "$server_pid" ]] && return 0
+    [[ "$parent" != "$current" ]] || return 1
+    current="$parent"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+codex_snapshot_timer_identity_valid() {
+  local identity="$1"
+  local pid server_pid uid token extra command desired current_server
+
+  IFS=$'\t' read -r pid server_pid uid token extra <<<"$identity"
+  [[ "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ && "$uid" =~ ^[0-9]+$ &&
+    "$token" =~ ^[A-Za-z0-9._-]+$ && -z "${extra:-}" ]] || return 1
+  [[ "$uid" == "$(id -u)" ]] || return 1
+  current_server="$(codex_snapshot_timer_server_pid 2>/dev/null || true)"
+  [[ "$server_pid" == "$current_server" ]] || return 1
+  desired="$(codex_snapshot_timer_desired_token 2>/dev/null || true)"
+  [[ "$token" == "$desired" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ "$(codex_snapshot_timer_process_uid "$pid" 2>/dev/null || true)" == "$uid" ]] || return 1
+  command="$(codex_snapshot_timer_process_command "$pid" 2>/dev/null || true)"
+  [[ "$command" == *" codex-snapshot-loop $token $server_pid $uid"* ]] || return 1
+  codex_snapshot_timer_has_server_ancestor "$pid" "$server_pid"
+}
+
+codex_snapshot_timer_health() {
+  local identity
+  TT_TIMER_PID=""
+  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  [[ -n "$identity" ]] || return 1
+  codex_snapshot_timer_identity_valid "$identity" || return 1
+  TT_TIMER_PID="${identity%%$'\t'*}"
+}
+
+codex_snapshot_timer_lock_acquire() {
+  local lock owner attempt owner_pid owner_uid owner_time now
+  lock="$(codex_cockpit_timer_lock_dir)"
+  mkdir -p "$(dirname "$lock")" || return 1
+  attempt=0
+  while (( attempt < 50 )); do
+    if mkdir "$lock" 2>/dev/null; then
+      printf '%s\t%s\t%s\n' "$$" "$(id -u)" "$(date +%s)" >"$lock/owner" || {
+        rmdir "$lock" 2>/dev/null || true
+        return 1
+      }
+      TT_TIMER_CONTROL_LOCK="$lock"
+      return 0
+    fi
+    if [[ -d "$lock" && ! -L "$lock" &&
+      "$(codex_snapshot_timer_file_uid "$lock" 2>/dev/null || true)" == "$(id -u)" ]]; then
+      owner="$lock/owner"
+      owner_pid="" owner_uid="" owner_time=""
+      if [[ -f "$owner" && ! -L "$owner" ]]; then
+        IFS=$'\t' read -r owner_pid owner_uid owner_time <"$owner" || true
+      fi
+      now="$(date +%s)"
+      if [[ "$owner_uid" == "$(id -u)" && "$owner_pid" =~ ^[0-9]+$ &&
+        "$owner_time" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null &&
+        (( now - owner_time < 15 )); then
+        :
+      elif [[ "$owner_time" =~ ^[0-9]+$ ]] && (( now - owner_time >= 5 )); then
+        rm -f "$owner" 2>/dev/null || true
+        rmdir "$lock" 2>/dev/null || true
+        continue
+      elif (( attempt >= 10 )); then
+        rm -f "$owner" 2>/dev/null || true
+        rmdir "$lock" 2>/dev/null || true
+        continue
       fi
     fi
-  fi
-
-  self="$(tt_self_command)"
-  nohup bash -lc "exec $self codex-snapshot-loop" >/dev/null 2>&1 &
-  printf '%s\n' "$!" > "$pid_file"
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
-stop_codex_snapshot_timer() {
-  local pid_file pid
-
-  pid_file="$(codex_cockpit_timer_pid_file)"
-  [[ -f "$pid_file" ]] || return 0
-  pid="$(cat "$pid_file" 2>/dev/null || true)"
-  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-    if ps -p "$pid" -o command= 2>/dev/null | grep -q 'codex-snapshot-loop'; then
-      kill "$pid" 2>/dev/null || true
-    fi
+codex_snapshot_timer_lock_release() {
+  local lock="${TT_TIMER_CONTROL_LOCK:-}"
+  [[ -n "$lock" ]] || return 0
+  if [[ -d "$lock" && ! -L "$lock" &&
+    "$(codex_snapshot_timer_file_uid "$lock" 2>/dev/null || true)" == "$(id -u)" ]]; then
+    rm -f "$lock/owner" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
   fi
-  rm -f "$pid_file"
+  TT_TIMER_CONTROL_LOCK=""
+}
+
+codex_snapshot_timer_launch_command() {
+  local token="$1"
+  local server_pid="$2"
+  local uid="$3"
+  local self command state_home
+
+  self="$(tt_self_command)"
+  state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  command="exec env"
+  command+=" HOME=$(shell_quote "$HOME")"
+  command+=" XDG_STATE_HOME=$(shell_quote "$state_home")"
+  command+=" TT_TMUX_BIN=$(shell_quote "$TMUX_BIN")"
+  command+=" TT_CODEX_SNAPSHOT_INTERVAL=$(shell_quote "${TT_CODEX_SNAPSHOT_INTERVAL:-300}")"
+  command+=" TT_CODEX_SNAPSHOT_INTERVAL_MIN=$(shell_quote "${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}")"
+  command+=" TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=$(shell_quote "${TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES:-65536}")"
+  command+=" TT_SNAPSHOT_HISTORY_MAX=$(shell_quote "${TT_SNAPSHOT_HISTORY_MAX:-864}")"
+  command+=" $self codex-snapshot-loop $(shell_quote "$token") $server_pid $uid"
+  printf '%s\n' "$command"
+}
+
+start_codex_snapshot_timer_locked() {
+  local state_file server_pid uid token command attempt identity
+
+  if codex_snapshot_timer_health; then
+    return 0
+  fi
+
+  state_file="$(codex_cockpit_timer_pid_file)"
+  server_pid="$(codex_snapshot_timer_server_pid)" || return 1
+  uid="$(id -u)"
+  token="v1-$(date +%s)-$$-${RANDOM:-0}-${server_pid}"
+  "$TMUX_BIN" set-option -gq @tt_codex_snapshot_timer_token "$token" || return 1
+  command="$(codex_snapshot_timer_launch_command "$token" "$server_pid" "$uid")"
+  if ! "$TMUX_BIN" run-shell -b "$command"; then
+    "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
+    return 1
+  fi
+
+  attempt=0
+  while (( attempt < 50 )); do
+    identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+    if [[ -n "$identity" ]] && codex_snapshot_timer_identity_valid "$identity"; then
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
+  codex_snapshot_timer_log "start-failed server=$server_pid token=$token"
+  [[ -f "$state_file" ]] || return 1
+  return 1
+}
+
+stop_codex_snapshot_timer_locked() {
+  local identity=""
+  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
+  if [[ -z "$identity" ]]; then
+    # Legacy pid-only records are retired without signalling an unproven process.
+    if [[ -f "$(codex_cockpit_timer_pid_file)" && ! -L "$(codex_cockpit_timer_pid_file)" &&
+      "$(codex_snapshot_timer_file_uid "$(codex_cockpit_timer_pid_file)" 2>/dev/null || true)" == "$(id -u)" ]]; then
+      rm -f "$(codex_cockpit_timer_pid_file)"
+    fi
+    return 0
+  fi
+  printf '%s\n' "$identity"
+}
+
+codex_snapshot_timer_stop_identity() {
+  local identity="$1"
+  local pid server_pid uid token extra attempt current command
+
+  IFS=$'\t' read -r pid server_pid uid token extra <<<"$identity"
+  [[ "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ && "$uid" == "$(id -u)" &&
+    "$token" =~ ^[A-Za-z0-9._-]+$ && -z "${extra:-}" ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  [[ "$(codex_snapshot_timer_process_uid "$pid" 2>/dev/null || true)" == "$uid" ]] || return 0
+  command="$(codex_snapshot_timer_process_command "$pid" 2>/dev/null || true)"
+  [[ "$command" == *" codex-snapshot-loop $token $server_pid $uid"* ]] || return 0
+  codex_snapshot_timer_has_server_ancestor "$pid" "$server_pid" || return 0
+  kill -TERM "$pid" 2>/dev/null || return 0
+  attempt=0
+  while (( attempt < 30 )); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  current="$(codex_snapshot_timer_process_command "$pid" 2>/dev/null || true)"
+  if [[ "$(codex_snapshot_timer_process_uid "$pid" 2>/dev/null || true)" == "$uid" &&
+    "$current" == *" codex-snapshot-loop $token $server_pid $uid"* ]] &&
+    codex_snapshot_timer_has_server_ancestor "$pid" "$server_pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+}
+
+codex_snapshot_timer_remove_identity_state() {
+  local expected="$1"
+  local identity
+
+  if codex_snapshot_timer_lock_acquire; then
+    identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+    if [[ "$identity" == "$expected" ]]; then
+      rm -f "$(codex_cockpit_timer_pid_file)"
+    fi
+    codex_snapshot_timer_lock_release
+  fi
+}
+
+codex_snapshot_timer_cleanup() {
+  local token="$1"
+  local server_pid="$2"
+  local uid="$3"
+  local identity expected
+  expected="$$"$'\t'"$server_pid"$'\t'"$uid"$'\t'"$token"
+
+  if codex_snapshot_timer_lock_acquire; then
+    identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+    if [[ "$identity" == "$expected" ]]; then
+      rm -f "$(codex_cockpit_timer_pid_file)"
+    fi
+    codex_snapshot_timer_lock_release
+  fi
 }
 
 tmux_server_running() {
@@ -3817,7 +4192,7 @@ case "${1:-}" in
     codex_restore_execute "${2:-preview}" "${3:-}" "${4:-}" "${5:-}"
     ;;
   codex-snapshot-loop)
-    codex_snapshot_timer_loop
+    codex_snapshot_timer_loop "${2:-}" "${3:-}" "${4:-}"
     ;;
   mosh-attn)
     sync_mosh_attention_panes "${2:-}"
