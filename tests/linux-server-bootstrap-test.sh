@@ -111,6 +111,33 @@ if SSH_CONNECTION='100.0.0.1 50000 100.100.100.100 22' \
   exit 1
 fi
 
+cat >"$temporary/fake-bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SUDO_TEST_LOG"
+if [[ "$*" == "-n true" && "${SUDO_TEST_NONINTERACTIVE:-0}" == 1 ]]; then
+  exit 0
+fi
+[[ "$*" == "-v" ]]
+EOF
+chmod +x "$temporary/fake-bin/sudo"
+: >"$temporary/sudo.log"
+PATH="$temporary/fake-bin:$PATH" \
+  SUDO_TEST_LOG="$temporary/sudo.log" \
+  SUDO_TEST_NONINTERACTIVE=1 \
+  ensure_sudo_access
+grep -Fxq -- '-n true' "$temporary/sudo.log"
+if grep -Fxq -- '-v' "$temporary/sudo.log"; then
+  printf 'interactive sudo validation ran despite working noninteractive sudo\n' >&2
+  exit 1
+fi
+: >"$temporary/sudo.log"
+PATH="$temporary/fake-bin:$PATH" \
+  SUDO_TEST_LOG="$temporary/sudo.log" \
+  SUDO_TEST_NONINTERACTIVE=0 \
+  ensure_sudo_access
+printf '%s\n' '-n true' '-v' >"$temporary/sudo.expected"
+cmp "$temporary/sudo.expected" "$temporary/sudo.log"
+
 ssh-keygen -q -t ed25519 -N '' -C proof-key -f "$temporary/proof-key"
 ssh-keygen -q -t ed25519 -N '' -C wrong-key -f "$temporary/wrong-key"
 mkdir -p "$temporary/auth-home/.ssh"
@@ -182,7 +209,8 @@ set -e
 [[ "$invalid_status" == 2 ]]
 grep -Fq 'must be a TCP port' "$temporary/invalid.out"
 [[ "$lockdown_status" != 0 ]]
-grep -Eq 'requires a live Tailscale SSH connection|requires Linux' "$temporary/lockdown.out"
+grep -Eq 'lockdown requires an exact Tailscale source verified by tailscale whois|requires Linux' \
+  "$temporary/lockdown.out"
 
 grep -Fq 'AuthenticationMethods publickey' "$script"
 grep -Fq 'ExposeAuthInfo yes' "$script"

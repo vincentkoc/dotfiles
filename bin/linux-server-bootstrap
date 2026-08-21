@@ -349,6 +349,10 @@ EOF
   done
 }
 
+ensure_sudo_access() {
+  sudo -n true || sudo -v
+}
+
 prepare() {
   validate_parameters
   if [[ "$dry_run" == 1 ]]; then
@@ -361,7 +365,7 @@ prepare() {
     printf 'sudo is required\n' >&2
     exit 2
   }
-  sudo -v
+  ensure_sudo_access
 
   run_root env DEBIAN_FRONTEND=noninteractive apt-get update
   apt_install_available \
