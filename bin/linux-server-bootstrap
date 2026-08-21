@@ -199,16 +199,7 @@ audit() {
     fi
   fi
   if command -v sshd >/dev/null 2>&1; then
-    local sshd_effective
-    sshd_effective="$(sshd_effective_config "$(id -un)" 2>/dev/null || true)"
-    status ssh:password_auth "$(awk '$1=="passwordauthentication"{print $2; exit}' <<<"$sshd_effective")"
-    status ssh:kbd_interactive_auth "$(awk '$1=="kbdinteractiveauthentication"{print $2; exit}' <<<"$sshd_effective")"
-    status ssh:root_login "$(awk '$1=="permitrootlogin"{print $2; exit}' <<<"$sshd_effective")"
-    status ssh:pubkey_auth "$(awk '$1=="pubkeyauthentication"{print $2; exit}' <<<"$sshd_effective")"
-    status ssh:authentication_methods "$(awk '$1=="authenticationmethods"{print $2; exit}' <<<"$sshd_effective")"
-    status ssh:expose_auth_info "$(awk '$1=="exposeauthinfo"{print $2; exit}' <<<"$sshd_effective")"
-    status ssh:x11_forwarding "$(awk '$1=="x11forwarding"{print $2; exit}' <<<"$sshd_effective")"
-    status ssh:agent_forwarding "$(awk '$1=="allowagentforwarding"{print $2; exit}' <<<"$sshd_effective")"
+    audit_sshd_statuses "$(id -un)"
   fi
   if [[ -n "${SSH_USER_AUTH:-}" ]]; then
     status ssh:user_auth_file present
@@ -279,7 +270,7 @@ sshd_context_address() {
   fi
 }
 
-sshd_effective_config() {
+sshd_effective_context() {
   local user="$1"
   local address local_address local_port
   address="$(sshd_context_address)"
@@ -288,8 +279,49 @@ sshd_effective_config() {
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
     read -r address _ local_address local_port <<<"$SSH_CONNECTION"
   fi
-  run_root sshd -T -C \
-    "user=$user,host=$address,addr=$address,laddr=$local_address,lport=$local_port"
+  printf 'user=%s,host=%s,addr=%s,laddr=%s,lport=%s\n' \
+    "$user" "$address" "$address" "$local_address" "$local_port"
+}
+
+sshd_effective_config() {
+  local user="$1"
+  run_root sshd -T -C "$(sshd_effective_context "$user")"
+}
+
+audit_sshd_effective_config() {
+  local user="$1"
+  local context output
+  context="$(sshd_effective_context "$user")"
+  if command -v sudo >/dev/null 2>&1 &&
+    output="$(sudo -n sshd -T -C "$context" 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return
+  fi
+  if output="$(sshd -T -C "$context" 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return
+  fi
+  return 1
+}
+
+audit_sshd_statuses() {
+  local user="$1"
+  local config=""
+  local key label value
+  config="$(audit_sshd_effective_config "$user")" || config=""
+  while read -r key label; do
+    value="$(effective_sshd_value "$config" "$key" 2>/dev/null || printf unknown)"
+    status "ssh:$label" "$value"
+  done <<'EOF'
+passwordauthentication password_auth
+kbdinteractiveauthentication kbd_interactive_auth
+permitrootlogin root_login
+pubkeyauthentication pubkey_auth
+authenticationmethods authentication_methods
+exposeauthinfo expose_auth_info
+x11forwarding x11_forwarding
+allowagentforwarding agent_forwarding
+EOF
 }
 
 effective_sshd_value() {

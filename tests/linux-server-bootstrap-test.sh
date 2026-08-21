@@ -80,6 +80,14 @@ grep -Fq "DOTFILES_DIR=$root" "$temporary/tt-symlink.out"
 # shellcheck disable=SC1090
 DOTFILES_SERVER_SOURCE_ONLY=1 source "$script"
 
+audit_definition="$(declare -f audit)"
+# shellcheck disable=SC2016
+grep -Fq 'audit_sshd_statuses "$(id -un)"' <<<"$audit_definition"
+if grep -Eq 'sshd_effective_config|run_root' <<<"$audit_definition"; then
+  printf 'audit can reach the interactive privileged SSH probe\n' >&2
+  exit 1
+fi
+
 prepare_definition="$(declare -f prepare)"
 if grep -Eq 'openssh-server|sshd|auth_proof|ssh_service|/etc/ssh|systemctl.*ssh' \
   <<<"$prepare_definition"; then
@@ -185,6 +193,77 @@ PATH="$temporary/fake-bin:$PATH" \
   ensure_sudo_access
 printf '%s\n' '-n true' '-v' >"$temporary/sudo.expected"
 cmp "$temporary/sudo.expected" "$temporary/sudo.log"
+
+cat >"$temporary/fake-bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SUDO_TEST_LOG"
+if [[ "${1:-}" != -n ]]; then
+  : >"$SUDO_INTERACTIVE_MARKER"
+  exit 99
+fi
+printf 'sudo: a password is required\n' >&2
+exit 1
+EOF
+cat >"$temporary/fake-bin/sshd" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SSHD_TEST_LOG"
+[[ "${SSHD_TEST_NO_PRIVILEGE:-0}" != 1 ]] || exit 1
+printf '%s\n' \
+  'passwordauthentication no' \
+  'kbdinteractiveauthentication no' \
+  'permitrootlogin no' \
+  'pubkeyauthentication yes' \
+  'authenticationmethods publickey' \
+  'exposeauthinfo no' \
+  'x11forwarding no' \
+  'allowagentforwarding no'
+EOF
+chmod +x "$temporary/fake-bin/sudo" "$temporary/fake-bin/sshd"
+: >"$temporary/sudo.log"
+: >"$temporary/sshd.log"
+audit_ssh_output="$(
+  PATH="$temporary/fake-bin:$PATH" \
+    SUDO_TEST_LOG="$temporary/sudo.log" \
+    SUDO_INTERACTIVE_MARKER="$temporary/sudo-interactive" \
+    SSHD_TEST_LOG="$temporary/sshd.log" \
+    audit_sshd_statuses "$(id -un)"
+)"
+[[ ! -e "$temporary/sudo-interactive" ]]
+grep -Eq '^-n sshd -T -C user=[^,]+,host=[^,]+,addr=[^,]+,laddr=[^,]+,lport=[0-9]+$' \
+  "$temporary/sudo.log"
+grep -Eq '^-T -C user=[^,]+,host=[^,]+,addr=[^,]+,laddr=[^,]+,lport=[0-9]+$' \
+  "$temporary/sshd.log"
+grep -Fxq 'ssh:password_auth=no' <<<"$audit_ssh_output"
+grep -Fxq 'ssh:kbd_interactive_auth=no' <<<"$audit_ssh_output"
+grep -Fxq 'ssh:root_login=no' <<<"$audit_ssh_output"
+grep -Fxq 'ssh:pubkey_auth=yes' <<<"$audit_ssh_output"
+grep -Fxq 'ssh:authentication_methods=publickey' <<<"$audit_ssh_output"
+grep -Fxq 'ssh:expose_auth_info=no' <<<"$audit_ssh_output"
+grep -Fxq 'ssh:x11_forwarding=no' <<<"$audit_ssh_output"
+grep -Fxq 'ssh:agent_forwarding=no' <<<"$audit_ssh_output"
+
+: >"$temporary/sudo.log"
+: >"$temporary/sshd.log"
+audit_unknown_output="$(
+  PATH="$temporary/fake-bin:$PATH" \
+    SUDO_TEST_LOG="$temporary/sudo.log" \
+    SUDO_INTERACTIVE_MARKER="$temporary/sudo-interactive" \
+    SSHD_TEST_LOG="$temporary/sshd.log" \
+    SSHD_TEST_NO_PRIVILEGE=1 \
+    audit_sshd_statuses "$(id -un)"
+)"
+[[ ! -e "$temporary/sudo-interactive" ]]
+for audit_label in \
+  password_auth \
+  kbd_interactive_auth \
+  root_login \
+  pubkey_auth \
+  authentication_methods \
+  expose_auth_info \
+  x11_forwarding \
+  agent_forwarding; do
+  grep -Fxq "ssh:$audit_label=unknown" <<<"$audit_unknown_output"
+done
 
 ssh-keygen -q -t ed25519 -N '' -C proof-key -f "$temporary/proof-key"
 ssh-keygen -q -t ed25519 -N '' -C wrong-key -f "$temporary/wrong-key"
