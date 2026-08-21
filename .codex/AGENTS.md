@@ -117,6 +117,8 @@
 - Before contributing, read `CONTRIBUTING.md` and relevant issue/PR templates. Match repo style. If an issue is linked, use closing refs like `Fixes #123`.
 - Use `ghx` for GitHub work. Prefer draft PRs first.
 - Never send a GitHub payload through `ghx` stdin (`--body-file -`, `-F -`, `--input -`, `--with-token`, or `/dev/stdin`). The proxy daemon does not forward stdin. Write the payload to a real temporary file and pass its path; after PR/issue body changes, read the live field back with `ghx --no-cache` and fail if it is empty or mismatched.
+- Before `codebase-memory-mcp` indexing, resolve the requested repository to its canonical owning checkout with the installed `codebase-memory-mcp` skill helper. Linked branch worktrees must reuse the owner graph; separate clones remain separate projects.
+- Never index `~/.codex/worktrees`, `~/GIT/_Worktrees`, repo-local `.worktrees`, `/tmp`, or `/private/tmp` paths as independent projects. If a path under one of those prefixes cannot resolve to an existing non-worktree owning checkout, skip indexing and report the missing canonical checkout.
 - Prefer worktrees and spawning subagents.
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
 - Start in a branch/worktree early so commits can be made incrementally.
