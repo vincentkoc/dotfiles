@@ -306,14 +306,16 @@ myssh() {
 	ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "$target" "$@"
 }
 
-mymosh() {
-	local target="m1"
-	if [[ $# -gt 0 && "$1" != -* ]]; then
-		target="$1"
-		shift
-	fi
-	mosh -4 -a --bind-server=any --ssh="ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3" -- "$target" "$@"
-}
+if [[ -z "${DOTFILES_DISABLE_MOSH:-}" ]] && _dotfiles_has mosh; then
+	mymosh() {
+		local target="m1"
+		if [[ $# -gt 0 && "$1" != -* ]]; then
+			target="$1"
+			shift
+		fi
+		mosh -4 -a --bind-server=any --ssh="ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3" -- "$target" "$@"
+	}
+fi
 
 # Aliases cheatsheet
 help-aliases() {

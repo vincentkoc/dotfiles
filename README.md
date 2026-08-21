@@ -94,15 +94,18 @@ pnpm 11.15.1, pinned zsh components, tmux, Git/GitHub tooling, and the portable
 aliases/functions. Node and pnpm stay under the current user's home directory;
 no downloaded script runs as root. The profile deliberately excludes macOS
 paths, private dotfiles, Git credentials/signing, GUI apps, OpenClaw global npm
-installs, and firewall activation.
+installs, Mosh, and firewall activation. Regular SSH is the safe default; add a
+separately reviewed tailnet UDP policy before opting into Mosh.
 
 After Tailscale and a public key are proven, open two regular OpenSSH sessions
 over Tailscale. Run `prove-second-session` in the second and `lockdown` in the
-first. The proof is boot-bound, expires after 15 minutes, and must come from
-another TTY. Lockdown permits SSH and Gateway HTTPS only on `tailscale0`,
-disables password and root SSH, validates `sshd` before reload, and leaves
-automatic reboots off. Override the interface or ports with the documented
-`DOTFILES_SERVER_*` environment variables.
+first. The proof requires one public-key authentication whose fingerprint is
+present in unchanged `authorized_keys`; it is boot-bound, expires after 15
+minutes, and must come from another TTY. Lockdown verifies the peer with
+Tailscale WhoIs, requires UFW IPv6 support, permits SSH and Gateway HTTPS only
+on `tailscale0`, disables password and root SSH, validates `sshd` before reload,
+and leaves automatic reboots off. Override the interface or ports with the
+documented `DOTFILES_SERVER_*` environment variables.
 
 ## Structure
 
