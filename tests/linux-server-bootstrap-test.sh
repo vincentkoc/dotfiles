@@ -38,7 +38,9 @@ grep -Fxq 'prepare.node_source=nodejs.org-checksum-pinned-user-install' "$plan_o
 grep -Fxq 'prepare.pnpm=pnpm@11.15.1' "$plan_one"
 grep -Fxq 'prepare.remote_shell=ssh' "$plan_one"
 grep -Fxq 'prepare.excludes=credentials-signing-gui-apps-global-openclaw-mosh' "$plan_one"
-grep -Fxq 'lockdown.requires=unchanged-authorized_keys,publickey-only-proof,tailscale-whois,passwordless-sudo,ufw-ipv6' "$plan_one"
+grep -Fxq 'enable_auth_proof.requires=admin-user,designated-key-sha256,unchanged-authorized_keys' "$plan_one"
+grep -Fxq 'proof.requires=fresh-nonmultiplexed-transport,designated-public-key,tailscale-whois' "$plan_one"
+grep -Fxq 'lockdown.requires=valid-proof,passwordless-sudo,ufw-ipv6' "$plan_one"
 grep -Fxq 'lockdown.interface=tailscale0' "$plan_one"
 
 DOTFILES_SERVER_DRY_RUN=1 "$script" prepare >"$temporary/dry-run"
@@ -76,6 +78,51 @@ grep -Fq "DOTFILES_DIR=$root" "$temporary/tt-symlink.out"
 
 # shellcheck disable=SC1090
 DOTFILES_SERVER_SOURCE_ONLY=1 source "$script"
+
+prepare_definition="$(declare -f prepare)"
+if grep -Eq 'openssh-server|sshd|auth_proof|ssh_service|/etc/ssh|systemctl.*ssh' \
+  <<<"$prepare_definition"; then
+  printf 'prepare mutates SSH server state\n' >&2
+  exit 1
+fi
+prepare_commands="$temporary/prepare-commands"
+(
+  # shellcheck disable=SC2329
+  sudo() { :; }
+  # shellcheck disable=SC2329
+  validate_parameters() { :; }
+  # shellcheck disable=SC2329
+  require_non_root() { :; }
+  # shellcheck disable=SC2329
+  require_ubuntu() { :; }
+  # shellcheck disable=SC2329
+  ensure_sudo_access() { :; }
+  # shellcheck disable=SC2329
+  record_prepare_command() {
+    printf '%s' "$1" >>"$prepare_commands"
+    shift
+    printf ' %q' "$@" >>"$prepare_commands"
+    printf '\n' >>"$prepare_commands"
+  }
+  # shellcheck disable=SC2329
+  run() { record_prepare_command run "$@"; }
+  # shellcheck disable=SC2329
+  run_root() { record_prepare_command run_root "$@"; }
+  # shellcheck disable=SC2329
+  apt_install_available() { record_prepare_command apt_install_available "$@"; }
+  # shellcheck disable=SC2329
+  install_pinned_checkout() { :; }
+  # shellcheck disable=SC2329
+  link_server_dotfiles() { :; }
+  # shellcheck disable=SC2329
+  install_openclaw_toolchain() { :; }
+  prepare
+) >/dev/null
+if grep -Eq 'openssh-server|sshd|auth.proof|/etc/ssh|systemctl.*(ssh|sshd)' \
+  "$prepare_commands"; then
+  printf 'prepare execution attempted an SSH server mutation\n' >&2
+  exit 1
+fi
 
 is_tailscale_ip 100.64.0.1
 is_tailscale_ip 100.127.255.254
@@ -214,6 +261,7 @@ grep -Eq 'lockdown requires an exact Tailscale source verified by tailscale whoi
 
 grep -Fq 'AuthenticationMethods publickey' "$script"
 grep -Fq 'ExposeAuthInfo yes' "$script"
+grep -Fq 'ExposeAuthInfo no' "$script"
 # shellcheck disable=SC2016
 grep -Fq 'ufw allow in on "$tailscale_interface"' "$script"
 grep -Fq 'lockdown must run from a different SSH session' "$script"

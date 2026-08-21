@@ -95,17 +95,39 @@ aliases/functions. Node and pnpm stay under the current user's home directory;
 no downloaded script runs as root. The profile deliberately excludes macOS
 paths, private dotfiles, Git credentials/signing, GUI apps, OpenClaw global npm
 installs, Mosh, and firewall activation. Regular SSH is the safe default; add a
-separately reviewed tailnet UDP policy before opting into Mosh.
+separately reviewed tailnet UDP policy before opting into Mosh. `prepare` does
+not install, write, validate, or reload the SSH server; the Ubuntu host must
+already have a working `sshd`.
 
-After Tailscale and a public key are proven, open two regular OpenSSH sessions
-over Tailscale. Run `prove-second-session` in the second and `lockdown` in the
-first. The proof requires one public-key authentication whose fingerprint is
-present in unchanged `authorized_keys`; it is boot-bound, expires after 15
-minutes, and must come from another TTY. Lockdown verifies the peer with
-Tailscale WhoIs, requires UFW IPv6 support, permits SSH and Gateway HTTPS only
-on `tailscale0`, disables password and root SSH, validates `sshd` before reload,
-and leaves automatic reboots off. Override the interface or ports with the
-documented `DOTFILES_SERVER_*` environment variables.
+Obtain the SHA256 fingerprint of the designated recovery public key through an
+independent trusted path, then explicitly enable the temporary proof phase:
+
+```bash
+DOTFILES_SERVER_ADMIN_USER="$(id -un)" \
+DOTFILES_SERVER_EXPECTED_KEY_SHA256='SHA256:replace-with-designated-key-fingerprint' \
+  ~/.dotfiles/bin/linux-server-bootstrap enable-auth-proof
+```
+
+Open the proof connection with a new transport, not an existing SSH control
+socket:
+
+```bash
+ssh -o ControlMaster=no -o ControlPath=none <tailnet-host>
+~/.dotfiles/bin/linux-server-bootstrap prove-second-session
+```
+
+Run `lockdown` from the independent original Tailscale SSH connection. The
+proof requires the freshly authenticated public key to match the externally
+supplied fingerprint and unchanged `authorized_keys`; it is boot-bound, expires
+after 15 minutes, and records a distinct source connection. This identifies the
+designated public key, not the agent or service that supplied it. Lockdown
+verifies the peer with Tailscale WhoIs, requires UFW IPv6 support, permits SSH
+and Gateway HTTPS only on `tailscale0`, disables password and root SSH, removes
+the temporary auth exposure, validates effective `ExposeAuthInfo no`, and
+leaves automatic reboots off. Use another nonmultiplexed login for the final
+`audit`; it must report `ssh:expose_auth_info=no` and
+`ssh:user_auth_file=absent`. Override the interface or ports with the documented
+`DOTFILES_SERVER_*` environment variables.
 
 ## Structure
 

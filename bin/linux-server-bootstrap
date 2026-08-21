@@ -17,6 +17,7 @@ script_path="$(resolve_script_path)"
 repo_root="$(cd "$(dirname "$script_path")/.." && pwd -P)"
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/linux-server"
 proof_file="$state_root/second-session-proof"
+auth_proof_state_file="$state_root/auth-proof-state"
 dry_run="${DOTFILES_SERVER_DRY_RUN:-0}"
 
 node_version=24.19.0
@@ -34,16 +35,19 @@ gateway_port="${DOTFILES_SERVER_GATEWAY_PORT:-443}"
 
 usage() {
   printf '%s\n' \
-    'usage: linux-server-bootstrap <plan|audit|prepare|prove-second-session|lockdown>' \
+    'usage: linux-server-bootstrap <plan|audit|prepare|enable-auth-proof|prove-second-session|lockdown>' \
     '' \
     '  plan                  Print the deterministic prepare and lockdown plan.' \
     '  audit                 Read-only shell, SSH, firewall, and tool audit.' \
     '  prepare               Install the Ubuntu CLI baseline and safe dotfiles.' \
-    '  prove-second-session  Record a fresh Tailscale SSH recovery session.' \
+    '  enable-auth-proof     Temporarily expose auth data for one administrator.' \
+    '  prove-second-session  Prove a designated key on a fresh Tailscale session.' \
     '  lockdown              Require that proof, then harden SSH and enable UFW.' \
     '' \
     'Environment:' \
     '  DOTFILES_SERVER_DRY_RUN=1                 Print prepare commands only.' \
+    '  DOTFILES_SERVER_ADMIN_USER=...            Required for enable-auth-proof.' \
+    '  DOTFILES_SERVER_EXPECTED_KEY_SHA256=...   Required designated-key fingerprint.' \
     '  DOTFILES_SERVER_TAILSCALE_INTERFACE=...   Default: tailscale0.' \
     '  DOTFILES_SERVER_SSH_PORT=...              Default: 22.' \
     '  DOTFILES_SERVER_GATEWAY_PORT=...          Default: 443.'
@@ -142,7 +146,9 @@ plan() {
     'prepare.remote_shell=ssh' \
     'prepare.dotfiles=portable-aliases-functions-server-zsh-server-tmux' \
     'prepare.excludes=credentials-signing-gui-apps-global-openclaw-mosh' \
-    'lockdown.requires=unchanged-authorized_keys,publickey-only-proof,tailscale-whois,passwordless-sudo,ufw-ipv6' \
+    'enable_auth_proof.requires=admin-user,designated-key-sha256,unchanged-authorized_keys' \
+    'proof.requires=fresh-nonmultiplexed-transport,designated-public-key,tailscale-whois' \
+    'lockdown.requires=valid-proof,passwordless-sudo,ufw-ipv6' \
     "lockdown.interface=$tailscale_interface" \
     "lockdown.ssh_port=$ssh_port" \
     "lockdown.gateway_port=$gateway_port" \
@@ -194,6 +200,12 @@ audit() {
     sshd_effective="$(sudo -n sshd -T 2>/dev/null || sshd -T 2>/dev/null || true)"
     status ssh:password_auth "$(awk '$1=="passwordauthentication"{print $2; exit}' <<<"$sshd_effective")"
     status ssh:root_login "$(awk '$1=="permitrootlogin"{print $2; exit}' <<<"$sshd_effective")"
+    status ssh:expose_auth_info "$(awk '$1=="exposeauthinfo"{print $2; exit}' <<<"$sshd_effective")"
+  fi
+  if [[ -n "${SSH_USER_AUTH:-}" ]]; then
+    status ssh:user_auth_file present
+  else
+    status ssh:user_auth_file absent
   fi
 }
 
@@ -238,18 +250,281 @@ ssh_service_name() {
   fi
 }
 
-install_auth_proof_config() {
-  local auth_dropin service
-  auth_dropin="$(mktemp)"
-  trap 'rm -f "${auth_dropin:-}"' EXIT
-  printf 'ExposeAuthInfo yes\n' >"$auth_dropin"
-  run_root install -d -m 0755 /etc/ssh/sshd_config.d
-  run_root install -m 0644 "$auth_dropin" /etc/ssh/sshd_config.d/50-dotfiles-auth-proof.conf
+auth_proof_dropin_path() {
+  printf '/etc/ssh/sshd_config.d/50-dotfiles-auth-proof.conf\n'
+}
+
+lockdown_dropin_path() {
+  printf '/etc/ssh/sshd_config.d/60-dotfiles-linux-server.conf\n'
+}
+
+sshd_config_valid() {
   run_root sshd -t
+}
+
+sshd_effective_expose_auth_info() {
+  local admin_user="$1"
+  run_root sshd -T -C "user=$admin_user,host=$(hostname),addr=127.0.0.1" |
+    awk '$1=="exposeauthinfo"{print $2; exit}'
+}
+
+reload_ssh_service() {
+  local service="$1"
+  run_root systemctl reload "$service" &&
+    run_root systemctl is-active --quiet "$service"
+}
+
+validate_admin_user() {
+  local admin_user="$1"
+  [[ "$admin_user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*[$]?$ ]] || {
+    printf 'DOTFILES_SERVER_ADMIN_USER is invalid\n' >&2
+    return 1
+  }
+  [[ "$admin_user" == "$(id -un)" ]] || {
+    printf 'enable-auth-proof must run as DOTFILES_SERVER_ADMIN_USER\n' >&2
+    return 1
+  }
+}
+
+validate_sha256_fingerprint() {
+  [[ "$1" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+}
+
+path_owner() {
+  stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null
+}
+
+path_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
+validate_managed_sshd_dropin() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$(path_owner "$path")" == 0 ]] || return 1
+  [[ "$(path_mode "$path")" == 644 ]]
+}
+
+ensure_private_state_root() {
+  install -d -m 0700 "$state_root"
+  chmod 0700 "$state_root"
+  validate_private_state_root
+}
+
+validate_private_state_root() {
+  [[ -d "$state_root" && ! -L "$state_root" ]] || return 1
+  [[ "$(path_owner "$state_root")" == "$(id -u)" ]] || return 1
+  [[ "$(path_mode "$state_root")" == 700 ]]
+}
+
+validate_private_state_file() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$(path_owner "$path")" == "$(id -u)" ]] || return 1
+  [[ "$(path_mode "$path")" == 600 ]]
+}
+
+write_private_state_file() {
+  local source="$1"
+  local destination="$2"
+  local temporary="$destination.tmp.$$"
+  install -m 0600 "$source" "$temporary"
+  mv -f "$temporary" "$destination"
+  validate_private_state_file "$destination"
+}
+
+state_value() {
+  local path="$1"
+  local key="$2"
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; count++} END {if (count != 1) exit 1}' "$path"
+}
+
+render_auth_proof_dropin() {
+  local admin_user="$1"
+  local destination="$2"
+  printf '%s\n' \
+    '# Temporary auth proof exposure managed by linux-server-bootstrap.' \
+    "Match User $admin_user" \
+    '    ExposeAuthInfo yes' \
+    'Match all' >"$destination"
+}
+
+render_lockdown_dropin() {
+  local destination="$1"
+  printf '%s\n' \
+    'PasswordAuthentication no' \
+    'KbdInteractiveAuthentication no' \
+    'ChallengeResponseAuthentication no' \
+    'PermitRootLogin no' \
+    'PubkeyAuthentication yes' \
+    'AuthenticationMethods publickey' \
+    'ExposeAuthInfo no' \
+    'X11Forwarding no' \
+    'AllowAgentForwarding no' >"$destination"
+}
+
+rollback_auth_proof_activation() {
+  local admin_user="$1"
+  local dropin="$2"
+  local remote_temporary="$3"
+  local service="$4"
+  local rollback_status=0
+  run_root rm -f "$remote_temporary" "$dropin" || rollback_status=1
+  sshd_config_valid || rollback_status=1
+  [[ "$(sshd_effective_expose_auth_info "$admin_user")" == no ]] || rollback_status=1
+  reload_ssh_service "$service" || rollback_status=1
+  [[ "$(sshd_effective_expose_auth_info "$admin_user")" == no ]] || rollback_status=1
+  rm -f "$auth_proof_state_file"
+  return "$rollback_status"
+}
+
+activate_auth_proof_transaction() (
+  local admin_user="$1"
+  local expected_fingerprint="$2"
+  local authorized_keys_hash="$3"
+  local dropin service local_config remote_temporary dropin_hash enabled_epoch pre_effective
+  dropin="$(auth_proof_dropin_path)"
   service="$(ssh_service_name)"
-  run_root systemctl reload "$service"
-  run rm -f "$auth_dropin"
-  trap - EXIT
+  local_config="$(mktemp)"
+  remote_temporary="$dropin.tmp.$$"
+  local state_temporary=""
+  trap 'rm -f "${local_config:-}" "${state_temporary:-}"' EXIT
+
+  if run_root test -e "$dropin" || run_root test -L "$dropin"; then
+    printf 'refusing unexpected preexisting auth-proof drop-in: %s\n' "$dropin" >&2
+    return 1
+  fi
+  if run_root test -e "$remote_temporary" || run_root test -L "$remote_temporary"; then
+    printf 'refusing unexpected preexisting auth-proof temporary path\n' >&2
+    return 1
+  fi
+  pre_effective="$(sshd_effective_expose_auth_info "$admin_user")" || {
+    printf 'cannot determine pre-activation ExposeAuthInfo value\n' >&2
+    return 1
+  }
+  [[ "$pre_effective" == no ]] || {
+    printf 'refusing auth-proof activation because ExposeAuthInfo is already enabled\n' >&2
+    return 1
+  }
+
+  render_auth_proof_dropin "$admin_user" "$local_config"
+  dropin_hash="$(sha256sum "$local_config" | awk '{print $1}')"
+  enabled_epoch="$(date +%s)"
+  ensure_private_state_root
+  [[ ! -e "$auth_proof_state_file" && ! -L "$auth_proof_state_file" ]] || {
+    printf 'refusing preexisting auth-proof state; complete or clean up the prior activation\n' >&2
+    return 1
+  }
+  state_temporary="$(mktemp)"
+  {
+    printf 'version=1\n'
+    printf 'admin_user=%s\n' "$admin_user"
+    printf 'expected_fingerprint=%s\n' "$expected_fingerprint"
+    printf 'authorized_keys_sha256=%s\n' "$authorized_keys_hash"
+    printf 'dropin_pre_state=absent\n'
+    printf 'expose_auth_info_pre_state=%s\n' "$pre_effective"
+    printf 'dropin_sha256=%s\n' "$dropin_hash"
+    printf 'enabled_epoch=%s\n' "$enabled_epoch"
+  } >"$state_temporary"
+  write_private_state_file "$state_temporary" "$auth_proof_state_file"
+
+  if ! run_root install -d -m 0755 "$(dirname "$dropin")" ||
+    ! run_root install -m 0644 "$local_config" "$remote_temporary"; then
+    rm -f "$auth_proof_state_file"
+    printf 'auth-proof staging failed before SSH configuration changed\n' >&2
+    return 1
+  fi
+  if ! run_root ln "$remote_temporary" "$dropin"; then
+    run_root rm -f "$remote_temporary"
+    rm -f "$auth_proof_state_file"
+    printf 'refusing auth-proof activation because the owned path appeared concurrently\n' >&2
+    return 1
+  fi
+
+  if ! run_root rm -f "$remote_temporary" ||
+    ! validate_managed_sshd_dropin "$dropin" ||
+    ! run_root cmp -s "$local_config" "$dropin" ||
+    ! sshd_config_valid ||
+    [[ "$(sshd_effective_expose_auth_info "$admin_user")" != yes ]] ||
+    ! reload_ssh_service "$service"; then
+    printf 'auth-proof activation failed; restoring the pre-activation SSH state\n' >&2
+    rollback_auth_proof_activation "$admin_user" "$dropin" "$remote_temporary" "$service" || {
+      printf 'auth-proof rollback failed; inspect sshd immediately\n' >&2
+    }
+    return 1
+  fi
+)
+
+validate_auth_proof_state() {
+  local admin_user expected_fingerprint authorized_keys_hash dropin_pre_state pre_effective dropin_hash enabled_epoch
+  validate_private_state_root || return 1
+  validate_private_state_file "$auth_proof_state_file" || return 1
+  [[ "$(state_value "$auth_proof_state_file" version)" == 1 ]] || return 1
+  admin_user="$(state_value "$auth_proof_state_file" admin_user)" || return 1
+  expected_fingerprint="$(state_value "$auth_proof_state_file" expected_fingerprint)" || return 1
+  authorized_keys_hash="$(state_value "$auth_proof_state_file" authorized_keys_sha256)" || return 1
+  dropin_pre_state="$(state_value "$auth_proof_state_file" dropin_pre_state)" || return 1
+  pre_effective="$(state_value "$auth_proof_state_file" expose_auth_info_pre_state)" || return 1
+  dropin_hash="$(state_value "$auth_proof_state_file" dropin_sha256)" || return 1
+  enabled_epoch="$(state_value "$auth_proof_state_file" enabled_epoch)" || return 1
+  validate_admin_user "$admin_user" &&
+    validate_sha256_fingerprint "$expected_fingerprint" &&
+    [[ "$authorized_keys_hash" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$dropin_pre_state" == absent ]] &&
+    [[ "$pre_effective" == no ]] &&
+    [[ "$dropin_hash" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$enabled_epoch" =~ ^[0-9]+$ ]]
+}
+
+validate_active_auth_proof_dropin() {
+  local admin_user dropin expected_hash actual_hash
+  admin_user="$(state_value "$auth_proof_state_file" admin_user)" || return 1
+  expected_hash="$(state_value "$auth_proof_state_file" dropin_sha256)" || return 1
+  dropin="$(auth_proof_dropin_path)"
+  actual_hash="$(run_root sha256sum "$dropin" 2>/dev/null | awk '{print $1}')" || return 1
+  [[ "$actual_hash" == "$expected_hash" ]] || return 1
+  [[ "$(sshd_effective_expose_auth_info "$admin_user")" == yes ]]
+}
+
+enable_auth_proof() {
+  validate_parameters
+  require_non_root
+  require_ubuntu
+  command -v sudo >/dev/null || {
+    printf 'sudo is required\n' >&2
+    exit 2
+  }
+  command -v sshd >/dev/null || {
+    printf 'sshd must already be installed before enable-auth-proof\n' >&2
+    exit 2
+  }
+  ensure_sudo_access
+
+  local admin_user="${DOTFILES_SERVER_ADMIN_USER:-}"
+  local expected_fingerprint="${DOTFILES_SERVER_EXPECTED_KEY_SHA256:-}"
+  local authorized_keys="$HOME/.ssh/authorized_keys"
+  local authorized_keys_hash
+  [[ -n "$admin_user" && -n "$expected_fingerprint" ]] || {
+    printf 'enable-auth-proof requires DOTFILES_SERVER_ADMIN_USER and DOTFILES_SERVER_EXPECTED_KEY_SHA256\n' >&2
+    exit 2
+  }
+  validate_admin_user "$admin_user" || exit 2
+  validate_sha256_fingerprint "$expected_fingerprint" || {
+    printf 'DOTFILES_SERVER_EXPECTED_KEY_SHA256 must be an OpenSSH SHA256 fingerprint\n' >&2
+    exit 2
+  }
+  validate_authorized_keys_file "$authorized_keys" || {
+    printf 'authorized_keys must be a user-owned 0600 regular file\n' >&2
+    exit 1
+  }
+  authorized_keys_has_fingerprint "$authorized_keys" "$expected_fingerprint" || {
+    printf 'the designated public key is not present in authorized_keys\n' >&2
+    exit 1
+  }
+  authorized_keys_hash="$(sha256sum "$authorized_keys" | awk '{print $1}')"
+  activate_auth_proof_transaction "$admin_user" "$expected_fingerprint" "$authorized_keys_hash"
+  log "temporary auth proof enabled for $admin_user"
+  log "open the proof session with: ssh -o ControlMaster=no -o ControlPath=none <tailnet-host>"
 }
 
 backup_and_link() {
@@ -369,7 +644,7 @@ prepare() {
 
   run_root env DEBIAN_FRONTEND=noninteractive apt-get update
   apt_install_available \
-    zsh git git-lfs curl ca-certificates locales openssh-client openssh-server \
+    zsh git git-lfs curl ca-certificates locales openssh-client \
     tmux gh jq ripgrep fd-find fzf bat eza tree less lsof dnsutils \
     net-tools htop btop zoxide direnv unzip xz-utils rsync sqlite3 shellcheck \
     build-essential pkg-config python3 python3-venv ufw unattended-upgrades \
@@ -398,7 +673,6 @@ prepare() {
 
   link_server_dotfiles
   install_openclaw_toolchain
-  install_auth_proof_config
 
   if ! locale -a | tr '[:upper:]' '[:lower:]' | grep -qx 'en_us.utf8'; then
     run_root sed -i 's/^[#[:space:]]*en_US.UTF-8[[:space:]]\+UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
@@ -406,7 +680,8 @@ prepare() {
   fi
   run_root update-locale LANG=en_US.UTF-8
   run_root usermod -s "$(command -v zsh)" "$(id -un)"
-  log "prepare complete; reconnect before running prove-second-session"
+  log "prepare complete; SSH configuration was not changed"
+  log "supply the designated public-key fingerprint before running enable-auth-proof"
 }
 
 is_tailscale_ip() {
@@ -522,6 +797,29 @@ verify_ufw_coverage() {
   ufw_rule_present "$rules" "$gateway_port" 6
 }
 
+validate_designated_auth_session() {
+  local expected_fingerprint="$1"
+  local authorized_keys="$2"
+  local authorized_keys_hash="$3"
+  local enabled_epoch="$4"
+  local auth_file="${SSH_USER_AUTH:-}"
+  local auth_fingerprint auth_mtime
+  auth_fingerprint="$(auth_info_publickey_fingerprint)" || return 1
+  [[ "$auth_fingerprint" == "$expected_fingerprint" ]] || return 1
+  validate_proven_authorized_keys \
+    "$authorized_keys" \
+    "$expected_fingerprint" \
+    "$authorized_keys_hash" || return 1
+  auth_mtime="$(stat -c %Y "$auth_file" 2>/dev/null || stat -f %m "$auth_file" 2>/dev/null)" || return 1
+  [[ "$auth_mtime" =~ ^[0-9]+$ ]] || return 1
+  ((auth_mtime >= enabled_epoch)) || return 1
+  printf '%s\n' "$auth_fingerprint"
+}
+
+independent_ssh_transport() {
+  [[ -n "$1" && -n "$2" && "$1" != "$2" ]]
+}
+
 prove_second_session() {
   require_non_root
   [[ -n "${SSH_CONNECTION:-}" ]] || {
@@ -532,33 +830,55 @@ prove_second_session() {
     printf 'proof requires an exact Tailscale source verified by tailscale whois\n' >&2
     exit 1
   }
+  if ! validate_auth_proof_state || ! validate_active_auth_proof_dropin; then
+    printf 'temporary auth-proof activation is missing, malformed, or ineffective\n' >&2
+    exit 1
+  fi
   local authorized_keys="$HOME/.ssh/authorized_keys"
-  local auth_fingerprint authorized_keys_hash
-  auth_fingerprint="$(auth_info_publickey_fingerprint)" || {
-    printf 'proof requires one publickey-only SSH authentication; reconnect after prepare\n' >&2
+  local admin_user expected_fingerprint authorized_keys_hash enabled_epoch
+  local auth_fingerprint proof_epoch proof_expires proof_temporary
+  admin_user="$(state_value "$auth_proof_state_file" admin_user)"
+  expected_fingerprint="$(state_value "$auth_proof_state_file" expected_fingerprint)"
+  authorized_keys_hash="$(state_value "$auth_proof_state_file" authorized_keys_sha256)"
+  enabled_epoch="$(state_value "$auth_proof_state_file" enabled_epoch)"
+  [[ "$(id -un)" == "$admin_user" ]] || {
+    printf 'proof must run as the designated administrator\n' >&2
     exit 1
   }
-  validate_authorized_keys_file "$authorized_keys" || {
-    printf 'authorized_keys must be a user-owned, non-writable regular file\n' >&2
+  auth_fingerprint="$(
+    validate_designated_auth_session \
+      "$expected_fingerprint" \
+      "$authorized_keys" \
+      "$authorized_keys_hash" \
+      "$enabled_epoch"
+  )" || {
+    printf 'fresh session key does not match the designated authorized public key\n' >&2
     exit 1
   }
-  authorized_keys_has_fingerprint "$authorized_keys" "$auth_fingerprint" || {
-    printf 'the SSH proof key is not present in authorized_keys\n' >&2
+  sudo -n true || {
+    printf 'proof session requires working passwordless sudo\n' >&2
     exit 1
   }
-  authorized_keys_hash="$(sha256sum "$authorized_keys" | awk '{print $1}')"
-  sudo -n true
-  mkdir -p "$state_root"
+  ensure_private_state_root || {
+    printf 'proof state directory is not private\n' >&2
+    exit 1
+  }
   umask 077
+  proof_epoch="$(date +%s)"
+  proof_expires=$((proof_epoch + 900))
+  proof_temporary="$(mktemp)"
   {
     printf 'boot_id=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
-    printf 'epoch=%s\n' "$(date +%s)"
+    printf 'epoch=%s\n' "$proof_epoch"
+    printf 'expires_epoch=%s\n' "$proof_expires"
     printf 'tty=%s\n' "$(tty)"
-    printf 'source=%s\n' "${SSH_CONNECTION%% *}"
+    printf 'source_connection=%s\n' "$SSH_CONNECTION"
     printf 'auth_fingerprint=%s\n' "$auth_fingerprint"
     printf 'authorized_keys_sha256=%s\n' "$authorized_keys_hash"
-  } >"$proof_file"
-  log "publickey-only proof recorded; run lockdown from the original Tailscale SSH session"
+  } >"$proof_temporary"
+  write_private_state_file "$proof_temporary" "$proof_file"
+  rm -f "$proof_temporary"
+  log "designated public-key proof recorded; run lockdown from the independent Tailscale SSH session"
 }
 
 validate_second_session_proof() {
@@ -570,33 +890,58 @@ validate_second_session_proof() {
     printf 'missing proof; run prove-second-session in another SSH session\n' >&2
     exit 1
   }
+  if ! validate_auth_proof_state || ! validate_active_auth_proof_dropin; then
+    printf 'temporary auth-proof activation is missing, malformed, or ineffective\n' >&2
+    exit 1
+  fi
+  validate_private_state_file "$proof_file" || {
+    printf 'second-session proof must be a user-owned 0600 regular file\n' >&2
+    exit 1
+  }
 
   local authorized_keys="$HOME/.ssh/authorized_keys"
-  local proof_boot proof_epoch proof_tty proof_fingerprint proof_authorized_keys_hash
-  local age
-  proof_boot="$(awk -F= '$1=="boot_id"{print $2}' "$proof_file")"
-  proof_epoch="$(awk -F= '$1=="epoch"{print $2}' "$proof_file")"
-  proof_tty="$(awk -F= '$1=="tty"{sub(/^tty=/,""); print}' "$proof_file")"
-  proof_fingerprint="$(awk -F= '$1=="auth_fingerprint"{print $2}' "$proof_file")"
-  proof_authorized_keys_hash="$(awk -F= '$1=="authorized_keys_sha256"{print $2}' "$proof_file")"
+  local expected_fingerprint expected_authorized_keys_hash
+  local proof_boot proof_epoch proof_expires proof_tty proof_source_connection
+  local proof_fingerprint proof_authorized_keys_hash now
+  expected_fingerprint="$(state_value "$auth_proof_state_file" expected_fingerprint)"
+  expected_authorized_keys_hash="$(state_value "$auth_proof_state_file" authorized_keys_sha256)"
+  proof_boot="$(state_value "$proof_file" boot_id)" || {
+    printf 'second-session proof is malformed\n' >&2
+    exit 1
+  }
+  proof_epoch="$(state_value "$proof_file" epoch)" || exit 1
+  proof_expires="$(state_value "$proof_file" expires_epoch)" || exit 1
+  proof_tty="$(state_value "$proof_file" tty)" || exit 1
+  proof_source_connection="$(state_value "$proof_file" source_connection)" || exit 1
+  proof_fingerprint="$(state_value "$proof_file" auth_fingerprint)" || exit 1
+  proof_authorized_keys_hash="$(state_value "$proof_file" authorized_keys_sha256)" || exit 1
   [[ "$proof_boot" == "$(cat /proc/sys/kernel/random/boot_id)" ]] || {
     printf 'second-session proof is from another boot\n' >&2
     exit 1
   }
-  [[ "$proof_epoch" =~ ^[0-9]+$ ]] || {
+  [[ "$proof_epoch" =~ ^[0-9]+$ && "$proof_expires" =~ ^[0-9]+$ ]] || {
     printf 'second-session proof is malformed\n' >&2
     exit 1
   }
-  age=$(($(date +%s) - proof_epoch))
-  ((age >= 0 && age <= 900)) || {
-    printf 'second-session proof is older than 15 minutes\n' >&2
+  ((proof_expires == proof_epoch + 900)) || {
+    printf 'second-session proof expiry is malformed\n' >&2
+    exit 1
+  }
+  now="$(date +%s)"
+  ((now >= proof_epoch && now <= proof_expires)) || {
+    printf 'second-session proof is expired\n' >&2
     exit 1
   }
   [[ "$proof_tty" != "$(tty)" ]] || {
     printf 'lockdown must run from a different SSH session than the proof\n' >&2
     exit 1
   }
-  [[ "$proof_fingerprint" == SHA256:* && "$proof_authorized_keys_hash" =~ ^[0-9a-f]{64}$ ]] || {
+  independent_ssh_transport "$proof_source_connection" "$SSH_CONNECTION" || {
+    printf 'lockdown and proof must use independent SSH transports; disable ControlMaster\n' >&2
+    exit 1
+  }
+  [[ "$proof_fingerprint" == "$expected_fingerprint" &&
+    "$proof_authorized_keys_hash" == "$expected_authorized_keys_hash" ]] || {
     printf 'second-session proof is missing public-key evidence\n' >&2
     exit 1
   }
@@ -607,7 +952,68 @@ validate_second_session_proof() {
     printf 'authorized_keys changed or no longer contains the proven SSH key\n' >&2
     exit 1
   }
-  sudo -n true
+  sudo -n true || {
+    printf 'lockdown requires working passwordless sudo\n' >&2
+    exit 1
+  }
+}
+
+stage_lockdown_ssh_config() (
+  local dropin local_config remote_temporary
+  dropin="$(lockdown_dropin_path)"
+  local_config="$(mktemp)"
+  remote_temporary="$dropin.tmp.$$"
+  trap 'rm -f "${local_config:-}"' EXIT
+  render_lockdown_dropin "$local_config"
+  run_root install -d -m 0755 "$(dirname "$dropin")"
+  run_root install -m 0644 "$local_config" "$remote_temporary"
+  run_root mv -T "$remote_temporary" "$dropin"
+  validate_managed_sshd_dropin "$dropin"
+  run_root cmp -s "$local_config" "$dropin"
+  sshd_config_valid
+)
+
+restore_auth_proof_dropin() (
+  local admin_user="$1"
+  local service="$2"
+  local dropin local_config remote_temporary expected_hash actual_hash
+  dropin="$(auth_proof_dropin_path)"
+  local_config="$(mktemp)"
+  remote_temporary="$dropin.tmp.rollback.$$"
+  trap 'rm -f "${local_config:-}"' EXIT
+  render_auth_proof_dropin "$admin_user" "$local_config"
+  expected_hash="$(state_value "$auth_proof_state_file" dropin_sha256)"
+  actual_hash="$(sha256sum "$local_config" | awk '{print $1}')"
+  [[ "$actual_hash" == "$expected_hash" ]]
+  run_root install -m 0644 "$local_config" "$remote_temporary"
+  run_root ln "$remote_temporary" "$dropin"
+  run_root rm -f "$remote_temporary"
+  validate_managed_sshd_dropin "$dropin"
+  run_root cmp -s "$local_config" "$dropin"
+  sshd_config_valid
+  [[ "$(sshd_effective_expose_auth_info "$admin_user")" == yes ]]
+  reload_ssh_service "$service"
+)
+
+finalize_auth_proof_cleanup() {
+  local admin_user="$1"
+  local dropin service
+  dropin="$(auth_proof_dropin_path)"
+  service="$(ssh_service_name)"
+  if ! run_root rm -f "$dropin"; then
+    printf 'failed to remove the temporary auth-proof drop-in\n' >&2
+    return 1
+  fi
+  if ! sshd_config_valid ||
+    [[ "$(sshd_effective_expose_auth_info "$admin_user")" != no ]] ||
+    ! reload_ssh_service "$service" ||
+    [[ "$(sshd_effective_expose_auth_info "$admin_user")" != no ]]; then
+    printf 'failed to disable temporary auth exposure; restoring the proof phase\n' >&2
+    restore_auth_proof_dropin "$admin_user" "$service" || {
+      printf 'failed to restore auth-proof SSH state; inspect sshd immediately\n' >&2
+    }
+    return 1
+  fi
 }
 
 lockdown() {
@@ -620,21 +1026,8 @@ lockdown() {
     exit 1
   }
 
-  local ssh_dropin service ufw_status
-  ssh_dropin="$(mktemp)"
-  trap 'rm -f "${ssh_dropin:-}"' EXIT
-  printf '%s\n' \
-    'PasswordAuthentication no' \
-    'KbdInteractiveAuthentication no' \
-    'ChallengeResponseAuthentication no' \
-    'PermitRootLogin no' \
-    'PubkeyAuthentication yes' \
-    'AuthenticationMethods publickey' \
-    'ExposeAuthInfo yes' \
-    'X11Forwarding no' \
-    'AllowAgentForwarding no' >"$ssh_dropin"
-  run_root install -m 0644 "$ssh_dropin" /etc/ssh/sshd_config.d/60-dotfiles-linux-server.conf
-  run_root sshd -t
+  local admin_user ufw_status
+  admin_user="$(state_value "$auth_proof_state_file" admin_user)"
 
   run_root ufw default deny incoming
   run_root ufw default allow outgoing
@@ -647,14 +1040,15 @@ lockdown() {
     exit 1
   }
 
-  service="$(ssh_service_name)"
+  stage_lockdown_ssh_config
   run_root systemctl enable --now unattended-upgrades
   printf 'Unattended-Upgrade::Automatic-Reboot "false";\n' |
     run_root tee /etc/apt/apt.conf.d/52dotfiles-no-auto-reboot >/dev/null
-  run_root systemctl reload "$service"
+  finalize_auth_proof_cleanup "$admin_user"
 
-  run rm -f "$proof_file"
-  log "lockdown complete; keep both sessions open until a third fresh Tailscale SSH login succeeds"
+  rm -f "$proof_file" "$auth_proof_state_file"
+  log "lockdown complete; keep both sessions open until a fresh nonmultiplexed Tailscale SSH login succeeds"
+  log "run audit in that fresh login and require ssh:expose_auth_info=no and ssh:user_auth_file=absent"
 }
 
 if [[ "${DOTFILES_SERVER_SOURCE_ONLY:-0}" != 1 ]]; then
@@ -662,6 +1056,7 @@ if [[ "${DOTFILES_SERVER_SOURCE_ONLY:-0}" != 1 ]]; then
     plan) plan ;;
     audit) audit ;;
     prepare) prepare ;;
+    enable-auth-proof) enable_auth_proof ;;
     prove-second-session) prove_second_session ;;
     lockdown) lockdown ;;
     -h | --help | help) usage ;;
