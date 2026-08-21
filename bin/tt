@@ -2295,7 +2295,12 @@ count_snapshot_history() {
   local label="${1:-codex-cockpit}"
   local dir
   dir="$(snapshot_history_dir "$label")"
-  find "$dir" -maxdepth 1 -type f -name '*.tsv' 2>/dev/null | wc -l | tr -d ' '
+  if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  [[ -d "$dir" ]] || return 1
+  find "$dir" -maxdepth 1 -type f -name '*.tsv' | wc -l | tr -d ' '
 }
 
 portable_stat_value() {

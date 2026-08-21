@@ -4,7 +4,21 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tt="$repo/bin/tt"
 temporary="$(mktemp -d)"
-trap 'rm -rf "$temporary"' EXIT
+live_tmux_bin=""
+live_tmux_socket=""
+live_tmux_tmpdir=""
+live_tmux_session=""
+
+cleanup() {
+  if [[ -n "$live_tmux_bin" && -n "$live_tmux_socket" && -n "$live_tmux_session" ]]; then
+    TMUX_TMPDIR="$live_tmux_tmpdir" \
+      "$live_tmux_bin" -L "$live_tmux_socket" kill-session -t "$live_tmux_session" \
+      >/dev/null 2>&1 || true
+  fi
+  [[ -z "$live_tmux_tmpdir" ]] || rm -rf "$live_tmux_tmpdir"
+  rm -rf "$temporary"
+}
+trap cleanup EXIT
 
 fake_tmux="$temporary/tmux"
 tmux_log="$temporary/tmux.log"
@@ -57,5 +71,74 @@ if grep -Fq '; exec /bin/sh -il' "$agent_state"; then
   printf 'agent snapshot retained the shell fallback suffix\n' >&2
   exit 1
 fi
+
+live_tmux_bin="$(command -v tmux)"
+live_tmux_socket="s$$"
+live_tmux_tmpdir="$(mktemp -d /tmp/tt-status.XXXXXX)"
+live_tmux_session="tt-status-$$"
+live_tmux_wrapper="$temporary/live-tmux"
+status_home="$temporary/status-home"
+status_state="$temporary/status-state"
+mkdir -p "$live_tmux_tmpdir"
+mkdir -p "$status_home"
+cat >"$live_tmux_wrapper" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$TT_TEST_REAL_TMUX" -L "$TT_TEST_TMUX_SOCKET" "$@"
+SH
+chmod +x "$live_tmux_wrapper"
+
+HOME="$status_home" \
+  TMUX_TMPDIR="$live_tmux_tmpdir" \
+  "$live_tmux_bin" -L "$live_tmux_socket" -f /dev/null \
+  new-session -d -s "$live_tmux_session"
+
+history_dir="$status_state/tt/history/codex-cockpit"
+[[ ! -e "$history_dir" ]]
+status_output="$(
+  HOME="$status_home" \
+    XDG_STATE_HOME="$status_state" \
+    TMUX_TMPDIR="$live_tmux_tmpdir" \
+    TT_TMUX_BIN="$live_tmux_wrapper" \
+    TT_TEST_REAL_TMUX="$live_tmux_bin" \
+    TT_TEST_TMUX_SOCKET="$live_tmux_socket" \
+    "$tt" status
+)"
+grep -Fxq 'history: 0/864 codex-cockpit files' <<<"$status_output"
+grep -Fq 'agents: ' <<<"$status_output"
+[[ ! -e "$history_dir" ]]
+
+mkdir -p "$history_dir"
+: >"$history_dir/one.tsv"
+: >"$history_dir/two.tsv"
+: >"$history_dir/ignored.txt"
+status_output="$(
+  HOME="$status_home" \
+    XDG_STATE_HOME="$status_state" \
+    TMUX_TMPDIR="$live_tmux_tmpdir" \
+    TT_TMUX_BIN="$live_tmux_wrapper" \
+    TT_TEST_REAL_TMUX="$live_tmux_bin" \
+    TT_TEST_TMUX_SOCKET="$live_tmux_socket" \
+    "$tt" status
+)"
+grep -Fxq 'history: 2/864 codex-cockpit files' <<<"$status_output"
+
+rm -rf "$history_dir"
+mkdir -p "$(dirname "$history_dir")"
+: >"$history_dir"
+if HOME="$status_home" \
+  XDG_STATE_HOME="$status_state" \
+  TMUX_TMPDIR="$live_tmux_tmpdir" \
+  TT_TMUX_BIN="$live_tmux_wrapper" \
+  TT_TEST_REAL_TMUX="$live_tmux_bin" \
+  TT_TEST_TMUX_SOCKET="$live_tmux_socket" \
+  "$tt" status >"$temporary/status-invalid-history.out" 2>&1; then
+  printf 'tt status accepted a non-directory history path\n' >&2
+  exit 1
+fi
+
+TMUX_TMPDIR="$live_tmux_tmpdir" \
+  "$live_tmux_bin" -L "$live_tmux_socket" kill-session -t "$live_tmux_session"
+live_tmux_session=""
 
 printf 'tt_lifecycle_test=passed\n'
