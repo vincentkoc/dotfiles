@@ -133,6 +133,89 @@ if grep -Eq 'openssh-server|sshd|auth.proof|/etc/ssh|systemctl.*(ssh|sshd)' \
   exit 1
 fi
 
+toolchain_test="$temporary/toolchain-prepare-test.sh"
+cat >"$toolchain_test" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck disable=SC1090
+DOTFILES_SERVER_SOURCE_ONLY=1 source "$BOOTSTRAP_SCRIPT"
+install_root="$HOME/.local/opt/node-v$node_version"
+mkdir -p "$install_root/bin" "$HOME/.oh-my-zsh/custom/themes"
+cat >"$install_root/bin/node" <<'NODE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == --version ]]; then
+  printf 'v24.19.0\n'
+  exit
+fi
+printf 'node|%s|%s\n' "$PATH" "$*" >>"$TOOLCHAIN_TEST_LOG"
+script="$1"
+shift
+exec /bin/bash "$script" "$@"
+NODE
+cat >"$install_root/bin/corepack" <<'COREPACK'
+#!/usr/bin/env node
+printf 'corepack|%s|%s\n' "$PATH" "$*" >>"$TOOLCHAIN_TEST_LOG"
+if [[ "${1:-}" == enable && "${2:-}" == --install-directory ]]; then
+  cat >"$3/pnpm" <<'PROXY'
+#!/usr/bin/env bash
+printf '11.15.1\n'
+PROXY
+  chmod +x "$3/pnpm"
+fi
+COREPACK
+for executable in npm npx; do
+  cat >"$install_root/bin/$executable" <<'TOOL'
+#!/usr/bin/env bash
+exit 0
+TOOL
+done
+chmod +x "$install_root/bin/"*
+
+  # shellcheck disable=SC2329
+  validate_parameters() { :; }
+  # shellcheck disable=SC2329
+  require_non_root() { :; }
+  # shellcheck disable=SC2329
+  require_ubuntu() { :; }
+  # shellcheck disable=SC2329
+  ensure_sudo_access() { :; }
+  # shellcheck disable=SC2329
+  run_root() { :; }
+  # shellcheck disable=SC2329
+  apt_install_available() { :; }
+  # shellcheck disable=SC2329
+  install_pinned_checkout() { :; }
+  # shellcheck disable=SC2329
+  link_server_dotfiles() { :; }
+
+[[ ! -e "$HOME/.local/bin" ]]
+prepare >/dev/null
+first_prepare_path="$PATH"
+[[ "$(grep -c '^corepack|' "$TOOLCHAIN_TEST_LOG")" == 2 ]]
+awk -F'|' -v prefix="$HOME/.local/bin:" '
+  $1 == "corepack" && index($2, prefix) != 1 { exit 1 }
+' "$TOOLCHAIN_TEST_LOG"
+[[ "$("$HOME/.local/bin/node" --version)" == "v$node_version" ]]
+[[ "$("$HOME/.local/bin/pnpm" --version)" == "$pnpm_version" ]]
+
+prepare >/dev/null
+[[ "$PATH" == "$first_prepare_path" ]]
+[[ "$(tr ':' '\n' <<<"$PATH" | grep -Fxc "$HOME/.local/bin")" == 1 ]]
+[[ "$(grep -c '^corepack|' "$TOOLCHAIN_TEST_LOG")" == 4 ]]
+awk -F'|' -v prefix="$HOME/.local/bin:" '
+  $1 == "corepack" && index($2, prefix) != 1 { exit 1 }
+' "$TOOLCHAIN_TEST_LOG"
+EOF
+chmod +x "$toolchain_test"
+: >"$temporary/toolchain.log"
+HOME="$temporary/toolchain-home" \
+  XDG_STATE_HOME="$temporary/toolchain-home/.local/state" \
+  PATH=/usr/bin:/bin \
+  BOOTSTRAP_SCRIPT="$script" \
+  TOOLCHAIN_TEST_LOG="$temporary/toolchain.log" \
+  /bin/bash "$toolchain_test"
+
 is_tailscale_ip 100.64.0.1
 is_tailscale_ip 100.127.255.254
 is_tailscale_ip fd7a:115c:a1e0::1

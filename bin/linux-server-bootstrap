@@ -744,9 +744,10 @@ node_archive_metadata() {
 }
 
 install_openclaw_toolchain() {
-  local archive checksum install_root staging temporary
+  local archive checksum install_root local_bin staging temporary
   read -r archive checksum < <(node_archive_metadata)
   install_root="$HOME/.local/opt/node-v$node_version"
+  local_bin="$HOME/.local/bin"
 
   if [[ ! -x "$install_root/bin/node" ]]; then
     temporary="$(mktemp -d)"
@@ -769,17 +770,22 @@ install_openclaw_toolchain() {
     trap - EXIT
   fi
 
-  run mkdir -p "$HOME/.local/bin"
+  run mkdir -p "$local_bin"
   local executable
   for executable in node npm npx corepack; do
-    backup_and_link "$install_root/bin/$executable" "$HOME/.local/bin/$executable"
+    backup_and_link "$install_root/bin/$executable" "$local_bin/$executable"
   done
-  run "$install_root/bin/corepack" enable --install-directory "$HOME/.local/bin"
-  run "$HOME/.local/bin/corepack" install --global "$pnpm_spec"
+  case ":$PATH:" in
+    *":$local_bin:"*) ;;
+    *) PATH="$local_bin${PATH:+:$PATH}" ;;
+  esac
+  export PATH
+  run "$install_root/bin/corepack" enable --install-directory "$local_bin"
+  run "$local_bin/corepack" install --global "$pnpm_spec"
 
   if [[ "$dry_run" != 1 ]]; then
-    [[ "$("$HOME/.local/bin/node" --version)" == "v$node_version" ]]
-    [[ "$("$HOME/.local/bin/pnpm" --version)" == "$pnpm_version" ]]
+    [[ "$("$local_bin/node" --version)" == "v$node_version" ]]
+    [[ "$("$local_bin/pnpm" --version)" == "$pnpm_version" ]]
   fi
 }
 
