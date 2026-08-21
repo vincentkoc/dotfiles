@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo \"Code discovery: prefer codebase-memory-mcp (search_graph, trace_path, get_code_snippet, query_graph, search_code) over broad grep/file reads; run index_repository first if the project is not indexed.\""
+            "command": "echo \"Code discovery: prefer codebase-memory-mcp (search_graph, trace_path, get_code_snippet, query_graph, search_code) over broad grep/file reads. Before index_repository, resolve the requested path to its canonical owning checkout with the codebase-memory-mcp canonical helper. Never index a linked branch, GWT, Codex, repo-local, or temporary worktree as a separate project; if no non-worktree canonical checkout exists, skip indexing and report it.\""
           }
         ]
       }
