@@ -108,6 +108,13 @@ DOTFILES_SERVER_EXPECTED_KEY_SHA256='SHA256:replace-with-designated-key-fingerpr
   ~/.dotfiles/bin/linux-server-bootstrap enable-auth-proof
 ```
 
+The activation is bound to the current boot and expires after 15 minutes. If
+the proof session is abandoned, remove the temporary exposure explicitly:
+
+```bash
+~/.dotfiles/bin/linux-server-bootstrap cleanup-auth-proof
+```
+
 Open the proof connection with a new transport, not an existing SSH control
 socket:
 
@@ -119,13 +126,16 @@ ssh -o ControlMaster=no -o ControlPath=none <tailnet-host>
 Run `lockdown` from the independent original Tailscale SSH connection. The
 proof requires the freshly authenticated public key to match the externally
 supplied fingerprint and unchanged `authorized_keys`; it is boot-bound, expires
-after 15 minutes, and records a distinct source connection. This identifies the
-designated public key, not the agent or service that supplied it. Lockdown
-verifies the peer with Tailscale WhoIs, requires UFW IPv6 support, permits SSH
-and Gateway HTTPS only on `tailscale0`, disables password and root SSH, removes
-the temporary auth exposure, validates effective `ExposeAuthInfo no`, and
-leaves automatic reboots off. Use another nonmultiplexed login for the final
-`audit`; it must report `ssh:expose_auth_info=no` and
+after 15 minutes, and records a distinct source connection. Successful proof
+immediately removes the temporary exposure while retaining the proof evidence
+needed by `lockdown`. This identifies the designated public key, not the agent
+or service that supplied it. Lockdown verifies the peer with Tailscale WhoIs,
+requires UFW IPv6 support, permits SSH and Gateway HTTPS only on `tailscale0`,
+and transactionally publishes the owned SSH policy without clobbering unknown
+content. It asserts effective password, keyboard-interactive, root, public-key,
+authentication-method, auth-info, X11, and agent-forwarding values before and
+after reload. Use another nonmultiplexed login for the final `audit`; it must
+report the locked values, including `ssh:expose_auth_info=no` and
 `ssh:user_auth_file=absent`. Override the interface or ports with the documented
 `DOTFILES_SERVER_*` environment variables.
 
