@@ -78,6 +78,67 @@ native. It adds argument-safe WSL bridges for `tt`, explicit-path
 Apply receipts and profile backups live under
 `%LOCALAPPDATA%\vincent-dotfiles\native-operator`.
 
+## Headless Linux servers
+
+Use the guarded server profile instead of the full desktop installer:
+
+```bash
+git clone https://github.com/vincentkoc/dotfiles.git ~/.dotfiles
+~/.dotfiles/bin/linux-server-bootstrap plan
+~/.dotfiles/bin/linux-server-bootstrap audit
+~/.dotfiles/bin/linux-server-bootstrap prepare
+```
+
+`prepare` installs the Ubuntu shell baseline, checksum-pinned Node 24.19.0,
+pnpm 11.15.1, pinned zsh components, tmux, Git/GitHub tooling, and the portable
+aliases/functions. Node and pnpm stay under the current user's home directory;
+no downloaded script runs as root. The profile deliberately excludes macOS
+paths, private dotfiles, Git credentials/signing, GUI apps, OpenClaw global npm
+installs, Mosh, and firewall activation. Regular SSH is the safe default; add a
+separately reviewed tailnet UDP policy before opting into Mosh. `prepare` does
+not install, write, validate, or reload the SSH server; the Ubuntu host must
+already have a working `sshd`.
+
+Obtain the SHA256 fingerprint of the designated recovery public key through an
+independent trusted path, then explicitly enable the temporary proof phase:
+
+```bash
+DOTFILES_SERVER_ADMIN_USER="$(id -un)" \
+DOTFILES_SERVER_EXPECTED_KEY_SHA256='SHA256:replace-with-designated-key-fingerprint' \
+  ~/.dotfiles/bin/linux-server-bootstrap enable-auth-proof
+```
+
+The activation is bound to the current boot and expires after 15 minutes. If
+the proof session is abandoned, remove the temporary exposure explicitly:
+
+```bash
+~/.dotfiles/bin/linux-server-bootstrap cleanup-auth-proof
+```
+
+Open the proof connection with a new transport, not an existing SSH control
+socket:
+
+```bash
+ssh -o ControlMaster=no -o ControlPath=none <tailnet-host>
+~/.dotfiles/bin/linux-server-bootstrap prove-second-session
+```
+
+Run `lockdown` from the independent original Tailscale SSH connection. The
+proof requires the freshly authenticated public key to match the externally
+supplied fingerprint and unchanged `authorized_keys`; it is boot-bound, expires
+after 15 minutes, and records a distinct source connection. Successful proof
+immediately removes the temporary exposure while retaining the proof evidence
+needed by `lockdown`. This identifies the designated public key, not the agent
+or service that supplied it. Lockdown verifies the peer with Tailscale WhoIs,
+requires UFW IPv6 support, permits SSH and Gateway HTTPS only on `tailscale0`,
+and transactionally publishes the owned SSH policy without clobbering unknown
+content. It asserts effective password, keyboard-interactive, root, public-key,
+authentication-method, auth-info, X11, and agent-forwarding values before and
+after reload. Use another nonmultiplexed login for the final `audit`; it must
+report the locked values, including `ssh:expose_auth_info=no` and
+`ssh:user_auth_file=absent`. Override the interface or ports with the documented
+`DOTFILES_SERVER_*` environment variables.
+
 ## Structure
 
 ```

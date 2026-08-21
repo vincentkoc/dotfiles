@@ -1,0 +1,58 @@
+setopt NO_BEEP
+setopt AUTO_PUSHD PUSHD_IGNORE_DUPS PUSHD_SILENT
+setopt EXTENDED_HISTORY INC_APPEND_HISTORY SHARE_HISTORY
+setopt HIST_EXPIRE_DUPS_FIRST HIST_IGNORE_DUPS HIST_IGNORE_ALL_DUPS
+setopt HIST_FIND_NO_DUPS HIST_SAVE_NO_DUPS HIST_VERIFY
+
+HISTFILE="${XDG_STATE_HOME:-$HOME/.local/state}/zsh/history"
+HISTSIZE=100000
+SAVEHIST=100000
+mkdir -p "${HISTFILE:h}"
+
+bindkey -e
+bindkey '^H' backward-kill-word
+bindkey '^[^?' backward-kill-word
+bindkey '^[[A' history-beginning-search-backward
+bindkey '^[[B' history-beginning-search-forward
+
+autoload -Uz colors compinit
+colors
+ZSH_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-zsh"
+mkdir -p "$ZSH_CACHE_DIR"
+compinit -C -d "$ZSH_CACHE_DIR/.zcompdump-${HOST:-server}-${ZSH_VERSION}"
+
+export ZSH="$HOME/.oh-my-zsh"
+[[ -r "$ZSH/plugins/z/z.plugin.zsh" ]] && source "$ZSH/plugins/z/z.plugin.zsh"
+[[ -r "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] &&
+  source "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
+
+SPACESHIP_PROMPT_ORDER=(dir git exit_code char)
+SPACESHIP_RPROMPT_ORDER=(host)
+SPACESHIP_PROMPT_SEPARATE_LINE=false
+SPACESHIP_PROMPT_ADD_NEWLINE=true
+SPACESHIP_PROMPT_ASYNC=false
+SPACESHIP_GIT_STATUS_SHOW=false
+SPACESHIP_PACKAGE_SHOW=false
+SPACESHIP_NODE_SHOW=false
+SPACESHIP_DIR_TRUNC=3
+SPACESHIP_CHAR_SYMBOL=">"
+[[ -r "$ZSH/custom/themes/spaceship.zsh-theme" ]] &&
+  source "$ZSH/custom/themes/spaceship.zsh-theme"
+
+[[ -r "$HOME/.aliases" ]] && source "$HOME/.aliases"
+[[ -r "$HOME/.functions" ]] && source "$HOME/.functions"
+
+if [[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+  source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+fi
+
+if (( $+commands[fd] )); then
+  export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+elif (( $+commands[rg] )); then
+  export FZF_DEFAULT_COMMAND='rg --files --hidden --follow --glob "!.git"'
+fi
+export FZF_CTRL_T_COMMAND="${FZF_DEFAULT_COMMAND:-}"
+export FZF_DEFAULT_OPTS='--height 40% --layout=reverse --border'
+
+(( $+commands[direnv] )) && eval "$(direnv hook zsh)"
+alias z='nocorrect zshz 2>&1'

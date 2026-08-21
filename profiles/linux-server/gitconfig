@@ -1,0 +1,20 @@
+[core]
+	editor = vim
+	excludesfile = ~/.gitignore_global
+[diff]
+	renames = copies
+[pull]
+	ff = only
+[fetch]
+	prune = true
+[init]
+	defaultBranch = main
+[extensions]
+	worktreeConfig = true
+[alias]
+	wtl = worktree list
+	wta = worktree add
+	wtr = worktree remove
+	wtp = worktree prune
+[color]
+	ui = auto

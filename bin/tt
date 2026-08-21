@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+resolve_script_path() {
+  local source="${BASH_SOURCE[0]}"
+  local directory
+  while [[ -L "$source" ]]; do
+    directory="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" == /* ]] || source="$directory/$source"
+  done
+  directory="$(cd -P "$(dirname "$source")" && pwd)"
+  printf '%s/%s\n' "$directory" "$(basename "$source")"
+}
+
 TMUX_BIN="${TT_TMUX_BIN:-/opt/homebrew/bin/tmux}"
 if [[ ! -x "$TMUX_BIN" && -z "${TT_TMUX_BIN:-}" ]]; then
   TMUX_BIN="/usr/local/bin/tmux"
@@ -13,7 +25,8 @@ if [[ ! -x "$TMUX_BIN" ]]; then
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_PATH="$(resolve_script_path)"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 DOTFILES_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 TT_WSL_BRIDGE_READY=0
 TT_WSL_BRIDGE_PENDING=0
@@ -2282,7 +2295,12 @@ count_snapshot_history() {
   local label="${1:-codex-cockpit}"
   local dir
   dir="$(snapshot_history_dir "$label")"
-  find "$dir" -maxdepth 1 -type f -name '*.tsv' 2>/dev/null | wc -l | tr -d ' '
+  if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  [[ -d "$dir" ]] || return 1
+  find "$dir" -maxdepth 1 -type f -name '*.tsv' | wc -l | tr -d ' '
 }
 
 portable_stat_value() {

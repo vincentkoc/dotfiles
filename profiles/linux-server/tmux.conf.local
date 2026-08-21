@@ -1,0 +1,21 @@
+tmux_conf_24b_colour=true
+tmux_conf_new_pane_retain_current_path=true
+tmux_conf_new_pane_reconnect_ssh=false
+tmux_conf_copy_to_os_clipboard=false
+
+set -g default-terminal "tmux-256color"
+set -ga terminal-features ",xterm*:RGB:extkeys:focus:title"
+set -g mouse on
+set -g mode-keys vi
+set -g status-keys vi
+set -g history-limit 100000
+set -g set-clipboard on
+set -g escape-time 0
+set -g status-interval 10
+set -g status-style "fg=#c0caf5,bg=#1a1b26"
+set -g status-left "#[fg=#1a1b26,bg=#7aa2f7,bold] #S #[default] "
+set -g status-right "#[fg=#9ece6a]%R %d %b #[fg=#c0caf5]$USER@#h "
+
+bind R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
+bind -T copy-mode-vi v send-keys -X begin-selection
+bind -T copy-mode-vi y send-keys -X copy-selection-and-cancel
