@@ -118,11 +118,18 @@ cp "$temporary/proof-key.pub" "$temporary/auth-home/.ssh/authorized_keys"
 chmod 600 "$temporary/auth-home/.ssh/authorized_keys"
 proof_fingerprint="$(ssh-keygen -lf "$temporary/proof-key.pub" -E sha256 | awk '{print $2}')"
 wrong_fingerprint="$(ssh-keygen -lf "$temporary/wrong-key.pub" -E sha256 | awk '{print $2}')"
-printf 'publickey ssh-ed25519 %s\n' "$proof_fingerprint" >"$temporary/auth-info"
+read -r proof_key_type proof_key_blob _ <"$temporary/proof-key.pub"
+printf 'publickey %s %s\n' "$proof_key_type" "$proof_key_blob" >"$temporary/auth-info"
 chmod 600 "$temporary/auth-info"
 SSH_USER_AUTH="$temporary/auth-info"
 export SSH_USER_AUTH
 [[ "$(auth_info_publickey_fingerprint)" == "$proof_fingerprint" ]]
+printf 'publickey %s %s\n' "$proof_key_type" "$proof_fingerprint" >"$temporary/auth-info"
+if auth_info_publickey_fingerprint >/dev/null; then
+  printf 'fabricated SSH_USER_AUTH fingerprint format accepted\n' >&2
+  exit 1
+fi
+printf 'publickey %s %s\n' "$proof_key_type" "$proof_key_blob" >"$temporary/auth-info"
 authorized_keys_has_fingerprint "$temporary/auth-home/.ssh/authorized_keys" "$proof_fingerprint"
 if authorized_keys_has_fingerprint "$temporary/auth-home/.ssh/authorized_keys" "$wrong_fingerprint"; then
   printf 'wrong authorized key fingerprint accepted\n' >&2

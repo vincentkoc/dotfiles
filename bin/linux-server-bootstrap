@@ -439,7 +439,7 @@ tailnet_source() {
 
 auth_info_publickey_fingerprint() {
   local auth_file="${SSH_USER_AUTH:-}"
-  local owner mode line_count method key_type fingerprint extra
+  local owner mode line_count method key_type key_blob extra fingerprint
   [[ -n "$auth_file" && -f "$auth_file" && ! -L "$auth_file" ]] || return 1
   owner="$(stat -c %u "$auth_file" 2>/dev/null || stat -f %u "$auth_file" 2>/dev/null)" || return 1
   [[ "$owner" == "$(id -u)" || "$owner" == 0 ]] || return 1
@@ -449,8 +449,14 @@ auth_info_publickey_fingerprint() {
 
   line_count="$(awk 'NF {count++} END {print count+0}' "$auth_file")"
   [[ "$line_count" == 1 ]] || return 1
-  read -r method key_type fingerprint extra < <(awk 'NF {print; exit}' "$auth_file")
-  [[ "$method" == publickey && -n "$key_type" && "$fingerprint" == SHA256:* && -z "${extra:-}" ]] || return 1
+  read -r method key_type key_blob extra < <(awk 'NF {print; exit}' "$auth_file")
+  [[ "$method" == publickey && -n "$key_type" && -n "$key_blob" && -z "${extra:-}" ]] || return 1
+  fingerprint="$(
+    printf '%s %s\n' "$key_type" "$key_blob" |
+      ssh-keygen -lf /dev/stdin -E sha256 2>/dev/null |
+      awk 'NR == 1 {print $2}'
+  )" || return 1
+  [[ "$fingerprint" == SHA256:* ]] || return 1
   printf '%s\n' "$fingerprint"
 }
 
