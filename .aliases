@@ -144,8 +144,12 @@ fi
 	alias dl="cd ~/Downloads"
 	alias desk="cd ~/Desktop/"
 	alias g="cd ~/GIT"
-	alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
-	alias dotfiles="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles"
+	if [[ "$OSTYPE" == "darwin"* ]]; then
+		alias i="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/"
+		alias dotfiles="cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles"
+	else
+		alias dotfiles="cd ~/.dotfiles"
+	fi
 
 	# Python venv
 	alias venv='source .venv/bin/activate'
@@ -163,7 +167,9 @@ fi
 	fi
 
 	# Homebrew
-	alias brewdump='brew bundle dump --file=~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/Brewfile --force && echo "Brewfile updated"'
+	if [[ "$OSTYPE" == "darwin"* ]]; then
+		alias brewdump='brew bundle dump --file=~/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/Brewfile --force && echo "Brewfile updated"'
+	fi
 
 	# Tree view (eza)
 	_dotfiles_has eza && alias tree='eza --tree'
@@ -245,18 +251,20 @@ fi
 
 	# Print ip's
 	alias myip='curl -s https://api.ipify.org && echo'
-	alias localip="ipconfig getifaddr en0"
+	if [[ "$OSTYPE" == "darwin"* ]]; then
+		alias localip="ipconfig getifaddr en0"
+	else
+		alias localip="hostname -I | awk '{print \$1}'"
+	fi
 
 #
 # Utilities
 #
-	# Empty the Trash on all mounted volumes and the main HDD.
-	# Also, clear Apple’s System Logs to improve shell startup speed.
-	# Finally, clear download history from quarantine. https://mths.be/bum
-	alias emptytrash="sudo rm -rfv /Volumes/*/.Trashes; sudo rm -rfv ~/.Trash; sudo rm -rfv /private/var/log/asl/*.asl; sqlite3 ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV* 'delete from LSQuarantineEvent'"
-
-	# iCloud - exclude dev folders from sync
-	alias icloud-ignore='$HOME/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/bin/icloud-ignore.sh'
+	if [[ "$OSTYPE" == "darwin"* ]]; then
+		# Empty the Trash on all mounted volumes and the main HDD.
+		alias emptytrash="sudo rm -rfv /Volumes/*/.Trashes; sudo rm -rfv ~/.Trash; sudo rm -rfv /private/var/log/asl/*.asl; sqlite3 ~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV* 'delete from LSQuarantineEvent'"
+		alias icloud-ignore='$HOME/Library/Mobile\ Documents/com~apple~CloudDocs/dotfiles/bin/icloud-ignore.sh'
+	fi
 
 	# URL-encode strings
     alias urlencode='python3 -c "import sys; from urllib.parse import quote_plus; print(quote_plus(sys.argv[1]))"'

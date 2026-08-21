@@ -1,0 +1,482 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/linux-server"
+proof_file="$state_root/second-session-proof"
+dry_run="${DOTFILES_SERVER_DRY_RUN:-0}"
+
+node_version=24.19.0
+node_linux_x64_sha256=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
+node_linux_arm64_sha256=01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc
+pnpm_version=11.15.1
+pnpm_spec='pnpm@11.15.1+sha512.81350b07e53c9538a02f1f2303b4290fa2d7be04e56e2a970c4cc4b417dc761de196edabd49d55c7dc9580db81007c44143e4e3d7e462b3000d23c255122d065'
+oh_my_zsh_sha=d42209f2afa8ec3e6971e5b4695ff27f9d5670d2
+autosuggestions_sha=85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5
+spaceship_sha=6cb3c47c0b5358172d9efb619ca05b8f08c50919
+
+tailscale_interface="${DOTFILES_SERVER_TAILSCALE_INTERFACE:-tailscale0}"
+ssh_port="${DOTFILES_SERVER_SSH_PORT:-22}"
+gateway_port="${DOTFILES_SERVER_GATEWAY_PORT:-443}"
+
+usage() {
+  printf '%s\n' \
+    'usage: linux-server-bootstrap <plan|audit|prepare|prove-second-session|lockdown>' \
+    '' \
+    '  plan                  Print the deterministic prepare and lockdown plan.' \
+    '  audit                 Read-only shell, SSH, firewall, and tool audit.' \
+    '  prepare               Install the Ubuntu CLI baseline and safe dotfiles.' \
+    '  prove-second-session  Record a fresh Tailscale SSH recovery session.' \
+    '  lockdown              Require that proof, then harden SSH and enable UFW.' \
+    '' \
+    'Environment:' \
+    '  DOTFILES_SERVER_DRY_RUN=1                 Print prepare commands only.' \
+    '  DOTFILES_SERVER_TAILSCALE_INTERFACE=...   Default: tailscale0.' \
+    '  DOTFILES_SERVER_SSH_PORT=...              Default: 22.' \
+    '  DOTFILES_SERVER_GATEWAY_PORT=...          Default: 443.'
+}
+
+log() {
+  printf '[linux-server] %s\n' "$*"
+}
+
+run() {
+  if [[ "$dry_run" == 1 ]]; then
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
+
+run_root() {
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    run "$@"
+  else
+    run sudo "$@"
+  fi
+}
+
+require_non_root() {
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    printf 'run this command as the intended administrator, not root\n' >&2
+    exit 2
+  fi
+}
+
+require_ubuntu() {
+  [[ "$(uname -s)" == Linux ]] || {
+    printf 'linux-server-bootstrap requires Linux\n' >&2
+    exit 2
+  }
+  [[ -r /etc/os-release ]] || {
+    printf 'cannot identify Linux distribution\n' >&2
+    exit 2
+  }
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${ID:-}" == ubuntu ]] || {
+    printf 'linux-server-bootstrap currently supports Ubuntu only\n' >&2
+    exit 2
+  }
+  command -v apt-get >/dev/null || {
+    printf 'apt-get is required\n' >&2
+    exit 2
+  }
+}
+
+validate_port() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || ((value < 1 || value > 65535)); then
+    printf '%s must be a TCP port from 1 to 65535\n' "$name" >&2
+    exit 2
+  fi
+}
+
+validate_parameters() {
+  [[ "$tailscale_interface" =~ ^[a-zA-Z0-9_.:-]+$ ]] || {
+    printf 'invalid Tailscale interface name\n' >&2
+    exit 2
+  }
+  validate_port DOTFILES_SERVER_SSH_PORT "$ssh_port"
+  validate_port DOTFILES_SERVER_GATEWAY_PORT "$gateway_port"
+}
+
+status() {
+  printf '%s=%s\n' "$1" "$2"
+}
+
+command_status() {
+  if command -v "$1" >/dev/null 2>&1; then
+    status "command:$1" ready
+  else
+    status "command:$1" missing
+  fi
+}
+
+plan() {
+  printf '%s\n' \
+    'platform=ubuntu' \
+    'mutates=no' \
+    'prepare.user=current-non-root-user' \
+    'prepare.packages=apt-official-repositories' \
+    "prepare.node=v$node_version" \
+    'prepare.node_source=nodejs.org-checksum-pinned-user-install' \
+    "prepare.pnpm=pnpm@$pnpm_version" \
+    'prepare.shell=zsh' \
+    'prepare.dotfiles=portable-aliases-functions-server-zsh-server-tmux' \
+    'prepare.excludes=credentials-signing-gui-apps-global-openclaw' \
+    'lockdown.requires=authorized_keys,tailscale,second-live-ssh-session,passwordless-sudo' \
+    "lockdown.interface=$tailscale_interface" \
+    "lockdown.ssh_port=$ssh_port" \
+    "lockdown.gateway_port=$gateway_port" \
+    'lockdown.public_firewall_changes=none'
+}
+
+audit() {
+  validate_parameters
+  status platform "$("$repo_root/bin/dotfiles-platform")"
+  status hostname "$(hostname)"
+  status user "$(id -un)"
+  status shell "${SHELL:-unknown}"
+
+  local command_name
+  for command_name in zsh git curl tmux rg fzf jq gh bat fd btop zoxide direnv node pnpm tailscale ufw sshd; do
+    command_status "$command_name"
+  done
+
+  local path
+  for path in .zshrc .zshenv .profile .aliases .functions .tmux.conf .tmux.conf.local .gitconfig; do
+    if [[ -L "$HOME/$path" && -e "$HOME/$path" ]]; then
+      status "link:$path" ready
+    else
+      status "link:$path" drift
+    fi
+  done
+
+  if command -v node >/dev/null 2>&1; then
+    status node:version "$(node --version)"
+  fi
+  if command -v pnpm >/dev/null 2>&1; then
+    status pnpm:version "$(pnpm --version)"
+  fi
+  if command -v tailscale >/dev/null 2>&1 && tailscale status --json >/dev/null 2>&1; then
+    status tailscale connected
+  else
+    status tailscale disconnected
+  fi
+  if command -v ufw >/dev/null 2>&1; then
+    status ufw "$(sudo -n ufw status 2>/dev/null | awk 'NR==1 {print tolower($2)}' || printf unknown)"
+  fi
+  if command -v sshd >/dev/null 2>&1; then
+    local sshd_effective
+    sshd_effective="$(sudo -n sshd -T 2>/dev/null || sshd -T 2>/dev/null || true)"
+    status ssh:password_auth "$(awk '$1=="passwordauthentication"{print $2; exit}' <<<"$sshd_effective")"
+    status ssh:root_login "$(awk '$1=="permitrootlogin"{print $2; exit}' <<<"$sshd_effective")"
+  fi
+}
+
+apt_install_available() {
+  local packages=()
+  local package
+  for package in "$@"; do
+    if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+      continue
+    fi
+    if apt-cache show "$package" >/dev/null 2>&1; then
+      packages+=("$package")
+    else
+      log "package unavailable, skipping: $package"
+    fi
+  done
+  [[ ${#packages[@]} -eq 0 ]] || run_root apt-get install -y "${packages[@]}"
+}
+
+install_pinned_checkout() {
+  local url="$1"
+  local destination="$2"
+  local sha="$3"
+
+  if [[ -d "$destination/.git" ]]; then
+    run git -C "$destination" remote set-url origin "$url"
+    run git -C "$destination" fetch --depth 1 origin "$sha"
+  else
+    run mkdir -p "$(dirname "$destination")"
+    run git init -q "$destination"
+    run git -C "$destination" remote add origin "$url"
+    run git -C "$destination" fetch --depth 1 origin "$sha"
+  fi
+  run git -C "$destination" checkout --detach --force "$sha"
+}
+
+backup_and_link() {
+  local source="$1"
+  local destination="$2"
+  local backup_root="$state_root/backups"
+  local backup
+
+  if [[ -L "$destination" && "$(readlink "$destination")" == "$source" ]]; then
+    return
+  fi
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    backup="$backup_root/$(basename "$destination").$(date +%Y%m%d%H%M%S).bak"
+    run mkdir -p "$backup_root"
+    run mv "$destination" "$backup"
+  fi
+  run mkdir -p "$(dirname "$destination")"
+  run ln -s "$source" "$destination"
+}
+
+node_archive_metadata() {
+  case "$(uname -m)" in
+    x86_64 | amd64)
+      printf 'node-v%s-linux-x64.tar.xz %s\n' "$node_version" "$node_linux_x64_sha256"
+      ;;
+    aarch64 | arm64)
+      printf 'node-v%s-linux-arm64.tar.xz %s\n' "$node_version" "$node_linux_arm64_sha256"
+      ;;
+    *)
+      printf 'unsupported Node.js architecture: %s\n' "$(uname -m)" >&2
+      return 1
+      ;;
+  esac
+}
+
+install_openclaw_toolchain() {
+  local archive checksum install_root staging temporary
+  read -r archive checksum < <(node_archive_metadata)
+  install_root="$HOME/.local/opt/node-v$node_version"
+
+  if [[ ! -x "$install_root/bin/node" ]]; then
+    temporary="$(mktemp -d)"
+    staging="$install_root.new.$$"
+    trap 'rm -rf "${temporary:-}" "${staging:-}"' EXIT
+    run curl --fail --location --proto '=https' --tlsv1.2 \
+      --output "$temporary/$archive" \
+      "https://nodejs.org/dist/v$node_version/$archive"
+    if [[ "$dry_run" != 1 ]]; then
+      printf '%s  %s\n' "$checksum" "$temporary/$archive" | sha256sum --check -
+    fi
+    run mkdir -p "$(dirname "$install_root")" "$staging"
+    run tar -xJf "$temporary/$archive" --strip-components=1 -C "$staging"
+    if [[ -e "$install_root" ]]; then
+      run mkdir -p "$state_root/backups"
+      run mv "$install_root" "$state_root/backups/node-v$node_version.$(date +%Y%m%d%H%M%S).bak"
+    fi
+    run mv "$staging" "$install_root"
+    run rm -rf "$temporary"
+    trap - EXIT
+  fi
+
+  run mkdir -p "$HOME/.local/bin"
+  local executable
+  for executable in node npm npx corepack; do
+    backup_and_link "$install_root/bin/$executable" "$HOME/.local/bin/$executable"
+  done
+  run "$install_root/bin/corepack" enable --install-directory "$HOME/.local/bin"
+  run "$HOME/.local/bin/corepack" install --global "$pnpm_spec"
+
+  if [[ "$dry_run" != 1 ]]; then
+    [[ "$("$HOME/.local/bin/node" --version)" == "v$node_version" ]]
+    [[ "$("$HOME/.local/bin/pnpm" --version)" == "$pnpm_version" ]]
+  fi
+}
+
+link_server_dotfiles() {
+  local source destination
+  while read -r source destination; do
+    backup_and_link "$repo_root/$source" "$HOME/$destination"
+  done <<'EOF'
+.aliases .aliases
+.functions .functions
+.ripgreprc .ripgreprc
+.tmux.conf .tmux.conf
+profiles/linux-server/profile .profile
+profiles/linux-server/zprofile .zprofile
+profiles/linux-server/zshenv .zshenv
+profiles/linux-server/zshrc .zshrc
+profiles/linux-server/tmux.conf.local .tmux.conf.local
+profiles/linux-server/gitconfig .gitconfig
+profiles/linux-server/ssh-config .ssh/config
+EOF
+
+  run mkdir -p "$HOME/.local/bin"
+  for source in dotfiles-audit dotfiles-platform gh ghx linux-server-bootstrap tt; do
+    backup_and_link "$repo_root/bin/$source" "$HOME/.local/bin/$source"
+  done
+}
+
+prepare() {
+  validate_parameters
+  if [[ "$dry_run" == 1 ]]; then
+    plan
+    return
+  fi
+  require_non_root
+  require_ubuntu
+  command -v sudo >/dev/null || {
+    printf 'sudo is required\n' >&2
+    exit 2
+  }
+  sudo -v
+
+  run_root env DEBIAN_FRONTEND=noninteractive apt-get update
+  apt_install_available \
+    zsh git git-lfs curl ca-certificates locales openssh-client openssh-server \
+    tmux mosh gh jq ripgrep fd-find fzf bat eza tree less lsof dnsutils \
+    net-tools htop btop zoxide direnv unzip xz-utils rsync sqlite3 shellcheck \
+    build-essential pkg-config python3 python3-venv ufw unattended-upgrades \
+    zsh-completions zsh-syntax-highlighting trash-cli
+
+  run mkdir -p "$HOME/.local/bin" "$state_root"
+  if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+    run ln -sfn "$(command -v fdfind)" "$HOME/.local/bin/fd"
+  fi
+  if ! command -v bat >/dev/null 2>&1 && command -v batcat >/dev/null 2>&1; then
+    run ln -sfn "$(command -v batcat)" "$HOME/.local/bin/bat"
+  fi
+
+  install_pinned_checkout https://github.com/ohmyzsh/ohmyzsh.git "$HOME/.oh-my-zsh" "$oh_my_zsh_sha"
+  install_pinned_checkout \
+    https://github.com/zsh-users/zsh-autosuggestions.git \
+    "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" \
+    "$autosuggestions_sha"
+  install_pinned_checkout \
+    https://github.com/spaceship-prompt/spaceship-prompt.git \
+    "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt" \
+    "$spaceship_sha"
+  run ln -sfn \
+    "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt/spaceship.zsh-theme" \
+    "$HOME/.oh-my-zsh/custom/themes/spaceship.zsh-theme"
+
+  link_server_dotfiles
+  install_openclaw_toolchain
+
+  if ! locale -a | tr '[:upper:]' '[:lower:]' | grep -qx 'en_us.utf8'; then
+    run_root sed -i 's/^[#[:space:]]*en_US.UTF-8[[:space:]]\+UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+    run_root locale-gen en_US.UTF-8
+  fi
+  run_root update-locale LANG=en_US.UTF-8
+  run_root usermod -s "$(command -v zsh)" "$(id -un)"
+  log "prepare complete; reconnect before running prove-second-session"
+}
+
+tailnet_source() {
+  local source="${SSH_CONNECTION%% *}"
+  [[ "$source" == 100.* || "$source" == fd7a:* ]]
+}
+
+prove_second_session() {
+  require_non_root
+  [[ -n "${SSH_CONNECTION:-}" ]] || {
+    printf 'proof must run inside SSH\n' >&2
+    exit 1
+  }
+  tailnet_source || {
+    printf 'proof requires SSH arriving over Tailscale\n' >&2
+    exit 1
+  }
+  command -v tailscale >/dev/null && tailscale status --json >/dev/null
+  sudo -n true
+  mkdir -p "$state_root"
+  umask 077
+  {
+    printf 'boot_id=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
+    printf 'epoch=%s\n' "$(date +%s)"
+    printf 'tty=%s\n' "$(tty)"
+    printf 'source=%s\n' "${SSH_CONNECTION%% *}"
+  } >"$proof_file"
+  log "proof recorded; run lockdown from the original Tailscale SSH session"
+}
+
+validate_second_session_proof() {
+  if [[ -z "${SSH_CONNECTION:-}" ]] || ! tailnet_source; then
+    printf 'lockdown requires a live Tailscale SSH connection\n' >&2
+    exit 1
+  fi
+  [[ -s "$proof_file" ]] || {
+    printf 'missing proof; run prove-second-session in another SSH session\n' >&2
+    exit 1
+  }
+
+  local proof_boot proof_epoch proof_tty age
+  proof_boot="$(awk -F= '$1=="boot_id"{print $2}' "$proof_file")"
+  proof_epoch="$(awk -F= '$1=="epoch"{print $2}' "$proof_file")"
+  proof_tty="$(awk -F= '$1=="tty"{sub(/^tty=/,""); print}' "$proof_file")"
+  [[ "$proof_boot" == "$(cat /proc/sys/kernel/random/boot_id)" ]] || {
+    printf 'second-session proof is from another boot\n' >&2
+    exit 1
+  }
+  [[ "$proof_epoch" =~ ^[0-9]+$ ]] || {
+    printf 'second-session proof is malformed\n' >&2
+    exit 1
+  }
+  age=$(($(date +%s) - proof_epoch))
+  ((age >= 0 && age <= 900)) || {
+    printf 'second-session proof is older than 15 minutes\n' >&2
+    exit 1
+  }
+  [[ "$proof_tty" != "$(tty)" ]] || {
+    printf 'lockdown must run from a different SSH session than the proof\n' >&2
+    exit 1
+  }
+  sudo -n true
+}
+
+lockdown() {
+  validate_parameters
+  require_non_root
+  require_ubuntu
+  validate_second_session_proof
+  command -v tailscale >/dev/null && tailscale status --json >/dev/null
+  [[ -s "$HOME/.ssh/authorized_keys" ]] || {
+    printf 'authorized_keys is empty; refusing SSH lockdown\n' >&2
+    exit 1
+  }
+
+  local ssh_dropin service
+  ssh_dropin="$(mktemp)"
+  trap 'rm -f "${ssh_dropin:-}"' EXIT
+  printf '%s\n' \
+    'PasswordAuthentication no' \
+    'KbdInteractiveAuthentication no' \
+    'ChallengeResponseAuthentication no' \
+    'PermitRootLogin no' \
+    'PubkeyAuthentication yes' \
+    'AuthenticationMethods publickey' \
+    'X11Forwarding no' \
+    'AllowAgentForwarding no' >"$ssh_dropin"
+  run_root install -m 0644 "$ssh_dropin" /etc/ssh/sshd_config.d/60-dotfiles-linux-server.conf
+  run_root sshd -t
+
+  run_root ufw default deny incoming
+  run_root ufw default allow outgoing
+  run_root ufw allow in on "$tailscale_interface" proto tcp to any port "$ssh_port"
+  run_root ufw allow in on "$tailscale_interface" proto tcp to any port "$gateway_port"
+  run_root ufw --force enable
+
+  service=ssh
+  systemctl list-unit-files ssh.service >/dev/null 2>&1 || service=sshd
+  run_root systemctl enable --now unattended-upgrades
+  printf 'Unattended-Upgrade::Automatic-Reboot "false";\n' |
+    run_root tee /etc/apt/apt.conf.d/52dotfiles-no-auto-reboot >/dev/null
+  run_root systemctl reload "$service"
+
+  run rm -f "$proof_file"
+  log "lockdown complete; keep both sessions open until a third fresh Tailscale SSH login succeeds"
+}
+
+case "${1:-audit}" in
+  plan) plan ;;
+  audit) audit ;;
+  prepare) prepare ;;
+  prove-second-session) prove_second_session ;;
+  lockdown) lockdown ;;
+  -h | --help | help) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

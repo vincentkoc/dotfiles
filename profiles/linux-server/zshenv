@@ -1,0 +1,5 @@
+[[ -r "$HOME/.profile" ]] && source "$HOME/.profile"
+
+if [[ ! -o interactive && -r "$HOME/.functions" ]]; then
+  source "$HOME/.functions"
+fi

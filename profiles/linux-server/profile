@@ -1,0 +1,32 @@
+# Headless Linux login environment.
+export DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+export DOTFILES_FUNCTIONS_ROOT="${DOTFILES_FUNCTIONS_ROOT:-$DOTFILES_DIR/functions}"
+export DOTFILES_BIN_ROOT="${DOTFILES_BIN_ROOT:-$HOME/.local/bin}"
+export DOTFILES_GIT_SPARSE_ROOT="${DOTFILES_GIT_SPARSE_ROOT:-$DOTFILES_DIR/git-sparse}"
+export DOTFILES_DISABLE_NODENV=1
+export DOTFILES_CD_SKIP_LISTING=1
+export TT_TMUX_BIN="${TT_TMUX_BIN:-/usr/bin/tmux}"
+export PNPM_HOME="${PNPM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/pnpm}"
+export RIPGREP_CONFIG_PATH="$HOME/.ripgreprc"
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_CTYPE="${LC_CTYPE:-en_US.UTF-8}"
+export EDITOR="${EDITOR:-$(command -v nvim || command -v vim || command -v vi)}"
+export VISUAL="$EDITOR"
+export PAGER=less
+export LESS='-F -i -J -M -R -W -x4 -X -z-4'
+export COLORTERM="${COLORTERM:-truecolor}"
+export DISABLE_TELEMETRY=1
+export DO_NOT_TRACK=1
+
+path_prepend() {
+  case ":$PATH:" in
+    *":$1:"*) ;;
+    *) PATH="$1${PATH:+:$PATH}" ;;
+  esac
+}
+
+path_prepend "$PNPM_HOME"
+path_prepend "$HOME/.local/bin"
+path_prepend "$HOME/bin"
+export PATH
+unset -f path_prepend
