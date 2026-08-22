@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import pathlib
+import subprocess
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -16,13 +17,21 @@ commands = [
     if hook.get("type") == "command"
 ]
 message = next(command for command in commands if "codebase-memory-mcp" in command)
+rendered = subprocess.run(
+    ["/bin/sh", "-c", message],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
 for phrase in (
-    "Before index_repository",
-    "canonical owning checkout",
-    "Never index a linked branch",
-    "skip indexing and report it",
+    "search/query tools",
+    "index_repository tool is intentionally disabled",
+    "codebase-memory-graph.sh index|init canonical helper",
+    "direct codebase-memory-mcp cli index_repository is forbidden",
+    "Linked worktrees rewrite to their owning checkout",
+    "reserved and temporary paths are denied as independent clones",
 ):
-    if phrase not in message:
+    if phrase not in rendered:
         raise SystemExit(f"missing hook policy: {phrase}")
 
 agents = AGENTS.read_text()

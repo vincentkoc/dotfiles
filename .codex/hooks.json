@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo \"Code discovery: prefer codebase-memory-mcp (search_graph, trace_path, get_code_snippet, query_graph, search_code) over broad grep/file reads. Before index_repository, resolve the requested path to its canonical owning checkout with the codebase-memory-mcp canonical helper. Never index a linked branch, GWT, Codex, repo-local, or temporary worktree as a separate project; if no non-worktree canonical checkout exists, skip indexing and report it.\""
+            "command": "echo \"Code discovery: use codebase-memory-mcp search/query tools (search_graph, trace_path, get_code_snippet, query_graph, search_code). The MCP index_repository tool is intentionally disabled. All indexing/reindexing must use the installed codebase-memory-graph.sh index|init canonical helper; direct codebase-memory-mcp cli index_repository is forbidden. Linked worktrees rewrite to their owning checkout; reserved and temporary paths are denied as independent clones.\""
           }
         ]
       }
