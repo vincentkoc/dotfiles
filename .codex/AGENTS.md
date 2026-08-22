@@ -168,6 +168,8 @@ Recovery mode rules:
 - If `node_modules` is not a symlink in a Codex worktree, stop and report it.
 - Prefer shared worktrees created with `gwt new`.
 - Prefer scoped tests and targeted verification; do not run repo-wide heavy gates unless explicitly asked or clearly required.
-- If disk is low, worktree count is high, or local state looks stale, run `agent-worktree-maintain --force` before continuing.
+- Worktree maintenance is a broad destructive mutation, never an automatic recovery step. Do not run `agent-worktree-maintain` because disk is low, the worktree count is high, state looks stale, or another cleanup command such as `gwt rm` just ran.
+- Before invoking worktree maintenance, resolve the exact host, canonical repository set, target worktree paths, owner session or PIDs, lock owner, and stop condition. A live maintainer/cleaner process or lock is contention: do not start a second process, kill it, or clear its lock; wait for the owner to finish unless the user gives current-turn permission naming that exact process or lock.
+- Run worktree maintenance only with current-turn user authorization naming the exact host, repository/worktree scope, and destructive mode. Restrict cleanup to paths owned by the current task or exact paths explicitly authorized; age, merged branches, missing panes, and low disk never prove ownership.
 - If the current worktree was cleaned up or no longer exists, stop and ask whether to recreate it.
 - Do not start duplicate heavy checks if another session is likely already running them.
