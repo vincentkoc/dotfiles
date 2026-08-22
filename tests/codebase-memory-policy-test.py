@@ -25,14 +25,20 @@ rendered = subprocess.run(
 ).stdout
 for phrase in (
     "search/query tools",
-    "index_repository tool is intentionally disabled",
+    "Direct index_repository use is policy-forbidden",
     "codebase-memory-graph.sh index|init canonical helper",
     "direct codebase-memory-mcp cli index_repository is forbidden",
     "Linked worktrees rewrite to their owning checkout",
-    "reserved and temporary paths are denied as independent clones",
+    (
+        "Independent indexing is denied for ~/.codex/worktrees, "
+        "~/GIT/_Worktrees, any repo-local .worktrees path, /tmp, "
+        "and /private/tmp."
+    ),
 ):
     if phrase not in rendered:
         raise SystemExit(f"missing hook policy: {phrase}")
+if "intentionally disabled" in rendered:
+    raise SystemExit("hook must describe policy rather than tool capability")
 
 agents = AGENTS.read_text()
 for phrase in (

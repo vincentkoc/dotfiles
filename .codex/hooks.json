@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo \"Code discovery: use codebase-memory-mcp search/query tools (search_graph, trace_path, get_code_snippet, query_graph, search_code). The MCP index_repository tool is intentionally disabled. All indexing/reindexing must use the installed codebase-memory-graph.sh index|init canonical helper; direct codebase-memory-mcp cli index_repository is forbidden. Linked worktrees rewrite to their owning checkout; reserved and temporary paths are denied as independent clones.\""
+            "command": "echo \"Code discovery: use codebase-memory-mcp search/query tools (search_graph, trace_path, get_code_snippet, query_graph, search_code). Direct index_repository use is policy-forbidden; all indexing/reindexing must use the installed codebase-memory-graph.sh index|init canonical helper, and direct codebase-memory-mcp cli index_repository is forbidden. Linked worktrees rewrite to their owning checkout. Independent indexing is denied for ~/.codex/worktrees, ~/GIT/_Worktrees, any repo-local .worktrees path, /tmp, and /private/tmp.\""
           }
         ]
       }
