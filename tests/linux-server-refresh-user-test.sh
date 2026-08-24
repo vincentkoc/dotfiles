@@ -50,11 +50,21 @@ THEME
 }
 
 install_openclaw_toolchain() {
-  cat >"$PNPM_HOME/pnpm" <<'PNPM'
+  local install_root="$HOME/.local/opt/node-v$node_version"
+  local dist="$install_root/lib/node_modules/corepack/dist"
+  local shim
+  mkdir -p "$dist"
+  for shim in pnpm pnpx; do
+    cat >"$dist/$shim.js" <<'PNPM'
 #!/usr/bin/env bash
 printf '11.15.1\n'
 PNPM
-  chmod 0755 "$PNPM_HOME/pnpm"
+    chmod 0755 "$dist/$shim.js"
+    if [[ ! -L "$PNPM_HOME/$shim" ]]; then
+      ln -s "../../opt/node-v$node_version/lib/node_modules/corepack/dist/$shim.js" \
+        "$PNPM_HOME/$shim"
+    fi
+  done
 }
 
 mkdir -p \
@@ -137,6 +147,7 @@ for public_path in \
   [[ "$(mode "$public_path")" == 755 ]]
 done
 [[ -x "$home/.local/share/pnpm/pnpm" ]]
+[[ -x "$home/.local/share/pnpm/pnpx" ]]
 [[ ! -e "$home/.local/share/pnpm/bin" ]]
 [[ "$(readlink "$home/.local/bin/codex")" == "$root/bin/codex" ]]
 for absent in \
@@ -144,6 +155,8 @@ for absent in \
   "$home/.local/bin/op" \
   "$home/.local/bin/openclaw" \
   "$home/.local/bin/mttc" \
+  "$home/.local/share/pnpm/yarn" \
+  "$home/.local/share/pnpm/yarnpkg" \
   "$home/.codex/hooks.json" \
   "$home/.codex/AGENTS.md" \
   "$home/.codex/config.toml" \
@@ -206,6 +219,30 @@ uname() {
 install_pinned_checkout() { :; }
 install_openclaw_toolchain() { :; }
 
+simulate_foreign_owner() {
+  foreign="$1"
+  original_owned_path_uid="$(declare -f owned_path_uid)"
+  eval "${original_owned_path_uid/owned_path_uid/original_owned_path_uid}"
+  owned_path_uid() {
+    if [[ "$1" == "$foreign" ]]; then
+      printf '424242\n'
+    else
+      original_owned_path_uid "$1"
+    fi
+  }
+}
+
+create_corepack_targets() {
+  local install_root="$HOME/.local/opt/node-v$node_version"
+  local dist="$install_root/lib/node_modules/corepack/dist"
+  local shim
+  mkdir -p "$dist"
+  for shim in pnpm pnpx; do
+    printf '#!/usr/bin/env bash\n' >"$dist/$shim.js"
+    chmod 0755 "$dist/$shim.js"
+  done
+}
+
 case "$DRIFT_CASE" in
   symlink)
     mkdir "$HOME/redirect"
@@ -216,20 +253,39 @@ case "$DRIFT_CASE" in
     ;;
   owner)
     mkdir -p "$HOME/.local/share/pnpm"
-    foreign="$HOME/.local/share/pnpm"
-    original_owned_path_uid="$(declare -f owned_path_uid)"
-    eval "${original_owned_path_uid/owned_path_uid/original_owned_path_uid}"
-    owned_path_uid() {
-      if [[ "$1" == "$foreign" ]]; then
-        printf '424242\n'
-      else
-        original_owned_path_uid "$1"
-      fi
-    }
+    simulate_foreign_owner "$HOME/.local/share/pnpm"
     ;;
   link)
     mkdir -p "$HOME/.local/bin"
     ln -s "$HOME/wrong-codex" "$HOME/.local/bin/codex"
+    ;;
+  home | terminal-parent | outside)
+    ;;
+  nested-symlink)
+    mkdir "$HOME/nested"
+    ln -s "$OUTSIDE_ROOT" "$HOME/nested/redirect"
+    ;;
+  nested-type)
+    : >"$HOME/nested"
+    ;;
+  nested-owner)
+    mkdir "$HOME/nested"
+    simulate_foreign_owner "$HOME/nested"
+    ;;
+  pnpm-file)
+    mkdir -p "$PNPM_HOME"
+    printf 'keep-pnpm\n' >"$PNPM_HOME/pnpm"
+    ;;
+  pnpx-symlink)
+    mkdir -p "$PNPM_HOME"
+    ln -s "$OUTSIDE_ROOT/wrong-pnpx" "$PNPM_HOME/pnpx"
+    ;;
+  pnpm-owner)
+    create_corepack_targets
+    mkdir -p "$PNPM_HOME"
+    ln -s "../../opt/node-v$node_version/lib/node_modules/corepack/dist/pnpm.js" \
+      "$PNPM_HOME/pnpm"
+    simulate_foreign_owner "$PNPM_HOME/pnpm"
     ;;
 esac
 
@@ -242,23 +298,74 @@ fi
 EOF
 chmod +x "$drift_case"
 
-for case_name in symlink type owner link; do
+for case_name in \
+  symlink type owner link home terminal-parent outside \
+  nested-symlink nested-type nested-owner \
+  pnpm-file pnpx-symlink pnpm-owner; do
   case_home="$temporary/drift-$case_name"
+  outside_root="$temporary/outside-$case_name"
   mkdir "$case_home"
+  mkdir "$outside_root"
+  chmod 0777 "$outside_root"
+  printf 'outside-marker\n' >"$outside_root/marker"
+  outside_mode_before="$(mode "$outside_root")"
+  outside_listing_before="$(find "$outside_root" -mindepth 1 -print | LC_ALL=C sort)"
+  home_mode_before="$(mode "$case_home")"
+  case_pnpm_home="$case_home/.local/share/pnpm"
+  case_state_home="$case_home/.local/state"
+  case "$case_name" in
+    home) case_pnpm_home="$case_home" ;;
+    terminal-parent) case_pnpm_home="$case_home/.." ;;
+    outside) case_pnpm_home="$case_home/../$(basename "$outside_root")/pnpm" ;;
+    nested-symlink) case_pnpm_home="$case_home/nested/redirect/pnpm" ;;
+    nested-type | nested-owner) case_pnpm_home="$case_home/nested/tools/pnpm" ;;
+  esac
   : >"$temporary/forbidden-$case_name.log"
   HOME="$case_home" \
     XDG_DATA_HOME="$case_home/.local/share" \
-    XDG_STATE_HOME="$case_home/.local/state" \
-    PNPM_HOME="$case_home/.local/share/pnpm" \
+    XDG_STATE_HOME="$case_state_home" \
+    PNPM_HOME="$case_pnpm_home" \
     PATH="$fakebin:/usr/bin:/bin" \
     FORBIDDEN_LOG="$temporary/forbidden-$case_name.log" \
     BOOTSTRAP_SCRIPT="$script" \
     DRIFT_CASE="$case_name" \
+    OUTSIDE_ROOT="$outside_root" \
     CASE_OUTPUT="$temporary/drift-$case_name.out" \
     "$drift_case"
   [[ ! -s "$temporary/forbidden-$case_name.log" ]]
-  grep -Eq 'refusing (symlinked|non-directory|foreign-owned|unexpected)' \
+  grep -Eq 'refusing (unsafe|non-canonical|symlinked|non-directory|foreign-owned|unexpected|user path outside)' \
     "$temporary/drift-$case_name.out"
+  [[ "$(mode "$case_home")" == "$home_mode_before" ]]
+  [[ "$(mode "$outside_root")" == "$outside_mode_before" ]]
+  [[ "$(<"$outside_root/marker")" == outside-marker ]]
+  [[ "$(find "$outside_root" -mindepth 1 -print | LC_ALL=C sort)" == "$outside_listing_before" ]]
+  case "$case_name" in
+    symlink)
+      [[ "$(readlink "$case_home/.local")" == "$case_home/redirect" ]]
+      ;;
+    type)
+      [[ -f "$case_home/.codex" && ! -L "$case_home/.codex" ]]
+      ;;
+    link)
+      [[ "$(readlink "$case_home/.local/bin/codex")" == "$case_home/wrong-codex" ]]
+      ;;
+    nested-symlink)
+      [[ "$(readlink "$case_home/nested/redirect")" == "$outside_root" ]]
+      ;;
+    nested-type)
+      [[ -f "$case_home/nested" && ! -L "$case_home/nested" ]]
+      ;;
+    pnpm-file)
+      [[ "$(<"$case_pnpm_home/pnpm")" == keep-pnpm ]]
+      ;;
+    pnpx-symlink)
+      [[ "$(readlink "$case_pnpm_home/pnpx")" == "$outside_root/wrong-pnpx" ]]
+      ;;
+    pnpm-owner)
+      [[ "$(readlink "$case_pnpm_home/pnpm")" == \
+        "../../opt/node-v24.19.0/lib/node_modules/corepack/dist/pnpm.js" ]]
+      ;;
+  esac
 done
 
 refresh_definitions="$(

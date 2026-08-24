@@ -162,14 +162,25 @@ NODE
 cat >"$install_root/bin/corepack" <<'COREPACK'
 #!/usr/bin/env node
 printf 'corepack|%s|%s\n' "$PATH" "$*" >>"$TOOLCHAIN_TEST_LOG"
-if [[ "${1:-}" == enable && "${2:-}" == --install-directory ]]; then
-  cat >"$3/pnpm" <<'PROXY'
+if [[ "${1:-}" == enable && "${2:-}" == pnpm && "${3:-}" == --install-directory ]]; then
+  for shim in pnpm pnpx; do
+    if [[ ! -L "$4/$shim" ]]; then
+      ln -s "$TOOLCHAIN_COREPACK_DIST_RELATIVE/$shim.js" "$4/$shim"
+    fi
+  done
+fi
+if [[ "${1:-}" == install && "${2:-}" == --global ]]; then
+  exit 0
+fi
+COREPACK
+mkdir -p "$install_root/lib/node_modules/corepack/dist"
+for shim in pnpm pnpx; do
+  cat >"$install_root/lib/node_modules/corepack/dist/$shim.js" <<'PROXY'
 #!/usr/bin/env bash
 printf '11.15.1\n'
 PROXY
-  chmod +x "$3/pnpm"
-fi
-COREPACK
+  chmod +x "$install_root/lib/node_modules/corepack/dist/$shim.js"
+done
 for executable in npm npx; do
   cat >"$install_root/bin/$executable" <<'TOOL'
 #!/usr/bin/env bash
@@ -177,6 +188,9 @@ exit 0
 TOOL
 done
 chmod +x "$install_root/bin/"*
+export TOOLCHAIN_COREPACK_DIST_RELATIVE="../../opt/node-v$node_version/lib/node_modules/corepack/dist"
+mkdir -p "$PNPM_HOME"
+printf 'keep-yarn\n' >"$PNPM_HOME/yarn"
 
   # shellcheck disable=SC2329
   validate_parameters() { :; }
@@ -204,6 +218,14 @@ awk -F'|' -v prefix="$HOME/.local/share/pnpm:$HOME/.local/bin:" '
 ' "$TOOLCHAIN_TEST_LOG"
 [[ "$("$HOME/.local/bin/node" --version)" == "v$node_version" ]]
 [[ "$("$HOME/.local/share/pnpm/pnpm" --version)" == "$pnpm_version" ]]
+[[ "$("$HOME/.local/share/pnpm/pnpx" --version)" == "$pnpm_version" ]]
+[[ "$(<"$PNPM_HOME/yarn")" == keep-yarn ]]
+[[ ! -e "$PNPM_HOME/yarnpkg" && ! -L "$PNPM_HOME/yarnpkg" ]]
+grep -Fq "enable pnpm --install-directory $PNPM_HOME" "$TOOLCHAIN_TEST_LOG"
+if grep -Eq 'enable .*yarn|enable --install-directory' "$TOOLCHAIN_TEST_LOG"; then
+  printf 'Corepack enabled an unscoped package manager surface\n' >&2
+  exit 1
+fi
 
 prepare >/dev/null
 [[ "$PATH" == "$first_prepare_path" ]]
@@ -213,6 +235,8 @@ prepare >/dev/null
 awk -F'|' -v prefix="$HOME/.local/share/pnpm:$HOME/.local/bin:" '
   $1 == "corepack" && index($2, prefix) != 1 { exit 1 }
 ' "$TOOLCHAIN_TEST_LOG"
+[[ "$(<"$PNPM_HOME/yarn")" == keep-yarn ]]
+[[ ! -e "$PNPM_HOME/yarnpkg" && ! -L "$PNPM_HOME/yarnpkg" ]]
 EOF
 chmod +x "$toolchain_test"
 : >"$temporary/toolchain.log"

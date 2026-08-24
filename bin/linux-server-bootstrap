@@ -738,27 +738,103 @@ owned_path_uid() {
   stat -c %u "$1" 2>/dev/null || stat -f %u "$1"
 }
 
+canonical_absolute_path() {
+  local path="$1"
+  local component
+  local -a input=() output=()
+  [[ "$path" == /* && "$path" != *$'\n'* && "$path" != *$'\t'* ]] || return 1
+  IFS='/' read -r -a input <<<"${path#/}"
+  for component in "${input[@]}"; do
+    case "$component" in
+      '' | .) ;;
+      ..)
+        ((${#output[@]} > 0)) || return 1
+        unset "output[${#output[@]}-1]"
+        ;;
+      *) output+=("$component") ;;
+    esac
+  done
+  if ((${#output[@]} == 0)); then
+    printf '/\n'
+  else
+    local IFS=/
+    printf '/%s\n' "${output[*]}"
+  fi
+}
+
+require_strict_home_descendant() {
+  local path="$1"
+  local canonical_home canonical_path
+  canonical_home="$(canonical_absolute_path "$HOME")" || {
+    printf 'refusing non-canonical HOME\n' >&2
+    return 1
+  }
+  [[ "$canonical_home" == "$HOME" ]] || {
+    printf 'refusing non-canonical HOME\n' >&2
+    return 1
+  }
+  canonical_path="$(canonical_absolute_path "$path")" || {
+    printf 'refusing non-canonical user path: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$canonical_path" == "$path" ]] || {
+    printf 'refusing non-canonical user path: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$path" == "$HOME/"* ]] || {
+    printf 'refusing user path outside HOME: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+preflight_home_directory() {
+  local canonical_home
+  canonical_home="$(canonical_absolute_path "$HOME")" || return 1
+  [[ "$canonical_home" == "$HOME" && ! -L "$HOME" && -d "$HOME" ]] || {
+    printf 'refusing unsafe HOME directory\n' >&2
+    return 1
+  }
+  [[ "$(owned_path_uid "$HOME")" == "$(id -u)" ]] || {
+    printf 'refusing foreign-owned HOME directory\n' >&2
+    return 1
+  }
+}
+
 preflight_owned_directory() {
   local path="$1"
-  if [[ -L "$path" ]]; then
-    printf 'refusing symlinked user directory: %s\n' "$path" >&2
-    return 1
-  fi
-  if [[ -e "$path" ]]; then
-    [[ -d "$path" ]] || {
-      printf 'refusing non-directory user path: %s\n' "$path" >&2
+  local relative component current="$HOME"
+  local -a components=()
+  require_strict_home_descendant "$path" || return 1
+  relative="${path#"$HOME"/}"
+  IFS='/' read -r -a components <<<"$relative"
+  for component in "${components[@]}"; do
+    current="$current/$component"
+    if [[ -L "$current" ]]; then
+      printf 'refusing symlinked user directory: %s\n' "$current" >&2
       return 1
-    }
-    [[ "$(owned_path_uid "$path")" == "$(id -u)" ]] || {
-      printf 'refusing foreign-owned user directory: %s\n' "$path" >&2
-      return 1
-    }
-  fi
+    fi
+    if [[ -e "$current" ]]; then
+      [[ -d "$current" ]] || {
+        printf 'refusing non-directory user path: %s\n' "$current" >&2
+        return 1
+      }
+      [[ "$(owned_path_uid "$current")" == "$(id -u)" ]] || {
+        printf 'refusing foreign-owned user directory: %s\n' "$current" >&2
+        return 1
+      }
+    fi
+  done
 }
 
 preflight_link_destination() {
   local source="$1"
   local destination="$2"
+  local parent
+  require_strict_home_descendant "$destination" || return 1
+  parent="$(dirname "$destination")"
+  if [[ "$parent" != "$HOME" ]]; then
+    preflight_owned_directory "$parent" || return 1
+  fi
   if [[ -L "$destination" ]]; then
     [[ "$(readlink "$destination")" == "$source" ]] || {
       printf 'refusing unexpected user symlink: %s\n' "$destination" >&2
@@ -841,47 +917,50 @@ EOF
 }
 
 preflight_corepack_pnpm() {
-  local destination="$pnpm_home/pnpm"
   local install_root="$HOME/.local/opt/node-v$node_version"
-  local resolved
-  if [[ -L "$destination" ]]; then
-    resolved="$(readlink -f "$destination")" || return 1
-    case "$resolved" in
-      "$install_root"/*) return ;;
-      *)
-        printf 'refusing unexpected pnpm symlink: %s\n' "$destination" >&2
+  local shim destination expected resolved resolved_expected
+  for shim in pnpm pnpx; do
+    destination="$pnpm_home/$shim"
+    expected="$install_root/lib/node_modules/corepack/dist/$shim.js"
+    if [[ -L "$destination" ]]; then
+      [[ "$(owned_path_uid "$destination")" == "$(id -u)" ]] || {
+        printf 'refusing foreign-owned Corepack shim: %s\n' "$destination" >&2
         return 1
-        ;;
-    esac
-  fi
-  if [[ -e "$destination" ]]; then
-    [[ -f "$destination" && "$(owned_path_uid "$destination")" == "$(id -u)" ]] || {
-      printf 'refusing unexpected pnpm launcher: %s\n' "$destination" >&2
+      }
+      resolved="$(readlink -f "$destination")" || {
+        printf 'refusing unexpected Corepack symlink: %s\n' "$destination" >&2
+        return 1
+      }
+      resolved_expected="$(readlink -f "$expected")" || {
+        printf 'refusing unexpected Corepack target: %s\n' "$destination" >&2
+        return 1
+      }
+      [[ "$resolved" == "$resolved_expected" && -f "$expected" && ! -L "$expected" ]] || {
+        printf 'refusing unexpected Corepack symlink: %s\n' "$destination" >&2
+        return 1
+      }
+      continue
+    fi
+    if [[ -e "$destination" ]]; then
+      [[ "$(owned_path_uid "$destination")" == "$(id -u)" ]] || {
+        printf 'refusing foreign-owned Corepack output: %s\n' "$destination" >&2
+        return 1
+      }
+      printf 'refusing unexpected Corepack output: %s\n' "$destination" >&2
       return 1
-    }
-  fi
+    fi
+  done
 }
 
 preflight_refresh_user() {
   local path mode source destination install_root
-  preflight_owned_directory "$HOME" || return 1
-  preflight_owned_directory "$repo_root" || return 1
-  case "$state_root" in
-    "$HOME"/*) ;;
-    *)
-      printf 'refusing state path outside HOME\n' >&2
-      return 1
-      ;;
-  esac
-  case "$pnpm_home" in
-    "$HOME"/*) ;;
-    *)
-      printf 'refusing PNPM_HOME outside HOME\n' >&2
-      return 1
-      ;;
-  esac
-  [[ "$state_root" != *"/../"* && "$pnpm_home" != *"/../"* ]] || {
-    printf 'refusing non-canonical user path\n' >&2
+  preflight_home_directory || return 1
+  [[ ! -L "$repo_root" && -d "$repo_root" ]] || {
+    printf 'refusing unsafe dotfiles source directory\n' >&2
+    return 1
+  }
+  [[ "$(owned_path_uid "$repo_root")" == "$(id -u)" ]] || {
+    printf 'refusing foreign-owned dotfiles source directory\n' >&2
     return 1
   }
   while IFS=$'\t' read -r path mode; do
@@ -907,7 +986,7 @@ ensure_owned_directory() {
   local path="$1"
   local mode="$2"
   if [[ ! -e "$path" ]]; then
-    run mkdir "$path"
+    run mkdir -p "$path"
   fi
   run chmod "$mode" "$path"
 }
@@ -995,7 +1074,7 @@ install_openclaw_toolchain() {
   path_prepend_once "$pnpm_home"
   export PATH
   run chmod 0755 "$install_root"
-  run "$install_root/bin/corepack" enable --install-directory "$pnpm_home"
+  run "$install_root/bin/corepack" enable pnpm --install-directory "$pnpm_home"
   run "$local_bin/corepack" install --global "$pnpm_spec"
 
   if [[ "$dry_run" != 1 ]]; then
