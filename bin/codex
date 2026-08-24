@@ -2,23 +2,31 @@
 set -euo pipefail
 
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+platform="$(uname -s)"
 
 real_codex=""
-case "$(uname -s)" in
+case "$platform" in
   Darwin)
-    # Homebrew owns the standalone CLI on macOS. Prefer its native binary even
-    # while old npm-backed Codex sessions are still draining.
-    for candidate in /opt/homebrew/bin/codex /usr/local/bin/codex; do
+    # The official installer owns macOS. Never fall through to Homebrew or npm:
+    # their binaries can block in dyld before Codex can report why.
+    for candidate in \
+      "$codex_home/packages/standalone/current/bin/codex" \
+      "$codex_home/packages/standalone/current/codex"; do
       if [[ -x "$candidate" ]]; then
         real_codex="$candidate"
         break
       fi
     done
+    if [[ -z "$real_codex" ]]; then
+      printf 'codex: official standalone CLI is missing; run codex-standalone-install\n' >&2
+      exit 127
+    fi
     ;;
   Linux)
     # The official standalone installer owns Linux/WSL and keeps this symlink
     # stable across releases.
-    candidate="$HOME/.codex/packages/standalone/current/bin/codex"
+    candidate="$codex_home/packages/standalone/current/bin/codex"
     if [[ -x "$candidate" ]]; then
       real_codex="$candidate"
     fi
@@ -47,10 +55,10 @@ while :; do
 done
 unset path_done path_entry path_remaining
 
-if [[ -z "$real_codex" ]]; then
+if [[ "$platform" != "Darwin" && -z "$real_codex" ]]; then
   real_codex="$(PATH="$lookup_path" command -v codex || true)"
 fi
-if [[ -z "$real_codex" && -x "/Applications/Codex.app/Contents/Resources/codex" ]]; then
+if [[ "$platform" != "Darwin" && -z "$real_codex" && -x "/Applications/Codex.app/Contents/Resources/codex" ]]; then
   real_codex="/Applications/Codex.app/Contents/Resources/codex"
 fi
 

@@ -61,6 +61,37 @@ output="$(env -u GITHUB_PAT_TOKEN PATH="$long_path" "$symlink_dir/codex" --versi
 [[ "$output" == *"version:--version"* ]]
 [[ "$output" == *"token:injected"* ]]
 
+darwin_home="$temporary/darwin-home"
+mkdir -p "$darwin_home/.codex/packages/standalone/current/bin"
+cat >"$darwin_home/.codex/packages/standalone/current/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'standalone:%s\n' "$*"
+EOF
+chmod +x "$darwin_home/.codex/packages/standalone/current/bin/codex"
+cat >"$backend_dir/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+EOF
+darwin_output="$(
+  GITHUB_PAT_TOKEN=test HOME="$darwin_home" PATH="$long_path" \
+    "$symlink_dir/codex" run "two words"
+)"
+[[ "$darwin_output" == "standalone:run two words" ]]
+
+missing_home="$temporary/darwin-missing"
+mkdir -p "$missing_home"
+set +e
+GITHUB_PAT_TOKEN=test HOME="$missing_home" PATH="$long_path" \
+  "$symlink_dir/codex" --version \
+  >"$temporary/darwin-missing.stdout" 2>"$temporary/darwin-missing.stderr"
+missing_status=$?
+set -e
+[[ $missing_status -eq 127 ]]
+[[ ! -s "$temporary/darwin-missing.stdout" ]]
+grep -Fx \
+  "codex: official standalone CLI is missing; run codex-standalone-install" \
+  "$temporary/darwin-missing.stderr" >/dev/null
+
 linux_home="$temporary/linux-home"
 mkdir -p "$linux_home/.codex/packages/standalone/current/bin"
 cat >"$linux_home/.codex/packages/standalone/current/bin/codex" <<'EOF'

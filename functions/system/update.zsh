@@ -1,39 +1,10 @@
-npm-global-update-all-nodenv() {
-    local package_name="$1"
-    local latest_version nodenv_root version version_dir
-    local update_failed=false
-
-    command -v nodenv >/dev/null 2>&1 || return 0
-    nodenv_root="${NODENV_ROOT:-$HOME/.nodenv}"
-    [[ -d "$nodenv_root/versions" ]] || return 0
-
-    latest_version=$(npm view "$package_name" version 2>/dev/null) || return 1
-
-    while IFS= read -r version_dir; do
-        version=${version_dir##*/}
-
-        if NODENV_VERSION="$version" npm ls -g "$package_name" --depth=0 >/dev/null 2>&1; then
-            echo "   $package_name@$latest_version for Node $version"
-            if ! NODENV_VERSION="$version" npm install -g "$package_name@$latest_version" --no-audit --no-fund; then
-                update_failed=true
-            fi
-        fi
-    done < <(find "$nodenv_root/versions" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
-
-    nodenv rehash
-    [[ "$update_failed" == false ]]
-}
-
 codex-update-all() {
-    local update_failed=false
-
-    if command -v brew >/dev/null 2>&1 && brew list --cask codex >/dev/null 2>&1; then
-        echo "   Homebrew cask codex"
-        brew upgrade --cask codex || update_failed=true
+    if ! command -v codex-standalone-install >/dev/null 2>&1; then
+        echo "codex-standalone-install is required" >&2
+        return 127
     fi
-
-    npm-global-update-all-nodenv @openai/codex || update_failed=true
-    [[ "$update_failed" == false ]]
+    echo "   OpenAI standalone Codex"
+    codex-standalone-install
 }
 
 up() {

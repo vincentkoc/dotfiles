@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly installer_url="https://chatgpt.com/codex/install.sh"
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+standalone_root="$codex_home/packages/standalone"
+lock_file="$standalone_root/install.lock"
+lock_dir="$standalone_root/install.lock.d"
+
+fail() {
+  printf 'codex-standalone-install: %s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+platform="$(uname -s)"
+case "$platform" in
+  Darwin | Linux) ;;
+  *) fail "unsupported platform: $platform" ;;
+esac
+
+if [[ -d "$lock_dir" ]]; then
+  fail "installer lock is active at $lock_dir" 75
+fi
+
+if [[ -e "$lock_file" ]]; then
+  case "$platform" in
+    Darwin)
+      command -v lockf >/dev/null 2>&1 ||
+        fail "lockf is required to verify $lock_file"
+      if ! lockf -s -t 0 -k "$lock_file" /usr/bin/true; then
+        fail "installer lock is active at $lock_file" 75
+      fi
+      ;;
+    Linux)
+      if command -v flock >/dev/null 2>&1 &&
+        ! flock -n "$lock_file" /usr/bin/true; then
+        fail "installer lock is active at $lock_file" 75
+      fi
+      ;;
+  esac
+fi
+
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+
+temporary="$(mktemp -d "${TMPDIR:-/tmp}/codex-standalone-install.XXXXXX")"
+cleanup() {
+  rm -rf "$temporary"
+}
+trap cleanup EXIT INT TERM
+
+installer="$temporary/install.sh"
+curl -fsSL --connect-timeout 10 --max-time 60 "$installer_url" -o "$installer"
+[[ -s "$installer" ]] || fail "downloaded installer is empty"
+
+first_line=""
+IFS= read -r first_line <"$installer" || true
+[[ "$first_line" == "#!/bin/sh" ]] ||
+  fail "downloaded installer has an unexpected header"
+grep -F 'RELEASES_BASE_URL="https://releases.openai.com/codex"' "$installer" >/dev/null ||
+  fail "downloaded installer does not declare the official release service"
+grep -F "STANDALONE_ROOT=\"\$CODEX_HOME_DIR/packages/standalone\"" "$installer" >/dev/null ||
+  fail "downloaded installer does not declare the standalone package root"
+/bin/sh -n "$installer" || fail "downloaded installer failed syntax validation"
+
+CODEX_NON_INTERACTIVE=1 /bin/sh "$installer" "$@"

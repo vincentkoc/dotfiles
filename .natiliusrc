@@ -303,7 +303,6 @@ BREWCASKS=(
     "android-platform-tools"
     "tfswitch"
     "tflint"
-    "codex"
     "claude"
     "ollama-app"
     "zed"
