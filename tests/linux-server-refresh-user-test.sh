@@ -292,6 +292,11 @@ create_corepack_targets() {
   done
 }
 
+directory_metadata() {
+  stat -c '%f:%s:%Y:%Z' "$1" 2>/dev/null ||
+    stat -f '%p:%z:%m:%c' "$1"
+}
+
 case "$DRIFT_CASE" in
   symlink)
     mkdir "$HOME/redirect"
@@ -325,6 +330,12 @@ case "$DRIFT_CASE" in
     mkdir "$HOME/nested"
     chmod 0777 "$HOME/nested"
     ;;
+  non-traversable)
+    mkdir "$HOME/.local"
+    ln -s "$OUTSIDE_ROOT" "$HOME/.local/bin"
+    chmod 0600 "$HOME/.local"
+    NON_TRAVERSABLE_METADATA="$(directory_metadata "$HOME/.local")"
+    ;;
   pnpm-file)
     mkdir -p "$PNPM_HOME"
     printf 'keep-pnpm\n' >"$PNPM_HOME/pnpm"
@@ -346,6 +357,9 @@ if refresh_user >"$CASE_OUTPUT" 2>&1; then
   printf 'drift case unexpectedly succeeded: %s\n' "$DRIFT_CASE" >&2
   exit 1
 fi
+if [[ "$DRIFT_CASE" == non-traversable ]]; then
+  [[ "$(directory_metadata "$HOME/.local")" == "$NON_TRAVERSABLE_METADATA" ]]
+fi
 [[ ! -e "$HOME/.ssh" && ! -L "$HOME/.ssh" ]]
 [[ ! -e "$HOME/.local/state" && ! -L "$HOME/.local/state" ]]
 EOF
@@ -353,7 +367,7 @@ chmod +x "$drift_case"
 
 for case_name in \
   symlink type owner link home terminal-parent outside \
-  nested-symlink nested-type nested-owner world-mode \
+  nested-symlink nested-type nested-owner world-mode non-traversable \
   pnpm-file pnpx-symlink pnpm-owner; do
   case_home="$temporary/drift-$case_name"
   outside_root="$temporary/outside-$case_name"
@@ -388,7 +402,7 @@ for case_name in \
     CASE_OUTPUT="$temporary/drift-$case_name.out" \
     "$drift_case"
   [[ ! -s "$temporary/forbidden-$case_name.log" ]]
-  grep -Eq 'refusing (unsafe|non-canonical|symlinked|non-directory|foreign-owned|world-writable|unexpected|user path outside)' \
+  grep -Eq 'refusing (unsafe|non-canonical|symlinked|non-directory|non-traversable|foreign-owned|world-writable|unexpected|user path outside)' \
     "$temporary/drift-$case_name.out"
   [[ "$(mode "$case_home")" == "$home_mode_before" ]]
   [[ "$(mode "$outside_root")" == "$outside_mode_before" ]]
@@ -412,6 +426,10 @@ for case_name in \
       ;;
     world-mode)
       [[ "$(mode "$case_home/nested")" == 777 ]]
+      ;;
+    non-traversable)
+      [[ "$(mode "$case_home/.local")" == 600 ]]
+      chmod 0700 "$case_home/.local"
       ;;
     pnpm-file)
       [[ "$(<"$case_pnpm_home/pnpm")" == keep-pnpm ]]

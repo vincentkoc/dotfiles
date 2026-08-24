@@ -818,7 +818,7 @@ require_strict_home_descendant() {
 }
 
 preflight_home_directory() {
-  local canonical_home
+  local canonical_home home_mode
   canonical_home="$(canonical_absolute_path "$HOME")" || return 1
   [[ "$canonical_home" == "$HOME" && ! -L "$HOME" && -d "$HOME" ]] || {
     printf 'refusing unsafe HOME directory\n' >&2
@@ -828,11 +828,16 @@ preflight_home_directory() {
     printf 'refusing foreign-owned HOME directory\n' >&2
     return 1
   }
+  home_mode="$(owned_path_mode "$HOME")" || return 1
+  (( (8#$home_mode & 8#0100) != 0 )) || {
+    printf 'refusing non-traversable HOME directory\n' >&2
+    return 1
+  }
 }
 
 preflight_owned_directory() {
   local path="$1"
-  local relative component current="$HOME"
+  local relative component current="$HOME" current_mode
   local -a components=()
   require_strict_home_descendant "$path" || return 1
   relative="${path#"$HOME"/}"
@@ -852,9 +857,12 @@ preflight_owned_directory() {
         printf 'refusing foreign-owned user directory: %s\n' "$current" >&2
         return 1
       }
-      # Owned 0775 paths are normalized after the complete preflight; world-write is never safe.
-      local current_mode
       current_mode="$(owned_path_mode "$current")" || return 1
+      (( (8#$current_mode & 8#0100) != 0 )) || {
+        printf 'refusing non-traversable user directory: %s\n' "$current" >&2
+        return 1
+      }
+      # Owned 0775 paths are normalized after the complete preflight; world-write is never safe.
       (( (8#$current_mode & 8#0002) == 0 )) || {
         printf 'refusing world-writable user directory: %s\n' "$current" >&2
         return 1
