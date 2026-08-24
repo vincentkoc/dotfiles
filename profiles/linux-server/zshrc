@@ -36,11 +36,16 @@ SPACESHIP_PACKAGE_SHOW=false
 SPACESHIP_NODE_SHOW=false
 SPACESHIP_DIR_TRUNC=3
 SPACESHIP_CHAR_SYMBOL=">"
+SPACESHIP_CHAR_SUFFIX=" "
 [[ -r "$ZSH/custom/themes/spaceship.zsh-theme" ]] &&
   source "$ZSH/custom/themes/spaceship.zsh-theme"
 
 [[ -r "$HOME/.aliases" ]] && source "$HOME/.aliases"
 [[ -r "$HOME/.functions" ]] && source "$HOME/.functions"
+
+cx() {
+  codex --no-alt-screen "$@"
+}
 
 if [[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
   source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh

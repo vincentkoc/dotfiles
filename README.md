@@ -87,6 +87,7 @@ git clone https://github.com/vincentkoc/dotfiles.git ~/.dotfiles
 ~/.dotfiles/bin/linux-server-bootstrap plan
 ~/.dotfiles/bin/linux-server-bootstrap audit
 ~/.dotfiles/bin/linux-server-bootstrap prepare
+~/.dotfiles/bin/linux-server-bootstrap refresh-user
 ```
 
 `prepare` installs the Ubuntu shell baseline, checksum-pinned Node 24.19.0,
@@ -98,6 +99,15 @@ installs, Mosh, and firewall activation. Regular SSH is the safe default; add a
 separately reviewed tailnet UDP policy before opting into Mosh. `prepare` does
 not install, write, validate, or reload the SSH server; the Ubuntu host must
 already have a working `sshd`.
+
+`refresh-user` reruns only the user-owned portion: safe directory modes,
+public shell links, pinned prompt tooling, Node/pnpm, and the public Codex
+launcher. It never invokes sudo, package management, firewall, account, or SSH
+server mutations. PNPM globals live directly in `PNPM_HOME`, and the server
+profile adds `cx` as an argument-preserving `codex --no-alt-screen` shortcut.
+The empty private `~/.codex` surface remains host-local; no hooks, global
+instructions, model catalog, credentials, QuickSSH, Mosh, or OpenClaw launcher
+configuration is linked.
 
 Obtain the SHA256 fingerprint of the designated recovery public key through an
 independent trusted path, then explicitly enable the temporary proof phase:

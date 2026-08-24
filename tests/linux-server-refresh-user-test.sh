@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script="$root/bin/linux-server-bootstrap"
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+
+mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
+fakebin="$temporary/fakebin"
+mkdir "$fakebin"
+for command_name in sudo apt apt-get apt-cache dpkg-query usermod chsh sshd ufw systemctl; do
+  cat >"$fakebin/$command_name" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$(basename "$0") $*" >>"$FORBIDDEN_LOG"
+exit 97
+EOF
+  chmod +x "$fakebin/$command_name"
+done
+
+refresh_case="$temporary/refresh-case.sh"
+cat >"$refresh_case" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 0002
+
+# shellcheck disable=SC1090
+DOTFILES_SERVER_SOURCE_ONLY=1 source "$BOOTSTRAP_SCRIPT"
+
+uname() {
+  [[ "${1:-}" == -s ]] && {
+    printf 'Linux\n'
+    return
+  }
+  command uname "$@"
+}
+
+install_pinned_checkout() {
+  local destination="$2"
+  [[ -d "$destination" && ! -L "$destination" ]]
+  if [[ "$destination" == "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt" ]]; then
+    cat >"$destination/spaceship.zsh-theme" <<'THEME'
+printf '[%s]\n' "$SPACESHIP_CHAR_SUFFIX" >"$PROMPT_CAPTURE"
+THEME
+    chmod 0644 "$destination/spaceship.zsh-theme"
+  fi
+}
+
+install_openclaw_toolchain() {
+  cat >"$PNPM_HOME/pnpm" <<'PNPM'
+#!/usr/bin/env bash
+printf '11.15.1\n'
+PNPM
+  chmod 0755 "$PNPM_HOME/pnpm"
+}
+
+mkdir -p \
+  "$HOME/.ssh" \
+  "$HOME/.local/bin" \
+  "$HOME/.local/share/pnpm" \
+  "$HOME/.local/state/dotfiles/linux-server/backups" \
+  "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" \
+  "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt"
+chmod 0775 \
+  "$HOME/.ssh" \
+  "$HOME/.local" \
+  "$HOME/.local/bin" \
+  "$HOME/.local/share" \
+  "$HOME/.local/share/pnpm" \
+  "$HOME/.local/state" \
+  "$HOME/.local/state/dotfiles" \
+  "$HOME/.local/state/dotfiles/linux-server" \
+  "$HOME/.local/state/dotfiles/linux-server/backups" \
+  "$HOME/.oh-my-zsh" \
+  "$HOME/.oh-my-zsh/custom" \
+  "$HOME/.oh-my-zsh/custom/plugins" \
+  "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" \
+  "$HOME/.oh-my-zsh/custom/themes" \
+  "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt"
+
+refresh_user
+first_links="$(
+  find "$HOME" -type l -print |
+    LC_ALL=C sort |
+    while IFS= read -r path; do printf '%s -> %s\n' "$path" "$(readlink "$path")"; done
+)"
+first_backups="$(find "$state_root/backups" -mindepth 1 -print)"
+refresh_user
+second_links="$(
+  find "$HOME" -type l -print |
+    LC_ALL=C sort |
+    while IFS= read -r path; do printf '%s -> %s\n' "$path" "$(readlink "$path")"; done
+)"
+[[ "$first_links" == "$second_links" ]]
+[[ -z "$first_backups" ]]
+[[ -z "$(find "$state_root/backups" -mindepth 1 -print)" ]]
+EOF
+chmod +x "$refresh_case"
+
+home="$temporary/home"
+mkdir "$home"
+: >"$temporary/forbidden.log"
+HOME="$home" \
+  XDG_DATA_HOME="$home/.local/share" \
+  XDG_STATE_HOME="$home/.local/state" \
+  PNPM_HOME="$home/.local/share/pnpm" \
+  PATH="$fakebin:/usr/bin:/bin" \
+  FORBIDDEN_LOG="$temporary/forbidden.log" \
+  BOOTSTRAP_SCRIPT="$script" \
+  "$refresh_case"
+[[ ! -s "$temporary/forbidden.log" ]]
+
+for secure_path in \
+  "$home/.ssh" \
+  "$home/.codex" \
+  "$home/.local/state" \
+  "$home/.local/state/dotfiles" \
+  "$home/.local/state/dotfiles/linux-server" \
+  "$home/.local/state/dotfiles/linux-server/backups"; do
+  [[ "$(mode "$secure_path")" == 700 ]]
+done
+for public_path in \
+  "$home/.local" \
+  "$home/.local/bin" \
+  "$home/.local/share" \
+  "$home/.local/share/pnpm" \
+  "$home/.local/opt" \
+  "$home/.oh-my-zsh" \
+  "$home/.oh-my-zsh/custom" \
+  "$home/.oh-my-zsh/custom/plugins" \
+  "$home/.oh-my-zsh/custom/plugins/zsh-autosuggestions" \
+  "$home/.oh-my-zsh/custom/themes" \
+  "$home/.oh-my-zsh/custom/themes/spaceship-prompt"; do
+  [[ "$(mode "$public_path")" == 755 ]]
+done
+[[ -x "$home/.local/share/pnpm/pnpm" ]]
+[[ ! -e "$home/.local/share/pnpm/bin" ]]
+[[ "$(readlink "$home/.local/bin/codex")" == "$root/bin/codex" ]]
+for absent in \
+  "$home/.local/bin/quickssh" \
+  "$home/.local/bin/op" \
+  "$home/.local/bin/openclaw" \
+  "$home/.local/bin/mttc" \
+  "$home/.codex/hooks.json" \
+  "$home/.codex/AGENTS.md" \
+  "$home/.codex/config.toml" \
+  "$home/.codex/models.json" \
+  "$home/.codex/auth.json"; do
+  [[ ! -e "$absent" && ! -L "$absent" ]]
+done
+[[ -z "$(find "$home/.codex" -mindepth 1 -print)" ]]
+
+profile_output="$(
+  HOME="$home" \
+    XDG_DATA_HOME="$home/.local/share" \
+    PNPM_HOME="$home/.local/share/pnpm" \
+    PATH="$home/.local/share/pnpm:/usr/bin:$home/.local/share/pnpm:/bin" \
+    zsh -dfc '
+      source "$HOME/.profile"
+      print -r -- "$PATH"
+    '
+)"
+[[ "$(tr ':' '\n' <<<"$profile_output" | grep -Fxc "$home/.local/share/pnpm")" == 1 ]]
+if grep -Fq "$home/.local/share/pnpm/bin" <<<"$profile_output"; then
+  printf 'server profile added PNPM_HOME/bin\n' >&2
+  exit 1
+fi
+
+prompt_capture="$temporary/prompt-suffix"
+cx_log="$temporary/cx-args"
+HOME="$home" \
+  PROMPT_CAPTURE="$prompt_capture" \
+  CX_LOG="$cx_log" \
+  zsh -dfc '
+    codex() {
+      print -r -- "$#" >"$CX_LOG"
+      local argument
+      for argument in "$@"; do
+        print -r -- "$argument" >>"$CX_LOG"
+      done
+    }
+    source "$HOME/.zshrc"
+    cx "two words" "*"
+  '
+[[ "$(<"$prompt_capture")" == "[ ]" ]]
+printf '%s\n' 3 --no-alt-screen "two words" '*' >"$temporary/cx-expected"
+cmp "$temporary/cx-expected" "$cx_log"
+
+drift_case="$temporary/drift-case.sh"
+cat >"$drift_case" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck disable=SC1090
+DOTFILES_SERVER_SOURCE_ONLY=1 source "$BOOTSTRAP_SCRIPT"
+uname() {
+  [[ "${1:-}" == -s ]] && {
+    printf 'Linux\n'
+    return
+  }
+  command uname "$@"
+}
+install_pinned_checkout() { :; }
+install_openclaw_toolchain() { :; }
+
+case "$DRIFT_CASE" in
+  symlink)
+    mkdir "$HOME/redirect"
+    ln -s "$HOME/redirect" "$HOME/.local"
+    ;;
+  type)
+    : >"$HOME/.codex"
+    ;;
+  owner)
+    mkdir -p "$HOME/.local/share/pnpm"
+    foreign="$HOME/.local/share/pnpm"
+    original_owned_path_uid="$(declare -f owned_path_uid)"
+    eval "${original_owned_path_uid/owned_path_uid/original_owned_path_uid}"
+    owned_path_uid() {
+      if [[ "$1" == "$foreign" ]]; then
+        printf '424242\n'
+      else
+        original_owned_path_uid "$1"
+      fi
+    }
+    ;;
+  link)
+    mkdir -p "$HOME/.local/bin"
+    ln -s "$HOME/wrong-codex" "$HOME/.local/bin/codex"
+    ;;
+esac
+
+if refresh_user >"$CASE_OUTPUT" 2>&1; then
+  printf 'drift case unexpectedly succeeded: %s\n' "$DRIFT_CASE" >&2
+  exit 1
+fi
+[[ ! -e "$HOME/.ssh" && ! -L "$HOME/.ssh" ]]
+[[ ! -e "$HOME/.local/state" && ! -L "$HOME/.local/state" ]]
+EOF
+chmod +x "$drift_case"
+
+for case_name in symlink type owner link; do
+  case_home="$temporary/drift-$case_name"
+  mkdir "$case_home"
+  : >"$temporary/forbidden-$case_name.log"
+  HOME="$case_home" \
+    XDG_DATA_HOME="$case_home/.local/share" \
+    XDG_STATE_HOME="$case_home/.local/state" \
+    PNPM_HOME="$case_home/.local/share/pnpm" \
+    PATH="$fakebin:/usr/bin:/bin" \
+    FORBIDDEN_LOG="$temporary/forbidden-$case_name.log" \
+    BOOTSTRAP_SCRIPT="$script" \
+    DRIFT_CASE="$case_name" \
+    CASE_OUTPUT="$temporary/drift-$case_name.out" \
+    "$drift_case"
+  [[ ! -s "$temporary/forbidden-$case_name.log" ]]
+  grep -Eq 'refusing (symlinked|non-directory|foreign-owned|unexpected)' \
+    "$temporary/drift-$case_name.out"
+done
+
+refresh_definitions="$(
+  # shellcheck disable=SC1090
+  DOTFILES_SERVER_SOURCE_ONLY=1 source "$script"
+  declare -f refresh_user refresh_user_content preflight_refresh_user
+)"
+if grep -Eq '(^|[[:space:]])(sudo|apt|apt-get|usermod|sshd|ufw|run_root)([[:space:]]|$)' \
+  <<<"$refresh_definitions"; then
+  printf 'refresh-user contains a privileged mutation route\n' >&2
+  exit 1
+fi
+
+printf 'linux_server_refresh_user_test=passed\n'

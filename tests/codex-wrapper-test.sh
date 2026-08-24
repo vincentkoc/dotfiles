@@ -61,6 +61,24 @@ output="$(env -u GITHUB_PAT_TOKEN PATH="$long_path" "$symlink_dir/codex" --versi
 [[ "$output" == *"version:--version"* ]]
 [[ "$output" == *"token:injected"* ]]
 
+linux_home="$temporary/linux-home"
+mkdir -p "$linux_home/.codex/packages/standalone/current/bin"
+cat >"$linux_home/.codex/packages/standalone/current/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf 'standalone:%s\n' "$*"
+[[ "${GITHUB_PAT_TOKEN:-}" == "native-token" ]]
+EOF
+chmod +x "$linux_home/.codex/packages/standalone/current/bin/codex"
+cat >"$backend_dir/uname" <<'EOF'
+#!/usr/bin/env bash
+printf 'Linux\n'
+EOF
+linux_output="$(
+  env -u GITHUB_PAT_TOKEN HOME="$linux_home" PATH="$long_path" \
+    "$symlink_dir/codex" run "two words"
+)"
+[[ "$linux_output" == "standalone:run two words" ]]
+
 if grep -Fq 'gh auth token' "$repo_root/.zshrc"; then
   printf '.zshrc must not fetch GitHub credentials during startup\n' >&2
   exit 1

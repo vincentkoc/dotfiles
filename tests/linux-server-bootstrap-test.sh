@@ -38,6 +38,9 @@ grep -Fxq 'prepare.node_source=nodejs.org-checksum-pinned-user-install' "$plan_o
 grep -Fxq 'prepare.pnpm=pnpm@11.15.1' "$plan_one"
 grep -Fxq 'prepare.remote_shell=ssh' "$plan_one"
 grep -Fxq 'prepare.excludes=credentials-signing-gui-apps-global-openclaw-mosh' "$plan_one"
+grep -Fxq 'refresh_user.privilege=user-only' "$plan_one"
+grep -Fxq 'refresh_user.codex=public-wrapper-standalone-backend' "$plan_one"
+grep -Fxq 'refresh_user.pnpm_home=direct-path-no-bin-suffix' "$plan_one"
 grep -Fxq 'enable_auth_proof.requires=admin-user,designated-key-sha256,unchanged-authorized_keys' "$plan_one"
 grep -Fxq 'enable_auth_proof.expires_seconds=900' "$plan_one"
 grep -Fxq 'proof.requires=fresh-nonmultiplexed-transport,designated-public-key,tailscale-whois' "$plan_one"
@@ -77,6 +80,7 @@ set -e
 grep -Fq "SCRIPT_DIR=$root/bin" "$temporary/tt-symlink.out"
 grep -Fq "DOTFILES_DIR=$root" "$temporary/tt-symlink.out"
 
+export SSH_CONNECTION=''
 # shellcheck disable=SC1090
 DOTFILES_SERVER_SOURCE_ONLY=1 source "$script"
 
@@ -125,6 +129,8 @@ prepare_commands="$temporary/prepare-commands"
   link_server_dotfiles() { :; }
   # shellcheck disable=SC2329
   install_openclaw_toolchain() { :; }
+  # shellcheck disable=SC2329
+  refresh_user_content() { :; }
   prepare
 ) >/dev/null
 if grep -Eq 'openssh-server|sshd|auth.proof|/etc/ssh|systemctl.*(ssh|sshd)' \
@@ -193,24 +199,27 @@ chmod +x "$install_root/bin/"*
 prepare >/dev/null
 first_prepare_path="$PATH"
 [[ "$(grep -c '^corepack|' "$TOOLCHAIN_TEST_LOG")" == 2 ]]
-awk -F'|' -v prefix="$HOME/.local/bin:" '
+awk -F'|' -v prefix="$HOME/.local/share/pnpm:$HOME/.local/bin:" '
   $1 == "corepack" && index($2, prefix) != 1 { exit 1 }
 ' "$TOOLCHAIN_TEST_LOG"
 [[ "$("$HOME/.local/bin/node" --version)" == "v$node_version" ]]
-[[ "$("$HOME/.local/bin/pnpm" --version)" == "$pnpm_version" ]]
+[[ "$("$HOME/.local/share/pnpm/pnpm" --version)" == "$pnpm_version" ]]
 
 prepare >/dev/null
 [[ "$PATH" == "$first_prepare_path" ]]
 [[ "$(tr ':' '\n' <<<"$PATH" | grep -Fxc "$HOME/.local/bin")" == 1 ]]
+[[ "$(tr ':' '\n' <<<"$PATH" | grep -Fxc "$HOME/.local/share/pnpm")" == 1 ]]
 [[ "$(grep -c '^corepack|' "$TOOLCHAIN_TEST_LOG")" == 4 ]]
-awk -F'|' -v prefix="$HOME/.local/bin:" '
+awk -F'|' -v prefix="$HOME/.local/share/pnpm:$HOME/.local/bin:" '
   $1 == "corepack" && index($2, prefix) != 1 { exit 1 }
 ' "$TOOLCHAIN_TEST_LOG"
 EOF
 chmod +x "$toolchain_test"
 : >"$temporary/toolchain.log"
 HOME="$temporary/toolchain-home" \
+  XDG_DATA_HOME="$temporary/toolchain-home/.local/share" \
   XDG_STATE_HOME="$temporary/toolchain-home/.local/state" \
+  PNPM_HOME="$temporary/toolchain-home/.local/share/pnpm" \
   PATH=/usr/bin:/bin \
   BOOTSTRAP_SCRIPT="$script" \
   TOOLCHAIN_TEST_LOG="$temporary/toolchain.log" \
@@ -426,6 +435,7 @@ grep -Fq 'AuthenticationMethods publickey' "$script"
 grep -Fq 'ExposeAuthInfo yes' "$script"
 grep -Fq 'ExposeAuthInfo no' "$script"
 grep -Fq 'cleanup-auth-proof) cleanup_auth_proof' "$script"
+grep -Fq 'refresh-user) refresh_user' "$script"
 # shellcheck disable=SC2016
 grep -Fq 'ufw allow in on "$tailscale_interface"' "$script"
 grep -Fq 'lockdown must run from a different SSH session' "$script"
