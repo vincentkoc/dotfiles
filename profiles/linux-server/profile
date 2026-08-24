@@ -20,10 +20,27 @@ export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 
 path_prepend() {
-  case ":$PATH:" in
-    *":$1:"*) ;;
-    *) PATH="$1${PATH:+:$PATH}" ;;
-  esac
+  local target="$1"
+  local remaining="${PATH:-}"
+  local result=""
+  local entry done=""
+  while :; do
+    case "$remaining" in
+      *:*)
+        entry="${remaining%%:*}"
+        remaining="${remaining#*:}"
+        ;;
+      *)
+        entry="$remaining"
+        done=1
+        ;;
+    esac
+    if [[ -n "$entry" && "$entry" != "$target" ]]; then
+      result="${result:+$result:}$entry"
+    fi
+    [[ -z "$done" ]] || break
+  done
+  PATH="$target${result:+:$result}"
 }
 
 path_prepend "$PNPM_HOME"
