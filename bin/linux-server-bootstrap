@@ -738,6 +738,10 @@ owned_path_uid() {
   stat -c %u "$1" 2>/dev/null || stat -f %u "$1"
 }
 
+owned_path_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
 canonical_absolute_path() {
   local path="$1"
   local component
@@ -760,6 +764,32 @@ canonical_absolute_path() {
     local IFS=/
     printf '/%s\n' "${output[*]}"
   fi
+}
+
+relative_path_between() {
+  local from to component result="" index=0
+  local -a from_parts=() to_parts=()
+  from="$(canonical_absolute_path "$1")" || return 1
+  to="$(canonical_absolute_path "$2")" || return 1
+  IFS='/' read -r -a from_parts <<<"${from#/}"
+  IFS='/' read -r -a to_parts <<<"${to#/}"
+  while ((index < ${#from_parts[@]} && index < ${#to_parts[@]})) &&
+    [[ "${from_parts[index]}" == "${to_parts[index]}" ]]; do
+    index=$((index + 1))
+  done
+  for ((; index < ${#from_parts[@]}; index++)); do
+    result="${result:+$result/}.."
+  done
+  index=0
+  while ((index < ${#from_parts[@]} && index < ${#to_parts[@]})) &&
+    [[ "${from_parts[index]}" == "${to_parts[index]}" ]]; do
+    index=$((index + 1))
+  done
+  for ((; index < ${#to_parts[@]}; index++)); do
+    component="${to_parts[index]}"
+    result="${result:+$result/}$component"
+  done
+  printf '%s\n' "${result:-.}"
 }
 
 require_strict_home_descendant() {
@@ -822,6 +852,13 @@ preflight_owned_directory() {
         printf 'refusing foreign-owned user directory: %s\n' "$current" >&2
         return 1
       }
+      # Owned 0775 paths are normalized after the complete preflight; world-write is never safe.
+      local current_mode
+      current_mode="$(owned_path_mode "$current")" || return 1
+      (( (8#$current_mode & 8#0002) == 0 )) || {
+        printf 'refusing world-writable user directory: %s\n' "$current" >&2
+        return 1
+      }
     fi
   done
 }
@@ -854,21 +891,17 @@ preflight_link_destination() {
   fi
 }
 
-refresh_user_directory_manifest() {
+refresh_user_directory_targets() {
   local state_base="${XDG_STATE_HOME:-$HOME/.local/state}"
   local data_base="${XDG_DATA_HOME:-$HOME/.local/share}"
   printf '%s\t%s\n' \
     "$HOME/.local" 0755 \
     "$HOME/.local/bin" 0755 \
     "$HOME/.local/share" 0755 \
-    "$data_base" 0755 \
-    "$(dirname "$pnpm_home")" 0755 \
-    "$pnpm_home" 0755 \
     "$HOME/.local/opt" 0755 \
     "$HOME/.ssh" 0700 \
     "$HOME/.codex" 0700 \
     "$state_base" 0700 \
-    "$(dirname "$state_root")" 0700 \
     "$state_root" 0700 \
     "$state_root/backups" 0700 \
     "$HOME/.oh-my-zsh" 0755 \
@@ -876,7 +909,65 @@ refresh_user_directory_manifest() {
     "$HOME/.oh-my-zsh/custom/plugins" 0755 \
     "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" 0755 \
     "$HOME/.oh-my-zsh/custom/themes" 0755 \
-    "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt" 0755
+    "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt" 0755 \
+    "$data_base" 0755 \
+    "$pnpm_home" 0755
+}
+
+refresh_user_directory_manifest() {
+  local path mode relative component current component_mode
+  local index lookup found
+  local -a paths=() modes=() components=() emitted=()
+  while IFS=$'\t' read -r path mode; do
+    [[ -n "$path" && -n "$mode" ]] || return 1
+    require_strict_home_descendant "$path" || return 1
+    found=0
+    for ((lookup = 0; lookup < ${#paths[@]}; lookup++)); do
+      if [[ "${paths[lookup]}" == "$path" ]]; then
+        [[ "${modes[lookup]}" == "$mode" ]] || {
+          printf 'refusing conflicting user directory mode: %s\n' "$path" >&2
+          return 1
+        }
+        found=1
+        break
+      fi
+    done
+    if ((found == 0)); then
+      paths+=("$path")
+      modes+=("$mode")
+    fi
+  done < <(refresh_user_directory_targets)
+
+  for ((index = 0; index < ${#paths[@]}; index++)); do
+    path="${paths[index]}"
+    mode="${modes[index]}"
+    relative="${path#"$HOME"/}"
+    current="$HOME"
+    IFS='/' read -r -a components <<<"$relative"
+    for component in "${components[@]}"; do
+      current="$current/$component"
+      component_mode="$mode"
+      for ((lookup = 0; lookup < ${#paths[@]}; lookup++)); do
+        if [[ "${paths[lookup]}" == "$current" ]]; then
+          component_mode="${modes[lookup]}"
+          break
+        fi
+      done
+      found=0
+      if ((${#emitted[@]} > 0)); then
+        for path in "${emitted[@]}"; do
+          if [[ "$path" == "$current" ]]; then
+            found=1
+            break
+          fi
+        done
+      fi
+      if ((found == 0)); then
+        printf '%s\t%s\n' "$current" "$component_mode"
+        emitted+=("$current")
+      fi
+    done
+  done
 }
 
 refresh_user_link_manifest() {
@@ -918,13 +1009,18 @@ EOF
 
 preflight_corepack_pnpm() {
   local install_root="$HOME/.local/opt/node-v$node_version"
-  local shim destination expected resolved resolved_expected
+  local shim destination expected expected_link resolved resolved_expected
   for shim in pnpm pnpx; do
     destination="$pnpm_home/$shim"
     expected="$install_root/lib/node_modules/corepack/dist/$shim.js"
     if [[ -L "$destination" ]]; then
       [[ "$(owned_path_uid "$destination")" == "$(id -u)" ]] || {
         printf 'refusing foreign-owned Corepack shim: %s\n' "$destination" >&2
+        return 1
+      }
+      expected_link="$(relative_path_between "$pnpm_home" "$expected")" || return 1
+      [[ "$(readlink "$destination")" == "$expected_link" ]] || {
+        printf 'refusing unexpected Corepack symlink: %s\n' "$destination" >&2
         return 1
       }
       resolved="$(readlink -f "$destination")" || {
@@ -953,6 +1049,7 @@ preflight_corepack_pnpm() {
 }
 
 preflight_refresh_user() {
+  local directory_manifest="$1"
   local path mode source destination install_root
   preflight_home_directory || return 1
   [[ ! -L "$repo_root" && -d "$repo_root" ]] || {
@@ -966,7 +1063,7 @@ preflight_refresh_user() {
   while IFS=$'\t' read -r path mode; do
     [[ -n "$path" && -n "$mode" ]] || return 1
     preflight_owned_directory "$path" || return 1
-  done < <(refresh_user_directory_manifest)
+  done <<<"$directory_manifest"
 
   install_root="$HOME/.local/opt/node-v$node_version"
   preflight_owned_directory "$install_root" || return 1
@@ -986,16 +1083,17 @@ ensure_owned_directory() {
   local path="$1"
   local mode="$2"
   if [[ ! -e "$path" ]]; then
-    run mkdir -p "$path"
+    run mkdir -m "$mode" "$path"
   fi
   run chmod "$mode" "$path"
 }
 
 normalize_refresh_user_directories() {
+  local directory_manifest="$1"
   local path mode
   while IFS=$'\t' read -r path mode; do
     ensure_owned_directory "$path" "$mode" || return 1
-  done < <(refresh_user_directory_manifest)
+  done <<<"$directory_manifest"
 }
 
 path_prepend_once() {
@@ -1095,11 +1193,13 @@ ensure_sudo_access() {
 }
 
 refresh_user_content() {
+  local directory_manifest
   export PNPM_HOME="$pnpm_home"
-  if ! preflight_refresh_user; then
+  directory_manifest="$(refresh_user_directory_manifest)" || return 1
+  if ! preflight_refresh_user "$directory_manifest"; then
     return 1
   fi
-  normalize_refresh_user_directories
+  normalize_refresh_user_directories "$directory_manifest"
 
   install_pinned_checkout \
     https://github.com/ohmyzsh/ohmyzsh.git \

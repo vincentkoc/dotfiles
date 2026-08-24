@@ -52,7 +52,7 @@ THEME
 install_openclaw_toolchain() {
   local install_root="$HOME/.local/opt/node-v$node_version"
   local dist="$install_root/lib/node_modules/corepack/dist"
-  local shim
+  local shim link_target
   mkdir -p "$dist"
   for shim in pnpm pnpx; do
     cat >"$dist/$shim.js" <<'PNPM'
@@ -61,8 +61,8 @@ printf '11.15.1\n'
 PNPM
     chmod 0755 "$dist/$shim.js"
     if [[ ! -L "$PNPM_HOME/$shim" ]]; then
-      ln -s "../../opt/node-v$node_version/lib/node_modules/corepack/dist/$shim.js" \
-        "$PNPM_HOME/$shim"
+      link_target="$(relative_path_between "$PNPM_HOME" "$dist/$shim.js")"
+      ln -s "$link_target" "$PNPM_HOME/$shim"
     fi
   done
 }
@@ -122,6 +122,55 @@ HOME="$home" \
   BOOTSTRAP_SCRIPT="$script" \
   "$refresh_case"
 [[ ! -s "$temporary/forbidden.log" ]]
+
+run_refresh_component_case() {
+  local name="$1"
+  local case_home="$2"
+  local case_pnpm_home="$3"
+  local forbidden="$temporary/forbidden-$name.log"
+  : >"$forbidden"
+  HOME="$case_home" \
+    XDG_DATA_HOME="$case_home/.local/share" \
+    XDG_STATE_HOME="$case_home/.local/state" \
+    PNPM_HOME="$case_pnpm_home" \
+    PATH="$fakebin:/usr/bin:/bin" \
+    FORBIDDEN_LOG="$forbidden" \
+    BOOTSTRAP_SCRIPT="$script" \
+    "$refresh_case"
+  [[ ! -s "$forbidden" ]]
+}
+
+direct_home="$temporary/direct-home"
+mkdir "$direct_home"
+run_refresh_component_case direct "$direct_home" "$direct_home/pnpm"
+[[ "$(mode "$direct_home/pnpm")" == 755 ]]
+
+deep_home="$temporary/deep-home"
+mkdir "$deep_home"
+deep_pnpm="$deep_home/tools/node/package-managers/pnpm"
+run_refresh_component_case deep "$deep_home" "$deep_pnpm"
+for path in \
+  "$deep_home/tools" \
+  "$deep_home/tools/node" \
+  "$deep_home/tools/node/package-managers" \
+  "$deep_pnpm"; do
+  [[ "$(mode "$path")" == 755 ]]
+done
+
+normalize_home="$temporary/normalize-home"
+normalize_pnpm="$normalize_home/existing/deep/pnpm"
+mkdir -p "$normalize_pnpm"
+chmod 0775 \
+  "$normalize_home/existing" \
+  "$normalize_home/existing/deep" \
+  "$normalize_pnpm"
+run_refresh_component_case normalize "$normalize_home" "$normalize_pnpm"
+for path in \
+  "$normalize_home/existing" \
+  "$normalize_home/existing/deep" \
+  "$normalize_pnpm"; do
+  [[ "$(mode "$path")" == 755 ]]
+done
 
 for secure_path in \
   "$home/.ssh" \
@@ -272,6 +321,10 @@ case "$DRIFT_CASE" in
     mkdir "$HOME/nested"
     simulate_foreign_owner "$HOME/nested"
     ;;
+  world-mode)
+    mkdir "$HOME/nested"
+    chmod 0777 "$HOME/nested"
+    ;;
   pnpm-file)
     mkdir -p "$PNPM_HOME"
     printf 'keep-pnpm\n' >"$PNPM_HOME/pnpm"
@@ -300,7 +353,7 @@ chmod +x "$drift_case"
 
 for case_name in \
   symlink type owner link home terminal-parent outside \
-  nested-symlink nested-type nested-owner \
+  nested-symlink nested-type nested-owner world-mode \
   pnpm-file pnpx-symlink pnpm-owner; do
   case_home="$temporary/drift-$case_name"
   outside_root="$temporary/outside-$case_name"
@@ -318,7 +371,9 @@ for case_name in \
     terminal-parent) case_pnpm_home="$case_home/.." ;;
     outside) case_pnpm_home="$case_home/../$(basename "$outside_root")/pnpm" ;;
     nested-symlink) case_pnpm_home="$case_home/nested/redirect/pnpm" ;;
-    nested-type | nested-owner) case_pnpm_home="$case_home/nested/tools/pnpm" ;;
+    nested-type | nested-owner | world-mode)
+      case_pnpm_home="$case_home/nested/tools/pnpm"
+      ;;
   esac
   : >"$temporary/forbidden-$case_name.log"
   HOME="$case_home" \
@@ -333,7 +388,7 @@ for case_name in \
     CASE_OUTPUT="$temporary/drift-$case_name.out" \
     "$drift_case"
   [[ ! -s "$temporary/forbidden-$case_name.log" ]]
-  grep -Eq 'refusing (unsafe|non-canonical|symlinked|non-directory|foreign-owned|unexpected|user path outside)' \
+  grep -Eq 'refusing (unsafe|non-canonical|symlinked|non-directory|foreign-owned|world-writable|unexpected|user path outside)' \
     "$temporary/drift-$case_name.out"
   [[ "$(mode "$case_home")" == "$home_mode_before" ]]
   [[ "$(mode "$outside_root")" == "$outside_mode_before" ]]
@@ -354,6 +409,9 @@ for case_name in \
       ;;
     nested-type)
       [[ -f "$case_home/nested" && ! -L "$case_home/nested" ]]
+      ;;
+    world-mode)
+      [[ "$(mode "$case_home/nested")" == 777 ]]
       ;;
     pnpm-file)
       [[ "$(<"$case_pnpm_home/pnpm")" == keep-pnpm ]]
@@ -376,6 +434,15 @@ refresh_definitions="$(
 if grep -Eq '(^|[[:space:]])(sudo|apt|apt-get|usermod|sshd|ufw|run_root)([[:space:]]|$)' \
   <<<"$refresh_definitions"; then
   printf 'refresh-user contains a privileged mutation route\n' >&2
+  exit 1
+fi
+ensure_directory_definition="$(
+  # shellcheck disable=SC1090
+  DOTFILES_SERVER_SOURCE_ONLY=1 source "$script"
+  declare -f ensure_owned_directory
+)"
+if grep -Eq 'mkdir[[:space:]]+-p' <<<"$ensure_directory_definition"; then
+  printf 'refresh-user uses mkdir -p for managed directory creation\n' >&2
   exit 1
 fi
 
