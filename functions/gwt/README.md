@@ -19,6 +19,7 @@ Key responsibilities:
 - sparse-checkout profile application
 - shared `node_modules` bootstrap for pnpm repos
 - pretty/default worktree listing with `--raw`, `--plain`, `--color`, and `--no-color`
+- metadata-immutable `-h`/`--help` handling before repository probes or command dispatch
 - unified worktree discovery across:
   - the current repository's registered Git worktrees
 - agent worktree cleanup front doors
