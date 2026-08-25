@@ -3,8 +3,10 @@ set -euo pipefail
 
 root="${0:A:h:h}"
 temporary="$(mktemp -d)"
+temporary="${temporary:A}"
 trap 'rm -rf "$temporary"' EXIT
 
+zdotdir="$temporary/zdotdir"
 home="$temporary/home"
 repo="$temporary/repo"
 foreign="$temporary/foreign"
@@ -12,7 +14,8 @@ worktrees_root="$home/worktrees"
 runtime="$home/Library/Application Support/agent-worktree-ops"
 gwt_fixture_root="$temporary/gwt-fixture"
 gwt_source="$gwt_fixture_root/functions/gwt/gwt.zsh"
-mkdir -p "$home" "$runtime" "${gwt_source:h}"
+mkdir -p "$zdotdir" "$home" "$runtime" "${gwt_source:h}"
+export ZDOTDIR="$zdotdir"
 cp "$root/functions/gwt/gwt.zsh" "$gwt_source"
 cp "$root/bin/agent-worktree-ops/agent-worktree-clean" "$runtime/agent-worktree-clean"
 cp "$root/bin/agent-worktree-ops/agent-worktree-maintain" "$runtime/agent-worktree-maintain"
