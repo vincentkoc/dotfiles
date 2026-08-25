@@ -49,5 +49,6 @@ install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-clean" "$RUN
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-maintain" "$RUNTIME_DIR/agent-worktree-maintain"
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-purge" "$RUNTIME_DIR/agent-worktree-purge"
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/retire-agent-worktree-scheduler" "$RUNTIME_DIR/retire-agent-worktree-scheduler"
+install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/worktree-storage-guard" "$RUNTIME_DIR/worktree-storage-guard"
 
 printf 'agent-worktree-ops runtime installed; scheduler state unchanged\n'

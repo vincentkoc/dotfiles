@@ -17,6 +17,7 @@ mkdir -m 700 "$state_dir/log"
 : >"$state_dir/log/agent-worktree-maintain.log"
 chmod 644 "$state_dir/log/agent-worktree-maintain.log"
 cp "$root/bin/agent-worktree-ops/agent-worktree-maintain" "$runtime/agent-worktree-maintain"
+cp "$root/bin/agent-worktree-ops/worktree-storage-guard" "$runtime/worktree-storage-guard"
 
 cat >"$runtime/agent-worktree-clean" <<'EOF'
 #!/usr/bin/env bash
@@ -28,7 +29,8 @@ fi
 printf '%s\n' "$*" >"$TEST_CLEANER_ARGS"
 exit "${TEST_CLEANER_EXIT:-0}"
 EOF
-chmod +x "$runtime/agent-worktree-clean" "$runtime/agent-worktree-maintain"
+chmod +x "$runtime/agent-worktree-clean" "$runtime/agent-worktree-maintain" \
+  "$runtime/worktree-storage-guard"
 
 mode_of() {
   stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
@@ -76,6 +78,23 @@ grep -q -- '--skip-legacy-purge' "$temporary/cleaner.args"
 [[ "$(mode_of "$state_dir/log")" == "700" ]]
 [[ "$(mode_of "$state_dir/locks")" == "700" ]]
 [[ "$(mode_of "$log_file")" == "600" ]]
+
+cat >"$runtime/worktree-storage-guard" <<'EOF'
+#!/usr/bin/env bash
+printf 'storage unavailable\n' >&2
+exit 78
+EOF
+chmod +x "$runtime/worktree-storage-guard"
+set +e
+run_maintainer >"$temporary/storage-failure.out" 2>&1
+status=$?
+set -e
+[[ "$status" == "78" ]]
+grep -q 'storage unavailable' "$temporary/storage-failure.out"
+[[ ! -e "$state_dir/locks/agent-worktree-maintain.lock" ]]
+[[ "$(grep -c 'start count=' "$log_file")" == "1" ]]
+cp "$root/bin/agent-worktree-ops/worktree-storage-guard" "$runtime/worktree-storage-guard"
+chmod +x "$runtime/worktree-storage-guard"
 
 legacy_codex_home="$temporary/legacy-codex"
 legacy_state_dir="$temporary/legacy-state"

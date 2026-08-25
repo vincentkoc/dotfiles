@@ -30,6 +30,9 @@ DEFAULT_MIN_AGE_DAYS = 2
 DEFAULT_TRIM_ARTIFACTS_AGE_DAYS = 0.25
 DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
 DEFAULT_QUARANTINE_ROOT = os.path.join(DEFAULT_CODEX_HOME, "quarantine", "worktrees")
+DEFAULT_STORAGE_GUARD = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "worktree-storage-guard"
+)
 STATE_READER_MAX_BYTES = 8 * 1024 * 1024
 STATE_READER_SOURCE_MAX_BYTES = 2 * 1024 * 1024
 MACHINE_CHILD_TIMEOUT_SECONDS = 30.0
@@ -651,6 +654,7 @@ def main() -> int:
 
 
 def run_cleaner(args: argparse.Namespace) -> int:
+    require_worktree_storage()
     repo_root = normalize_path(resolve_repo_root(args.repo))
     codex_home = normalize_path(args.codex_home)
     quarantine_root = normalize_path(args.quarantine_root)
@@ -769,6 +773,7 @@ def run_cleaner(args: argparse.Namespace) -> int:
     if not args.apply:
         return 0
 
+    require_worktree_storage()
     failed_mutations = apply_trims(
         repo_root=repo_root,
         codex_home=codex_home,
@@ -804,6 +809,22 @@ def resolve_repo_root(repo: Optional[str]) -> str:
     if repo:
         return repo
     return run_text(["git", "rev-parse", "--show-toplevel"])
+
+
+def require_worktree_storage() -> None:
+    guard = os.environ.get("WORKTREE_STORAGE_GUARD", DEFAULT_STORAGE_GUARD)
+    result = subprocess.run(
+        [guard],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or f"worktree storage guard failed with status {result.returncode}"
+        )
 
 
 def normalize_path(raw_path: str) -> str:
@@ -2050,6 +2071,7 @@ def apply_trims(
     failed_mutations = 0
     with progress_bar(total=len(candidates), desc="trimming artifacts") as progress:
         for candidate in candidates:
+            require_worktree_storage()
             reason = revalidate_candidate(
                 repo_root=repo_root,
                 codex_home=codex_home,
@@ -2080,6 +2102,7 @@ def apply_removals(
     failed_mutations = 0
     with progress_bar(total=len(candidates), desc="removing worktrees") as progress:
         for candidate in candidates:
+            require_worktree_storage()
             reason = revalidate_candidate(
                 repo_root=repo_root,
                 codex_home=codex_home,

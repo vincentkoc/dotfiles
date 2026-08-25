@@ -3,8 +3,10 @@ set -euo pipefail
 
 root="${0:A:h:h}"
 temporary="$(mktemp -d)"
+temporary="${temporary:A}"
 trap 'rm -rf "$temporary"' EXIT
 
+zdotdir="$temporary/zdotdir"
 home="$temporary/home"
 repo="$temporary/repo"
 foreign="$temporary/foreign"
@@ -12,11 +14,14 @@ worktrees_root="$home/worktrees"
 runtime="$home/Library/Application Support/agent-worktree-ops"
 gwt_fixture_root="$temporary/gwt-fixture"
 gwt_source="$gwt_fixture_root/functions/gwt/gwt.zsh"
-mkdir -p "$home" "$runtime" "${gwt_source:h}"
+mkdir -p "$zdotdir" "$home" "$runtime" "${gwt_source:h}"
+export ZDOTDIR="$zdotdir"
 cp "$root/functions/gwt/gwt.zsh" "$gwt_source"
 cp "$root/bin/agent-worktree-ops/agent-worktree-clean" "$runtime/agent-worktree-clean"
 cp "$root/bin/agent-worktree-ops/agent-worktree-maintain" "$runtime/agent-worktree-maintain"
-chmod +x "$runtime/agent-worktree-clean" "$runtime/agent-worktree-maintain"
+cp "$root/bin/agent-worktree-ops/worktree-storage-guard" "$runtime/worktree-storage-guard"
+chmod +x "$runtime/agent-worktree-clean" "$runtime/agent-worktree-maintain" \
+  "$runtime/worktree-storage-guard"
 
 fake_bin="$temporary/bin"
 mkdir -p "$fake_bin"
@@ -226,6 +231,39 @@ git init -b main "$foreign_row" >/dev/null
 
 index_before="$(invalidate_index_stat_cache "$remove_path")"
 metadata_before="$(metadata_snapshot "$repo")"
+
+cat >"$runtime/worktree-storage-guard" <<'EOF'
+#!/bin/sh
+echo storage-unavailable >&2
+exit 78
+EOF
+chmod +x "$runtime/worktree-storage-guard"
+guarded_metadata_before="$(git -C "$repo" worktree list --porcelain | shasum -a 256)"
+for guarded_command in \
+  'audit' \
+  'clean' \
+  'new blocked main' \
+  'add blocked-add main' \
+  'rm remove-me' \
+  'prune'; do
+  if HOME="$home" DOTFILES_WORKTREES_ROOT="$worktrees_root" \
+    zsh -f -c '
+      source "$1"
+      cd "$2"
+      gwt ${(z)3}
+    ' zsh "$gwt_source" "$repo" "$guarded_command" \
+      >"$temporary/guarded.out" 2>&1; then
+    print -u2 "expected storage guard failure: $guarded_command"
+    exit 1
+  fi
+  grep -Fq storage-unavailable "$temporary/guarded.out"
+done
+[[ "$guarded_metadata_before" == "$(git -C "$repo" worktree list --porcelain | shasum -a 256)" ]]
+[[ ! -e "$TEST_PRUNE_LOG" ]]
+cp "$root/bin/agent-worktree-ops/worktree-storage-guard" \
+  "$runtime/worktree-storage-guard"
+chmod +x "$runtime/worktree-storage-guard"
+
 PATH="$fake_bin:$PATH" \
 GIT_OPTIONAL_LOCKS=caller-value \
 GIT_NO_LAZY_FETCH=caller-lazy-value \

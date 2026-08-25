@@ -45,7 +45,8 @@ assert_runtime_only() {
     agent-worktree-clean \
     agent-worktree-maintain \
     agent-worktree-purge \
-    retire-agent-worktree-scheduler; do
+    retire-agent-worktree-scheduler \
+    worktree-storage-guard; do
     [[ -x "$runtime/$tool" ]]
     cmp -s "$root/bin/agent-worktree-ops/$tool" "$runtime/$tool"
   done

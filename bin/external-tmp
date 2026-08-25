@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+if (( $# == 0 )); then
+  printf 'Usage: external-tmp <command...>\n' >&2
+  exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+guard="${WORKTREE_STORAGE_GUARD:-$SCRIPT_DIR/agent-worktree-ops/worktree-storage-guard}"
+if [[ ! -x "$guard" ]]; then
+  guard="$HOME/Library/Application Support/agent-worktree-ops/worktree-storage-guard"
+fi
+if [[ ! -x "$guard" ]]; then
+  printf 'external-tmp: worktree storage guard is unavailable\n' >&2
+  exit 127
+fi
+
+mount_point="$("$guard" --require-config --print-mount-point)"
+scratch_root="$mount_point/.scratch/tmp"
+temporary=""
+
+cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if [[ -n "$temporary" && -e "$temporary" ]]; then
+    if "$guard" >/dev/null 2>&1; then
+      /bin/rm -rf -- "$temporary"
+    else
+      printf 'external-tmp: storage disappeared; refusing cleanup fallback: %s\n' \
+        "$temporary" >&2
+    fi
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT HUP INT TERM
+mkdir -p "$scratch_root"
+chmod 0700 "$mount_point/.scratch" "$scratch_root"
+temporary="$(mktemp -d "$scratch_root/external-tmp.XXXXXX")"
+"$guard"
+
+physical="$(cd "$temporary" && pwd -P)"
+case "$physical/" in
+  "$mount_point/.scratch/tmp/"*) ;;
+  *)
+    printf 'external-tmp: scratch path escaped configured storage: %s\n' "$physical" >&2
+    exit 78
+    ;;
+esac
+
+TMPDIR="$temporary/" TMP="$temporary" TEMP="$temporary" "$@"

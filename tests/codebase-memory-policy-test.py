@@ -7,6 +7,8 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HOOKS = ROOT / ".codex" / "hooks.json"
 AGENTS = ROOT / ".codex" / "AGENTS.md"
+STORAGE_GUARD = ROOT / "bin" / "agent-worktree-ops" / "worktree-storage-guard"
+WORKTREE_DOCS = ROOT / "functions" / "gwt" / "README.md"
 
 
 payload = json.loads(HOOKS.read_text())
@@ -53,5 +55,23 @@ for phrase in (
 ):
     if phrase not in agents:
         raise SystemExit(f"missing agent policy: {phrase}")
+
+guard = STORAGE_GUARD.read_text()
+for phrase in (
+    "path_has_no_symlink_components",
+    "mount point resolves outside its canonical path",
+    "canonical path is not a direct filesystem mount",
+):
+    if phrase not in guard:
+        raise SystemExit(f"missing physical-path storage guard: {phrase}")
+
+docs = WORKTREE_DOCS.read_text()
+for phrase in (
+    "lexical and resolved containment",
+    "canonical owning checkout",
+    "symlinked `~/.codex/worktrees`",
+):
+    if phrase not in docs:
+        raise SystemExit(f"missing worktree indexing policy: {phrase}")
 
 print("codebase_memory_policy_test=passed")

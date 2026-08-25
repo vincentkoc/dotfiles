@@ -3,6 +3,8 @@ deepclean() {
     local skip_mole=0
     local repo=""
     local root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    local guard=""
+    local source_path="${${(%):-%x}:A}"
     local -a repo_roots
 
     while (( $# )); do
@@ -32,6 +34,23 @@ EOF
         esac
         shift
     done
+
+    if [[ -n "${WORKTREE_STORAGE_GUARD:-}" ]]; then
+        guard="$WORKTREE_STORAGE_GUARD"
+    elif [[ -x "${source_path:h:h:h}/bin/agent-worktree-ops/worktree-storage-guard" ]]; then
+        guard="${source_path:h:h:h}/bin/agent-worktree-ops/worktree-storage-guard"
+    elif command -v worktree-storage-guard >/dev/null 2>&1; then
+        guard="$(command -v worktree-storage-guard)"
+    elif [[ -x "$HOME/Library/Application Support/agent-worktree-ops/worktree-storage-guard" ]]; then
+        guard="$HOME/Library/Application Support/agent-worktree-ops/worktree-storage-guard"
+    else
+        echo "deepclean: worktree-storage-guard missing" >&2
+        return 127
+    fi
+    "$guard" || {
+        echo "deepclean: required worktree storage is unavailable" >&2
+        return 78
+    }
 
     if [[ -n "$repo" ]]; then
         repo_roots=("${repo:A}")
