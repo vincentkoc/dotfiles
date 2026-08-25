@@ -4,6 +4,17 @@ Agent worktree cleanup and maintenance tools.
 
 Bins in this folder:
 
+- `worktree-storage-guard`
+  - reads the private runtime contract
+    `external-worktree-storage.v1`
+  - treats a missing contract as an unconfigured host, but fails closed once a
+    valid required contract is installed
+  - requires the exact UUID to be mounted directly at canonical
+    `~/.codex/worktrees` as encrypted, case-insensitive APFS with ownership
+    enabled and a user-owned mode-0700 mounted root
+  - rejects symlinked mountpoints or parent components, wrong UUID/filesystem,
+    writable internal fallback, and hot disappearance
+  - when absent, the underlying mountpoint must remain `root:wheel` mode `0000`
 - `agent-worktree-clean`
   - dry-run/apply cleanup of idle worktrees and stale artifacts
   - only registered, non-main worktrees from the selected Git common dir are actionable
@@ -38,6 +49,8 @@ Bins in this folder:
   - apply mode revalidates dirtiness, reachability, sessions, tmux panes, and process CWDs
   - removals are serial, non-force `git worktree remove` operations
   - apply exits nonzero when a selected trim or removal fails
+  - validates required external storage before inventory and again before every
+    trim/removal mutation
   - pass `--skip-legacy-purge` to leave legacy quarantine cleanup to a separate job
 - `agent-worktree-maintain`
   - pressure-aware maintenance runner using the cleaner's registered inventory
@@ -50,10 +63,11 @@ Bins in this folder:
     untrusted lock state exits with status 73
   - pass `--skip-legacy-purge` to forward the cleaner's purge opt-out
   - pass `--no-log` to emit output for ephemeral capture without creating a log
+  - validates required external storage before creating locks, logs, or state
 - `agent-worktree-purge`
   - background purge of entries left in the legacy quarantine directory
 - `install-agent-worktree-ops`
-  - atomically installs runtime copies only
+  - atomically installs runtime copies, including the storage guard, only
   - never creates, loads, unloads, enables, disables, or removes a LaunchAgent
   - accepts legacy `--install-only` as an alias for the runtime-only default
 - `retire-agent-worktree-scheduler`
@@ -72,5 +86,6 @@ Bins in this folder:
     labels disabled with no matching jobs loaded
   - never removes runtime directories, logs, history, or iCloud/Mackup residue
 
-Neither audit nor apply mode prunes Git worktree metadata. Use explicit
-`git worktree prune` or `gwt prune` only after reviewing stale registrations.
+Neither audit nor apply mode prunes Git worktree metadata. Use guarded
+`gwt prune` only after reviewing stale registrations. Raw `git worktree prune`
+is unsafe while required storage is absent.

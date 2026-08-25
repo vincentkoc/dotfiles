@@ -566,6 +566,16 @@ _gwt_tool_path() {
     return 1
 }
 
+_gwt_require_worktree_storage() {
+    local guard_path
+
+    guard_path=$(_gwt_tool_path worktree-storage-guard) || {
+        echo "gwt: worktree-storage-guard not found" >&2
+        return 127
+    }
+    "$guard_path"
+}
+
 _gwt_validate_cleanup_args() {
     local command_name="$1"
     shift
@@ -1134,6 +1144,7 @@ EOF
             ;;
         audit)
             local repo_root cleaner_path audit_table worktree_count machine_mode=false arg
+            _gwt_require_worktree_storage || return
             repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             _gwt_validate_cleanup_args audit "$@" || return 1
             cleaner_path=$(_gwt_tool_path agent-worktree-clean) || {
@@ -1171,6 +1182,7 @@ EOF
             ;;
         clean)
             local repo_root maintainer_path
+            _gwt_require_worktree_storage || return
             repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             _gwt_validate_cleanup_args clean "$@" || return 1
             maintainer_path=$(_gwt_tool_path agent-worktree-maintain) || {
@@ -1188,6 +1200,8 @@ EOF
             local use_sparse=false
             local checkout_risk=""
             local created_worktree=false
+
+            _gwt_require_worktree_storage || return
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -1330,6 +1344,8 @@ EOF
             local force_remove=false
             local arg target_path main_worktree repo_root current_path
 
+            _gwt_require_worktree_storage || return
+
             for arg in "$@"; do
                 case "$arg" in
                     --force|-f) force_remove=true ;;
@@ -1379,6 +1395,7 @@ EOF
             _gwt_tmux_sync_context
             ;;
         prune)
+            _gwt_require_worktree_storage || return
             git worktree prune
             _gwt_tmux_sync_context
             ;;

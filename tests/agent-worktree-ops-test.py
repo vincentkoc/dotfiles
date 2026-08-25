@@ -552,6 +552,10 @@ class WorktreeCleanerTests(unittest.TestCase):
 
     def test_machine_reader_runs_from_anonymous_cleaner_source_fd(self) -> None:
         source_fd = os.open(CLEANER_PATH, os.O_RDONLY)
+        environment = os.environ.copy()
+        environment["WORKTREE_STORAGE_GUARD"] = str(
+            CLEANER_PATH.with_name("worktree-storage-guard")
+        )
         try:
             result = subprocess.run(
                 [
@@ -567,6 +571,7 @@ class WorktreeCleanerTests(unittest.TestCase):
                     str(self.codex_home),
                     "--machine",
                 ],
+                env=environment,
                 pass_fds=(source_fd,),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -968,26 +973,30 @@ class WorktreeCleanerTests(unittest.TestCase):
         )
         failed_remove = SimpleNamespace(returncode=1, stdout="", stderr="refused")
 
-        with mock.patch.object(CLEANER, "progress_bar", return_value=mock.MagicMock()):
-            with mock.patch.object(CLEANER, "revalidate_candidate", return_value=None):
-                with mock.patch.object(CLEANER, "trim_worktree_artifacts", return_value=False):
-                    trim_failures = CLEANER.apply_trims(
-                        repo_root="/tmp/repo",
-                        codex_home="/tmp/codex",
-                        candidates=[candidate],
-                        shared_node_modules_source="/tmp/repo/node_modules",
-                        session_limit=30,
-                        scan_limit=200,
-                    )
-                with mock.patch.object(CLEANER.subprocess, "run", return_value=failed_remove):
-                    removal_failures = CLEANER.apply_removals(
-                        repo_root="/tmp/repo",
-                        codex_home="/tmp/codex",
-                        candidates=[candidate],
-                        include_detached=False,
-                        session_limit=30,
-                        scan_limit=200,
-                    )
+        with mock.patch.object(CLEANER, "require_worktree_storage"):
+            progress_patch = mock.patch.object(
+                CLEANER, "progress_bar", return_value=mock.MagicMock()
+            )
+            with progress_patch:
+                with mock.patch.object(CLEANER, "revalidate_candidate", return_value=None):
+                    with mock.patch.object(CLEANER, "trim_worktree_artifacts", return_value=False):
+                        trim_failures = CLEANER.apply_trims(
+                            repo_root="/tmp/repo",
+                            codex_home="/tmp/codex",
+                            candidates=[candidate],
+                            shared_node_modules_source="/tmp/repo/node_modules",
+                            session_limit=30,
+                            scan_limit=200,
+                        )
+                    with mock.patch.object(CLEANER.subprocess, "run", return_value=failed_remove):
+                        removal_failures = CLEANER.apply_removals(
+                            repo_root="/tmp/repo",
+                            codex_home="/tmp/codex",
+                            candidates=[candidate],
+                            include_detached=False,
+                            session_limit=30,
+                            scan_limit=200,
+                        )
 
         self.assertEqual(trim_failures, 1)
         self.assertEqual(removal_failures, 1)
@@ -1374,6 +1383,34 @@ class WorktreeCleanerTests(unittest.TestCase):
             self.assertEqual(before, path_metadata(sentinel))
         finally:
             time.sleep(0.7)
+
+    def test_storage_guard_failure_precedes_inventory(self) -> None:
+        guard = self.base / "storage-guard"
+        guard.write_text(
+            "#!/bin/sh\nprintf 'storage unavailable\\n' >&2\nexit 78\n",
+            encoding="utf-8",
+        )
+        os.chmod(guard, 0o755)
+        environment = os.environ.copy()
+        environment["WORKTREE_STORAGE_GUARD"] = str(guard)
+        result = subprocess.run(
+            [
+                str(CLEANER_PATH),
+                "--repo",
+                str(self.repo),
+                "--codex-home",
+                str(self.codex_home),
+                "--list-registered",
+            ],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("storage unavailable", result.stderr)
 
 
 if __name__ == "__main__":

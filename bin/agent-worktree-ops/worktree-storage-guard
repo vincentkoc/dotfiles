@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import grp
+import json
+import os
+import pathlib
+import plistlib
+import re
+import stat
+import subprocess
+import sys
+from typing import Any
+
+
+SCHEMA = "external-worktree-storage.v1"
+DEFAULT_CONFIG = (
+    pathlib.Path.home()
+    / "Library"
+    / "Application Support"
+    / "agent-worktree-ops"
+    / "external-worktree-storage.json"
+)
+UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+
+
+class GuardError(RuntimeError):
+    pass
+
+
+def path_has_no_symlink_components(path: pathlib.Path) -> bool:
+    path = pathlib.Path(os.path.abspath(path))
+    current = pathlib.Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return False
+        except FileNotFoundError:
+            continue
+    return True
+
+
+def load_config(path: pathlib.Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    if not path_has_no_symlink_components(path):
+        raise GuardError(f"runtime config has a symlinked component: {path}")
+    if path.is_symlink() or not path.is_file():
+        raise GuardError(f"runtime config is not a regular file: {path}")
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid():
+        raise GuardError(f"runtime config has the wrong owner: {path}")
+    if metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise GuardError(f"runtime config permissions are unsafe: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise GuardError(f"runtime config is unreadable: {error}") from error
+    expected_keys = {
+        "case_sensitive",
+        "encrypted",
+        "filesystem",
+        "mount_point",
+        "required",
+        "schema_version",
+        "volume_uuid",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise GuardError("runtime config schema is invalid")
+    if (
+        value.get("schema_version") != SCHEMA
+        or value.get("required") is not True
+        or value.get("filesystem") != "apfs"
+        or value.get("encrypted") is not True
+        or value.get("case_sensitive") is not False
+        or not isinstance(value.get("volume_uuid"), str)
+        or UUID_RE.fullmatch(value["volume_uuid"]) is None
+    ):
+        raise GuardError("runtime config policy is incomplete or invalid")
+    canonical = pathlib.Path.home() / ".codex" / "worktrees"
+    mount_point = pathlib.Path(value["mount_point"])
+    if not mount_point.is_absolute() or os.path.normpath(mount_point) != str(canonical):
+        raise GuardError(f"runtime config mount point is not canonical: {mount_point}")
+    return value
+
+
+def test_observation() -> dict[str, Any] | None:
+    if os.environ.get("WORKTREE_STORAGE_GUARD_TESTING") != "1":
+        return None
+    fixture = os.environ.get("WORKTREE_STORAGE_GUARD_OBSERVED")
+    if not fixture:
+        return None
+    value = json.loads(pathlib.Path(fixture).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise GuardError("test observation is invalid")
+    return value
+
+
+def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/diskutil", "info", "-plist", str(mount_point)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        result = None
+    disk = {}
+    if result is not None and result.returncode == 0:
+        try:
+            disk = plistlib.loads(result.stdout)
+        except (plistlib.InvalidFileException, ValueError):
+            disk = {}
+    mounted = disk.get("MountPoint") == str(mount_point)
+    metadata = None
+    try:
+        metadata = os.lstat(mount_point)
+    except FileNotFoundError:
+        pass
+    parent_metadata = None
+    try:
+        parent_metadata = os.stat(mount_point.parent)
+    except FileNotFoundError:
+        pass
+    free_gib = None
+    if mounted:
+        try:
+            filesystem = os.statvfs(mount_point)
+            free_gib = (filesystem.f_bavail * filesystem.f_frsize) // (1024**3)
+        except OSError:
+            pass
+    personality = str(
+        disk.get("FileSystemPersonality")
+        or disk.get("FilesystemName")
+        or ""
+    )
+    return {
+        "mounted": mounted,
+        "mount_point": disk.get("MountPoint"),
+        "volume_uuid": disk.get("VolumeUUID"),
+        "filesystem": "apfs" if "apfs" in personality.casefold() else personality.casefold(),
+        "encrypted": disk.get("Encrypted") is True,
+        "free_gib": free_gib,
+        "case_sensitive": "case-sensitive" in personality.casefold(),
+        "ownership_enabled": disk.get("GlobalPermissionsEnabled") is True,
+        "owner_uid": metadata.st_uid if metadata else None,
+        "owner_gid": metadata.st_gid if metadata else None,
+        "mode": format(stat.S_IMODE(metadata.st_mode), "04o") if metadata else None,
+        "device": metadata.st_dev if metadata else None,
+        "parent_device": parent_metadata.st_dev if parent_metadata else None,
+    }
+
+
+def require_fallback_closed(observed: dict[str, Any]) -> None:
+    try:
+        wheel_gid = grp.getgrnam("wheel").gr_gid
+    except KeyError:
+        wheel_gid = 0
+    if (
+        observed.get("owner_uid") != 0
+        or observed.get("owner_gid") != wheel_gid
+        or observed.get("mode") not in ("0000", "000")
+    ):
+        raise GuardError("required storage is absent and the internal fallback is writable")
+    raise GuardError("required external worktree storage is not mounted")
+
+
+def validate_observation(
+    config: dict[str, Any], observed: dict[str, Any]
+) -> pathlib.Path:
+    mount_point = pathlib.Path(config["mount_point"])
+    if not path_has_no_symlink_components(mount_point):
+        raise GuardError(f"mount point has a symlinked component: {mount_point}")
+    if os.path.realpath(mount_point) != str(mount_point):
+        raise GuardError(f"mount point resolves outside its canonical path: {mount_point}")
+    if observed.get("mounted") is not True:
+        require_fallback_closed(observed)
+    if observed.get("mount_point") != str(mount_point):
+        raise GuardError("external volume is mounted at the wrong path")
+    if str(observed.get("volume_uuid") or "").casefold() != config["volume_uuid"].casefold():
+        raise GuardError("mounted external volume UUID does not match policy")
+    if str(observed.get("filesystem") or "").casefold() != "apfs":
+        raise GuardError("mounted external volume is not APFS")
+    if observed.get("encrypted") is not True:
+        raise GuardError("mounted external volume is not encrypted")
+    if observed.get("case_sensitive") is not False:
+        raise GuardError("mounted external volume must be case-insensitive")
+    if observed.get("ownership_enabled") is not True:
+        raise GuardError("mounted external volume ownership is disabled")
+    if observed.get("owner_uid") != os.getuid():
+        raise GuardError("mounted external volume has the wrong owner")
+    if observed.get("mode") not in ("0700", "700"):
+        raise GuardError("mounted external volume root must use mode 0700")
+    device = observed.get("device")
+    parent_device = observed.get("parent_device")
+    if device is None or parent_device is None or device == parent_device:
+        raise GuardError("canonical path is not a direct filesystem mount")
+    return mount_point
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument("--config", default=os.environ.get("WORKTREE_STORAGE_CONFIG"))
+    parser.add_argument("--require-config", action="store_true")
+    parser.add_argument("--print-mount-point", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    config_path = pathlib.Path(args.config).expanduser() if args.config else DEFAULT_CONFIG
+    try:
+        config = load_config(config_path)
+        if config is None:
+            if args.require_config:
+                raise GuardError(f"external worktree storage is not configured: {config_path}")
+            if args.json:
+                print(json.dumps({"configured": False, "schema_version": SCHEMA}, sort_keys=True))
+            return 0
+        observed = test_observation() or live_observation(pathlib.Path(config["mount_point"]))
+        mount_point = validate_observation(config, observed)
+        if args.print_mount_point:
+            print(mount_point)
+        elif args.json:
+            print(
+                json.dumps(
+                    {
+                        "configured": True,
+                        "free_gib": observed.get("free_gib"),
+                        "mount_point": str(mount_point),
+                        "schema_version": SCHEMA,
+                        "volume_uuid": config["volume_uuid"],
+                    },
+                    sort_keys=True,
+                )
+            )
+        return 0
+    except (GuardError, OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"worktree-storage-guard: {error}", file=sys.stderr)
+        return 78
+
+
+if __name__ == "__main__":
+    sys.exit(main())

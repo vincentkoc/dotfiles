@@ -9,6 +9,7 @@ export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
 DEFAULT_REPO="$HOME/GIT/_Perso/openclaw"
 DEFAULT_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 DEFAULT_CLEANER="$SCRIPT_DIR/agent-worktree-clean"
+DEFAULT_STORAGE_GUARD="$SCRIPT_DIR/worktree-storage-guard"
 DEFAULT_SESSION_LIMIT=30
 DEFAULT_MIN_AGE_DAYS=2
 DEFAULT_TRIM_ARTIFACTS_AGE_DAYS=0.25
@@ -494,6 +495,11 @@ EOF
       ;;
   esac
 done
+
+"$DEFAULT_STORAGE_GUARD" || {
+  echo "agent-worktree-maintain: required worktree storage is unavailable" >&2
+  exit 78
+}
 
 if (( state_dir_explicit == 0 )); then
   state_dir="$codex_home"
