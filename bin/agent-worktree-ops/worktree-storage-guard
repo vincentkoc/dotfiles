@@ -22,6 +22,9 @@ DEFAULT_CONFIG = (
     / "external-worktree-storage.json"
 )
 MARKER_NAME = ".external-worktree-storage-marker"
+PHYSICAL_EXTERNAL_BUS_PROTOCOLS = frozenset(
+    {"FireWire", "NVMe", "SATA", "SCSI", "Thunderbolt", "USB"}
+)
 REQUIRED_MINIMUM_FREE_GIB = 200
 REQUIRED_MINIMUM_FREE_PERCENT = 10
 UUID_RE = re.compile(
@@ -162,6 +165,24 @@ def read_marker(mount_point: pathlib.Path) -> str | None:
         return None
 
 
+def normalized_device_location(disk: dict[str, Any]) -> str | None:
+    if (
+        disk.get("Internal") is False
+        and disk.get("RemovableMediaOrExternalDevice") is True
+        and disk.get("BusProtocol") in PHYSICAL_EXTERNAL_BUS_PROTOCOLS
+    ):
+        return "External"
+    return None
+
+
+def normalized_encryption(disk: dict[str, Any]) -> bool | None:
+    encryption = disk.get("Encryption")
+    if isinstance(encryption, bool):
+        return encryption
+    legacy = disk.get("Encrypted")
+    return legacy if isinstance(legacy, bool) else None
+
+
 def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
     try:
         result = subprocess.run(
@@ -215,12 +236,12 @@ def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
         "mount_point": disk.get("MountPoint"),
         "volume_uuid": disk.get("VolumeUUID"),
         "filesystem": "apfs" if "apfs" in personality.casefold() else personality.casefold(),
-        "encrypted": disk.get("Encrypted") is True,
+        "encrypted": normalized_encryption(disk) is True,
         "free_gib": free_gib,
         "free_percent": free_percent,
         "case_sensitive": "case-sensitive" in personality.casefold(),
         "ownership_enabled": disk.get("GlobalPermissionsEnabled") is True,
-        "device_location": disk.get("DeviceLocation"),
+        "device_location": normalized_device_location(disk),
         "marker_id": read_marker(mount_point) if mounted else None,
         "spotlight": (
             "disabled"

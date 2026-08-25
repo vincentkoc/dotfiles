@@ -70,6 +70,38 @@ assert str(module.DEFAULT_CONFIG) == (
 source = pathlib.Path(sys.argv[1]).read_text()
 assert "com.apple.metadata:com_apple_backup_excludeItem" not in source
 assert '"/usr/bin/tmutil", "isexcluded"' in source
+assert module.normalized_device_location(
+    {
+        "BusProtocol": "USB",
+        "Internal": False,
+        "RemovableMediaOrExternalDevice": True,
+    }
+) == "External"
+assert module.normalized_device_location(
+    {
+        "BusProtocol": "USB",
+        "Internal": True,
+        "RemovableMediaOrExternalDevice": False,
+    }
+) is None
+assert module.normalized_device_location(
+    {
+        "BusProtocol": "Disk Image",
+        "Internal": False,
+        "RemovableMediaOrExternalDevice": True,
+    }
+) is None
+assert module.normalized_device_location(
+    {
+        "Internal": False,
+        "RemovableMediaOrExternalDevice": True,
+    }
+) is None
+assert module.normalized_device_location({}) is None
+assert module.normalized_encryption({"Encryption": True}) is True
+assert module.normalized_encryption({"Encryption": False, "Encrypted": True}) is False
+assert module.normalized_encryption({"Encrypted": True}) is True
+assert module.normalized_encryption({}) is None
 if os.getuid() != 0:
     try:
         module.load_config(pathlib.Path(sys.argv[2]), production_default=True)
