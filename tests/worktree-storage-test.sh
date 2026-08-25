@@ -11,13 +11,17 @@ home="$temporary/home"
 config="$temporary/external-worktree-storage.json"
 observed="$temporary/observed.json"
 mount_point="$home/.codex/worktrees"
+volume_uuid="$(printf '%s-%s-%s-%s-%s' 11111111 2222 3333 4444 555555555555)"
+other_uuid="$(printf '%s-%s-%s-%s-%s' aaaaaaaa bbbb cccc dddd eeeeeeeeeeee)"
+marker_id="studio-a.external-worktree-storage.v1"
+other_marker_id="studio-b.external-worktree-storage.v1"
 mkdir -p "$mount_point"
 chmod 0700 "$mount_point"
 
 write_config() {
-  local uuid="${1:-11111111-2222-3333-4444-555555555555}"
+  local uuid="${1:-$volume_uuid}"
   cat >"$config" <<EOF
-{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"vcuriosity.external-worktree-storage.v1","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
+{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"$marker_id","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
 EOF
   chmod 0600 "$config"
 }
@@ -32,7 +36,7 @@ write_observed() {
   local free_gib="${7:-1000}"
   local free_percent="${8:-50}"
   cat >"$observed" <<EOF
-{"case_sensitive":false,"device":200,"device_location":"External","encrypted":true,"filesystem":"$filesystem","free_gib":$free_gib,"free_percent":$free_percent,"marker_id":"vcuriosity.external-worktree-storage.v1","mode":"$mode","mount_point":"$mount_point","mounted":$mounted,"owner_gid":$owner_gid,"owner_uid":$owner_uid,"ownership_enabled":true,"parent_device":100,"spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
+{"case_sensitive":false,"device":200,"device_location":"External","encrypted":true,"filesystem":"$filesystem","free_gib":$free_gib,"free_percent":$free_percent,"marker_id":"$marker_id","mode":"$mode","mount_point":"$mount_point","mounted":$mounted,"owner_gid":$owner_gid,"owner_uid":$owner_uid,"ownership_enabled":true,"parent_device":100,"spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
 EOF
 }
 
@@ -45,7 +49,7 @@ run_guard() {
 }
 
 write_config
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 [[ "$(run_guard --print-mount-point)" == "$mount_point" ]]
 python3 - "$guard" "$config" <<'PY'
 import importlib.util
@@ -96,35 +100,35 @@ worktree_common="$(git -C "$managed_worktree" rev-parse --path-format=absolute -
 [[ "$owner_common" == "$worktree_common" ]]
 git -C "$owner_repo" worktree remove "$managed_worktree"
 
-write_observed "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$other_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 if run_guard >"$temporary/wrong-uuid.out" 2>&1; then
   echo "wrong UUID must fail" >&2
   exit 1
 fi
 grep -Fq "UUID does not match policy" "$temporary/wrong-uuid.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" exfat true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" exfat true "$(id -u)" "$(id -g)" 0700
 if run_guard >"$temporary/exfat.out" 2>&1; then
   echo "ExFAT must fail" >&2
   exit 1
 fi
 grep -Fq "not APFS" "$temporary/exfat.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700 199 50
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700 199 50
 if run_guard >"$temporary/low-gib.out" 2>&1; then
   echo "minimum_free_gib must fail before mutation" >&2
   exit 1
 fi
 grep -Fq "minimum_free_gib" "$temporary/low-gib.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700 1000 9
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700 1000 9
 if run_guard >"$temporary/low-percent.out" 2>&1; then
   echo "minimum_free_percent must fail before mutation" >&2
   exit 1
 fi
 grep -Fq "minimum_free_percent" "$temporary/low-percent.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 python3 - "$observed" <<'PY'
 import json
 import pathlib
@@ -141,15 +145,15 @@ if run_guard >"$temporary/internal-device.out" 2>&1; then
 fi
 grep -Fq "not an external device" "$temporary/internal-device.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
-python3 - "$observed" <<'PY'
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" "$other_marker_id" <<'PY'
 import json
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
 value = json.loads(path.read_text())
-value["marker_id"] = "vatlantis.external-worktree-storage.v1"
+value["marker_id"] = sys.argv[2]
 path.write_text(json.dumps(value))
 PY
 if run_guard >"$temporary/wrong-marker.out" 2>&1; then
@@ -158,7 +162,7 @@ if run_guard >"$temporary/wrong-marker.out" 2>&1; then
 fi
 grep -Fq "marker does not match" "$temporary/wrong-marker.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 python3 - "$observed" <<'PY'
 import json
 import pathlib
@@ -175,7 +179,7 @@ if run_guard >"$temporary/spotlight.out" 2>&1; then
 fi
 grep -Fq "Spotlight indexing is not disabled" "$temporary/spotlight.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 python3 - "$observed" <<'PY'
 import json
 import pathlib
@@ -200,23 +204,23 @@ except KeyError:
     print(0)
 PY
 )"
-write_observed "11111111-2222-3333-4444-555555555555" apfs false 0 "$wheel_gid" 0000
+write_observed "$volume_uuid" apfs false 0 "$wheel_gid" 0000
 if run_guard >"$temporary/absent.out" 2>&1; then
   echo "absent mount must fail" >&2
   exit 1
 fi
 grep -Fq "not mounted" "$temporary/absent.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs false "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs false "$(id -u)" "$(id -g)" 0700
 if run_guard >"$temporary/fallback.out" 2>&1; then
   echo "writable fallback must fail" >&2
   exit 1
 fi
 grep -Fq "fallback is writable" "$temporary/fallback.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 run_guard
-write_observed "11111111-2222-3333-4444-555555555555" apfs false 0 "$wheel_gid" 0000
+write_observed "$volume_uuid" apfs false 0 "$wheel_gid" 0000
 if run_guard >"$temporary/hot-disappearance.out" 2>&1; then
   echo "hot disappearance must fail closed" >&2
   exit 1
@@ -225,7 +229,7 @@ grep -Fq "not mounted" "$temporary/hot-disappearance.out"
 
 rm -rf "$mount_point"
 ln -s /Volumes/ExternalWorktrees "$mount_point"
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 if run_guard >"$temporary/symlink.out" 2>&1; then
   echo "symlinked canonical mount point must fail" >&2
   exit 1
@@ -243,7 +247,7 @@ grep -Fq "required config missing or invalid" "$temporary/pending.out"
 
 write_config
 chmod 0666 "$config"
-write_observed "11111111-2222-3333-4444-555555555555" apfs false "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs false "$(id -u)" "$(id -g)" 0700
 if run_guard >"$temporary/writable-config.out" 2>&1; then
   echo "writable runtime config must fail" >&2
   exit 1
@@ -261,21 +265,21 @@ fi
 grep -Fq "symlinked component" "$temporary/symlink-config.out"
 rm "$config"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs false 0 "$wheel_gid" 0000
+write_observed "$volume_uuid" apfs false 0 "$wheel_gid" 0000
 if run_guard >"$temporary/missing-sealed.out" 2>&1; then
   echo "missing config with sealed fallback must fail" >&2
   exit 1
 fi
 grep -Fq "required config missing" "$temporary/missing-sealed.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 if run_guard >"$temporary/missing-mounted.out" 2>&1; then
   echo "missing config with a direct mount must fail" >&2
   exit 1
 fi
 grep -Fq "required config missing" "$temporary/missing-mounted.out"
 
-write_observed "11111111-2222-3333-4444-555555555555" apfs false "$(id -u)" "$(id -g)" 0700
+write_observed "$volume_uuid" apfs false "$(id -u)" "$(id -g)" 0700
 run_guard
 if run_guard --require-config \
   >"$temporary/unconfigured.out" 2>&1; then

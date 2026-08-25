@@ -13,14 +13,16 @@ config="$temporary/config.json"
 observed="$temporary/observed.json"
 probe="$temporary/probe.sh"
 result="$temporary/result"
+volume_uuid="$(printf '%s-%s-%s-%s-%s' 11111111 2222 3333 4444 555555555555)"
+marker_id="studio-a.external-worktree-storage.v1"
 mkdir -p "$mount_point"
 chmod 0700 "$mount_point"
 cat >"$config" <<EOF
-{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"vcuriosity.external-worktree-storage.v1","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"11111111-2222-3333-4444-555555555555"}
+{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"$marker_id","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$volume_uuid"}
 EOF
 chmod 0600 "$config"
 cat >"$observed" <<EOF
-{"case_sensitive":false,"device":200,"device_location":"External","encrypted":true,"filesystem":"apfs","free_gib":1000,"free_percent":50,"marker_id":"vcuriosity.external-worktree-storage.v1","mode":"0700","mount_point":"$mount_point","mounted":true,"owner_gid":$(id -g),"owner_uid":$(id -u),"ownership_enabled":true,"parent_device":100,"spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"11111111-2222-3333-4444-555555555555"}
+{"case_sensitive":false,"device":200,"device_location":"External","encrypted":true,"filesystem":"apfs","free_gib":1000,"free_percent":50,"marker_id":"$marker_id","mode":"0700","mount_point":"$mount_point","mounted":true,"owner_gid":$(id -g),"owner_uid":$(id -u),"ownership_enabled":true,"parent_device":100,"spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$volume_uuid"}
 EOF
 cat >"$probe" <<'EOF'
 #!/usr/bin/env bash
