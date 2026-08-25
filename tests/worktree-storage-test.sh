@@ -17,7 +17,7 @@ chmod 0700 "$mount_point"
 write_config() {
   local uuid="${1:-11111111-2222-3333-4444-555555555555}"
   cat >"$config" <<EOF
-{"case_sensitive":false,"encrypted":true,"filesystem":"apfs","mount_point":"$mount_point","required":true,"schema_version":"external-worktree-storage.v1","volume_uuid":"$uuid"}
+{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"vcuriosity.external-worktree-storage.v1","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
 EOF
   chmod 0600 "$config"
 }
@@ -29,8 +29,10 @@ write_observed() {
   local owner_uid="$4"
   local owner_gid="$5"
   local mode="$6"
+  local free_gib="${7:-1000}"
+  local free_percent="${8:-50}"
   cat >"$observed" <<EOF
-{"case_sensitive":false,"device":200,"encrypted":true,"filesystem":"$filesystem","mode":"$mode","mount_point":"$mount_point","mounted":$mounted,"owner_gid":$owner_gid,"owner_uid":$owner_uid,"ownership_enabled":true,"parent_device":100,"volume_uuid":"$uuid"}
+{"case_sensitive":false,"device":200,"device_location":"External","encrypted":true,"filesystem":"$filesystem","free_gib":$free_gib,"free_percent":$free_percent,"marker_id":"vcuriosity.external-worktree-storage.v1","mode":"$mode","mount_point":"$mount_point","mounted":$mounted,"owner_gid":$owner_gid,"owner_uid":$owner_uid,"ownership_enabled":true,"parent_device":100,"spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
 EOF
 }
 
@@ -45,6 +47,39 @@ run_guard() {
 write_config
 write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
 [[ "$(run_guard --print-mount-point)" == "$mount_point" ]]
+python3 - "$guard" "$config" <<'PY'
+import importlib.util
+import importlib.machinery
+import os
+import pathlib
+import sys
+
+loader = importlib.machinery.SourceFileLoader("storage_guard", sys.argv[1])
+spec = importlib.util.spec_from_loader("storage_guard", loader)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader
+spec.loader.exec_module(module)
+assert str(module.DEFAULT_CONFIG) == (
+    "/Library/Application Support/agent-worktree-ops/"
+    "external-worktree-storage.json"
+)
+source = pathlib.Path(sys.argv[1]).read_text()
+assert "com.apple.metadata:com_apple_backup_excludeItem" not in source
+assert '"/usr/bin/tmutil", "isexcluded"' in source
+if os.getuid() != 0:
+    try:
+        module.load_config(pathlib.Path(sys.argv[2]), production_default=True)
+    except module.GuardError as error:
+        assert "wrong owner" in str(error)
+    else:
+        raise AssertionError("production config must be root-owned")
+PY
+if HOME="$home" WORKTREE_STORAGE_CONFIG="$config" "$guard" \
+  >"$temporary/override.out" 2>&1; then
+  echo "runtime config overrides must be test-only" >&2
+  exit 1
+fi
+grep -Fq "override requires guard test mode" "$temporary/override.out"
 
 owner_repo="$temporary/owner-repo"
 managed_worktree="$mount_point/owner-repo/feature"
@@ -74,6 +109,88 @@ if run_guard >"$temporary/exfat.out" 2>&1; then
   exit 1
 fi
 grep -Fq "not APFS" "$temporary/exfat.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700 199 50
+if run_guard >"$temporary/low-gib.out" 2>&1; then
+  echo "minimum_free_gib must fail before mutation" >&2
+  exit 1
+fi
+grep -Fq "minimum_free_gib" "$temporary/low-gib.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700 1000 9
+if run_guard >"$temporary/low-percent.out" 2>&1; then
+  echo "minimum_free_percent must fail before mutation" >&2
+  exit 1
+fi
+grep -Fq "minimum_free_percent" "$temporary/low-percent.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["device_location"] = "Internal"
+path.write_text(json.dumps(value))
+PY
+if run_guard >"$temporary/internal-device.out" 2>&1; then
+  echo "internal device location must fail" >&2
+  exit 1
+fi
+grep -Fq "not an external device" "$temporary/internal-device.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["marker_id"] = "vatlantis.external-worktree-storage.v1"
+path.write_text(json.dumps(value))
+PY
+if run_guard >"$temporary/wrong-marker.out" 2>&1; then
+  echo "wrong host marker must fail" >&2
+  exit 1
+fi
+grep -Fq "marker does not match" "$temporary/wrong-marker.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["spotlight"] = "enabled_or_unknown"
+path.write_text(json.dumps(value))
+PY
+if run_guard >"$temporary/spotlight.out" 2>&1; then
+  echo "enabled Spotlight must fail" >&2
+  exit 1
+fi
+grep -Fq "Spotlight indexing is not disabled" "$temporary/spotlight.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["time_machine_excluded"] = False
+path.write_text(json.dumps(value))
+PY
+if run_guard >"$temporary/time-machine.out" 2>&1; then
+  echo "missing persistent Time Machine exclusion must fail" >&2
+  exit 1
+fi
+grep -Fq "persistent Time Machine exclusion" "$temporary/time-machine.out"
 
 wheel_gid="$(python3 - <<'PY'
 import grp
@@ -122,15 +239,49 @@ if run_guard >"$temporary/pending.out" 2>&1; then
   echo "pending UUID must fail" >&2
   exit 1
 fi
-grep -Fq "policy is incomplete" "$temporary/pending.out"
+grep -Fq "required config missing or invalid" "$temporary/pending.out"
 
+write_config
+chmod 0666 "$config"
+write_observed "11111111-2222-3333-4444-555555555555" apfs false "$(id -u)" "$(id -g)" 0700
+if run_guard >"$temporary/writable-config.out" 2>&1; then
+  echo "writable runtime config must fail" >&2
+  exit 1
+fi
+grep -Fq "permissions are unsafe" "$temporary/writable-config.out"
+chmod 0600 "$config"
+
+real_config="$temporary/real-config.json"
+mv "$config" "$real_config"
+ln -s "$real_config" "$config"
+if run_guard >"$temporary/symlink-config.out" 2>&1; then
+  echo "symlinked runtime config must fail" >&2
+  exit 1
+fi
+grep -Fq "symlinked component" "$temporary/symlink-config.out"
 rm "$config"
-HOME="$home" WORKTREE_STORAGE_CONFIG="$config" "$guard"
-if HOME="$home" WORKTREE_STORAGE_CONFIG="$config" "$guard" --require-config \
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs false 0 "$wheel_gid" 0000
+if run_guard >"$temporary/missing-sealed.out" 2>&1; then
+  echo "missing config with sealed fallback must fail" >&2
+  exit 1
+fi
+grep -Fq "required config missing" "$temporary/missing-sealed.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs true "$(id -u)" "$(id -g)" 0700
+if run_guard >"$temporary/missing-mounted.out" 2>&1; then
+  echo "missing config with a direct mount must fail" >&2
+  exit 1
+fi
+grep -Fq "required config missing" "$temporary/missing-mounted.out"
+
+write_observed "11111111-2222-3333-4444-555555555555" apfs false "$(id -u)" "$(id -g)" 0700
+run_guard
+if run_guard --require-config \
   >"$temporary/unconfigured.out" 2>&1; then
   echo "required unconfigured storage must fail" >&2
   exit 1
 fi
-grep -Fq "not configured" "$temporary/unconfigured.out"
+grep -Fq "required config missing" "$temporary/unconfigured.out"
 
 printf 'worktree storage tests passed\n'

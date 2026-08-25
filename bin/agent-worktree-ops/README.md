@@ -5,13 +5,18 @@ Agent worktree cleanup and maintenance tools.
 Bins in this folder:
 
 - `worktree-storage-guard`
-  - reads the private runtime contract
+  - reads the private system policy
     `external-worktree-storage.v1`
-  - treats a missing contract as an unconfigured host, but fails closed once a
-    valid required contract is installed
+  - reads the root-owned, non-writable policy at
+    `/Library/Application Support/agent-worktree-ops/external-worktree-storage.json`
+  - treats a missing contract as unconfigured only when the canonical path has
+    neither a direct mount nor the sealed `root:wheel` mode-0000 backing directory
   - requires the exact UUID to be mounted directly at canonical
     `~/.codex/worktrees` as encrypted, case-insensitive APFS with ownership
     enabled and a user-owned mode-0700 mounted root
+  - requires at least 200 GiB and 10% free, an exact host marker, external-device
+    location, disabled Spotlight indexing, and a UUID-tracked Time Machine volume
+    exclusion verified with `tmutil isexcluded`
   - rejects symlinked mountpoints or parent components, wrong UUID/filesystem,
     writable internal fallback, and hot disappearance
   - when absent, the underlying mountpoint must remain `root:wheel` mode `0000`

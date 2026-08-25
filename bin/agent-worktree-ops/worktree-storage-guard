@@ -17,12 +17,13 @@ from typing import Any
 
 SCHEMA = "external-worktree-storage.v1"
 DEFAULT_CONFIG = (
-    pathlib.Path.home()
-    / "Library"
-    / "Application Support"
+    pathlib.Path("/Library/Application Support")
     / "agent-worktree-ops"
     / "external-worktree-storage.json"
 )
+MARKER_NAME = ".external-worktree-storage-marker"
+REQUIRED_MINIMUM_FREE_GIB = 200
+REQUIRED_MINIMUM_FREE_PERCENT = 10
 UUID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -46,29 +47,48 @@ def path_has_no_symlink_components(path: pathlib.Path) -> bool:
     return True
 
 
-def load_config(path: pathlib.Path) -> dict[str, Any] | None:
-    if not path.exists():
+def load_config(
+    path: pathlib.Path, *, production_default: bool
+) -> dict[str, Any] | None:
+    if not path.exists() and not path.is_symlink():
         return None
     if not path_has_no_symlink_components(path):
         raise GuardError(f"runtime config has a symlinked component: {path}")
     if path.is_symlink() or not path.is_file():
         raise GuardError(f"runtime config is not a regular file: {path}")
     metadata = path.stat()
-    if metadata.st_uid != os.getuid():
+    expected_uid = 0 if production_default else os.getuid()
+    if metadata.st_uid != expected_uid:
         raise GuardError(f"runtime config has the wrong owner: {path}")
     if metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) & 0o022:
         raise GuardError(f"runtime config permissions are unsafe: {path}")
+    if production_default:
+        parent = path.parent.stat()
+        if (
+            path.parent.is_symlink()
+            or parent.st_uid != 0
+            or stat.S_IMODE(parent.st_mode) & 0o022
+        ):
+            raise GuardError(f"runtime config directory is unsafe: {path.parent}")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise GuardError(f"runtime config is unreadable: {error}") from error
     expected_keys = {
         "case_sensitive",
+        "backing_directory_mode",
+        "device_location",
         "encrypted",
         "filesystem",
+        "marker_id",
+        "minimum_free_gib",
+        "minimum_free_percent",
         "mount_point",
+        "owners",
         "required",
         "schema_version",
+        "spotlight",
+        "time_machine_excluded",
         "volume_uuid",
     }
     if not isinstance(value, dict) or set(value) != expected_keys:
@@ -79,6 +99,15 @@ def load_config(path: pathlib.Path) -> dict[str, Any] | None:
         or value.get("filesystem") != "apfs"
         or value.get("encrypted") is not True
         or value.get("case_sensitive") is not False
+        or value.get("owners") is not True
+        or value.get("device_location") != "External"
+        or value.get("backing_directory_mode") != "0000"
+        or value.get("spotlight") != "disabled"
+        or value.get("time_machine_excluded") is not True
+        or value.get("minimum_free_gib") != REQUIRED_MINIMUM_FREE_GIB
+        or value.get("minimum_free_percent") != REQUIRED_MINIMUM_FREE_PERCENT
+        or not isinstance(value.get("marker_id"), str)
+        or not value["marker_id"]
         or not isinstance(value.get("volume_uuid"), str)
         or UUID_RE.fullmatch(value["volume_uuid"]) is None
     ):
@@ -100,6 +129,37 @@ def test_observation() -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise GuardError("test observation is invalid")
     return value
+
+
+def run_text(command: list[str]) -> tuple[int, str]:
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return 1, ""
+    return result.returncode, result.stdout.strip()
+
+
+def read_marker(mount_point: pathlib.Path) -> str | None:
+    marker = mount_point / MARKER_NAME
+    try:
+        metadata = os.lstat(marker)
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            return None
+        return marker.read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return None
 
 
 def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
@@ -130,12 +190,21 @@ def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
     except FileNotFoundError:
         pass
     free_gib = None
+    free_percent = None
     if mounted:
         try:
             filesystem = os.statvfs(mount_point)
             free_gib = (filesystem.f_bavail * filesystem.f_frsize) // (1024**3)
+            if filesystem.f_blocks:
+                free_percent = filesystem.f_bavail * 100.0 / filesystem.f_blocks
         except OSError:
             pass
+    spotlight_code, spotlight_output = run_text(
+        ["/usr/bin/mdutil", "-s", str(mount_point)]
+    )
+    excluded_code, excluded_output = run_text(
+        ["/usr/bin/tmutil", "isexcluded", str(mount_point)]
+    )
     personality = str(
         disk.get("FileSystemPersonality")
         or disk.get("FilesystemName")
@@ -148,8 +217,20 @@ def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
         "filesystem": "apfs" if "apfs" in personality.casefold() else personality.casefold(),
         "encrypted": disk.get("Encrypted") is True,
         "free_gib": free_gib,
+        "free_percent": free_percent,
         "case_sensitive": "case-sensitive" in personality.casefold(),
         "ownership_enabled": disk.get("GlobalPermissionsEnabled") is True,
+        "device_location": disk.get("DeviceLocation"),
+        "marker_id": read_marker(mount_point) if mounted else None,
+        "spotlight": (
+            "disabled"
+            if spotlight_code == 0 and "indexing disabled" in spotlight_output.casefold()
+            else "enabled_or_unknown"
+        ),
+        "time_machine_excluded": (
+            excluded_code == 0
+            and "[excluded]" in excluded_output.casefold()
+        ),
         "owner_uid": metadata.st_uid if metadata else None,
         "owner_gid": metadata.st_gid if metadata else None,
         "mode": format(stat.S_IMODE(metadata.st_mode), "04o") if metadata else None,
@@ -158,15 +239,36 @@ def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
     }
 
 
-def require_fallback_closed(observed: dict[str, Any]) -> None:
+def fallback_is_sealed(observed: dict[str, Any]) -> bool:
     try:
         wheel_gid = grp.getgrnam("wheel").gr_gid
     except KeyError:
         wheel_gid = 0
+    return (
+        observed.get("owner_uid") == 0
+        and observed.get("owner_gid") == wheel_gid
+        and observed.get("mode") in ("0000", "000")
+    )
+
+
+def direct_mount_is_present(
+    mount_point: pathlib.Path, observed: dict[str, Any]
+) -> bool:
+    return (
+        observed.get("mounted") is True
+        and observed.get("mount_point") == str(mount_point)
+        and observed.get("device") is not None
+        and observed.get("parent_device") is not None
+        and observed.get("device") != observed.get("parent_device")
+    )
+
+
+def require_fallback_closed(
+    config: dict[str, Any], observed: dict[str, Any]
+) -> None:
     if (
-        observed.get("owner_uid") != 0
-        or observed.get("owner_gid") != wheel_gid
-        or observed.get("mode") not in ("0000", "000")
+        config.get("backing_directory_mode") != "0000"
+        or not fallback_is_sealed(observed)
     ):
         raise GuardError("required storage is absent and the internal fallback is writable")
     raise GuardError("required external worktree storage is not mounted")
@@ -181,7 +283,7 @@ def validate_observation(
     if os.path.realpath(mount_point) != str(mount_point):
         raise GuardError(f"mount point resolves outside its canonical path: {mount_point}")
     if observed.get("mounted") is not True:
-        require_fallback_closed(observed)
+        require_fallback_closed(config, observed)
     if observed.get("mount_point") != str(mount_point):
         raise GuardError("external volume is mounted at the wrong path")
     if str(observed.get("volume_uuid") or "").casefold() != config["volume_uuid"].casefold():
@@ -194,6 +296,8 @@ def validate_observation(
         raise GuardError("mounted external volume must be case-insensitive")
     if observed.get("ownership_enabled") is not True:
         raise GuardError("mounted external volume ownership is disabled")
+    if observed.get("device_location") != config["device_location"]:
+        raise GuardError("mounted worktree volume is not an external device")
     if observed.get("owner_uid") != os.getuid():
         raise GuardError("mounted external volume has the wrong owner")
     if observed.get("mode") not in ("0700", "700"):
@@ -202,6 +306,21 @@ def validate_observation(
     parent_device = observed.get("parent_device")
     if device is None or parent_device is None or device == parent_device:
         raise GuardError("canonical path is not a direct filesystem mount")
+    if observed.get("marker_id") != config["marker_id"]:
+        raise GuardError("mounted worktree volume marker does not match policy")
+    if observed.get("spotlight") != config["spotlight"]:
+        raise GuardError("Spotlight indexing is not disabled on the worktree volume")
+    if observed.get("time_machine_excluded") is not True:
+        raise GuardError("worktree volume lacks a persistent Time Machine exclusion")
+    free_gib = observed.get("free_gib")
+    if not isinstance(free_gib, (int, float)) or free_gib < config["minimum_free_gib"]:
+        raise GuardError("worktree volume free space is below minimum_free_gib")
+    free_percent = observed.get("free_percent")
+    if (
+        not isinstance(free_percent, (int, float))
+        or free_percent < config["minimum_free_percent"]
+    ):
+        raise GuardError("worktree volume free space is below minimum_free_percent")
     return mount_point
 
 
@@ -218,10 +337,28 @@ def main() -> int:
     args = parse_args()
     config_path = pathlib.Path(args.config).expanduser() if args.config else DEFAULT_CONFIG
     try:
-        config = load_config(config_path)
+        if args.config and os.environ.get("WORKTREE_STORAGE_GUARD_TESTING") != "1":
+            raise GuardError("runtime config override requires guard test mode")
+        config_error = None
+        try:
+            config = load_config(config_path, production_default=args.config is None)
+        except GuardError as error:
+            config = None
+            config_error = error
         if config is None:
+            canonical = pathlib.Path.home() / ".codex" / "worktrees"
+            observed = test_observation() or live_observation(canonical)
+            managed_state = (
+                not path_has_no_symlink_components(canonical)
+                or fallback_is_sealed(observed)
+                or direct_mount_is_present(canonical, observed)
+            )
+            if managed_state:
+                raise GuardError(f"required config missing or invalid: {config_path}")
+            if config_error is not None:
+                raise config_error
             if args.require_config:
-                raise GuardError(f"external worktree storage is not configured: {config_path}")
+                raise GuardError(f"required config missing: {config_path}")
             if args.json:
                 print(json.dumps({"configured": False, "schema_version": SCHEMA}, sort_keys=True))
             return 0
@@ -234,9 +371,18 @@ def main() -> int:
                 json.dumps(
                     {
                         "configured": True,
+                        "backing_directory_mode": config["backing_directory_mode"],
+                        "device_location": observed.get("device_location"),
                         "free_gib": observed.get("free_gib"),
+                        "free_percent": observed.get("free_percent"),
+                        "marker_id": observed.get("marker_id"),
+                        "minimum_free_gib": config["minimum_free_gib"],
+                        "minimum_free_percent": config["minimum_free_percent"],
                         "mount_point": str(mount_point),
+                        "owners": observed.get("ownership_enabled"),
                         "schema_version": SCHEMA,
+                        "spotlight": observed.get("spotlight"),
+                        "time_machine_excluded": observed.get("time_machine_excluded"),
                         "volume_uuid": config["volume_uuid"],
                     },
                     sort_keys=True,

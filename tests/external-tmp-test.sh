@@ -16,11 +16,11 @@ result="$temporary/result"
 mkdir -p "$mount_point"
 chmod 0700 "$mount_point"
 cat >"$config" <<EOF
-{"case_sensitive":false,"encrypted":true,"filesystem":"apfs","mount_point":"$mount_point","required":true,"schema_version":"external-worktree-storage.v1","volume_uuid":"11111111-2222-3333-4444-555555555555"}
+{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"vcuriosity.external-worktree-storage.v1","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"11111111-2222-3333-4444-555555555555"}
 EOF
 chmod 0600 "$config"
 cat >"$observed" <<EOF
-{"case_sensitive":false,"device":200,"encrypted":true,"filesystem":"apfs","mode":"0700","mount_point":"$mount_point","mounted":true,"owner_gid":$(id -g),"owner_uid":$(id -u),"ownership_enabled":true,"parent_device":100,"volume_uuid":"11111111-2222-3333-4444-555555555555"}
+{"case_sensitive":false,"device":200,"device_location":"External","encrypted":true,"filesystem":"apfs","free_gib":1000,"free_percent":50,"marker_id":"vcuriosity.external-worktree-storage.v1","mode":"0700","mount_point":"$mount_point","mounted":true,"owner_gid":$(id -g),"owner_uid":$(id -u),"ownership_enabled":true,"parent_device":100,"spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"11111111-2222-3333-4444-555555555555"}
 EOF
 cat >"$probe" <<'EOF'
 #!/usr/bin/env bash
@@ -73,10 +73,12 @@ fi
 grep -Fq "simulated hot disappearance" "$temporary/hot.out"
 
 if HOME="$home" WORKTREE_STORAGE_CONFIG="$temporary/missing" \
+  WORKTREE_STORAGE_GUARD_TESTING=1 \
+  WORKTREE_STORAGE_GUARD_OBSERVED="$observed" \
   "$command_path" /usr/bin/true >"$temporary/missing.out" 2>&1; then
   echo "external-tmp must require configured storage" >&2
   exit 1
 fi
-grep -Fq "not configured" "$temporary/missing.out"
+grep -Fq "required config missing" "$temporary/missing.out"
 
 printf 'external tmp tests passed\n'
