@@ -980,18 +980,8 @@ _gwt_tmux_sync_context() {
     tt sync >/dev/null 2>&1 || true
 }
 
-_gwt_sparse_register_shell_hook
-
-# gwt: opinionated wrapper around `git worktree`.
-# oh-my-zsh git plugin defines `gwt` alias; remove it so the function can load cleanly.
-unalias gwt 2>/dev/null
-gwt() {
-    local subcommand="$1"
-    shift || true
-
-    case "$subcommand" in
-        ""|help|-h|--help)
-            cat <<'EOF'
+_gwt_print_help() {
+    cat <<'EOF'
 Usage: gwt <command> [args]
 
 Commands:
@@ -1014,7 +1004,35 @@ Commands:
 Env:
   DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1  Also link nested workspace node_modules trees
 EOF
+}
+
+_gwt_sparse_register_shell_hook
+
+# gwt: opinionated wrapper around `git worktree`.
+# oh-my-zsh git plugin defines `gwt` alias; remove it so the function can load cleanly.
+unalias gwt 2>/dev/null
+gwt() {
+    local subcommand="${1:-}"
+    local help_arg
+    (( $# > 0 )) && shift
+
+    case "$subcommand" in
+        ""|help|-h|--help)
+            _gwt_print_help
+            return 0
             ;;
+    esac
+
+    for help_arg in "$@"; do
+        case "$help_arg" in
+            -h|--help)
+                _gwt_print_help
+                return 0
+                ;;
+        esac
+    done
+
+    case "$subcommand" in
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             ;;
