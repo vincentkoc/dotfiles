@@ -662,24 +662,28 @@ setup_codex_dotfiles() {
 }
 
 setup_claude_dotfiles() {
-    local df_dir claude_dir claude_settings_src claude_settings_dest
+    local df_dir claude_dir claude_settings_helper claude_settings_output
     local claude_desktop_dest claude_sessions_dir claude_account_uuid tmp_file
     local -a claude_session_files
     df_dir="$(dotfiles_dir)"
     claude_dir="$HOME/.claude"
-    claude_settings_src="$df_dir/.claude/settings.json"
-    claude_settings_dest="$claude_dir/settings.json"
+    claude_settings_helper="$df_dir/bin/claude-managed-settings"
     claude_desktop_dest="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
     claude_sessions_dir="$HOME/Library/Application Support/Claude/claude-code-sessions"
 
-    if [[ ! -f "$claude_settings_src" ]]; then
-        warn "Claude settings file missing in dotfiles: $claude_settings_src"
-        return
+    if [[ ! -x "$claude_settings_helper" ]]; then
+        error "Claude managed-settings helper missing: $claude_settings_helper"
+        return 1
     fi
-
-    mkdir -p "$claude_dir"
-    link_dotfile "$claude_settings_src" "$claude_settings_dest"
-    success "Claude settings linked to $claude_settings_src"
+    if ! claude_settings_output="$(
+        "$claude_settings_helper" \
+            --dotfiles-dir "$df_dir" \
+            --claude-dir "$claude_dir"
+    )"; then
+        error "$claude_settings_output"
+        return 1
+    fi
+    success "$claude_settings_output"
 
     if [[ "$(uname)" == "Darwin" ]] && command -v jq >/dev/null 2>&1; then
         mkdir -p "$(dirname "$claude_desktop_dest")"
