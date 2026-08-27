@@ -94,24 +94,24 @@ install_linux_dependencies() {
     if command -v apt-get &>/dev/null; then
         info "Installing Linux packages via apt..."
         run_privileged apt-get update
-        run_privileged apt-get install -y zsh git curl locales ca-certificates gh unzip sqlite3
+        run_privileged apt-get install -y zsh git curl locales ca-certificates gh unzip sqlite3 python3
     elif command -v dnf &>/dev/null; then
         info "Installing Linux packages via dnf..."
-        run_privileged dnf install -y zsh git curl glibc-langpack-en ca-certificates
+        run_privileged dnf install -y zsh git curl glibc-langpack-en ca-certificates python3
     elif command -v yum &>/dev/null; then
         info "Installing Linux packages via yum..."
-        run_privileged yum install -y zsh git curl glibc-langpack-en ca-certificates
+        run_privileged yum install -y zsh git curl glibc-langpack-en ca-certificates python3
     elif command -v pacman &>/dev/null; then
         info "Installing Linux packages via pacman..."
-        run_privileged pacman -Sy --noconfirm zsh git curl ca-certificates
+        run_privileged pacman -Sy --noconfirm zsh git curl ca-certificates python
     elif command -v zypper &>/dev/null; then
         info "Installing Linux packages via zypper..."
-        run_privileged zypper --non-interactive install zsh git curl glibc-locale ca-certificates
+        run_privileged zypper --non-interactive install zsh git curl glibc-locale ca-certificates python3
     elif command -v apk &>/dev/null; then
         info "Installing Linux packages via apk..."
-        run_privileged apk add --no-cache zsh git curl ca-certificates musl-locales
+        run_privileged apk add --no-cache zsh git curl ca-certificates musl-locales python3
     else
-        warn "No supported package manager found. Ensure zsh, git, and curl are installed."
+        warn "No supported package manager found. Ensure zsh, git, curl, and python3 are installed."
     fi
 }
 
@@ -675,8 +675,12 @@ setup_claude_dotfiles() {
         error "Claude managed-settings helper missing: $claude_settings_helper"
         return 1
     fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        error "Python 3 is required before Claude managed-settings setup"
+        return 1
+    fi
     if ! claude_settings_output="$(
-        "$claude_settings_helper" \
+        python3 "$claude_settings_helper" \
             --dotfiles-dir "$df_dir" \
             --claude-dir "$claude_dir"
     )"; then

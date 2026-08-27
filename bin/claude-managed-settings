@@ -136,11 +136,25 @@ def same(actual: dict, expected: dict) -> bool:
     return actual == expected
 
 
-def validate_json_file(value: dict, reason: str) -> bytes:
+def validate_json_file(
+    value: dict,
+    reason: str,
+    *,
+    require_writable: bool = True,
+) -> bytes:
+    mode = value.get("mode")
     if (
         value.get("kind") != "file"
         or value.get("uid") != os.getuid()
         or value.get("nlink") != 1
+        or not isinstance(mode, int)
+        or (
+            require_writable
+            and (
+                not mode & stat.S_IWUSR
+                or mode & (stat.S_IWGRP | stat.S_IWOTH)
+            )
+        )
     ):
         raise ManagedSettingsError(reason)
     payload = value["payload"]
@@ -174,7 +188,11 @@ def validate_baseline(dotfiles: pathlib.Path) -> tuple[dict, bytes]:
     parent = open_directory(dotfiles / ".claude")
     try:
         baseline = classify(parent["fd"], "settings.json", include_payload=True)
-        payload = validate_json_file(baseline, "baseline_incompatible")
+        payload = validate_json_file(
+            baseline,
+            "baseline_incompatible",
+            require_writable=False,
+        )
         check_directory(parent)
         return baseline, payload
     finally:

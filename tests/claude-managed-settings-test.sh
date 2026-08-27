@@ -33,6 +33,12 @@ assert_repo_clean() {
   [[ -z "$(git -C "$repo" status --porcelain)" ]]
 }
 
+file_mode() {
+  python3 -c \
+    'import os, sys; print(format(os.stat(sys.argv[1], follow_symlinks=False).st_mode & 0o777, "o"))' \
+    "$1"
+}
+
 legacy_repo="$(new_repo legacy)"
 legacy_claude="$fixture/legacy/home/.claude"
 mkdir -p "$legacy_claude"
@@ -67,6 +73,33 @@ regular_before="$(shasum -a 256 "$regular_claude/settings.json" | awk '{print $1
 [[ "$(shasum -a 256 "$regular_claude/settings.json" | awk '{print $1}')" == "$regular_before" ]]
 [[ ! -e "$regular_claude/settings.managed.json" ]]
 assert_repo_clean "$regular_repo"
+
+for state in regular managed; do
+  for mode in 0400 0666; do
+    name="unsafe-mode-$state-$mode"
+    repo="$(new_repo "$name")"
+    claude="$fixture/$name/home/.claude"
+    mkdir -p "$claude"
+    if [[ "$state" == managed ]]; then
+      target="$claude/settings.managed.json"
+      printf '{"hooks":{"machine":true}}\n' >"$target"
+      ln -s settings.managed.json "$claude/settings.json"
+      expected_reason=managed_target_incompatible
+    else
+      target="$claude/settings.json"
+      printf '{"hooks":{"machine":true}}\n' >"$target"
+      expected_reason=target_incompatible
+    fi
+    chmod "$mode" "$target"
+    if mode_output="$(run_helper "$repo" "$claude" env 2>&1)"; then
+      printf 'expected unsafe mode rejection: %s %s\n' "$state" "$mode" >&2
+      exit 1
+    fi
+    [[ "$mode_output" == "claude_managed_settings=blocked reason=$expected_reason" ]]
+    [[ "$(file_mode "$target")" == "${mode#0}" ]]
+    assert_repo_clean "$repo"
+  done
+done
 
 absent_repo="$(new_repo absent)"
 absent_claude="$fixture/absent/home/.claude"
@@ -126,6 +159,29 @@ if managed_hardlink_output="$(run_helper "$managed_hardlink_repo" "$managed_hard
   exit 1
 fi
 [[ "$managed_hardlink_output" == "claude_managed_settings=blocked reason=managed_target_incompatible" ]]
+
+reserved_link_repo="$(new_repo reserved-link)"
+reserved_link_claude="$fixture/reserved-link/home/.claude"
+mkdir -p "$reserved_link_claude"
+printf '{}\n' >"$reserved_link_claude/settings.json"
+printf 'operator marker\n' >"$reserved_link_claude/.settings.json.managed-link"
+if reserved_link_output="$(run_helper "$reserved_link_repo" "$reserved_link_claude" env 2>&1)"; then
+  printf 'expected reserved link marker rejection\n' >&2
+  exit 1
+fi
+[[ "$reserved_link_output" == "claude_managed_settings=blocked reason=recovery_required" ]]
+[[ "$(cat "$reserved_link_claude/.settings.json.managed-link")" == "operator marker" ]]
+
+reserved_seed_repo="$(new_repo reserved-seed)"
+reserved_seed_claude="$fixture/reserved-seed/home/.claude"
+mkdir -p "$reserved_seed_claude"
+ln -s operator.json "$reserved_seed_claude/.settings.managed.json.seed"
+if reserved_seed_output="$(run_helper "$reserved_seed_repo" "$reserved_seed_claude" env 2>&1)"; then
+  printf 'expected reserved seed marker rejection\n' >&2
+  exit 1
+fi
+[[ "$reserved_seed_output" == "claude_managed_settings=blocked reason=recovery_required" ]]
+[[ "$(readlink "$reserved_seed_claude/.settings.managed.json.seed")" == operator.json ]]
 
 nonregular_repo="$(new_repo nonregular)"
 nonregular_claude="$fixture/nonregular/home/.claude"
@@ -204,6 +260,27 @@ if dirty_output="$(run_helper "$dirty_repo" "$dirty_claude" env 2>&1)"; then
 fi
 [[ "$dirty_output" == "claude_managed_settings=blocked reason=baseline_dirty" ]]
 [[ ! -e "$dirty_claude" ]]
+
+minimal_home="$fixture/minimal-linux/home"
+minimal_repo="$(new_repo minimal-linux)"
+mkdir -p "$minimal_repo/bin" "$minimal_home/GIT/_Perso"
+cp "$helper" "$minimal_repo/bin/claude-managed-settings"
+chmod 0755 "$minimal_repo/bin/claude-managed-settings"
+mv "$minimal_repo" "$minimal_home/GIT/_Perso/dotfiles"
+minimal_bin="$fixture/minimal-linux/bin"
+mkdir -p "$minimal_bin"
+set +e
+minimal_output="$(
+  HOME="$minimal_home" PATH="$minimal_bin" /bin/bash -c '
+    source "$1/install.sh"
+    setup_claude_dotfiles
+  ' _ "$root" 2>&1
+)"
+minimal_status=$?
+set -e
+[[ "$minimal_status" == 1 ]]
+grep -Fq 'Python 3 is required before Claude managed-settings setup' <<<"$minimal_output"
+[[ ! -e "$minimal_home/.claude" ]]
 
 setup_home="$fixture/setup-integration/home"
 setup_repo="$(new_repo setup-integration)"

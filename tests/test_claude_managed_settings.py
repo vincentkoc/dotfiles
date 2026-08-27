@@ -20,11 +20,38 @@ class ValidationTests(unittest.TestCase):
             "kind": "file",
             "uid": MODULE.os.getuid() + 1,
             "nlink": 1,
+            "mode": 0o600,
             "payload": b"{}\n",
         }
         with self.assertRaises(MODULE.ManagedSettingsError) as raised:
             MODULE.validate_json_file(value, "target_incompatible")
         self.assertEqual(raised.exception.reason, "target_incompatible")
+
+    def test_read_only_file_is_rejected(self):
+        value = {
+            "kind": "file",
+            "uid": MODULE.os.getuid(),
+            "nlink": 1,
+            "mode": 0o400,
+            "payload": b"{}\n",
+        }
+        with self.assertRaises(MODULE.ManagedSettingsError) as raised:
+            MODULE.validate_json_file(value, "target_incompatible")
+        self.assertEqual(raised.exception.reason, "target_incompatible")
+
+    def test_group_or_world_writable_file_is_rejected(self):
+        for mode in (0o620, 0o602, 0o666):
+            with self.subTest(mode=oct(mode)):
+                value = {
+                    "kind": "file",
+                    "uid": MODULE.os.getuid(),
+                    "nlink": 1,
+                    "mode": mode,
+                    "payload": b"{}\n",
+                }
+                with self.assertRaises(MODULE.ManagedSettingsError) as raised:
+                    MODULE.validate_json_file(value, "target_incompatible")
+                self.assertEqual(raised.exception.reason, "target_incompatible")
 
     def test_managed_symlink_wrong_owner_is_rejected(self):
         value = {
