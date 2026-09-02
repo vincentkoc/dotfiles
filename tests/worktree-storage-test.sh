@@ -231,6 +231,14 @@ mutate_config 'value["children"]["openclaw_managed"].pop("mode")'
 assert_invalid_config missing-child-field "required config missing or invalid"
 
 write_config
+mutate_config 'value["children"]["openclaw_pnpm_store"]["disposable"] = 1'
+assert_invalid_config integer-disposable "required config missing or invalid"
+
+write_config
+mutate_config 'value["children"]["openclaw_pnpm_store"]["disposable"] = 1.0'
+assert_invalid_config float-disposable "required config missing or invalid"
+
+write_config
 mutate_config 'value["children"]["openclaw_pnpm_store"]["relative_path"] = "openclaw-managed/cache"'
 assert_invalid_config overlapping-child "required config missing or invalid"
 

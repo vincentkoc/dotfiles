@@ -52,6 +52,16 @@ class GuardError(RuntimeError):
     pass
 
 
+def children_contract_is_exact(value: Any) -> bool:
+    if not isinstance(value, dict) or value != EXPECTED_CHILDREN:
+        return False
+    pnpm_store = value.get("openclaw_pnpm_store")
+    return (
+        isinstance(pnpm_store, dict)
+        and pnpm_store.get("disposable") is True
+    )
+
+
 def path_has_no_symlink_components(path: pathlib.Path) -> bool:
     path = pathlib.Path(os.path.abspath(path))
     current = pathlib.Path(path.anchor)
@@ -115,7 +125,7 @@ def load_config(
     if (
         value.get("schema_version") != SCHEMA
         or value.get("required") is not True
-        or value.get("children") != EXPECTED_CHILDREN
+        or not children_contract_is_exact(value.get("children"))
         or value.get("filesystem") != "apfs"
         or value.get("encrypted") is not True
         or value.get("case_sensitive") is not False
@@ -144,7 +154,7 @@ def storage_child_paths(
 ) -> dict[str, pathlib.Path]:
     root = pathlib.Path(os.path.abspath(mount_point))
     children = config.get("children")
-    if not isinstance(children, dict) or children != EXPECTED_CHILDREN:
+    if not children_contract_is_exact(children):
         raise GuardError("runtime config child policy is incomplete or invalid")
     paths: dict[str, pathlib.Path] = {}
     for name, contract in children.items():
