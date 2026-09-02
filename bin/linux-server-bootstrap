@@ -742,6 +742,10 @@ owned_path_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
 
+owned_path_links() {
+  stat -c %h "$1" 2>/dev/null || stat -f %l "$1"
+}
+
 canonical_absolute_path() {
   local path="$1"
   local component
@@ -835,6 +839,135 @@ preflight_home_directory() {
   }
 }
 
+refresh_user_source_directories() {
+  printf '%s\n' \
+    "$repo_root" \
+    "$repo_root/bin"
+}
+
+preflight_dotfiles_source_directory() {
+  local path="$1"
+  local source_mode
+  [[ ! -L "$path" && -d "$path" ]] || {
+    printf 'refusing unsafe dotfiles source directory: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$(owned_path_uid "$path")" == "$(id -u)" ]] || {
+    printf 'refusing foreign-owned dotfiles source directory: %s\n' "$path" >&2
+    return 1
+  }
+  source_mode="$(owned_path_mode "$path")" || return 1
+  (( (8#$source_mode & 8#0100) != 0 )) || {
+    printf 'refusing non-traversable dotfiles source directory: %s\n' "$path" >&2
+    return 1
+  }
+  (( (8#$source_mode & 8#0002) == 0 )) || {
+    printf 'refusing world-writable dotfiles source directory: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+refresh_user_source_files() {
+  printf '%s\n' \
+    "$repo_root/bin/codex" \
+    "$repo_root/bin/dotfiles-audit" \
+    "$repo_root/bin/linux-server-bootstrap"
+}
+
+preflight_dotfiles_source_file() {
+  local path="$1"
+  local source_mode
+  [[ ! -L "$path" && -f "$path" ]] || {
+    printf 'refusing unsafe dotfiles source file: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$(owned_path_uid "$path")" == "$(id -u)" ]] || {
+    printf 'refusing foreign-owned dotfiles source file: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$(owned_path_links "$path")" == 1 ]] || {
+    printf 'refusing linked dotfiles source file: %s\n' "$path" >&2
+    return 1
+  }
+  source_mode="$(owned_path_mode "$path")" || return 1
+  (( (8#$source_mode & 8#0100) != 0 )) || {
+    printf 'refusing non-executable dotfiles source file: %s\n' "$path" >&2
+    return 1
+  }
+  (( (8#$source_mode & 8#0002) == 0 )) || {
+    printf 'refusing world-writable dotfiles source file: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+preflight_standalone_codex_target() {
+  local path="$1"
+  local current="$HOME/.codex/packages/standalone/current"
+  local releases="$HOME/.codex/packages/standalone/releases"
+  local canonical_release release_relative logical_release
+  local resolved_release resolved_releases resolved_target
+  local target_mode
+  [[ "$path" == "$current/bin/codex" && -L "$current" ]] || {
+    printf 'refusing unsafe standalone Codex current link: %s\n' "$current" >&2
+    return 1
+  }
+  [[ "$(owned_path_uid "$current")" == "$(id -u)" ]] || {
+    printf 'refusing foreign-owned standalone Codex current link: %s\n' "$current" >&2
+    return 1
+  }
+  [[ "$(owned_path_links "$current")" == 1 ]] || {
+    printf 'refusing linked standalone Codex current link: %s\n' "$current" >&2
+    return 1
+  }
+  preflight_owned_directory "$releases" || return 1
+  resolved_releases="$(readlink -f "$releases")" || {
+    printf 'refusing unsafe standalone Codex releases directory: %s\n' "$releases" >&2
+    return 1
+  }
+  resolved_release="$(readlink -f "$current")" || {
+    printf 'refusing unsafe standalone Codex current link: %s\n' "$current" >&2
+    return 1
+  }
+  canonical_release="$(canonical_absolute_path "$resolved_release")" || {
+    printf 'refusing unsafe standalone Codex release: %s\n' "$current" >&2
+    return 1
+  }
+  [[ "$canonical_release" == "$resolved_release" &&
+    "$resolved_release" == "$resolved_releases/"* ]] || {
+    printf 'refusing unsafe standalone Codex release: %s\n' "$current" >&2
+    return 1
+  }
+  release_relative="${resolved_release#"$resolved_releases"/}"
+  logical_release="$releases/$release_relative"
+  preflight_owned_directory "$logical_release/bin" || return 1
+  resolved_target="$(readlink -f "$path")" || {
+    printf 'refusing unsafe standalone Codex target: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$resolved_target" == "$resolved_release/bin/codex" ]] || {
+    printf 'refusing unsafe standalone Codex target: %s\n' "$path" >&2
+    return 1
+  }
+  path="$resolved_target"
+  [[ ! -L "$path" && -f "$path" ]] || {
+    printf 'refusing unsafe standalone Codex target: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$(owned_path_uid "$path")" == "$(id -u)" ]] || {
+    printf 'refusing foreign-owned standalone Codex target: %s\n' "$path" >&2
+    return 1
+  }
+  [[ "$(owned_path_links "$path")" == 1 ]] || {
+    printf 'refusing linked standalone Codex target: %s\n' "$path" >&2
+    return 1
+  }
+  target_mode="$(owned_path_mode "$path")" || return 1
+  [[ "$target_mode" == 755 && -x "$path" ]] || {
+    printf 'refusing unsafe standalone Codex target mode: %s\n' "$path" >&2
+    return 1
+  }
+}
+
 preflight_owned_directory() {
   local path="$1"
   local relative component current="$HOME" current_mode
@@ -897,6 +1030,37 @@ preflight_link_destination() {
       return 1
     }
   fi
+}
+
+refresh_user_codex_source() {
+  local destination="$HOME/.local/bin/codex"
+  local public_wrapper="$repo_root/bin/codex"
+  local standalone="$HOME/.codex/packages/standalone/current/bin/codex"
+  local target
+
+  if [[ ! -e "$destination" && ! -L "$destination" ]]; then
+    printf '%s\n' "$public_wrapper"
+    return
+  fi
+  [[ -L "$destination" ]] || {
+    printf 'refusing unexpected Codex launcher type: %s\n' "$destination" >&2
+    return 1
+  }
+  target="$(readlink "$destination")" || return 1
+  if [[ "$target" == "$public_wrapper" ]]; then
+    printf '%s\n' "$public_wrapper"
+    return
+  fi
+  [[ "$target" == "$standalone" ]] || {
+    printf 'refusing unexpected Codex launcher target: %s\n' "$destination" >&2
+    return 1
+  }
+  [[ "$(owned_path_uid "$destination")" == "$(id -u)" ]] || {
+    printf 'refusing foreign-owned Codex launcher symlink: %s\n' "$destination" >&2
+    return 1
+  }
+  preflight_standalone_codex_target "$standalone" || return 1
+  printf '%s\n' "$standalone"
 }
 
 refresh_user_directory_targets() {
@@ -979,7 +1143,7 @@ refresh_user_directory_manifest() {
 }
 
 refresh_user_link_manifest() {
-  local source destination
+  local source destination codex_source
   while read -r source destination; do
     printf '%s\t%s\n' "$repo_root/$source" "$HOME/$destination"
   done <<'EOF'
@@ -1000,8 +1164,10 @@ bin/gh .local/bin/gh
 bin/ghx .local/bin/ghx
 bin/linux-server-bootstrap .local/bin/linux-server-bootstrap
 bin/tt .local/bin/tt
-bin/codex .local/bin/codex
 EOF
+
+  codex_source="$(refresh_user_codex_source)" || return 1
+  printf '%s\t%s\n' "$codex_source" "$HOME/.local/bin/codex"
 
   printf '%s\t%s\n' \
     "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt/spaceship.zsh-theme" \
@@ -1058,16 +1224,16 @@ preflight_corepack_pnpm() {
 
 preflight_refresh_user() {
   local directory_manifest="$1"
-  local path mode source destination install_root
+  local path mode source destination install_root link_manifest
   preflight_home_directory || return 1
-  [[ ! -L "$repo_root" && -d "$repo_root" ]] || {
-    printf 'refusing unsafe dotfiles source directory\n' >&2
-    return 1
-  }
-  [[ "$(owned_path_uid "$repo_root")" == "$(id -u)" ]] || {
-    printf 'refusing foreign-owned dotfiles source directory\n' >&2
-    return 1
-  }
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || return 1
+    preflight_dotfiles_source_directory "$path" || return 1
+  done < <(refresh_user_source_directories)
+  while IFS= read -r source; do
+    [[ -n "$source" ]] || return 1
+    preflight_dotfiles_source_file "$source" || return 1
+  done < <(refresh_user_source_files)
   while IFS=$'\t' read -r path mode; do
     [[ -n "$path" && -n "$mode" ]] || return 1
     preflight_owned_directory "$path" || return 1
@@ -1075,16 +1241,27 @@ preflight_refresh_user() {
 
   install_root="$HOME/.local/opt/node-v$node_version"
   preflight_owned_directory "$install_root" || return 1
+  link_manifest="$(refresh_user_link_manifest)" || return 1
   while IFS=$'\t' read -r source destination; do
     [[ -n "$source" && -n "$destination" ]] || return 1
     preflight_link_destination "$source" "$destination" || return 1
-  done < <(refresh_user_link_manifest)
+  done <<<"$link_manifest"
   for source in node npm npx corepack; do
     preflight_link_destination \
       "$install_root/bin/$source" \
       "$HOME/.local/bin/$source" || return 1
   done
   preflight_corepack_pnpm || return 1
+}
+
+normalize_refresh_user_source() {
+  local path source
+  while IFS= read -r path; do
+    run chmod 0755 "$path" || return 1
+  done < <(refresh_user_source_directories)
+  while IFS= read -r source; do
+    run chmod 0755 "$source" || return 1
+  done < <(refresh_user_source_files)
 }
 
 ensure_owned_directory() {
@@ -1190,10 +1367,11 @@ install_openclaw_toolchain() {
 }
 
 link_server_dotfiles() {
-  local source destination
+  local source destination link_manifest
+  link_manifest="$(refresh_user_link_manifest)" || return 1
   while IFS=$'\t' read -r source destination; do
     backup_and_link "$source" "$destination" || return 1
-  done < <(refresh_user_link_manifest)
+  done <<<"$link_manifest"
 }
 
 ensure_sudo_access() {
@@ -1207,7 +1385,8 @@ refresh_user_content() {
   if ! preflight_refresh_user "$directory_manifest"; then
     return 1
   fi
-  normalize_refresh_user_directories "$directory_manifest"
+  normalize_refresh_user_source || return 1
+  normalize_refresh_user_directories "$directory_manifest" || return 1
 
   install_pinned_checkout \
     https://github.com/ohmyzsh/ohmyzsh.git \

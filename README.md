@@ -105,9 +105,17 @@ public shell links, pinned prompt tooling, Node/pnpm, and the public Codex
 launcher. It never invokes sudo, package management, firewall, account, or SSH
 server mutations. PNPM globals live directly in `PNPM_HOME`, and the server
 profile adds `cx` as an argument-preserving `codex --no-alt-screen` shortcut.
-The empty private `~/.codex` surface remains host-local; no hooks, global
-instructions, model catalog, credentials, QuickSSH, Mosh, or OpenClaw launcher
-configuration is linked.
+After the complete safety preflight, the owned dotfiles checkout and its
+managed `codex`, `dotfiles-audit`, and `linux-server-bootstrap` source launchers
+are normalized to mode `0755`. A fresh host gets the public Codex wrapper; an
+existing, user-owned executable link from `~/.local/bin/codex` to the official
+standalone target under `~/.codex/packages/standalone/current/bin/codex` is
+preserved only when `current` resolves through owned, non-world-writable
+directories to an unlinked mode-`0755` binary beneath the standalone
+`releases` directory. Other Codex launcher files or links are rejected. The
+private `~/.codex` surface remains host-local; no hooks, global instructions,
+model catalog, credentials, QuickSSH, Mosh, or OpenClaw launcher configuration
+is linked.
 
 Obtain the SHA256 fingerprint of the designated recovery public key through an
 independent trusted path, then explicitly enable the temporary proof phase:

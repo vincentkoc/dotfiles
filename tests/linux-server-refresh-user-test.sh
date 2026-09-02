@@ -10,6 +10,36 @@ mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
 
+create_test_repo() {
+  local destination="$1"
+  mkdir "$destination"
+  (
+    cd "$root"
+    tar -cf - \
+      .aliases \
+      .functions \
+      .ripgreprc \
+      .tmux.conf \
+      profiles/linux-server \
+      bin/codex \
+      bin/dotfiles-audit \
+      bin/dotfiles-platform \
+      bin/gh \
+      bin/ghx \
+      bin/linux-server-bootstrap \
+      bin/tt
+  ) | (
+    cd "$destination"
+    tar -xf -
+  )
+  chmod 0775 "$destination"
+  chmod 0775 "$destination/bin"
+  chmod 0775 \
+    "$destination/bin/codex" \
+    "$destination/bin/dotfiles-audit" \
+    "$destination/bin/linux-server-bootstrap"
+}
+
 fakebin="$temporary/fakebin"
 mkdir "$fakebin"
 for command_name in sudo apt apt-get apt-cache dpkg-query usermod chsh sshd ufw systemctl; do
@@ -20,6 +50,24 @@ exit 97
 EOF
   chmod +x "$fakebin/$command_name"
 done
+cat >"$fakebin/chmod" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${CHMOD_CALL_LOG:-}" ]]; then
+  printf '%s\n' "$*" >>"$CHMOD_CALL_LOG"
+fi
+for argument in "$@"; do
+  if [[ -n "${FAIL_CHMOD_PATH:-}" && "$argument" == "$FAIL_CHMOD_PATH" ]]; then
+    printf 'injected chmod failure: %s\n' "$argument" >>"$CHMOD_FAILURE_LOG"
+    exit 96
+  fi
+  if [[ "$argument" == "$DEVELOPER_REPO_ROOT" ]]; then
+    printf 'refusing test chmod of developer worktree\n' >>"$DEVELOPER_CHMOD_LOG"
+    exit 98
+  fi
+done
+exec /bin/chmod "$@"
+EOF
+chmod +x "$fakebin/chmod"
 
 refresh_case="$temporary/refresh-case.sh"
 cat >"$refresh_case" <<'EOF'
@@ -29,6 +77,7 @@ umask 0002
 
 # shellcheck disable=SC1090
 DOTFILES_SERVER_SOURCE_ONLY=1 source "$BOOTSTRAP_SCRIPT"
+repo_root="$TEST_REPO_ROOT"
 
 uname() {
   [[ "${1:-}" == -s ]] && {
@@ -91,7 +140,25 @@ chmod 0775 \
   "$HOME/.oh-my-zsh/custom/themes" \
   "$HOME/.oh-my-zsh/custom/themes/spaceship-prompt"
 
+if [[ "${PRESERVE_STANDALONE_CODEX:-0}" == 1 ]]; then
+  standalone="$HOME/.codex/packages/standalone/current/bin/codex"
+  standalone_release="$HOME/.codex/packages/standalone/releases/test-release"
+  mkdir -p "$standalone_release/bin"
+  chmod 0700 "$HOME/.codex"
+  chmod 0755 \
+    "$HOME/.codex/packages" \
+    "$HOME/.codex/packages/standalone" \
+    "$HOME/.codex/packages/standalone/releases" \
+    "$standalone_release" \
+    "$standalone_release/bin"
+  ln -s "$standalone_release" "$HOME/.codex/packages/standalone/current"
+  printf '#!/usr/bin/env bash\n' >"$standalone_release/bin/codex"
+  chmod 0755 "$standalone_release/bin/codex"
+  ln -s "$standalone" "$HOME/.local/bin/codex"
+fi
+
 refresh_user
+[[ "$(owned_path_mode "$repo_root/bin")" == 755 ]]
 first_links="$(
   find "$HOME" -type l -print |
     LC_ALL=C sort |
@@ -99,6 +166,7 @@ first_links="$(
 )"
 first_backups="$(find "$state_root/backups" -mindepth 1 -print)"
 refresh_user
+[[ "$(owned_path_mode "$repo_root/bin")" == 755 ]]
 second_links="$(
   find "$HOME" -type l -print |
     LC_ALL=C sort |
@@ -112,22 +180,39 @@ chmod +x "$refresh_case"
 
 home="$temporary/home"
 mkdir "$home"
+test_repo="$home/.dotfiles"
+create_test_repo "$test_repo"
 : >"$temporary/forbidden.log"
+: >"$temporary/developer-chmod.log"
 HOME="$home" \
   XDG_DATA_HOME="$home/.local/share" \
   XDG_STATE_HOME="$home/.local/state" \
   PNPM_HOME="$home/.local/share/pnpm" \
   PATH="$fakebin:/usr/bin:/bin" \
   FORBIDDEN_LOG="$temporary/forbidden.log" \
+  DEVELOPER_CHMOD_LOG="$temporary/developer-chmod.log" \
+  DEVELOPER_REPO_ROOT="$root" \
   BOOTSTRAP_SCRIPT="$script" \
+  TEST_REPO_ROOT="$test_repo" \
   "$refresh_case"
 [[ ! -s "$temporary/forbidden.log" ]]
+[[ ! -s "$temporary/developer-chmod.log" ]]
+[[ "$(mode "$test_repo")" == 755 ]]
+[[ "$(mode "$test_repo/bin")" == 755 ]]
+[[ "$(mode "$test_repo/bin/codex")" == 755 ]]
+[[ "$(mode "$test_repo/bin/linux-server-bootstrap")" == 755 ]]
+[[ "$(mode "$test_repo/bin/dotfiles-audit")" == 755 ]]
 
 run_refresh_component_case() {
   local name="$1"
   local case_home="$2"
   local case_pnpm_home="$3"
+  local preserve_standalone="${4:-0}"
+  local source_bin_mode="${5:-0775}"
   local forbidden="$temporary/forbidden-$name.log"
+  local case_repo="$case_home/.dotfiles"
+  create_test_repo "$case_repo"
+  chmod "$source_bin_mode" "$case_repo/bin"
   : >"$forbidden"
   HOME="$case_home" \
     XDG_DATA_HOME="$case_home/.local/share" \
@@ -135,9 +220,18 @@ run_refresh_component_case() {
     PNPM_HOME="$case_pnpm_home" \
     PATH="$fakebin:/usr/bin:/bin" \
     FORBIDDEN_LOG="$forbidden" \
+    DEVELOPER_CHMOD_LOG="$temporary/developer-chmod.log" \
+    DEVELOPER_REPO_ROOT="$root" \
     BOOTSTRAP_SCRIPT="$script" \
+    TEST_REPO_ROOT="$case_repo" \
+    PRESERVE_STANDALONE_CODEX="$preserve_standalone" \
     "$refresh_case"
   [[ ! -s "$forbidden" ]]
+  [[ "$(mode "$case_repo")" == 755 ]]
+  [[ "$(mode "$case_repo/bin")" == 755 ]]
+  [[ "$(mode "$case_repo/bin/codex")" == 755 ]]
+  [[ "$(mode "$case_repo/bin/linux-server-bootstrap")" == 755 ]]
+  [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 755 ]]
 }
 
 direct_home="$temporary/direct-home"
@@ -172,6 +266,31 @@ for path in \
   [[ "$(mode "$path")" == 755 ]]
 done
 
+private_bin_home="$temporary/private-bin-home"
+mkdir "$private_bin_home"
+run_refresh_component_case \
+  private-bin \
+  "$private_bin_home" \
+  "$private_bin_home/.local/share/pnpm" \
+  0 \
+  0700
+
+standalone_home="$temporary/standalone-home"
+mkdir "$standalone_home"
+run_refresh_component_case \
+  standalone \
+  "$standalone_home" \
+  "$standalone_home/.local/share/pnpm" \
+  1
+standalone_target="$standalone_home/.codex/packages/standalone/current/bin/codex"
+standalone_release="$standalone_home/.codex/packages/standalone/releases/test-release"
+[[ "$(readlink "$standalone_home/.local/bin/codex")" == "$standalone_target" ]]
+[[ "$(readlink "$standalone_home/.codex/packages/standalone/current")" == \
+  "$standalone_release" ]]
+[[ "$(readlink -f "$standalone_target")" == \
+  "$(readlink -f "$standalone_release/bin/codex")" ]]
+[[ -x "$standalone_release/bin/codex" ]]
+
 for secure_path in \
   "$home/.ssh" \
   "$home/.codex" \
@@ -198,7 +317,7 @@ done
 [[ -x "$home/.local/share/pnpm/pnpm" ]]
 [[ -x "$home/.local/share/pnpm/pnpx" ]]
 [[ ! -e "$home/.local/share/pnpm/bin" ]]
-[[ "$(readlink "$home/.local/bin/codex")" == "$root/bin/codex" ]]
+[[ "$(readlink "$home/.local/bin/codex")" == "$test_repo/bin/codex" ]]
 for absent in \
   "$home/.local/bin/quickssh" \
   "$home/.local/bin/op" \
@@ -258,6 +377,7 @@ set -euo pipefail
 
 # shellcheck disable=SC1090
 DOTFILES_SERVER_SOURCE_ONLY=1 source "$BOOTSTRAP_SCRIPT"
+repo_root="$TEST_REPO_ROOT"
 uname() {
   [[ "${1:-}" == -s ]] && {
     printf 'Linux\n'
@@ -292,6 +412,18 @@ create_corepack_targets() {
   done
 }
 
+create_standalone_codex_target() {
+  standalone="$HOME/.codex/packages/standalone/current/bin/codex"
+  standalone_current="$HOME/.codex/packages/standalone/current"
+  standalone_release="$HOME/.codex/packages/standalone/releases/test-release"
+  standalone_binary="$standalone_release/bin/codex"
+  mkdir -p "$standalone_release/bin" "$HOME/.local/bin"
+  ln -s "$standalone_release" "$standalone_current"
+  printf '#!/usr/bin/env bash\n' >"$standalone_binary"
+  chmod 0755 "$standalone_binary"
+  ln -s "$standalone" "$HOME/.local/bin/codex"
+}
+
 directory_metadata() {
   stat -c '%f:%s:%Y:%Z' "$1" 2>/dev/null ||
     stat -f '%p:%z:%m:%c' "$1"
@@ -309,9 +441,61 @@ case "$DRIFT_CASE" in
     mkdir -p "$HOME/.local/share/pnpm"
     simulate_foreign_owner "$HOME/.local/share/pnpm"
     ;;
-  link)
+  codex-wrong-target)
     mkdir -p "$HOME/.local/bin"
     ln -s "$HOME/wrong-codex" "$HOME/.local/bin/codex"
+    ;;
+  codex-file)
+    mkdir -p "$HOME/.local/bin"
+    printf 'keep-codex\n' >"$HOME/.local/bin/codex"
+    ;;
+  codex-foreign-target)
+    create_standalone_codex_target
+    simulate_foreign_owner "$(readlink -f "$standalone_binary")"
+    ;;
+  codex-standalone-symlink)
+    create_standalone_codex_target
+    rm "$standalone_binary"
+    ln -s /bin/sh "$standalone_binary"
+    ;;
+  codex-standalone-hardlink)
+    create_standalone_codex_target
+    ln "$standalone_binary" "$HOME/standalone-codex-hardlink"
+    ;;
+  codex-standalone-unsafe-mode)
+    create_standalone_codex_target
+    chmod 0777 "$standalone_binary"
+    ;;
+  codex-standalone-noncanonical-mode)
+    create_standalone_codex_target
+    chmod 0775 "$standalone_binary"
+    ;;
+  codex-current-file)
+    create_standalone_codex_target
+    rm "$standalone_current"
+    mkdir "$standalone_current"
+    ;;
+  codex-current-outside)
+    standalone="$HOME/.codex/packages/standalone/current/bin/codex"
+    standalone_current="$HOME/.codex/packages/standalone/current"
+    standalone_release="$OUTSIDE_ROOT/release"
+    standalone_binary="$standalone_release/bin/codex"
+    mkdir -p "$HOME/.codex/packages/standalone/releases" "$HOME/.local/bin"
+    ln -s "$standalone_release" "$standalone_current"
+    ln -s "$standalone" "$HOME/.local/bin/codex"
+    ;;
+  codex-release-owner)
+    create_standalone_codex_target
+    simulate_foreign_owner "$standalone_release"
+    ;;
+  codex-release-world-mode)
+    create_standalone_codex_target
+    chmod 0777 "$standalone_release"
+    ;;
+  codex-release-bin-symlink)
+    create_standalone_codex_target
+    rm -rf "$standalone_release/bin"
+    ln -s "$OUTSIDE_ROOT/release-bin" "$standalone_release/bin"
     ;;
   home | terminal-parent | outside)
     ;;
@@ -329,6 +513,33 @@ case "$DRIFT_CASE" in
   world-mode)
     mkdir "$HOME/nested"
     chmod 0777 "$HOME/nested"
+    ;;
+  repo-world-mode)
+    chmod 0777 "$repo_root"
+    ;;
+  source-parent-symlink)
+    mv "$repo_root/bin" "$OUTSIDE_ROOT/source-bin"
+    ln -s "$OUTSIDE_ROOT/source-bin" "$repo_root/bin"
+    ;;
+  source-parent-file)
+    mv "$repo_root/bin" "$OUTSIDE_ROOT/source-bin"
+    printf 'keep-source-parent\n' >"$repo_root/bin"
+    ;;
+  source-parent-owner)
+    simulate_foreign_owner "$repo_root/bin"
+    ;;
+  source-parent-world-mode)
+    chmod 0777 "$repo_root/bin"
+    ;;
+  source-world-mode)
+    chmod 0777 "$repo_root/bin/dotfiles-audit"
+    ;;
+  source-symlink)
+    rm "$repo_root/bin/dotfiles-audit"
+    ln -s "$OUTSIDE_ROOT/marker" "$repo_root/bin/dotfiles-audit"
+    ;;
+  source-hardlink)
+    ln "$repo_root/bin/dotfiles-audit" "$OUTSIDE_ROOT/dotfiles-audit"
     ;;
   non-traversable)
     mkdir "$HOME/.local"
@@ -353,6 +564,11 @@ case "$DRIFT_CASE" in
     ;;
 esac
 
+repo_mode_before="$(owned_path_mode "$repo_root")"
+bin_mode_before="$(owned_path_mode "$repo_root/bin" 2>/dev/null || true)"
+bootstrap_mode_before="$(owned_path_mode "$repo_root/bin/linux-server-bootstrap" 2>/dev/null || true)"
+audit_mode_before="$(owned_path_mode "$repo_root/bin/dotfiles-audit" 2>/dev/null || true)"
+: >"$CHMOD_CALL_LOG"
 if refresh_user >"$CASE_OUTPUT" 2>&1; then
   printf 'drift case unexpectedly succeeded: %s\n' "$DRIFT_CASE" >&2
   exit 1
@@ -360,26 +576,84 @@ fi
 if [[ "$DRIFT_CASE" == non-traversable ]]; then
   [[ "$(directory_metadata "$HOME/.local")" == "$NON_TRAVERSABLE_METADATA" ]]
 fi
+case "$DRIFT_CASE" in
+  chmod-failure-root | chmod-failure-bin | chmod-failure-first-source) ;;
+  *)
+    [[ "$(owned_path_mode "$repo_root")" == "$repo_mode_before" ]]
+    [[ "$(owned_path_mode "$repo_root/bin" 2>/dev/null || true)" == "$bin_mode_before" ]]
+    [[ "$(owned_path_mode "$repo_root/bin/linux-server-bootstrap" 2>/dev/null || true)" == \
+      "$bootstrap_mode_before" ]]
+    [[ "$(owned_path_mode "$repo_root/bin/dotfiles-audit" 2>/dev/null || true)" == \
+      "$audit_mode_before" ]]
+    ;;
+esac
+if [[ "$DRIFT_CASE" == source-parent-symlink ]]; then
+  [[ -L "$repo_root/bin" ]]
+  [[ "$(owned_path_mode "$OUTSIDE_ROOT/source-bin/codex")" == 775 ]]
+  [[ "$(owned_path_mode "$OUTSIDE_ROOT/source-bin/dotfiles-audit")" == 775 ]]
+  [[ "$(owned_path_mode "$OUTSIDE_ROOT/source-bin/linux-server-bootstrap")" == 775 ]]
+  rm "$repo_root/bin"
+  mv "$OUTSIDE_ROOT/source-bin" "$repo_root/bin"
+fi
+if [[ "$DRIFT_CASE" == source-parent-file ]]; then
+  [[ -f "$repo_root/bin" && "$(<"$repo_root/bin")" == keep-source-parent ]]
+  rm "$repo_root/bin"
+  mv "$OUTSIDE_ROOT/source-bin" "$repo_root/bin"
+fi
+if [[ "$DRIFT_CASE" == source-hardlink ]]; then
+  [[ "$(owned_path_links "$repo_root/bin/dotfiles-audit")" == 2 ]]
+  rm "$OUTSIDE_ROOT/dotfiles-audit"
+fi
+if [[ "$DRIFT_CASE" == codex-standalone-hardlink ]]; then
+  [[ "$(owned_path_links "$standalone_binary")" == 2 ]]
+  rm "$HOME/standalone-codex-hardlink"
+fi
 [[ ! -e "$HOME/.ssh" && ! -L "$HOME/.ssh" ]]
 [[ ! -e "$HOME/.local/state" && ! -L "$HOME/.local/state" ]]
 EOF
 chmod +x "$drift_case"
 
 for case_name in \
-  symlink type owner link home terminal-parent outside \
-  nested-symlink nested-type nested-owner world-mode non-traversable \
+  symlink type owner codex-wrong-target codex-file codex-foreign-target \
+  codex-standalone-symlink codex-standalone-hardlink codex-standalone-unsafe-mode \
+  codex-standalone-noncanonical-mode codex-current-file codex-current-outside \
+  codex-release-owner codex-release-world-mode codex-release-bin-symlink \
+  home terminal-parent outside \
+  nested-symlink nested-type nested-owner world-mode repo-world-mode non-traversable \
+  source-parent-symlink source-parent-file source-parent-owner source-parent-world-mode \
+  source-world-mode source-symlink source-hardlink \
+  chmod-failure-root chmod-failure-bin chmod-failure-first-source \
   pnpm-file pnpx-symlink pnpm-owner; do
   case_home="$temporary/drift-$case_name"
   outside_root="$temporary/outside-$case_name"
   mkdir "$case_home"
   mkdir "$outside_root"
+  case_repo="$case_home/.dotfiles"
+  create_test_repo "$case_repo"
   chmod 0777 "$outside_root"
   printf 'outside-marker\n' >"$outside_root/marker"
+  case "$case_name" in
+    codex-current-outside)
+      mkdir -p "$outside_root/release/bin"
+      printf '#!/usr/bin/env bash\n' >"$outside_root/release/bin/codex"
+      chmod 0755 "$outside_root/release/bin/codex"
+      ;;
+    codex-release-bin-symlink)
+      mkdir -p "$outside_root/release-bin"
+      printf '#!/usr/bin/env bash\n' >"$outside_root/release-bin/codex"
+      chmod 0755 "$outside_root/release-bin/codex"
+      ;;
+  esac
   outside_mode_before="$(mode "$outside_root")"
   outside_listing_before="$(find "$outside_root" -mindepth 1 -print | LC_ALL=C sort)"
   home_mode_before="$(mode "$case_home")"
   case_pnpm_home="$case_home/.local/share/pnpm"
   case_state_home="$case_home/.local/state"
+  fail_chmod_path=
+  chmod_failure_log="$temporary/chmod-failure-$case_name.log"
+  chmod_call_log="$temporary/chmod-calls-$case_name.log"
+  : >"$chmod_failure_log"
+  : >"$chmod_call_log"
   case "$case_name" in
     home) case_pnpm_home="$case_home" ;;
     terminal-parent) case_pnpm_home="$case_home/.." ;;
@@ -388,6 +662,9 @@ for case_name in \
     nested-type | nested-owner | world-mode)
       case_pnpm_home="$case_home/nested/tools/pnpm"
       ;;
+    chmod-failure-root) fail_chmod_path="$case_repo" ;;
+    chmod-failure-bin) fail_chmod_path="$case_repo/bin" ;;
+    chmod-failure-first-source) fail_chmod_path="$case_repo/bin/codex" ;;
   esac
   : >"$temporary/forbidden-$case_name.log"
   HOME="$case_home" \
@@ -396,14 +673,44 @@ for case_name in \
     PNPM_HOME="$case_pnpm_home" \
     PATH="$fakebin:/usr/bin:/bin" \
     FORBIDDEN_LOG="$temporary/forbidden-$case_name.log" \
+    DEVELOPER_CHMOD_LOG="$temporary/developer-chmod.log" \
+    DEVELOPER_REPO_ROOT="$root" \
     BOOTSTRAP_SCRIPT="$script" \
+    TEST_REPO_ROOT="$case_repo" \
     DRIFT_CASE="$case_name" \
     OUTSIDE_ROOT="$outside_root" \
     CASE_OUTPUT="$temporary/drift-$case_name.out" \
+    FAIL_CHMOD_PATH="$fail_chmod_path" \
+    CHMOD_FAILURE_LOG="$chmod_failure_log" \
+    CHMOD_CALL_LOG="$chmod_call_log" \
     "$drift_case"
   [[ ! -s "$temporary/forbidden-$case_name.log" ]]
-  grep -Eq 'refusing (unsafe|non-canonical|symlinked|non-directory|non-traversable|foreign-owned|world-writable|unexpected|user path outside)' \
-    "$temporary/drift-$case_name.out"
+  if [[ "$case_name" == chmod-failure-* ]]; then
+    grep -Fxq "injected chmod failure: $fail_chmod_path" "$chmod_failure_log"
+    [[ "$(wc -l <"$chmod_failure_log" | tr -d ' ')" == 1 ]]
+    expected_chmod_calls="$temporary/chmod-calls-$case_name.expected"
+    case "$case_name" in
+      chmod-failure-root)
+        printf '0755 %s\n' "$case_repo" >"$expected_chmod_calls"
+        ;;
+      chmod-failure-bin)
+        printf '0755 %s\n' \
+          "$case_repo" \
+          "$case_repo/bin" >"$expected_chmod_calls"
+        ;;
+      chmod-failure-first-source)
+        printf '0755 %s\n' \
+          "$case_repo" \
+          "$case_repo/bin" \
+          "$case_repo/bin/codex" >"$expected_chmod_calls"
+        ;;
+    esac
+    cmp "$expected_chmod_calls" "$chmod_call_log"
+  else
+    grep -Eq 'refusing (unsafe|non-canonical|symlinked|linked|non-directory|non-traversable|foreign-owned|world-writable|unexpected|user path outside)' \
+      "$temporary/drift-$case_name.out"
+    [[ ! -s "$chmod_failure_log" ]]
+  fi
   [[ "$(mode "$case_home")" == "$home_mode_before" ]]
   [[ "$(mode "$outside_root")" == "$outside_mode_before" ]]
   [[ "$(<"$outside_root/marker")" == outside-marker ]]
@@ -415,8 +722,47 @@ for case_name in \
     type)
       [[ -f "$case_home/.codex" && ! -L "$case_home/.codex" ]]
       ;;
-    link)
+    codex-wrong-target)
       [[ "$(readlink "$case_home/.local/bin/codex")" == "$case_home/wrong-codex" ]]
+      ;;
+    codex-file)
+      [[ "$(<"$case_home/.local/bin/codex")" == keep-codex ]]
+      ;;
+    codex-foreign-target)
+      [[ "$(readlink "$case_home/.local/bin/codex")" == \
+        "$case_home/.codex/packages/standalone/current/bin/codex" ]]
+      ;;
+    codex-standalone-symlink)
+      [[ "$(readlink "$case_home/.codex/packages/standalone/releases/test-release/bin/codex")" == \
+        /bin/sh ]]
+      ;;
+    codex-standalone-hardlink)
+      [[ ! -e "$case_home/standalone-codex-hardlink" ]]
+      ;;
+    codex-standalone-unsafe-mode)
+      [[ "$(mode "$case_home/.codex/packages/standalone/releases/test-release/bin/codex")" == \
+        777 ]]
+      ;;
+    codex-standalone-noncanonical-mode)
+      [[ "$(mode "$case_home/.codex/packages/standalone/releases/test-release/bin/codex")" == \
+        775 ]]
+      ;;
+    codex-current-file)
+      [[ -d "$case_home/.codex/packages/standalone/current" ]]
+      ;;
+    codex-current-outside)
+      [[ "$(readlink "$case_home/.codex/packages/standalone/current")" == \
+        "$outside_root/release" ]]
+      ;;
+    codex-release-owner)
+      [[ -d "$case_home/.codex/packages/standalone/releases/test-release" ]]
+      ;;
+    codex-release-world-mode)
+      [[ "$(mode "$case_home/.codex/packages/standalone/releases/test-release")" == 777 ]]
+      ;;
+    codex-release-bin-symlink)
+      [[ "$(readlink "$case_home/.codex/packages/standalone/releases/test-release/bin")" == \
+        "$outside_root/release-bin" ]]
       ;;
     nested-symlink)
       [[ "$(readlink "$case_home/nested/redirect")" == "$outside_root" ]]
@@ -426,6 +772,50 @@ for case_name in \
       ;;
     world-mode)
       [[ "$(mode "$case_home/nested")" == 777 ]]
+      ;;
+    repo-world-mode)
+      [[ "$(mode "$case_repo")" == 777 ]]
+      ;;
+    source-parent-symlink)
+      [[ -d "$case_repo/bin" && ! -L "$case_repo/bin" ]]
+      ;;
+    source-parent-file)
+      [[ -d "$case_repo/bin" && ! -L "$case_repo/bin" ]]
+      ;;
+    source-parent-owner)
+      [[ -d "$case_repo/bin" && ! -L "$case_repo/bin" ]]
+      ;;
+    source-parent-world-mode)
+      [[ "$(mode "$case_repo/bin")" == 777 ]]
+      ;;
+    source-world-mode)
+      [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 777 ]]
+      ;;
+    source-symlink)
+      [[ "$(readlink "$case_repo/bin/dotfiles-audit")" == \
+        "$outside_root/marker" ]]
+      ;;
+    source-hardlink) [[ ! -e "$outside_root/dotfiles-audit" ]] ;;
+    chmod-failure-root)
+      [[ "$(mode "$case_repo")" == 775 ]]
+      [[ "$(mode "$case_repo/bin")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/codex")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/linux-server-bootstrap")" == 775 ]]
+      ;;
+    chmod-failure-bin)
+      [[ "$(mode "$case_repo")" == 755 ]]
+      [[ "$(mode "$case_repo/bin")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/codex")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/linux-server-bootstrap")" == 775 ]]
+      ;;
+    chmod-failure-first-source)
+      [[ "$(mode "$case_repo")" == 755 ]]
+      [[ "$(mode "$case_repo/bin")" == 755 ]]
+      [[ "$(mode "$case_repo/bin/codex")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 775 ]]
+      [[ "$(mode "$case_repo/bin/linux-server-bootstrap")" == 775 ]]
       ;;
     non-traversable)
       [[ "$(mode "$case_home/.local")" == 600 ]]
@@ -443,6 +833,7 @@ for case_name in \
       ;;
   esac
 done
+[[ ! -s "$temporary/developer-chmod.log" ]]
 
 refresh_definitions="$(
   # shellcheck disable=SC1090
