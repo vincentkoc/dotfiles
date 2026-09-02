@@ -66,6 +66,37 @@ ssh_allowed_signer_ready() {
   [[ "$canonical_count" == 1 && "$matching_count" == 1 ]]
 }
 
+clear_gpg_program() {
+  local status
+
+  if git config --global --get-all gpg.program >/dev/null; then
+    if git config --global --unset-all gpg.program; then
+      :
+    else
+      status=$?
+      echo "git-signing-mode: failed to remove gpg.program" >&2
+      return "$status"
+    fi
+  else
+    status=$?
+    if [[ "$status" -ne 1 ]]; then
+      echo "git-signing-mode: failed to inspect gpg.program" >&2
+      return "$status"
+    fi
+  fi
+
+  if git config --global --get-all gpg.program >/dev/null; then
+    echo "git-signing-mode: gpg.program remains configured" >&2
+    return 1
+  else
+    status=$?
+    if [[ "$status" -ne 1 ]]; then
+      echo "git-signing-mode: failed to verify gpg.program removal" >&2
+      return "$status"
+    fi
+  fi
+}
+
 set_ssh_mode() {
   local configured_allowed_signers derived_public_key observed_fingerprint observed_public_key
   local ssh_allowed_signers="$HOME/GIT/_Perso/dotfiles/.ssh/allowed_signers"
@@ -110,8 +141,8 @@ set_ssh_mode() {
     exit 1
   fi
 
+  clear_gpg_program
   git config --global gpg.format ssh
-  git config --global --unset-all gpg.program >/dev/null 2>&1 || true
   git config --global gpg.ssh.program "${ssh_program}"
   git config --global gpg.ssh.allowedSignersFile "${ssh_allowed_signers_config}"
   git config --global user.signingkey "${ssh_key_config}"

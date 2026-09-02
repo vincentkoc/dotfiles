@@ -191,6 +191,83 @@ if grep -Fq "$mode_home" "$mode_home/.gitconfig"; then
   exit 1
 fi
 
+(
+  export HOME="$mode_home"
+  export GIT_CONFIG_GLOBAL="$mode_home/.gitconfig"
+  source "$repo_root/bin/git-signing-mode"
+  ssh_signing_public_key="$fixture_public_key"
+  ssh_signing_fingerprint="$fixture_fingerprint"
+  main ssh
+) >"$fixture/mode-absent.out"
+grep -Fq 'git signing mode: ssh' "$fixture/mode-absent.out"
+if HOME="$mode_home" GIT_CONFIG_GLOBAL="$mode_home/.gitconfig" \
+  git config --global --get-all gpg.program >/dev/null 2>&1; then
+  echo 'git-signing-mode recreated gpg.program from the absent path' >&2
+  exit 1
+fi
+
+unset_failure_home="$fixture/unset-failure-home"
+unset_failure_allowed_signers="$unset_failure_home/GIT/_Perso/dotfiles/.ssh/allowed_signers"
+failing_git_dir="$fixture/failing-git"
+real_git="$(command -v git)"
+mkdir -p \
+  "$(dirname "$unset_failure_allowed_signers")" \
+  "$unset_failure_home/.ssh" \
+  "$failing_git_dir"
+cp "$fixture_key" "$unset_failure_home/.ssh/git_signing_vincentkoc_ieee"
+cp "$fixture_key.pub" "$unset_failure_home/.ssh/git_signing_vincentkoc_ieee.pub"
+printf '%s\n' "$mode_expected" > "$unset_failure_allowed_signers"
+HOME="$unset_failure_home" GIT_CONFIG_GLOBAL="$unset_failure_home/.gitconfig" \
+  git config --global gpg.program /stale/gpg
+HOME="$unset_failure_home" GIT_CONFIG_GLOBAL="$unset_failure_home/.gitconfig" \
+  git config --global test.preserved unrelated-value
+cat > "$failing_git_dir/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == config &&
+  "\${2:-}" == --global &&
+  "\${3:-}" == --unset-all &&
+  "\${4:-}" == gpg.program ]]; then
+  echo 'forced gpg.program unset failure' >&2
+  exit 73
+fi
+exec "$real_git" "\$@"
+EOF
+chmod +x "$failing_git_dir/git"
+unset_failure_before="$(
+  shasum -a 256 "$unset_failure_home/.gitconfig" | awk '{print $1}'
+)"
+set +e
+(
+  export HOME="$unset_failure_home"
+  export GIT_CONFIG_GLOBAL="$unset_failure_home/.gitconfig"
+  export PATH="$failing_git_dir:$PATH"
+  source "$repo_root/bin/git-signing-mode"
+  ssh_signing_public_key="$fixture_public_key"
+  ssh_signing_fingerprint="$fixture_fingerprint"
+  main ssh
+) >"$fixture/mode-unset-failure.out" 2>&1
+unset_failure_status=$?
+set -e
+[[ "$unset_failure_status" == 73 ]]
+unset_failure_after="$(
+  shasum -a 256 "$unset_failure_home/.gitconfig" | awk '{print $1}'
+)"
+[[ "$unset_failure_before" == "$unset_failure_after" ]]
+[[ "$(
+  HOME="$unset_failure_home" GIT_CONFIG_GLOBAL="$unset_failure_home/.gitconfig" \
+    git config --global --get-all gpg.program
+)" == /stale/gpg ]]
+[[ "$(
+  HOME="$unset_failure_home" GIT_CONFIG_GLOBAL="$unset_failure_home/.gitconfig" \
+    git config --global --get test.preserved
+)" == unrelated-value ]]
+grep -Fq 'forced gpg.program unset failure' "$fixture/mode-unset-failure.out"
+grep -Fq 'failed to remove gpg.program' "$fixture/mode-unset-failure.out"
+if grep -Fq 'git signing mode: ssh' "$fixture/mode-unset-failure.out"; then
+  echo 'git-signing-mode reported success after gpg.program unset failure' >&2
+  exit 1
+fi
+
 mode_config_before="$(shasum -a 256 "$mode_home/.gitconfig" | awk '{print $1}')"
 if (
   export HOME="$mode_home"
