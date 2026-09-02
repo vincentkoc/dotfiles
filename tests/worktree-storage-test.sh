@@ -13,15 +13,24 @@ observed="$temporary/observed.json"
 mount_point="$home/.codex/worktrees"
 volume_uuid="$(printf '%s-%s-%s-%s-%s' 11111111 2222 3333 4444 555555555555)"
 other_uuid="$(printf '%s-%s-%s-%s-%s' aaaaaaaa bbbb cccc dddd eeeeeeeeeeee)"
-marker_id="studio-a.external-worktree-storage.v1"
-other_marker_id="studio-b.external-worktree-storage.v1"
+marker_id="studio-a.external-worktree-storage.v2"
+other_marker_id="studio-b.external-worktree-storage.v2"
+openclaw_managed="$mount_point/openclaw-managed"
+openclaw_pnpm_store="$mount_point/.pnpm-store/openclaw"
+
+create_storage_children() {
+  mkdir -p "$openclaw_managed" "$openclaw_pnpm_store"
+  chmod 0700 "$mount_point" "$openclaw_managed" \
+    "$mount_point/.pnpm-store" "$openclaw_pnpm_store"
+}
+
 mkdir -p "$mount_point"
-chmod 0700 "$mount_point"
+create_storage_children
 
 write_config() {
   local uuid="${1:-$volume_uuid}"
   cat >"$config" <<EOF
-{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"$marker_id","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
+{"backing_directory_mode":"0000","case_sensitive":false,"children":{"openclaw_managed":{"cleanup_authority":"openclaw_registered_worktrees","mode":"0700","ownership":"home_owner","relative_path":"openclaw-managed"},"openclaw_pnpm_store":{"cleanup_authority":"dotfiles-private","disposable":true,"mode":"0700","ownership":"home_owner","relative_path":".pnpm-store/openclaw"}},"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"$marker_id","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v2","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$uuid"}
 EOF
   chmod 0600 "$config"
 }
@@ -51,7 +60,8 @@ run_guard() {
 write_config
 write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 [[ "$(run_guard --print-mount-point)" == "$mount_point" ]]
-python3 - "$guard" "$config" <<'PY'
+run_guard --json >"$temporary/ready.json"
+HOME="$home" python3 - "$guard" "$config" <<'PY'
 import importlib.util
 import importlib.machinery
 import os
@@ -67,6 +77,22 @@ assert str(module.DEFAULT_CONFIG) == (
     "/Library/Application Support/agent-worktree-ops/"
     "external-worktree-storage.json"
 )
+assert module.SCHEMA == "external-worktree-storage.v2"
+assert module.EXPECTED_CHILDREN == {
+    "openclaw_managed": {
+        "relative_path": "openclaw-managed",
+        "ownership": "home_owner",
+        "mode": "0700",
+        "cleanup_authority": "openclaw_registered_worktrees",
+    },
+    "openclaw_pnpm_store": {
+        "relative_path": ".pnpm-store/openclaw",
+        "ownership": "home_owner",
+        "mode": "0700",
+        "cleanup_authority": "dotfiles-private",
+        "disposable": True,
+    },
+}
 source = pathlib.Path(sys.argv[1]).read_text()
 assert "com.apple.metadata:com_apple_backup_excludeItem" not in source
 assert '"/usr/bin/tmutil", "isexcluded"' in source
@@ -110,6 +136,30 @@ if os.getuid() != 0:
     else:
         raise AssertionError("production config must be root-owned")
 PY
+python3 - "$temporary/ready.json" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert value["configured"] is True
+assert value["schema_version"] == "external-worktree-storage.v2"
+assert value["children"] == {
+    "openclaw_managed": {
+        "cleanup_authority": "openclaw_registered_worktrees",
+        "mode": "0700",
+        "ownership": "home_owner",
+        "relative_path": "openclaw-managed",
+    },
+    "openclaw_pnpm_store": {
+        "cleanup_authority": "dotfiles-private",
+        "disposable": True,
+        "mode": "0700",
+        "ownership": "home_owner",
+        "relative_path": ".pnpm-store/openclaw",
+    },
+}
+PY
 if HOME="$home" WORKTREE_STORAGE_CONFIG="$config" "$guard" \
   >"$temporary/override.out" 2>&1; then
   echo "runtime config overrides must be test-only" >&2
@@ -131,6 +181,64 @@ owner_common="$(git -C "$owner_repo" rev-parse --path-format=absolute --git-comm
 worktree_common="$(git -C "$managed_worktree" rev-parse --path-format=absolute --git-common-dir)"
 [[ "$owner_common" == "$worktree_common" ]]
 git -C "$owner_repo" worktree remove "$managed_worktree"
+
+assert_invalid_config() {
+  local name="$1"
+  local expected="$2"
+  if run_guard >"$temporary/$name.out" 2>&1; then
+    echo "$name config must fail" >&2
+    exit 1
+  fi
+  grep -Fq "$expected" "$temporary/$name.out"
+}
+
+mutate_config() {
+  local expression="$1"
+  python3 - "$config" "$expression" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+exec(sys.argv[2], {"value": value})
+path.write_text(json.dumps(value, sort_keys=True) + "\n")
+PY
+}
+
+write_config
+mutate_config 'value["schema_version"] = "external-worktree-storage.v1"'
+assert_invalid_config v1-schema "required config missing or invalid"
+
+write_config
+mutate_config 'value.pop("required")'
+assert_invalid_config missing-required "required config missing or invalid"
+
+write_config
+mutate_config 'value["unknown"] = True'
+assert_invalid_config unknown-field "required config missing or invalid"
+
+write_config
+mutate_config 'value.pop("children")'
+assert_invalid_config missing-children "required config missing or invalid"
+
+write_config
+mutate_config 'value["children"]["openclaw_managed"]["extra"] = True'
+assert_invalid_config unknown-child-field "required config missing or invalid"
+
+write_config
+mutate_config 'value["children"]["openclaw_managed"].pop("mode")'
+assert_invalid_config missing-child-field "required config missing or invalid"
+
+write_config
+mutate_config 'value["children"]["openclaw_pnpm_store"]["relative_path"] = "openclaw-managed/cache"'
+assert_invalid_config overlapping-child "required config missing or invalid"
+
+write_config
+mutate_config 'value["children"]["openclaw_managed"]["relative_path"] = "../escape"'
+assert_invalid_config escaping-child "required config missing or invalid"
+
+write_config
 
 write_observed "$other_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 if run_guard >"$temporary/wrong-uuid.out" 2>&1; then
@@ -270,6 +378,7 @@ grep -Fq "symlinked component" "$temporary/symlink.out"
 
 rm "$mount_point"
 mkdir "$mount_point"
+create_storage_children
 write_config pending
 if run_guard >"$temporary/pending.out" 2>&1; then
   echo "pending UUID must fail" >&2
@@ -287,6 +396,97 @@ fi
 grep -Fq "permissions are unsafe" "$temporary/writable-config.out"
 chmod 0600 "$config"
 
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+rm -rf "$openclaw_managed"
+if run_guard >"$temporary/missing-child.out" 2>&1; then
+  echo "missing storage child must fail" >&2
+  exit 1
+fi
+grep -Fq "required storage child is missing: openclaw_managed" \
+  "$temporary/missing-child.out"
+mkdir "$openclaw_managed"
+chmod 0700 "$openclaw_managed"
+
+chmod 0755 "$openclaw_managed"
+if run_guard >"$temporary/child-mode.out" 2>&1; then
+  echo "wrong storage child mode must fail" >&2
+  exit 1
+fi
+grep -Fq "storage child must use mode 0700: openclaw_managed" \
+  "$temporary/child-mode.out"
+chmod 0700 "$openclaw_managed"
+
+rm -rf "$openclaw_managed"
+printf 'not a directory\n' >"$openclaw_managed"
+if run_guard >"$temporary/child-file.out" 2>&1; then
+  echo "storage child file must fail" >&2
+  exit 1
+fi
+grep -Fq "storage child is not a real directory: openclaw_managed" \
+  "$temporary/child-file.out"
+rm "$openclaw_managed"
+mkdir "$openclaw_managed"
+chmod 0700 "$openclaw_managed"
+
+rm -rf "$openclaw_managed"
+ln -s "$openclaw_pnpm_store" "$openclaw_managed"
+if run_guard >"$temporary/child-symlink.out" 2>&1; then
+  echo "symlinked storage child must fail" >&2
+  exit 1
+fi
+grep -Fq "storage child has a symlinked component: openclaw_managed" \
+  "$temporary/child-symlink.out"
+rm "$openclaw_managed"
+mkdir "$openclaw_managed"
+chmod 0700 "$openclaw_managed"
+
+HOME="$home" python3 - "$guard" "$config" <<'PY'
+import importlib.machinery
+import importlib.util
+import os
+import pathlib
+import sys
+from unittest import mock
+
+loader = importlib.machinery.SourceFileLoader("storage_guard_metadata", sys.argv[1])
+spec = importlib.util.spec_from_loader("storage_guard_metadata", loader)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader
+spec.loader.exec_module(module)
+config = module.load_config(pathlib.Path(sys.argv[2]), production_default=False)
+assert config is not None
+root = pathlib.Path(config["mount_point"])
+child = root / "openclaw-managed"
+real_lstat = module.os.lstat
+
+def changed_lstat(path, *, uid_delta=0, gid_delta=0, device_delta=0):
+    metadata = real_lstat(path)
+    if pathlib.Path(path) != child:
+        return metadata
+    values = list(metadata)
+    values[2] = metadata.st_dev + device_delta
+    values[4] = metadata.st_uid + uid_delta
+    values[5] = metadata.st_gid + gid_delta
+    return os.stat_result(values)
+
+for error, kwargs in (
+    ("wrong owner", {"uid_delta": 1}),
+    ("wrong owner", {"gid_delta": 1}),
+    ("crosses filesystems", {"device_delta": 1}),
+):
+    with mock.patch.object(
+        module.os, "lstat", side_effect=lambda path, kwargs=kwargs: changed_lstat(path, **kwargs)
+    ):
+        try:
+            module.validate_storage_children(config, root)
+        except module.GuardError as caught:
+            assert error in str(caught), caught
+        else:
+            raise AssertionError(error)
+PY
+
+write_observed "$volume_uuid" apfs false "$(id -u)" "$(id -g)" 0700
 real_config="$temporary/real-config.json"
 mv "$config" "$real_config"
 ln -s "$real_config" "$config"

@@ -15,7 +15,7 @@ import sys
 from typing import Any
 
 
-SCHEMA = "external-worktree-storage.v1"
+SCHEMA = "external-worktree-storage.v2"
 DEFAULT_CONFIG = (
     pathlib.Path("/Library/Application Support")
     / "agent-worktree-ops"
@@ -27,6 +27,21 @@ PHYSICAL_EXTERNAL_BUS_PROTOCOLS = frozenset(
 )
 REQUIRED_MINIMUM_FREE_GIB = 200
 REQUIRED_MINIMUM_FREE_PERCENT = 10
+EXPECTED_CHILDREN = {
+    "openclaw_managed": {
+        "relative_path": "openclaw-managed",
+        "ownership": "home_owner",
+        "mode": "0700",
+        "cleanup_authority": "openclaw_registered_worktrees",
+    },
+    "openclaw_pnpm_store": {
+        "relative_path": ".pnpm-store/openclaw",
+        "ownership": "home_owner",
+        "mode": "0700",
+        "cleanup_authority": "dotfiles-private",
+        "disposable": True,
+    },
+}
 UUID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -80,6 +95,7 @@ def load_config(
     expected_keys = {
         "case_sensitive",
         "backing_directory_mode",
+        "children",
         "device_location",
         "encrypted",
         "filesystem",
@@ -99,6 +115,7 @@ def load_config(
     if (
         value.get("schema_version") != SCHEMA
         or value.get("required") is not True
+        or value.get("children") != EXPECTED_CHILDREN
         or value.get("filesystem") != "apfs"
         or value.get("encrypted") is not True
         or value.get("case_sensitive") is not False
@@ -120,6 +137,76 @@ def load_config(
     if not mount_point.is_absolute() or os.path.normpath(mount_point) != str(canonical):
         raise GuardError(f"runtime config mount point is not canonical: {mount_point}")
     return value
+
+
+def storage_child_paths(
+    config: dict[str, Any], mount_point: pathlib.Path
+) -> dict[str, pathlib.Path]:
+    root = pathlib.Path(os.path.abspath(mount_point))
+    children = config.get("children")
+    if not isinstance(children, dict) or children != EXPECTED_CHILDREN:
+        raise GuardError("runtime config child policy is incomplete or invalid")
+    paths: dict[str, pathlib.Path] = {}
+    for name, contract in children.items():
+        relative_value = contract.get("relative_path")
+        if not isinstance(relative_value, str):
+            raise GuardError(f"storage child path is invalid: {name}")
+        relative = pathlib.PurePosixPath(relative_value)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise GuardError(f"storage child path is invalid: {name}")
+        child = pathlib.Path(os.path.abspath(root / pathlib.Path(*relative.parts)))
+        try:
+            child.relative_to(root)
+        except ValueError as error:
+            raise GuardError(f"storage child escapes the mounted root: {name}") from error
+        if child == root:
+            raise GuardError(f"storage child resolves to the mounted root: {name}")
+        paths[name] = child
+    child_items = list(paths.items())
+    for index, (left_name, left) in enumerate(child_items):
+        for right_name, right in child_items[index + 1 :]:
+            if (
+                left == right
+                or left in right.parents
+                or right in left.parents
+            ):
+                raise GuardError(
+                    f"storage children overlap: {left_name}, {right_name}"
+                )
+    return paths
+
+
+def validate_storage_children(
+    config: dict[str, Any], mount_point: pathlib.Path
+) -> None:
+    root_metadata = os.lstat(mount_point)
+    if (
+        stat.S_ISLNK(root_metadata.st_mode)
+        or not stat.S_ISDIR(root_metadata.st_mode)
+    ):
+        raise GuardError("mounted external volume root is not a real directory")
+    home_metadata = os.stat(pathlib.Path.home())
+    expected_owner = (home_metadata.st_uid, home_metadata.st_gid)
+    root_device = root_metadata.st_dev
+    for name, child in storage_child_paths(config, mount_point).items():
+        relative = child.relative_to(mount_point)
+        current = mount_point
+        for component in relative.parts:
+            current /= component
+            if not path_has_no_symlink_components(current):
+                raise GuardError(f"storage child has a symlinked component: {name}")
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError as error:
+                raise GuardError(f"required storage child is missing: {name}") from error
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise GuardError(f"storage child is not a real directory: {name}")
+            if (metadata.st_uid, metadata.st_gid) != expected_owner:
+                raise GuardError(f"storage child has the wrong owner: {name}")
+            if stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise GuardError(f"storage child must use mode 0700: {name}")
+            if metadata.st_dev != root_device:
+                raise GuardError(f"storage child crosses filesystems: {name}")
 
 
 def test_observation() -> dict[str, Any] | None:
@@ -342,6 +429,7 @@ def validate_observation(
         or free_percent < config["minimum_free_percent"]
     ):
         raise GuardError("worktree volume free space is below minimum_free_percent")
+    validate_storage_children(config, mount_point)
     return mount_point
 
 
@@ -393,6 +481,7 @@ def main() -> int:
                     {
                         "configured": True,
                         "backing_directory_mode": config["backing_directory_mode"],
+                        "children": config["children"],
                         "device_location": observed.get("device_location"),
                         "free_gib": observed.get("free_gib"),
                         "free_percent": observed.get("free_percent"),

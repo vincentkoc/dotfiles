@@ -6,7 +6,7 @@ Bins in this folder:
 
 - `worktree-storage-guard`
   - reads the private system policy
-    `external-worktree-storage.v1`
+    `external-worktree-storage.v2`; schema v1 is rejected
   - reads the root-owned, non-writable policy at
     `/Library/Application Support/agent-worktree-ops/external-worktree-storage.json`
   - treats a missing contract as unconfigured only when the canonical path has
@@ -17,8 +17,15 @@ Bins in this folder:
   - requires at least 200 GiB and 10% free, an exact host marker, external-device
     location, disabled Spotlight indexing, and a UUID-tracked Time Machine volume
     exclusion verified with `tmutil isexcluded`
+  - requires the exact `openclaw-managed` and `.pnpm-store/openclaw` child
+    contracts; every path component must remain a real, user-owned mode-0700
+    directory on the mounted volume's filesystem
+  - reserves `openclaw-managed` for OpenClaw's registered-worktree lifecycle and
+    `.pnpm-store/openclaw` as a disposable store owned by `dotfiles-private`
   - rejects symlinked mountpoints or parent components, wrong UUID/filesystem,
-    writable internal fallback, and hot disappearance
+    missing, overlapping, symlinked, cross-filesystem, wrongly owned, or
+    wrongly permissioned children, writable internal fallback, and hot
+    disappearance
   - when absent, the underlying mountpoint must remain `root:wheel` mode `0000`
 - `agent-worktree-clean`
   - dry-run/apply cleanup of idle worktrees and stale artifacts
