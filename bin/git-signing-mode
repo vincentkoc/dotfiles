@@ -12,6 +12,7 @@ ssh_signing_fingerprint='SHA256:OIEOnMWCJeKhWpBNlB42wwPuUG5gsC8Crq1ibnt7ylQ'
 ssh_allowed_signers_config='~/GIT/_Perso/dotfiles/.ssh/allowed_signers'
 gpg_program="/opt/homebrew/bin/gpg"
 gpg_key_id="FB4C24AE87080A95"
+ssh_program="/usr/bin/ssh-keygen"
 
 usage() {
   cat <<'EOF'
@@ -31,7 +32,7 @@ require_git_config() {
 }
 
 show_status() {
-  git config --global --show-origin --get-regexp '^(user.signingkey|commit.gpgsign|tag.gpgsign|gpg\.format|gpg\.program|gpg\.ssh\.allowedSignersFile)$' || true
+  git config --global --show-origin --get-regexp '^(user.signingkey|commit.gpgsign|tag.gpgsign|gpg\.format|gpg\.program|gpg\.ssh\.(allowedSignersFile|program))$' || true
 }
 
 canonical_ssh_allowed_signer() {
@@ -63,6 +64,37 @@ ssh_allowed_signer_ready() {
       "$path"
   )"
   [[ "$canonical_count" == 1 && "$matching_count" == 1 ]]
+}
+
+clear_gpg_program() {
+  local status
+
+  if git config --global --get-all gpg.program >/dev/null; then
+    if git config --global --unset-all gpg.program; then
+      :
+    else
+      status=$?
+      echo "git-signing-mode: failed to remove gpg.program" >&2
+      return "$status"
+    fi
+  else
+    status=$?
+    if [[ "$status" -ne 1 ]]; then
+      echo "git-signing-mode: failed to inspect gpg.program" >&2
+      return "$status"
+    fi
+  fi
+
+  if git config --global --get-all gpg.program >/dev/null; then
+    echo "git-signing-mode: gpg.program remains configured" >&2
+    return 1
+  else
+    status=$?
+    if [[ "$status" -ne 1 ]]; then
+      echo "git-signing-mode: failed to verify gpg.program removal" >&2
+      return "$status"
+    fi
+  fi
 }
 
 set_ssh_mode() {
@@ -109,8 +141,9 @@ set_ssh_mode() {
     exit 1
   fi
 
+  clear_gpg_program
   git config --global gpg.format ssh
-  git config --global gpg.program "${gpg_program}"
+  git config --global gpg.ssh.program "${ssh_program}"
   git config --global gpg.ssh.allowedSignersFile "${ssh_allowed_signers_config}"
   git config --global user.signingkey "${ssh_key_config}"
   git config --global commit.gpgsign true
