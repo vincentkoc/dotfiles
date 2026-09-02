@@ -14,11 +14,12 @@ observed="$temporary/observed.json"
 probe="$temporary/probe.sh"
 result="$temporary/result"
 volume_uuid="$(printf '%s-%s-%s-%s-%s' 11111111 2222 3333 4444 555555555555)"
-marker_id="studio-a.external-worktree-storage.v1"
-mkdir -p "$mount_point"
-chmod 0700 "$mount_point"
+marker_id="studio-a.external-worktree-storage.v2"
+mkdir -p "$mount_point/openclaw-managed" "$mount_point/.pnpm-store/openclaw"
+chmod 0700 "$mount_point" "$mount_point/openclaw-managed" \
+  "$mount_point/.pnpm-store" "$mount_point/.pnpm-store/openclaw"
 cat >"$config" <<EOF
-{"backing_directory_mode":"0000","case_sensitive":false,"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"$marker_id","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v1","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$volume_uuid"}
+{"backing_directory_mode":"0000","case_sensitive":false,"children":{"openclaw_managed":{"cleanup_authority":"openclaw_registered_worktrees","mode":"0700","ownership":"home_owner","relative_path":"openclaw-managed"},"openclaw_pnpm_store":{"cleanup_authority":"dotfiles-private","disposable":true,"mode":"0700","ownership":"home_owner","relative_path":".pnpm-store/openclaw"}},"device_location":"External","encrypted":true,"filesystem":"apfs","marker_id":"$marker_id","minimum_free_gib":200,"minimum_free_percent":10,"mount_point":"$mount_point","owners":true,"required":true,"schema_version":"external-worktree-storage.v2","spotlight":"disabled","time_machine_excluded":true,"volume_uuid":"$volume_uuid"}
 EOF
 chmod 0600 "$config"
 cat >"$observed" <<EOF
