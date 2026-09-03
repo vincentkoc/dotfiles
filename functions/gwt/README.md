@@ -32,6 +32,10 @@ External storage behavior:
 - The root-owned system policy binds the exact UUID and host marker, requires an
   external device with ownership enabled, disabled Spotlight, persistent Time
   Machine volume exclusion, and at least 200 GiB plus 10% free.
+- Encryption policy and observation are exact JSON booleans. The observed value
+  must match policy; unknown or mismatched state fails without disclosing the
+  values. Integrations can discover this contract statically with
+  `worktree-storage-guard --capabilities --json` before any storage probe.
 - `gwt new`, `add`, `rm`, `audit`, `clean`, and `prune` stop before worktree
   access when the configured volume is absent, wrong, or replaced by a writable
   internal fallback. Missing policy also fails closed when the direct mount or
