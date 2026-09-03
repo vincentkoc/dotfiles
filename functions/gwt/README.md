@@ -27,8 +27,9 @@ Key responsibilities:
 
 External storage behavior:
 
-- Configured hosts mount an encrypted, case-insensitive APFS volume directly at
-  canonical `~/.codex/worktrees`; a symlinked `~/.codex/worktrees` is rejected.
+- Configured hosts mount a case-insensitive APFS volume in the policy-selected
+  encrypted or unencrypted state directly at canonical `~/.codex/worktrees`;
+  a symlinked `~/.codex/worktrees` is rejected.
 - The root-owned system policy binds the exact UUID and host marker, requires an
   external device with ownership enabled, disabled Spotlight, persistent Time
   Machine volume exclusion, and at least 200 GiB plus 10% free.

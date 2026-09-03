@@ -156,6 +156,7 @@ assert module.normalized_device_location({}) is None
 assert module.normalized_encryption({"Encryption": True}) is True
 assert module.normalized_encryption({"Encryption": False, "Encrypted": True}) is False
 assert module.normalized_encryption({"Encryption": "true", "Encrypted": True}) is None
+assert module.normalized_encryption({"Encryption": "true", "Encrypted": False}) is None
 assert module.normalized_encryption({"Encryption": 1, "Encrypted": True}) is None
 assert module.normalized_encryption({"Encryption": None, "Encrypted": True}) is None
 assert module.normalized_encryption({"Encrypted": True}) is True
@@ -241,6 +242,20 @@ path.write_text(json.dumps(value, sort_keys=True) + "\n")
 PY
 }
 
+mutate_observed() {
+  local expression="$1"
+  python3 - "$observed" "$expression" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+exec(sys.argv[2], {"value": value})
+path.write_text(json.dumps(value, sort_keys=True) + "\n")
+PY
+}
+
 write_config
 mutate_config 'value["schema_version"] = "external-worktree-storage.v1"'
 assert_invalid_config v1-schema "required config missing or invalid"
@@ -278,8 +293,16 @@ mutate_config 'value["encrypted"] = 1'
 assert_invalid_config integer-encrypted "required config missing or invalid"
 
 write_config
+mutate_config 'value["encrypted"] = 0'
+assert_invalid_config integer-zero-encrypted "required config missing or invalid"
+
+write_config
 mutate_config 'value["encrypted"] = 1.0'
 assert_invalid_config float-encrypted "required config missing or invalid"
+
+write_config
+mutate_config 'value["encrypted"] = 0.0'
+assert_invalid_config float-zero-encrypted "required config missing or invalid"
 
 write_config
 mutate_config 'value["encrypted"] = "true"'
@@ -358,6 +381,26 @@ value["encrypted"] = None
 path.write_text(json.dumps(value))
 PY
 assert_encryption_failure encrypted-observation-unknown
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value.pop("encrypted")'
+assert_encryption_failure encrypted-observation-missing
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value["encrypted"] = "true"'
+assert_encryption_failure encrypted-observation-string
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value["encrypted"] = 1'
+assert_encryption_failure encrypted-observation-integer
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value["encrypted"] = 1.0'
+assert_encryption_failure encrypted-observation-float
 
 write_config
 mutate_config 'value["encrypted"] = False'
