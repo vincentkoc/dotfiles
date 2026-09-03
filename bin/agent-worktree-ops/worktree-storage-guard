@@ -16,6 +16,13 @@ from typing import Any
 
 
 SCHEMA = "external-worktree-storage.v2"
+CAPABILITIES = {
+    "encryption_attestation": "exact_boolean",
+    "encryption_policy": "exact_boolean",
+    "schema_version": "worktree-storage-guard-capabilities.v1",
+    "storage_schema": SCHEMA,
+    "unknown_encryption": "reject",
+}
 DEFAULT_CONFIG = (
     pathlib.Path("/Library/Application Support")
     / "agent-worktree-ops"
@@ -127,7 +134,7 @@ def load_config(
         or value.get("required") is not True
         or not children_contract_is_exact(value.get("children"))
         or value.get("filesystem") != "apfs"
-        or value.get("encrypted") is not True
+        or type(value.get("encrypted")) is not bool
         or value.get("case_sensitive") is not False
         or value.get("owners") is not True
         or value.get("device_location") != "External"
@@ -273,11 +280,11 @@ def normalized_device_location(disk: dict[str, Any]) -> str | None:
 
 
 def normalized_encryption(disk: dict[str, Any]) -> bool | None:
-    encryption = disk.get("Encryption")
-    if isinstance(encryption, bool):
-        return encryption
+    if "Encryption" in disk:
+        encryption = disk["Encryption"]
+        return encryption if type(encryption) is bool else None
     legacy = disk.get("Encrypted")
-    return legacy if isinstance(legacy, bool) else None
+    return legacy if type(legacy) is bool else None
 
 
 def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
@@ -333,7 +340,7 @@ def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
         "mount_point": disk.get("MountPoint"),
         "volume_uuid": disk.get("VolumeUUID"),
         "filesystem": "apfs" if "apfs" in personality.casefold() else personality.casefold(),
-        "encrypted": normalized_encryption(disk) is True,
+        "encrypted": normalized_encryption(disk),
         "free_gib": free_gib,
         "free_percent": free_percent,
         "case_sensitive": "case-sensitive" in personality.casefold(),
@@ -408,8 +415,12 @@ def validate_observation(
         raise GuardError("mounted external volume UUID does not match policy")
     if str(observed.get("filesystem") or "").casefold() != "apfs":
         raise GuardError("mounted external volume is not APFS")
-    if observed.get("encrypted") is not True:
-        raise GuardError("mounted external volume is not encrypted")
+    observed_encrypted = observed.get("encrypted")
+    if (
+        type(observed_encrypted) is not bool
+        or observed_encrypted is not config["encrypted"]
+    ):
+        raise GuardError("mounted external volume encryption does not match policy")
     if observed.get("case_sensitive") is not False:
         raise GuardError("mounted external volume must be case-insensitive")
     if observed.get("ownership_enabled") is not True:
@@ -445,22 +456,44 @@ def validate_observation(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("--config", default=os.environ.get("WORKTREE_STORAGE_CONFIG"))
+    parser.add_argument("--config")
     parser.add_argument("--require-config", action="store_true")
     parser.add_argument("--print-mount-point", action="store_true")
+    parser.add_argument("--capabilities", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    config_path = pathlib.Path(args.config).expanduser() if args.config else DEFAULT_CONFIG
     try:
-        if args.config and os.environ.get("WORKTREE_STORAGE_GUARD_TESTING") != "1":
+        if args.capabilities:
+            if (
+                not args.json
+                or args.config is not None
+                or args.require_config
+                or args.print_mount_point
+            ):
+                raise GuardError(
+                    "--capabilities requires --json and cannot be combined with runtime options"
+                )
+            print(json.dumps(CAPABILITIES, sort_keys=True, separators=(",", ":")))
+            return 0
+        config_override = args.config
+        if config_override is None:
+            config_override = os.environ.get("WORKTREE_STORAGE_CONFIG")
+        config_path = (
+            pathlib.Path(config_override).expanduser()
+            if config_override
+            else DEFAULT_CONFIG
+        )
+        if config_override and os.environ.get("WORKTREE_STORAGE_GUARD_TESTING") != "1":
             raise GuardError("runtime config override requires guard test mode")
         config_error = None
         try:
-            config = load_config(config_path, production_default=args.config is None)
+            config = load_config(
+                config_path, production_default=config_override is None
+            )
         except GuardError as error:
             config = None
             config_error = error
@@ -493,6 +526,7 @@ def main() -> int:
                         "backing_directory_mode": config["backing_directory_mode"],
                         "children": config["children"],
                         "device_location": observed.get("device_location"),
+                        "encrypted": observed.get("encrypted"),
                         "free_gib": observed.get("free_gib"),
                         "free_percent": observed.get("free_percent"),
                         "marker_id": observed.get("marker_id"),

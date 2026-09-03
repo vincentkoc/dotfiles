@@ -57,6 +57,35 @@ run_guard() {
     "$guard" "$@"
 }
 
+capabilities='{"encryption_attestation":"exact_boolean","encryption_policy":"exact_boolean","schema_version":"worktree-storage-guard-capabilities.v1","storage_schema":"external-worktree-storage.v2","unknown_encryption":"reject"}'
+actual_capabilities="$(
+  HOME="$temporary/capability-home" \
+    WORKTREE_STORAGE_CONFIG="$temporary/missing-capability-config.json" \
+    WORKTREE_STORAGE_GUARD_OBSERVED="$temporary/missing-observation.json" \
+    "$guard" --capabilities --json
+)"
+[[ "$actual_capabilities" == "$capabilities" ]]
+
+assert_invalid_capabilities() {
+  local name="$1"
+  shift
+  if "$guard" "$@" >"$temporary/$name.out" 2>&1; then
+    echo "$name capabilities invocation must fail" >&2
+    exit 1
+  fi
+  grep -Fq -- \
+    "--capabilities requires --json and cannot be combined with runtime options" \
+    "$temporary/$name.out"
+}
+
+assert_invalid_capabilities capabilities-without-json --capabilities
+assert_invalid_capabilities capabilities-with-config \
+  --capabilities --json --config "$config"
+assert_invalid_capabilities capabilities-with-required \
+  --capabilities --json --require-config
+assert_invalid_capabilities capabilities-with-mount-point \
+  --capabilities --json --print-mount-point
+
 write_config
 write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
 [[ "$(run_guard --print-mount-point)" == "$mount_point" ]]
@@ -126,7 +155,17 @@ assert module.normalized_device_location(
 assert module.normalized_device_location({}) is None
 assert module.normalized_encryption({"Encryption": True}) is True
 assert module.normalized_encryption({"Encryption": False, "Encrypted": True}) is False
+assert module.normalized_encryption({"Encryption": "true", "Encrypted": True}) is None
+assert module.normalized_encryption({"Encryption": "true", "Encrypted": False}) is None
+for legacy_encrypted in (False, True):
+    assert module.normalized_encryption(
+        {"Encryption": 1.0, "Encrypted": legacy_encrypted}
+    ) is None
+assert module.normalized_encryption({"Encryption": 1, "Encrypted": True}) is None
+assert module.normalized_encryption({"Encryption": None, "Encrypted": True}) is None
 assert module.normalized_encryption({"Encrypted": True}) is True
+assert module.normalized_encryption({"Encrypted": False}) is False
+assert module.normalized_encryption({"Encrypted": 1}) is None
 assert module.normalized_encryption({}) is None
 if os.getuid() != 0:
     try:
@@ -143,6 +182,7 @@ import sys
 
 value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert value["configured"] is True
+assert value["encrypted"] is True
 assert value["schema_version"] == "external-worktree-storage.v2"
 assert value["children"] == {
     "openclaw_managed": {
@@ -206,6 +246,20 @@ path.write_text(json.dumps(value, sort_keys=True) + "\n")
 PY
 }
 
+mutate_observed() {
+  local expression="$1"
+  python3 - "$observed" "$expression" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+exec(sys.argv[2], {"value": value})
+path.write_text(json.dumps(value, sort_keys=True) + "\n")
+PY
+}
+
 write_config
 mutate_config 'value["schema_version"] = "external-worktree-storage.v1"'
 assert_invalid_config v1-schema "required config missing or invalid"
@@ -239,6 +293,30 @@ mutate_config 'value["children"]["openclaw_pnpm_store"]["disposable"] = 1.0'
 assert_invalid_config float-disposable "required config missing or invalid"
 
 write_config
+mutate_config 'value["encrypted"] = 1'
+assert_invalid_config integer-encrypted "required config missing or invalid"
+
+write_config
+mutate_config 'value["encrypted"] = 0'
+assert_invalid_config integer-zero-encrypted "required config missing or invalid"
+
+write_config
+mutate_config 'value["encrypted"] = 1.0'
+assert_invalid_config float-encrypted "required config missing or invalid"
+
+write_config
+mutate_config 'value["encrypted"] = 0.0'
+assert_invalid_config float-zero-encrypted "required config missing or invalid"
+
+write_config
+mutate_config 'value["encrypted"] = "true"'
+assert_invalid_config string-encrypted "required config missing or invalid"
+
+write_config
+mutate_config 'value["encrypted"] = None'
+assert_invalid_config null-encrypted "required config missing or invalid"
+
+write_config
 mutate_config 'value["children"]["openclaw_pnpm_store"]["relative_path"] = "openclaw-managed/cache"'
 assert_invalid_config overlapping-child "required config missing or invalid"
 
@@ -262,6 +340,96 @@ if run_guard >"$temporary/exfat.out" 2>&1; then
 fi
 grep -Fq "not APFS" "$temporary/exfat.out"
 
+assert_encryption_failure() {
+  local name="$1"
+  if run_guard >"$temporary/$name.out" 2>&1; then
+    echo "$name encryption attestation must fail" >&2
+    exit 1
+  fi
+  grep -Fq "encryption does not match policy" "$temporary/$name.out"
+  if grep -Eq "expected|actual|true|false|null" "$temporary/$name.out"; then
+    echo "$name encryption failure must not disclose values" >&2
+    exit 1
+  fi
+}
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["encrypted"] = False
+path.write_text(json.dumps(value))
+PY
+assert_encryption_failure encrypted-policy-true-observed-false
+
+write_config
+mutate_config 'value["encrypted"] = False'
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+assert_encryption_failure encrypted-policy-false-observed-true
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["encrypted"] = None
+path.write_text(json.dumps(value))
+PY
+assert_encryption_failure encrypted-observation-unknown
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value.pop("encrypted")'
+assert_encryption_failure encrypted-observation-missing
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value["encrypted"] = "true"'
+assert_encryption_failure encrypted-observation-string
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value["encrypted"] = 1'
+assert_encryption_failure encrypted-observation-integer
+
+write_config
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+mutate_observed 'value["encrypted"] = 1.0'
+assert_encryption_failure encrypted-observation-float
+
+write_config
+mutate_config 'value["encrypted"] = False'
+write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700
+python3 - "$observed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["encrypted"] = False
+path.write_text(json.dumps(value))
+PY
+run_guard --json >"$temporary/unencrypted-ready.json"
+python3 - "$temporary/unencrypted-ready.json" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert value["encrypted"] is False
+PY
+
+write_config
 write_observed "$volume_uuid" apfs true "$(id -u)" "$(id -g)" 0700 199 50
 if run_guard >"$temporary/low-gib.out" 2>&1; then
   echo "minimum_free_gib must fail before mutation" >&2

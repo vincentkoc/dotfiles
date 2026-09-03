@@ -12,8 +12,18 @@ Bins in this folder:
   - treats a missing contract as unconfigured only when the canonical path has
     neither a direct mount nor the sealed `root:wheel` mode-0000 backing directory
   - requires the exact UUID to be mounted directly at canonical
-    `~/.codex/worktrees` as encrypted, case-insensitive APFS with ownership
-    enabled and a user-owned mode-0700 mounted root
+    `~/.codex/worktrees` as case-insensitive APFS with policy-matching
+    encryption, ownership enabled, and a user-owned mode-0700 mounted root
+  - requires policy `encrypted` to be an exact JSON boolean and requires the
+    observed encryption boolean to match it exactly; unknown or mismatched
+    encryption fails without disclosing either value
+  - treats modern `diskutil` `Encryption` as authoritative whenever present;
+    malformed modern values are unknown, and legacy `Encrypted` is consulted
+    only when the modern field is absent
+  - exposes static integration discovery only through
+    `worktree-storage-guard --capabilities --json`; this returns the v1 exact-
+    boolean capability contract before reading environment configuration,
+    filesystem state, or `diskutil`, and rejects runtime options
   - requires at least 200 GiB and 10% free, an exact host marker, external-device
     location, disabled Spotlight indexing, and a UUID-tracked Time Machine volume
     exclusion verified with `tmutil isexcluded`
