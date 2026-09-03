@@ -157,6 +157,10 @@ assert module.normalized_encryption({"Encryption": True}) is True
 assert module.normalized_encryption({"Encryption": False, "Encrypted": True}) is False
 assert module.normalized_encryption({"Encryption": "true", "Encrypted": True}) is None
 assert module.normalized_encryption({"Encryption": "true", "Encrypted": False}) is None
+for legacy_encrypted in (False, True):
+    assert module.normalized_encryption(
+        {"Encryption": 1.0, "Encrypted": legacy_encrypted}
+    ) is None
 assert module.normalized_encryption({"Encryption": 1, "Encrypted": True}) is None
 assert module.normalized_encryption({"Encryption": None, "Encrypted": True}) is None
 assert module.normalized_encryption({"Encrypted": True}) is True
