@@ -826,11 +826,16 @@ setup_ghostty_config() {
     fi
 
     mkdir -p "$HOME/.config"
-    link_dotfile "$ghostty_config_dir" "$local_ghostty_dir"
-
     if [[ "$(uname)" == "Darwin" ]]; then
+        if [[ -L "$local_ghostty_dir" && "$(readlink "$local_ghostty_dir")" == "$ghostty_config_dir" ]]; then
+            unlink "$local_ghostty_dir"
+        elif [[ -e "$local_ghostty_dir" || -L "$local_ghostty_dir" ]]; then
+            warn "Ghostty XDG config can override the macOS config; run terminal-sync --apply to back it up"
+        fi
         mkdir -p "$macos_ghostty_dir"
         link_dotfile "$ghostty_config_file" "$macos_ghostty_config"
+    else
+        link_dotfile "$ghostty_config_dir" "$local_ghostty_dir"
     fi
 
     success "Ghostty config linked to $ghostty_config_dir"

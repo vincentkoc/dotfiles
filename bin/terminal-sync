@@ -33,7 +33,7 @@ check_link() {
 
     report "$target" drift
     failures=$((failures + 1))
-    [[ "$mode" == "apply" ]] || return
+    [[ "$mode" == "apply" ]] || return 0
 
     mkdir -p "$(dirname "$target")"
     if [[ -e "$target" || -L "$target" ]]; then
@@ -44,6 +44,26 @@ check_link() {
         fi
     fi
     ln -s "$source" "$target"
+}
+
+check_absent() {
+    local target="$1"
+    local legacy_source="${2:-}"
+
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        report "$target" ready
+        return
+    fi
+
+    report "$target" drift
+    failures=$((failures + 1))
+    [[ "$mode" == "apply" ]] || return 0
+
+    if [[ -n "$legacy_source" && -L "$target" && "$(readlink "$target")" == "$legacy_source" ]]; then
+        unlink "$target"
+    else
+        mv "$target" "$target.pre-terminal-sync.$(date +%Y%m%d%H%M%S).bak"
+    fi
 }
 
 has_meslo_font_payload() {
@@ -88,7 +108,7 @@ sync_font_pack() {
 
     report "terminal font pack ($total)" "drift missing=${#missing[@]}"
     failures=$((failures + 1))
-    [[ "$mode" == "apply" ]] || return
+    [[ "$mode" == "apply" ]] || return 0
     brew install --cask "${missing[@]}"
 }
 
@@ -100,7 +120,7 @@ repair_font() {
 
     report "MesloLGL Nerd Font Mono" drift
     failures=$((failures + 1))
-    [[ "$mode" == "apply" ]] || return
+    [[ "$mode" == "apply" ]] || return 0
 
     command -v brew >/dev/null 2>&1 || {
         report Homebrew missing
@@ -142,13 +162,22 @@ PY
 validate_ghostty() {
     local binary="/Applications/Ghostty.app/Contents/MacOS/ghostty"
     local effective_config
+    local expected_stack
+    local font_key
+    local font_stack
+    local fonts_ready=1
     if [[ ! -x "$binary" ]]; then
         report Ghostty missing
         failures=$((failures + 1))
         return
     fi
     effective_config="$($binary +show-config 2>/dev/null || true)"
-    if grep -q '^font-family = MesloLGL Nerd Font Mono$' <<<"$effective_config"; then
+    for font_key in font-family font-family-bold font-family-italic font-family-bold-italic; do
+        font_stack="$(grep "^$font_key = " <<<"$effective_config" || true)"
+        expected_stack="$font_key = Monaco"$'\n'"$font_key = MesloLGL Nerd Font Mono"
+        [[ "$font_stack" == "$expected_stack" ]] || fonts_ready=0
+    done
+    if [[ "$fonts_ready" -eq 1 ]]; then
         report "Ghostty effective config" ready
     else
         report "Ghostty effective config" drift
@@ -181,7 +210,7 @@ reload_tmux() {
     exit 2
 }
 
-check_link "$ghostty_source" "$HOME/.config/ghostty"
+check_absent "$HOME/.config/ghostty" "$ghostty_source"
 check_link "$ghostty_config" "$HOME/Library/Application Support/com.mitchellh.ghostty/config.ghostty"
 check_link "$tmux_config" "$HOME/.tmux.conf"
 check_link "$tmux_local_config" "$HOME/.tmux.conf.local"
@@ -202,7 +231,7 @@ if [[ "$mode" == "apply" ]]; then
     while IFS= read -r cask; do
         brew list --cask "$cask" >/dev/null 2>&1 || failures=$((failures + 1))
     done < <(declared_font_casks)
-    [[ -L "$HOME/.config/ghostty" && "$(readlink "$HOME/.config/ghostty")" == "$ghostty_source" ]] || failures=$((failures + 1))
+    [[ ! -e "$HOME/.config/ghostty" && ! -L "$HOME/.config/ghostty" ]] || failures=$((failures + 1))
     [[ -L "$HOME/.tmux.conf" && "$(readlink "$HOME/.tmux.conf")" == "$tmux_config" ]] || failures=$((failures + 1))
     [[ "$failures" -eq 0 ]] || exit 1
     printf '\nterminal parity applied; open a new Ghostty window if an existing window cached the old font\n'
