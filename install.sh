@@ -422,6 +422,9 @@ setup_config_symlinks() {
     local df_dir natilius_profile
     df_dir="$(dotfiles_dir)"
 
+    mkdir -p "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh"
+    link_dotfile "$df_dir/.ssh/config" "$HOME/.ssh/config"
     link_dotfile "$df_dir/.gitconfig" "$HOME/.gitconfig"
     link_dotfile "$df_dir/.mackup.cfg" "$HOME/.mackup.cfg"
     link_dotfile "$df_dir/.natiliusrc" "$HOME/.natiliusrc"
