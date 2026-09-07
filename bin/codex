@@ -71,16 +71,17 @@ if [[ "${CODEX_WRAPPER_DEBUG:-0}" == "1" ]]; then
   printf 'codex launcher: %s\n' "$real_codex" >&2
 fi
 
-if [[ -z "${GITHUB_PAT_TOKEN:-}" ]]; then
-  token=""
+token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_PAT_TOKEN:-}}"
+if [[ -z "$token" ]]; then
   gh_bin="$(PATH="$lookup_path" command -v gh || true)"
   if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    token="$("$gh_bin" auth token 2>/dev/null || true)"
+    token="$("$gh_bin" auth token </dev/null 2>/dev/null)" || token=""
   fi
-  if [[ -n "$token" ]]; then
-    export GITHUB_PAT_TOKEN="$token"
-  fi
-  unset gh_bin token
 fi
+if [[ -n "$token" ]]; then
+  export GITHUB_PERSONAL_ACCESS_TOKEN="${GITHUB_PERSONAL_ACCESS_TOKEN:-$token}"
+  export GITHUB_PAT_TOKEN="${GITHUB_PAT_TOKEN:-$token}"
+fi
+unset gh_bin token
 
 exec "$real_codex" "$@"
