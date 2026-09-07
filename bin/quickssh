@@ -63,6 +63,7 @@ resolve_legacy_host() {
 
   load_legacy_hosts || return 1
   alias_key="${alias//-/_}"
+  [[ -n "$alias_key" && "$alias_key" != *[!a-zA-Z0-9_]* ]] || return 1
   host_info_var="quickssh_hosts_${alias_key}"
   host_info="${!host_info_var:-}"
   [[ -n "$host_info" ]] || return 1
@@ -132,13 +133,15 @@ legacy_host_prefers_mosh() {
 }
 
 set_tmux_connection_title() {
-  local title="$1" window_id pane_count
+  local title="$1" window_id pane_count tmux_title
 
   [[ -n "${TMUX_PANE:-}" ]] || return 0
   command -v tmux >/dev/null 2>&1 || return 0
 
+  # tmux expands formats in titles, but connection aliases must remain literal.
+  tmux_title="${title//#/##}"
   tmux set-option -pt "$TMUX_PANE" @tt_base_title "$title" 2>/dev/null || true
-  tmux select-pane -t "$TMUX_PANE" -T "$title" 2>/dev/null || true
+  tmux select-pane -t "$TMUX_PANE" -T "$tmux_title" 2>/dev/null || true
 
   window_id="$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null || true)"
   [[ -n "$window_id" ]] || return 0
@@ -146,7 +149,19 @@ set_tmux_connection_title() {
   [[ "$pane_count" == "1" ]] || return 0
 
   tmux set-window-option -t "$window_id" automatic-rename off 2>/dev/null || true
-  tmux rename-window -t "$window_id" "$title" 2>/dev/null || true
+  tmux rename-window -t "$window_id" "$tmux_title" 2>/dev/null || true
+}
+
+set_connection_title() {
+  local title
+
+  title="$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]')"
+  if [[ -n "${TMUX_PANE:-}" ]]; then
+    set_tmux_connection_title "$title"
+  elif [[ -t 1 && -n "${TERM:-}" && "$TERM" != "dumb" ]]; then
+    # Name the connection before the remote shell or tmux takes over its title.
+    printf '\033]2;%s\007' "$title"
+  fi
 }
 
 ssh_config_files() {
@@ -328,8 +343,9 @@ if [[ -n "$local_port" || -n "$destination_port" ]]; then
   ssh_args+=(-L "$local_port:localhost:$destination_port")
 fi
 
+set_connection_title "$input"
+
 if [[ "$use_mosh" == "true" ]]; then
-  set_tmux_connection_title "$input"
   mosh_ssh=(ssh "${ssh_args[@]}")
   if [[ "$has_remote_command" == "true" ]]; then
     exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target" "${remote_command[@]}"
