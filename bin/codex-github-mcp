@@ -10,13 +10,43 @@ if [[ -z "$github_mcp_server" ]]; then
   exit 127
 fi
 
-github_token="$("$HOME/bin/ghx" auth token 2>/dev/null || true)"
+github_token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_PAT_TOKEN:-}}"
 if [[ -z "$github_token" ]]; then
-  echo "codex-github-mcp: GitHub CLI authentication is unavailable" >&2
+  wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  lookup_path=""
+  path_remaining="${PATH:-}"
+  path_done=""
+  while :; do
+    case "$path_remaining" in
+      *:*)
+        path_entry="${path_remaining%%:*}"
+        path_remaining="${path_remaining#*:}"
+        ;;
+      *)
+        path_entry="$path_remaining"
+        path_done=1
+        ;;
+    esac
+    path_entry="${path_entry:-.}"
+    if [[ ! -d "$path_entry" || ! "$path_entry" -ef "$wrapper_dir" ]]; then
+      lookup_path+="${lookup_path:+:}$path_entry"
+    fi
+    [[ -z "${path_done:-}" ]] || break
+  done
+  unset path_done path_entry path_remaining
+
+  gh_bin="$(PATH="$lookup_path" command -v gh || true)"
+  if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
+    github_token="$("$gh_bin" auth token </dev/null 2>/dev/null)" || github_token=""
+  fi
+fi
+if [[ -z "$github_token" ]]; then
+  echo "codex-github-mcp: set GITHUB_PERSONAL_ACCESS_TOKEN or GITHUB_PAT_TOKEN, or authenticate the native GitHub CLI" >&2
   exit 1
 fi
 
-export GITHUB_PERSONAL_ACCESS_TOKEN="$github_token"
-unset github_token
+export GITHUB_PERSONAL_ACCESS_TOKEN="${GITHUB_PERSONAL_ACCESS_TOKEN:-$github_token}"
+export GITHUB_PAT_TOKEN="${GITHUB_PAT_TOKEN:-$github_token}"
+unset gh_bin github_token
 
-exec "$github_mcp_server" stdio
+exec "$github_mcp_server" stdio "$@"

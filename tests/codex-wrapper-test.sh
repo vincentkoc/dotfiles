@@ -57,7 +57,10 @@ long_path="$long_path:$backend_dir:/usr/bin:/bin"
 path_entry_count=$((path_entry_count + 3))
 [[ "$path_entry_count" -eq 45 ]]
 
-output="$(env -u GITHUB_PAT_TOKEN PATH="$long_path" "$symlink_dir/codex" --version)"
+output="$(
+  env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN -u CODEX_HOME \
+    PATH="$long_path" "$symlink_dir/codex" --version
+)"
 [[ "$output" == *"version:--version"* ]]
 [[ "$output" == *"token:injected"* ]]
 
@@ -73,7 +76,8 @@ cat >"$backend_dir/uname" <<'EOF'
 printf 'Darwin\n'
 EOF
 darwin_output="$(
-  GITHUB_PAT_TOKEN=test HOME="$darwin_home" PATH="$long_path" \
+  env -u GITHUB_PERSONAL_ACCESS_TOKEN -u CODEX_HOME \
+    GITHUB_PAT_TOKEN=test HOME="$darwin_home" PATH="$long_path" \
     "$symlink_dir/codex" run "two words"
 )"
 [[ "$darwin_output" == "standalone:run two words" ]]
@@ -81,7 +85,8 @@ darwin_output="$(
 missing_home="$temporary/darwin-missing"
 mkdir -p "$missing_home"
 set +e
-GITHUB_PAT_TOKEN=test HOME="$missing_home" PATH="$long_path" \
+env -u GITHUB_PERSONAL_ACCESS_TOKEN -u CODEX_HOME \
+  GITHUB_PAT_TOKEN=test HOME="$missing_home" PATH="$long_path" \
   "$symlink_dir/codex" --version \
   >"$temporary/darwin-missing.stdout" 2>"$temporary/darwin-missing.stderr"
 missing_status=$?
@@ -105,7 +110,8 @@ cat >"$backend_dir/uname" <<'EOF'
 printf 'Linux\n'
 EOF
 linux_output="$(
-  env -u GITHUB_PAT_TOKEN HOME="$linux_home" PATH="$long_path" \
+  env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN -u CODEX_HOME \
+    HOME="$linux_home" PATH="$long_path" \
     "$symlink_dir/codex" run "two words"
 )"
 [[ "$linux_output" == "standalone:run two words" ]]
