@@ -11,6 +11,7 @@ backend="$temporary/backend"
 mkdir -p "$wrapper/gh-support" "$backend" "$temporary/home" "$temporary/alias" "$temporary/no-jq-tools"
 ln -s /bin/bash "$temporary/no-jq-tools/bash"
 ln -s "$(command -v dirname)" "$temporary/no-jq-tools/dirname"
+ln -s "$(command -v cat)" "$temporary/no-jq-tools/cat"
 cp "$root/bin/gh" "$root/bin/ghx" "$wrapper/"
 cp "$root/bin/gh-support/route.sh" "$wrapper/gh-support/"
 if [[ "${GH_TEST_COMPOSE_GUARD:-0}" == 1 ]]; then
@@ -49,7 +50,6 @@ EOF
 cp "$backend/gh" "$backend/ghx"
 ln -s "$wrapper/gh" "$temporary/alias/gh"
 ln -s "$wrapper/ghx" "$temporary/alias/ghx"
-ln -s "$(command -v jq)" "$backend/jq"
 chmod +x "$wrapper/gh" "$wrapper/ghx" "$wrapper/low-data" "$backend/gh" "$backend/ghx" "$backend/python3"
 export HOME="$temporary/home" PATH="$wrapper:$temporary/alias:$backend:/usr/bin:/bin"
 export TEST_ROUTE="$temporary/route" TEST_ARGS="$temporary/args" TEST_ENV="$temporary/env"
@@ -171,17 +171,29 @@ for entry in gh ghx; do
   TEST_ERROR='expected backend error' TEST_STATUS=7 run 7 "$entry" pr create
   [[ "$( <"$temporary/stderr")" == 'expected backend error' ]]
 
-  printf '{\n  "ok": true\n}\n{\n  "ok": false\n}\n' >"$TEST_OUTPUT"
+  # The stub verifies argv and passthrough. Real native formatting is exercised
+  # by ghx-native-cache-test.py, including scalars, objects, and mixed streams.
+  printf '{"ok":true}\n{"ok":false}\n' >"$TEST_OUTPUT"
   for flag in --jq -q; do
     route gh "$entry" api repos/example/repo "$flag" '{ok: .ok}'
-    [[ "$( <"$temporary/stdout")" == $'{"ok":true}\n{"ok":false}' ]]
+    cmp "$TEST_OUTPUT" "$temporary/stdout"
+    [[ "$( <"$TEST_ARGS")" == "api"$'\n'"repos/example/repo"$'\n'"$flag"$'\n''({ok: .ok}'$'\n'') | if type == "object" then tojson else . end' ]]
   done
-  route gh "$entry" api repos/example/repo '--jq={ok:.ok}'
-  route gh "$entry" api repos/example/repo '-q{ok:.ok}'
+  for prefix in --jq= -q -q= -iq; do
+    route gh "$entry" api repos/example/repo "${prefix}{ok:.ok}"
+    [[ "$( <"$TEST_ARGS")" == "api"$'\n'"repos/example/repo"$'\n'"${prefix}({ok:.ok}"$'\n'') | if type == "object" then tojson else . end' ]]
+  done
+  route gh "$entry" api repos/example/repo -iH --jq -q .field
+  [[ "$( <"$TEST_ARGS")" == $'api\nrepos/example/repo\n-iH\n--jq\n-q\n(.field\n) | if type == "object" then tojson else . end' ]]
+  route gh "$entry" api repos/example/repo --input --jq --jq .field
+  [[ "$( <"$TEST_ARGS")" == $'api\nrepos/example/repo\n--input\n--jq\n--jq\n(.field\n) | if type == "object" then tojson else . end' ]]
+  route gh "$entry" api repos/example/repo -- --jq .field
+  [[ "$( <"$TEST_ARGS")" == $'api\nrepos/example/repo\n--\n--jq\n.field' ]]
+  route gh "$entry" api repos/example/repo --jq '.field # trailing comment'
+  [[ "$( <"$TEST_ARGS")" == $'api\nrepos/example/repo\n--jq\n(.field # trailing comment\n) | if type == "object" then tojson else . end' ]]
   TEST_STATUS=9 run 9 "$entry" api repos/example/repo --jq '{ok:.ok}'
-  printf 'not json\n' >"$TEST_OUTPUT"
-  run 5 "$entry" api repos/example/repo --jq '{ok:.ok}'
-  route gh "$entry" api repos/example/repo --jq .login
+  printf '{\nordinary scalar output\n' >"$TEST_OUTPUT"
+  route gh "$entry" api repos/example/repo --jq '"{"'
   cmp "$TEST_OUTPUT" "$temporary/stdout"
   : >"$TEST_OUTPUT"
   route gh "$entry" api repos/example/repo --jq '{ok:.ok}'
@@ -212,9 +224,7 @@ PY
 mv "$backend/ghx" "$backend/proxy-disabled"
 route gh ghx pr view 123 -R example/repo --json number
 mv "$backend/proxy-disabled" "$backend/ghx"
-mv "$backend/jq" "$backend/jq-disabled"
-run 127 env PATH="$wrapper:$backend:$temporary/no-jq-tools" gh api repos/example/repo --jq '{ok:.ok}'
-mv "$backend/jq-disabled" "$backend/jq"
+route gh env PATH="$wrapper:$backend:$temporary/no-jq-tools" gh api repos/example/repo --jq '{ok:.ok}'
 mv "$HOME/.ghx/config.yaml" "$HOME/.ghx/saved"
 route gh ghx pr view 123 -R example/repo --json number
 mv "$backend/gh" "$backend/native-disabled"

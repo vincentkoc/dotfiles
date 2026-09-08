@@ -115,8 +115,9 @@ of implying a TTL was honored. The wrappers do not accept `--ttl=...` or
 New native invocations unset `GH_FORCE_TTY` and disable color. Non-TTY stdin
 also selects `GH_PROMPT_DISABLED=1` and `GH_PAGER=cat`, except auth, which retains
 the caller's prompt/pager policy. Existing daemon environment is unchanged.
-API object-producing jq expressions retain compact JSONL output; scalar queries
-remain native. The deployed low-data guard belongs at each entrypoint, once,
+API jq filters compact actual object results through native `gh`'s formatter;
+scalars, arrays, and unfiltered responses retain native output. No external
+`jq` is required. The deployed low-data guard belongs at each entrypoint, once,
 before this helper; the helper never calls one entrypoint from the other.
 
 ## Repo Fetch Policy

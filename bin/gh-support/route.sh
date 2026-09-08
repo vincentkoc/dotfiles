@@ -52,36 +52,59 @@ gh_cacheable_read() {
   [[ -n "$item" && -n "$fields" && "$repo" == */* ]]
 }
 
+gh_jq_filter() {
+  # gh's own formatter knows result types. Preserve scalars/arrays and convert
+  # only objects to JSONL; the newline also terminates trailing jq comments.
+  [[ -n "$1" ]] || return 0
+  printf '(%s\n) | if type == "object" then tojson else . end' "$1"
+}
+
 gh_native() {
-  local expression="" index next
-  local args=("$@") statuses=()
+  local index next short prefix flag expression
+  local args=("$@")
   if [[ "${1:-}" == api ]]; then
     for ((index = 1; index < ${#args[@]}; index += 1)); do
       case "${args[index]}" in
-        -q | --jq)
+        --jq)
           next=$((index + 1))
-          expression="${args[next]:-}"
+          [[ $next -ge ${#args[@]} ]] || args[next]="$(gh_jq_filter "${args[next]}")"
           index="$next" ;;
-        --jq=*) expression="${args[index]#*=}" ;;
-        -q?*) expression="${args[index]#-q}" ;;
+        --jq=*) args[index]="--jq=$(gh_jq_filter "${args[index]#*=}")" ;;
+        --cache | --field | --header | --hostname | --input | --method | --preview | --raw-field | --template)
+          index=$((index + 1)) ;;
         --) break ;;
+        --*) ;;
+        -?*)
+          short="${args[index]#-}"
+          prefix="-"
+          while [[ -n "$short" ]]; do
+            flag="${short:0:1}"
+            short="${short:1}"
+            prefix+="$flag"
+            case "$flag" in
+              q)
+                if [[ -n "$short" ]]; then
+                  expression="$short"
+                  if [[ "$expression" == =* ]]; then
+                    prefix+="="
+                    expression="${expression#=}"
+                  fi
+                  args[index]="$prefix$(gh_jq_filter "$expression")"
+                else
+                  next=$((index + 1))
+                  [[ $next -ge ${#args[@]} ]] || args[next]="$(gh_jq_filter "${args[next]}")"
+                  index="$next"
+                fi
+                break ;;
+              F | H | X | p | f | t)
+                [[ -n "$short" ]] || index=$((index + 1))
+                break ;;
+              i) ;;
+              *) break ;;
+            esac
+          done ;;
       esac
     done
-  fi
-  # Preserve the existing object-expression JSONL contract; scalar queries stay
-  # byte-for-byte native. A failed producer or JSON parser must remain a failure.
-  if [[ "$expression" == *"{"* ]]; then
-    local jq_bin
-    jq_bin="$(command -v jq)" || {
-      gh_route_error "jq is required for API object-expression JSONL output"
-      return 127
-    }
-    set +e
-    "$gh_bin" "${args[@]}" | "$jq_bin" -c .
-    statuses=("${PIPESTATUS[@]}")
-    set -e
-    [[ "${statuses[0]}" == 0 ]] || return "${statuses[0]}"
-    return "${statuses[1]}"
   fi
   exec "$gh_bin" "${args[@]}"
 }
