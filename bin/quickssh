@@ -318,6 +318,8 @@ fi
 remote_command=()
 has_remote_command=false
 if [[ "$use_tmux" == "true" ]]; then
+  "$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tt" \
+    topology-authorize remote-create "$target"
   remote_command=(sh -lc 'tmux attach || tmux new-session')
   has_remote_command=true
 elif [[ "$use_screen" == "true" ]]; then

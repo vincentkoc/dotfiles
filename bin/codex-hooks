@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Render the effective Codex hooks file from stable integration fragments."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import fcntl
+import hashlib
+import json
+import os
+import pathlib
+import re
+import tempfile
+
+
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+def read_json(path: pathlib.Path) -> dict[str, object]:
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict) or not isinstance(payload.get("hooks", {}), dict):
+        raise ValueError(f"invalid hooks JSON: {path}")
+    return payload
+
+
+def encoded(payload: object) -> bytes:
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+
+
+def digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def file_digest(path: pathlib.Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            checksum = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                checksum.update(chunk)
+            return checksum.hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def atomic_write(path: pathlib.Path, payload: bytes, mode: int = 0o600) -> None:
+    temporary_name = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+        temporary_name = None
+    finally:
+        if temporary_name:
+            pathlib.Path(temporary_name).unlink(missing_ok=True)
+
+
+def canonical_group(group: object) -> str:
+    return json.dumps(group, sort_keys=True, separators=(",", ":"))
+
+
+def managed_groups(fragments: list[dict[str, object]]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for fragment in fragments:
+        hooks = fragment.get("hooks", {})
+        assert isinstance(hooks, dict)
+        for event, groups in hooks.items():
+            if not isinstance(event, str) or not isinstance(groups, list):
+                raise ValueError("fragment hook events must contain arrays")
+            result.setdefault(event, []).extend(canonical_group(group) for group in groups)
+    return result
+
+
+def remove_managed(
+    current: dict[str, object], previous: dict[str, list[str]]
+) -> dict[str, object]:
+    user = copy.deepcopy(current)
+    hooks = user.setdefault("hooks", {})
+    assert isinstance(hooks, dict)
+    for event, managed in previous.items():
+        groups = hooks.get(event, [])
+        if not isinstance(groups, list):
+            raise ValueError(f"hook event is not an array: {event}")
+        remaining = list(managed)
+        kept = []
+        for group in groups:
+            value = canonical_group(group)
+            if value in remaining:
+                remaining.remove(value)
+            else:
+                kept.append(group)
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
+    return user
+
+
+def merge(
+    user: dict[str, object], fragments: list[dict[str, object]]
+) -> tuple[dict[str, object], dict[str, list[str]]]:
+    output = copy.deepcopy(user)
+    hooks = output.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("user hooks field must be an object")
+    seen = {
+        event: {canonical_group(group) for group in groups}
+        for event, groups in hooks.items()
+        if isinstance(event, str) and isinstance(groups, list)
+    }
+    managed: dict[str, list[str]] = {}
+    for fragment in fragments:
+        fragment_hooks = fragment["hooks"]
+        assert isinstance(fragment_hooks, dict)
+        for event, groups in fragment_hooks.items():
+            if not isinstance(groups, list):
+                raise ValueError(f"fragment hook event is not an array: {event}")
+            destination = hooks.setdefault(event, [])
+            if not isinstance(destination, list):
+                raise ValueError(f"user hook event is not an array: {event}")
+            event_seen = seen.setdefault(event, set())
+            for group in groups:
+                value = canonical_group(group)
+                if value not in event_seen:
+                    destination.append(group)
+                    event_seen.add(value)
+                    managed.setdefault(event, []).append(value)
+    return output, managed
+
+
+def existing_user_payload(
+    target: pathlib.Path,
+    state: dict[str, object] | None,
+    owned_source: pathlib.Path | None,
+) -> tuple[dict[str, object], str | None]:
+    current_digest = file_digest(target)
+    current = read_json(target) if current_digest is not None else {"hooks": {}}
+    if state and current_digest == state.get("rendered_sha256"):
+        user = state.get("user_payload")
+        if not isinstance(user, dict):
+            raise ValueError("render state has invalid user payload")
+        user = copy.deepcopy(user)
+    elif state:
+        previous = state.get("managed_groups")
+        if not isinstance(previous, dict):
+            raise ValueError("render state has invalid managed groups")
+        user = remove_managed(current, previous)
+    else:
+        user = current
+    if owned_source and current_digest is not None:
+        source = validate_fragment(owned_source)
+        user = remove_managed(user, managed_groups([source]))
+    return user, current_digest
+
+
+def validate_fragment(path: pathlib.Path) -> dict[str, object]:
+    payload = read_json(path)
+    if set(payload) != {"hooks"}:
+        raise ValueError("integration fragment must contain only the hooks object")
+    managed_groups([payload])
+    return payload
+
+
+def render(args: argparse.Namespace) -> int:
+    target = args.target.absolute()
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fragments_dir = target.parent / "hooks.d"
+    fragments_dir.mkdir(mode=0o700, exist_ok=True)
+    state_path = fragments_dir / ".render-state.json"
+    lock_path = target.parent / ".hooks.render.lock"
+
+    with lock_path.open("a+") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        state = read_json(state_path) if state_path.exists() else None
+        user_payload, before_digest = existing_user_payload(
+            target, state, args.owned_source
+        )
+
+        fragment_target = fragments_dir / f"{args.integration_id}.json"
+        if args.remove:
+            fragment_target.unlink(missing_ok=True)
+        else:
+            fragment = validate_fragment(args.fragment)
+            atomic_write(fragment_target, encoded(fragment))
+
+        fragment_paths = sorted(
+            path
+            for path in fragments_dir.glob("*.json")
+            if not path.name.startswith(".")
+        )
+        fragments = [validate_fragment(path) for path in fragment_paths]
+        output, managed = merge(user_payload, fragments)
+        output_bytes = encoded(output)
+        if file_digest(target) != before_digest:
+            raise RuntimeError("effective hooks changed during render; no replacement")
+
+        atomic_write(target, output_bytes)
+        render_state = {
+            "hooks": {},
+            "managed_groups": managed,
+            "rendered_sha256": digest(output_bytes),
+            "schema": 1,
+            "user_payload": user_payload,
+        }
+        atomic_write(state_path, encoded(render_state))
+
+    print(
+        f"codex_hooks=rendered integrations={len(fragment_paths)} "
+        f"target={target}"
+    )
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(prog="codex-hooks")
+    commands = root.add_subparsers(dest="command", required=True)
+    for name, remove in (("register", False), ("unregister", True)):
+        command = commands.add_parser(name)
+        command.add_argument("--integration-id", required=True)
+        command.add_argument("--target", type=pathlib.Path, required=True)
+        command.add_argument("--fragment", type=pathlib.Path)
+        command.add_argument("--owned-source", type=pathlib.Path)
+        command.set_defaults(remove=remove, run=render)
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    if not ID_RE.fullmatch(args.integration_id):
+        raise SystemExit("codex-hooks: invalid integration ID")
+    if not args.remove and args.fragment is None:
+        raise SystemExit("codex-hooks: register requires --fragment")
+    try:
+        return args.run(args)
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+        print(f"codex-hooks: {error}", file=os.sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

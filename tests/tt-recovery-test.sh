@@ -5,6 +5,9 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tt="$repo/bin/tt"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
+export TMUX_TMPDIR="$temporary/tmux-root"
+mkdir -p "$TMUX_TMPDIR"
+chmod 700 "$TMUX_TMPDIR"
 recovery_section="$temporary/recovery-section.sh"
 awk '
   /^tmux_server_running\(\)/ { in_recovery = 1 }
@@ -22,6 +25,7 @@ fi
 grep -Fq 'require_recovery_session_absent "$session" || exit 2' "$recovery_section"
 grep -Fq 'require_recovery_session_absent "ops" || exit 2' "$recovery_section"
 grep -Fq 'require_recovery_manifest_sessions_absent "$manifest" || exit 2' "$recovery_section"
+grep -Fq 'require_operator_manifest_scopes "$manifest" || exit $?' "$recovery_section"
 grep -Fq 'restore_cockpit_snapshot "$snapshot" "$session" --preserve-server' "$recovery_section"
 grep -Fq 'restore_agent_cockpit_layouts "$manifest"' "$recovery_section"
 grep -Fq 'create_ops_detached "$session" "$HOME" --no-shell-upgrade "$preserve_server" --recovery-session' "$recovery_section"
@@ -44,6 +48,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_ISOLATED_FIXTURE=1 \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   TT_TEST_TMUX_SERVER_RUNNING=1 \
@@ -70,6 +75,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_ISOLATED_FIXTURE=1 \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   TT_TEST_TMUX_SERVER_RUNNING=1 \
@@ -97,6 +103,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_ISOLATED_FIXTURE=1 \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   TT_TEST_TMUX_SERVER_RUNNING=1 \
@@ -120,6 +127,7 @@ env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_ISOLATED_FIXTURE=1 \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TEST_TMUX_LOG="$tmux_log" \
   TT_TEST_TMUX_SERVER_RUNNING=1 \
@@ -143,6 +151,7 @@ if env -u TMUX \
   HOME="$temporary/home" \
   XDG_CONFIG_HOME="$temporary/config" \
   TT_TMUX_BIN="$fake_tmux" \
+  TT_ISOLATED_FIXTURE=1 \
   TT_TEST_TMUX_LOG="$tmux_log" \
   TT_TEST_TMUX_EXISTING_SESSION="cockpit" \
   "$tt" recover cockpit "$snapshot" >/dev/null 2>&1; then

@@ -163,6 +163,19 @@ def descendants(root, children):
     return result
 
 
+def previous_rows():
+    if not OUTPUT.is_file():
+        return {}
+    rows = {}
+    for line in OUTPUT.read_text(errors="replace").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) >= 8:
+            rows[fields[0]] = fields
+    return rows
+
+
 def build_rows():
     ps_children = defaultdict(list)
     ps_command = {}
@@ -177,13 +190,23 @@ def build_rows():
         ps_command[pid] = command
 
     rows = []
+    previous = previous_rows()
     pane_format = (
         "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t"
-        "#{pane_title}\t#{pane_current_command}\t#{pane_current_path}"
+        "#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t"
+        "#{pane_dead}\t#{pane_dead_status}"
     )
     for line in run([TMUX, "list-panes", "-a", "-F", pane_format]).splitlines():
         try:
-            target, pane_pid, title, current_command, cwd = line.split("\t", 4)
+            (
+                target,
+                pane_pid,
+                title,
+                current_command,
+                cwd,
+                pane_dead,
+                pane_dead_status,
+            ) = line.split("\t", 6)
             pane_pid_int = int(pane_pid)
         except ValueError:
             raise SnapshotError("tmux returned an invalid pane record") from None
@@ -213,9 +236,12 @@ def build_rows():
         status = "shell"
         session_id = ""
         restore = f"cd {shlex.quote(cwd)} && exec {shlex.quote(LOGIN_SHELL)} -il"
+        owner_state = "shell"
+        exit_status = ""
 
         if codex_commands:
             kind = "codex"
+            owner_state = "running"
             command_text = " ".join(codex_commands)
             dangerous = (
                 " --dangerously-bypass-approvals-and-sandbox"
@@ -237,6 +263,7 @@ def build_rows():
                 restore = f"cd {shlex.quote(cwd)} && codex --no-alt-screen"
         elif claude_commands:
             kind = "claude"
+            owner_state = "running"
             status = "resume"
             dangerous = (
                 " --dangerously-skip-permissions"
@@ -245,8 +272,29 @@ def build_rows():
             )
             restore = f"cd {shlex.quote(cwd)} && claude{dangerous} resume"
 
+        if pane_dead == "1":
+            owner_state = "exited"
+            exit_status = pane_dead_status
+            old = previous.get(target)
+            if old and old[1] in {"codex", "claude"}:
+                kind = old[1]
+                session_id = old[5]
+                status = old[6]
+                restore = old[7]
+
         rows.append(
-            [target, kind, cwd, title, current_command, session_id, status, restore]
+            [
+                target,
+                kind,
+                cwd,
+                title,
+                current_command,
+                session_id,
+                status,
+                restore,
+                owner_state,
+                exit_status,
+            ]
         )
     return rows
 
@@ -258,7 +306,8 @@ def write_snapshot(rows):
         fd, tmp_name = tempfile.mkstemp(prefix=f"{OUTPUT.name}.", dir=str(OUTPUT.parent))
         with os.fdopen(fd, "w") as handle:
             handle.write(
-                "# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\tstatus\trestore\n"
+                "# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\t"
+                "status\trestore\towner_state\texit_status\n"
             )
             for row in rows:
                 handle.write("\t".join(clean(value) for value in row) + "\n")
