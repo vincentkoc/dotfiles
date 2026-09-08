@@ -35,6 +35,7 @@ EXCLUDED = (
     "assets/large.bin", "vendor/a2ui/renderers/lit/index.ts", "bin/old",
     ".changeset/old.md", ".pi/old.md", "unrelated/large.bin",
 )
+SPECIAL_DIRS = ('"quoted dir', "line\nbreak", "-option")
 
 
 class SparseTest(unittest.TestCase):
@@ -92,7 +93,8 @@ os.execv(os.environ["GWT_TEST_REAL_GIT"], [os.environ["GWT_TEST_REAL_GIT"], *arg
         self.git("config", "gc.auto", "0")
         self.git("config", "maintenance.auto", "false")
         self.git("remote", "add", "origin", "https://github.com/openclaw/openclaw.git")
-        for name in (*INCLUDED, *EXCLUDED, ".gitignore", "space dir/file.txt"):
+        for name in (*INCLUDED, *EXCLUDED, ".gitignore", "space dir/file.txt",
+                     *(f"{directory}/file.txt" for directory in SPECIAL_DIRS)):
             file = self.repo / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text("*.ignored\n" if name == ".gitignore" else f"{name}\n")
@@ -237,8 +239,20 @@ os.execv(os.environ["GWT_TEST_REAL_GIT"], [os.environ["GWT_TEST_REAL_GIT"], *arg
         self.log.write_text("")
         self.sparse("add", "src", "space dir")
         self.assertEqual([op for op in self.operations() if op[0] == "sparse-checkout"],
-                         [["sparse-checkout", "set", "--cone", "--sparse-index", "--stdin"]])
+                         [["sparse-checkout", "set", "--cone", "--sparse-index", "--", "src", "space dir"]])
         self.assertTrue((self.repo / "space dir/file.txt").is_file())
+
+    def test_add_preserves_quoted_newline_and_option_like_argv(self):
+        for existing in (False, True):
+            if existing:
+                self.sparse("set", "cone")
+            self.log.write_text("")
+            self.sparse("add", *SPECIAL_DIRS)
+            for directory in SPECIAL_DIRS:
+                self.assertTrue((self.repo / directory / "file.txt").is_file(), directory)
+            operation = (["add"] if existing else ["set", "--cone", "--sparse-index"])
+            self.assertEqual([op for op in self.operations() if op[0] == "sparse-checkout"],
+                             [["sparse-checkout", *operation, "--", *SPECIAL_DIRS]])
 
     def test_fresh_add_and_full(self):
         self.sparse("add", "src")

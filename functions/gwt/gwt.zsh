@@ -327,9 +327,9 @@ _gwt_sparse_add_paths() {
         return "$config_status"
     fi
     if [[ "$sparse_enabled" == "true" ]]; then
-        printf '%s\n' "$@" | git -C "$worktree_path" sparse-checkout add --stdin || return $?
+        git -C "$worktree_path" sparse-checkout add -- "$@" || return $?
     else
-        printf '%s\n' "$@" | git -C "$worktree_path" sparse-checkout set --cone --sparse-index --stdin || return $?
+        git -C "$worktree_path" sparse-checkout set --cone --sparse-index -- "$@" || return $?
     fi
     _gwt_sparse_record_profile "$worktree_path" custom || return $?
 }
