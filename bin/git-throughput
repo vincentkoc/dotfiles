@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Explicit repo-local fetch policy, conditional rollback, and one-ref refresh."""
+
+import argparse
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+
+
+def git(repo, *args, check=True):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=check, capture_output=True
+    )
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def config_path(repo):
+    common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    path = Path(os.fsdecode(common.stdout).strip()) / "config"
+    if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
+        raise ValueError("common config must be an owned, regular non-symlink file")
+    return path
+
+
+def validate_remote(repo, remote):
+    remotes = os.fsdecode(git(repo, "remote").stdout).splitlines()
+    if remote not in remotes:
+        raise ValueError("remote must be a configured name, not a URL")
+
+
+def copy_metadata(source_fd, target_fd):
+    if sys.platform == "darwin":
+        # copyfile.h: COPYFILE_METADATA = ACL | STAT | XATTR. Descriptor-only
+        # copying cannot touch a replacement config.lock at the same path.
+        function = ctypes.CDLL(None, use_errno=True).fcopyfile
+        function.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        function.restype = ctypes.c_int
+        if function(source_fd, target_fd, None, 7) != 0:
+            raise OSError(ctypes.get_errno(), "could not preserve config metadata")
+    else:
+        metadata = os.fstat(source_fd)
+        os.fchown(target_fd, metadata.st_uid, metadata.st_gid)
+        os.fchmod(target_fd, stat.S_IMODE(metadata.st_mode))
+        for name in os.listxattr(source_fd):
+            os.setxattr(target_fd, name, os.getxattr(source_fd, name))
+
+
+def locked_replace(config, expected, receipt, prepare):
+    lock = config.with_name("config.lock")
+    fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    owned_inode = os.fstat(fd).st_ino
+    source_fd = None
+    try:
+        source_fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW)
+        original = os.fstat(source_fd)
+        if not stat.S_ISREG(original.st_mode) or original.st_uid != os.getuid():
+            raise ValueError("config ownership or file type changed")
+
+        def identity(metadata):
+            return (metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                    metadata.st_uid, metadata.st_gid, metadata.st_size,
+                    metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+        def unchanged():
+            return identity(config.lstat()) == identity(original) and digest(config) == expected
+
+        def owns_lock():
+            return lock.lstat().st_ino == owned_inode and not lock.is_symlink()
+
+        if not unchanged():
+            raise ValueError("config drifted; no changes made")
+        receipt.mkdir(mode=0o700)
+        before = receipt / "before.config"
+        after = receipt / "after.config"
+        # Native cp preserves platform ACLs/xattrs as well as ordinary metadata.
+        subprocess.run(["cp", "-p", str(config), str(before)], check=True)
+        subprocess.run(["cp", "-p", str(config), str(after)], check=True)
+        prepare(after)
+        postimage = digest(after)
+        record = {"config": str(config), "before": expected, "after": postimage}
+        (receipt / "receipt.json").write_text(json.dumps(record, indent=2) + "\n")
+        if not unchanged():
+            raise ValueError("config changed while locked; retained receipt, no overwrite")
+        if postimage == expected:
+            print(f"git-throughput: already configured; receipt={receipt}")
+            return
+        if not owns_lock():
+            raise ValueError("lock ownership changed; no overwrite")
+        copy_metadata(source_fd, fd)
+        os.ftruncate(fd, 0)
+        with os.fdopen(os.dup(fd), "wb") as staged:
+            staged.write(after.read_bytes())
+            staged.flush()
+            os.fsync(staged.fileno())
+        if not owns_lock() or not unchanged():
+            raise ValueError("lock or config changed; no overwrite")
+        # Rename the actual Git lock while held; never remove another writer's lock.
+        os.replace(lock, config)
+        if digest(config) != postimage:
+            raise ValueError("post-write drift detected; do not automatically roll back")
+        print(f"git-throughput: updated; receipt={receipt}")
+    finally:
+        try:
+            if lock.exists() and lock.lstat().st_ino == owned_inode:
+                lock.unlink()
+        finally:
+            if source_fd is not None:
+                os.close(source_fd)
+            os.close(fd)
+
+
+def apply_policy(args):
+    config = config_path(args.repo)
+    remotes = list(dict.fromkeys(args.review_remote))
+    for remote in remotes:
+        validate_remote(args.repo, remote)
+        if remote == "origin":
+            raise ValueError("origin cannot be marked as an occasional review remote")
+
+    def prepare(stage):
+        values = {"fetch.prune": "true", "fetch.pruneTags": "false"}
+        for remote in remotes:
+            values[f"remote.{remote}.skipFetchAll"] = "true"
+            values[f"remote.{remote}.tagOpt"] = "--no-tags"
+        for key, value in values.items():
+            existing = git(args.repo, "config", "--file", str(stage), "--get-all", key, check=False)
+            if existing.returncode not in (0, 1):
+                raise ValueError("could not read staged config")
+            if existing.stdout != (value + "\n").encode():
+                git(args.repo, "config", "--file", str(stage), "--replace-all", key, value)
+
+    locked_replace(config, args.expect_sha256, args.receipt, prepare)
+
+
+def rollback(args):
+    config = config_path(args.repo)
+    record = json.loads((args.receipt / "receipt.json").read_text())
+    before = args.receipt / "before.config"
+    after = args.receipt / "after.config"
+    if (record["config"] != str(config) or digest(before) != record["before"]
+            or digest(after) != record["after"]):
+        raise ValueError("receipt does not match this config or its saved images")
+    undo_receipt = args.rollback_receipt
+
+    def prepare(stage):
+        subprocess.run(["cp", "-p", str(before), str(stage)], check=True)
+
+    locked_replace(config, record["after"], undo_receipt, prepare)
+
+
+def refresh(args):
+    validate_remote(args.repo, args.remote)
+    source = args.source
+    destination = args.destination
+    if not source.startswith(("refs/heads/", "refs/pull/", "refs/tags/")):
+        raise ValueError("source must be an explicit heads, pull, or tags ref")
+    if not destination.startswith(f"refs/remotes/{args.remote}/"):
+        raise ValueError("destination must be under refs/remotes/<remote>/")
+    for ref in (source, destination):
+        git(args.repo, "check-ref-format", ref)
+    # Keep configured wildcard mappings, tags, pruning and maintenance out of this
+    # one-ref operation. PATH-resolved Git retains the installed download guard.
+    guard = shutil.which("low-data")
+    environment = os.environ.copy()
+    if guard:
+        subprocess.run([guard, "status"], check=True)
+        if subprocess.run([guard, "active"]).returncode != 1:
+            environment.update(GIT_ALLOW_PROTOCOL="file", GIT_NO_LAZY_FETCH="1")
+    result = subprocess.run([
+        "git", "-C", str(args.repo), "-c", "maintenance.auto=false",
+        "-c", "gc.auto=0", "fetch", "--no-tags", "--no-prune",
+        "--no-prune-tags", "--no-write-fetch-head", "--recurse-submodules=no",
+        "--no-auto-maintenance", "--refmap=", "--", args.remote,
+        f"+{source}:{destination}",
+    ], env=environment)
+    return result.returncode
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    apply = commands.add_parser("apply", help="config only; never fetch or prune")
+    apply.add_argument("--repo", type=Path, required=True)
+    apply.add_argument("--expect-sha256", required=True)
+    apply.add_argument("--receipt", type=Path, required=True)
+    apply.add_argument("--review-remote", action="append", default=[])
+    undo = commands.add_parser("rollback", help="restore only an unchanged postimage")
+    undo.add_argument("--repo", type=Path, required=True)
+    undo.add_argument("--receipt", type=Path, required=True)
+    undo.add_argument("--rollback-receipt", type=Path, required=True)
+    fetch = commands.add_parser("refresh", help="fetch exactly one explicit ref")
+    fetch.add_argument("--repo", type=Path, required=True)
+    fetch.add_argument("--remote", required=True)
+    fetch.add_argument("--source", required=True)
+    fetch.add_argument("--destination", required=True)
+    args = parser.parse_args()
+    os.umask(0o077)
+    try:
+        return {"apply": apply_policy, "rollback": rollback, "refresh": refresh}[args.command](args) or 0
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        # Git errors can contain private URLs; surface only the failed command family.
+        detail = "Git/config subprocess failed" if isinstance(error, subprocess.CalledProcessError) else str(error)
+        print(f"git-throughput: {detail}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

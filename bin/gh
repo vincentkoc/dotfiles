@@ -1,68 +1,8 @@
 #!/usr/bin/env bash
-# ghx-shim: this script redirects gh commands through ghx for caching
+# shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-lookup_path=""
-path_remaining="${PATH:-}"
-path_done=""
-while :; do
-  case "$path_remaining" in
-    *:*)
-      path_entry="${path_remaining%%:*}"
-      path_remaining="${path_remaining#*:}"
-      ;;
-    *)
-      path_entry="$path_remaining"
-      path_done=1
-      ;;
-  esac
-  path_entry="${path_entry:-.}"
-  if [[ ! -d "$path_entry" || ! "$path_entry" -ef "$wrapper_dir" ]]; then
-    lookup_path+="${lookup_path:+:}$path_entry"
-  fi
-  [[ -z "${path_done:-}" ]] || break
-done
-unset path_done path_entry path_remaining
-gh_bin="$(PATH="$lookup_path" command -v gh || true)"
-
-run_native_gh() {
-  if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
-    printf 'gh: GitHub CLI is not installed\n' >&2
-    exit 127
-  fi
-  exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
-}
-
-# Authentication may prompt, read credentials, or consult the keychain. Keep it
-# out of ghx's daemon protocol and its IPC timeout entirely.
-if [[ "${1:-}" == "auth" ]]; then
-  run_native_gh "$@"
-fi
-
-# API consumers need byte-clean JSON. ghx's cache renderer colorizes object
-# responses, which breaks jq and ClawSweeper's line-oriented parsers.
-if [[ "${1:-}" == "api" ]]; then
-  if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    jq_expression=""
-    for ((index = 1; index < $#; index += 1)); do
-      if [[ "${!index}" == "--jq" ]]; then
-        next_index=$((index + 1))
-        jq_expression="${!next_index:-}"
-        break
-      fi
-    done
-
-    # ClawSweeper consumes one compact JSON object per line. The real gh
-    # prints jq object results prettily, so compact only object expressions;
-    # scalar expressions must keep gh's plain output contract.
-    if [[ "$jq_expression" == *"{"* ]] && jq_bin="$(PATH="$lookup_path" command -v jq)" && [[ -n "$jq_bin" ]]; then
-      env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@" | "$jq_bin" -c .
-      exit "${PIPESTATUS[0]}"
-    fi
-
-    run_native_gh "$@"
-  fi
-fi
-
-exec "$wrapper_dir/ghx" "$@"
+# shellcheck source=gh-support/route.sh
+source "$wrapper_dir/gh-support/route.sh"
+gh_route "$@"
