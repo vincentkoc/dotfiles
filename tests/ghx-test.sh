@@ -2,6 +2,12 @@
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+for entry in gh ghx; do
+  if ! head -c 512 "$root/bin/$entry" | grep -q '^# ghx-shim'; then
+    printf 'FAIL: %s must expose its ghx shim marker in the first 512 bytes\n' "$entry" >&2
+    exit 1
+  fi
+done
 export TEST_PYTHON
 TEST_PYTHON="$(command -v python3)"
 temporary="$(mktemp -d)"

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# ghx-shim: keep this marker in the first 512 bytes for ghx backend discovery.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
