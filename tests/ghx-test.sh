@@ -244,7 +244,7 @@ route gh env PATH="$wrapper:$backend:$temporary/no-jq-tools" gh api repos/exampl
 mv "$HOME/.ghx/config.yaml" "$HOME/.ghx/saved"
 route gh ghx pr view 123 -R example/repo --json number
 mv "$backend/gh" "$backend/native-disabled"
-run 127 ghx pr view 123 -R example/repo --json number
+run 127 env PATH="$wrapper:$backend:$temporary/no-jq-tools" ghx pr view 123 -R example/repo --json number
 [[ ! -e "$TEST_ROUTE" ]]
-run 127 gh api repos/example/repo
+run 127 env PATH="$wrapper:$backend:$temporary/no-jq-tools" gh api repos/example/repo
 printf 'PASS: gh/ghx routing, stdin, cache controls, bootstrap, JSONL, guards, and failures\n'
