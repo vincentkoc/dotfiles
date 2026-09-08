@@ -25,6 +25,11 @@ Key responsibilities:
 - agent worktree cleanup front doors
 - fail-closed external worktree storage validation for mutating and audit commands
 
+Sparse profile authority and explicit application behavior are documented in
+[`git-sparse/README.md`](../../git-sparse/README.md). Profiles default to the
+physically loaded module's checkout; an explicit `DOTFILES_GIT_SPARSE_ROOT`
+override is preserved. Updates do not reapply existing checkouts.
+
 External storage behavior:
 
 - Configured hosts mount a case-insensitive APFS volume in the policy-selected

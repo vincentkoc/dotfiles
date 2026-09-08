@@ -102,7 +102,7 @@ _gwt_repo_slug() {
 }
 
 _gwt_sparse_root() {
-    printf '%s\n' "${DOTFILES_GIT_SPARSE_ROOT:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/git-sparse}"
+    printf '%s\n' "${DOTFILES_GIT_SPARSE_ROOT:-$DOTFILES_GWT_CHECKOUT_ROOT/git-sparse}"
 }
 
 _gwt_sparse_repo_dir() {
@@ -209,9 +209,27 @@ _gwt_sparse_list_profiles() {
         done | sort -u
 }
 
-_gwt_sparse_enable_worktree_config() {
-    local repo_root="$1"
-    git -C "$repo_root" config extensions.worktreeConfig true >/dev/null 2>&1 || return 1
+_gwt_sparse_record_profile() {
+    local worktree_path="$1"
+    local profile="$2"
+    local profile_file="${3:-}"
+    local config_status=0
+
+    # Native Git has already changed the checkout. A metadata failure is not a rollback.
+    git -C "$worktree_path" config --worktree dotfiles.sparseProfile "$profile" || config_status=$?
+    if (( config_status == 0 )); then
+        if [[ -n "$profile_file" ]]; then
+            git -C "$worktree_path" config --worktree dotfiles.sparseProfileFile "$profile_file" || config_status=$?
+        else
+            git -C "$worktree_path" config --worktree --unset-all dotfiles.sparseProfileFile || config_status=$?
+            # --unset-all returns 5 when the key is already absent.
+            (( config_status == 5 )) && config_status=0
+        fi
+    fi
+    if (( config_status != 0 )); then
+        echo "gwt: Git sparse-checkout succeeded, but profile metadata update failed; inspect 'gwt sparse status' before retrying" >&2
+        return "$config_status"
+    fi
 }
 
 _gwt_sparse_apply_profile() {
@@ -221,12 +239,9 @@ _gwt_sparse_apply_profile() {
 
     repo_root=$(_gwt_git_probe -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
     repo_dir=$(_gwt_sparse_repo_dir "$repo_root") || return 1
-    _gwt_sparse_enable_worktree_config "$repo_root" || return 1
-
     if [[ "$profile" == "full" ]]; then
-        git -C "$worktree_path" sparse-checkout disable >/dev/null 2>&1 || true
-        git -C "$worktree_path" config --worktree dotfiles.sparseProfile full || return 1
-        git -C "$worktree_path" config --worktree --unset-all dotfiles.sparseProfileFile >/dev/null 2>&1 || true
+        git -C "$worktree_path" sparse-checkout disable || return $?
+        _gwt_sparse_record_profile "$worktree_path" full || return $?
         echo "gwt: sparse profile full (disabled) for $worktree_path"
         return 0
     fi
@@ -238,15 +253,12 @@ _gwt_sparse_apply_profile() {
 
     mode=$(_gwt_sparse_profile_mode "$profile_file") || return 1
     if [[ "$mode" == "cone" ]]; then
-        git -C "$worktree_path" sparse-checkout init --cone --sparse-index || return 1
-        git -C "$worktree_path" sparse-checkout set --stdin < "$profile_file" || return 1
+        git -C "$worktree_path" sparse-checkout set --cone --sparse-index --stdin < "$profile_file" || return $?
     else
-        git -C "$worktree_path" sparse-checkout init --no-cone || return 1
-        git -C "$worktree_path" sparse-checkout set --no-cone --stdin < "$profile_file" || return 1
+        git -C "$worktree_path" sparse-checkout set --no-cone --no-sparse-index --stdin < "$profile_file" || return $?
     fi
 
-    git -C "$worktree_path" config --worktree dotfiles.sparseProfile "$profile" || return 1
-    git -C "$worktree_path" config --worktree dotfiles.sparseProfileFile "$profile_file" || return 1
+    _gwt_sparse_record_profile "$worktree_path" "$profile" "$profile_file" || return $?
     echo "gwt: sparse profile $profile ($mode) from $profile_file"
 }
 
@@ -302,21 +314,24 @@ _gwt_sparse_status() {
 _gwt_sparse_add_paths() {
     local worktree_path="$1"
     shift
-    local repo_root
+    local sparse_enabled config_status=0
 
     [[ $# -gt 0 ]] || {
         echo "Usage: gwt sparse add <path...>" >&2
         return 1
     }
 
-    repo_root=$(_gwt_git_probe -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null) || return 1
-    _gwt_sparse_enable_worktree_config "$repo_root" || return 1
-    if [[ "$(_gwt_git_probe -C "$worktree_path" config --bool core.sparseCheckout 2>/dev/null || echo false)" != "true" ]]; then
-        git -C "$worktree_path" sparse-checkout init --cone --sparse-index || return 1
+    sparse_enabled=$(_gwt_git_probe -C "$worktree_path" config --bool core.sparseCheckout) || config_status=$?
+    if (( config_status != 0 && config_status != 1 )); then
+        echo "gwt: cannot read sparse-checkout state; no paths added" >&2
+        return "$config_status"
     fi
-    git -C "$worktree_path" sparse-checkout add "$@" || return 1
-    git -C "$worktree_path" config --worktree dotfiles.sparseProfile custom >/dev/null 2>&1 || true
-    git -C "$worktree_path" config --worktree --unset-all dotfiles.sparseProfileFile >/dev/null 2>&1 || true
+    if [[ "$sparse_enabled" == "true" ]]; then
+        printf '%s\n' "$@" | git -C "$worktree_path" sparse-checkout add --stdin || return $?
+    else
+        printf '%s\n' "$@" | git -C "$worktree_path" sparse-checkout set --cone --sparse-index --stdin || return $?
+    fi
+    _gwt_sparse_record_profile "$worktree_path" custom || return $?
 }
 
 _gwt_sparse_clear_shell_env() {
