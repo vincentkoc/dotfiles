@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $# == 0 ]] || { printf 'usage: ghx-bootstrap\n' >&2; exit 2; }
+command -v python3 >/dev/null || { printf 'ghx-bootstrap: python3 is required\n' >&2; exit 127; }
+umask 077
+directory="${HOME:?}/.ghx"
+config="$directory/config.yaml"
+if [[ -L "$directory" || -L "$config" ]]; then
+  printf 'ghx-bootstrap: refusing a symlinked config or directory\n' >&2
+  exit 1
+fi
+if [[ -e "$config" ]]; then
+  [[ -f "$config" ]] || { printf 'ghx-bootstrap: config is not a regular file\n' >&2; exit 1; }
+  printf 'ghx-bootstrap: existing config preserved\n'
+  exit 0
+fi
+mkdir -p "$directory"
+temporary="$(mktemp "$directory/.config.yaml.XXXXXX")"
+trap 'rm -f "$temporary"' EXIT
+# ghx 1.5.4 applies GHX_GH_PATH only after loading a config file. Keep defaults.
+printf '{}\n' >"$temporary"
+python3 - "$temporary" "$config" <<'PY' || {
+import os
+import sys
+
+try:
+    os.link(sys.argv[1], sys.argv[2])
+except OSError:
+    sys.exit(1)
+PY
+  printf 'ghx-bootstrap: could not create config atomically; existing state unchanged\n' >&2
+  exit 1
+}
+printf 'ghx-bootstrap: initialized config with upstream defaults; no daemon restart\n'

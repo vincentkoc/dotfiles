@@ -1,75 +1,9 @@
 #!/usr/bin/env bash
+# ghx-shim: keep this marker in the first 512 bytes for ghx backend discovery.
+# shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-lookup_path=""
-path_remaining="${PATH:-}"
-path_done=""
-while :; do
-  case "$path_remaining" in
-    *:*)
-      path_entry="${path_remaining%%:*}"
-      path_remaining="${path_remaining#*:}"
-      ;;
-    *)
-      path_entry="$path_remaining"
-      path_done=1
-      ;;
-  esac
-  path_entry="${path_entry:-.}"
-  if [[ ! -d "$path_entry" || ! "$path_entry" -ef "$wrapper_dir" ]]; then
-    lookup_path+="${lookup_path:+:}$path_entry"
-  fi
-  [[ -z "${path_done:-}" ]] || break
-done
-unset path_done path_entry path_remaining
-
-ghx_bin="$(PATH="$lookup_path" command -v ghx || true)"
-gh_bin="$(PATH="$lookup_path" command -v gh || true)"
-
-run_native_gh() {
-  if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
-    printf 'ghx: command requires the real GitHub CLI\n' >&2
-    exit 127
-  fi
-  exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$gh_bin" "$@"
-}
-
-uses_stdin_payload() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      - | -F- | /dev/stdin | /dev/fd/0 | --body-file=- | --body-file=/dev/stdin | --body-file=/dev/fd/0 | --input=- | --input=/dev/stdin | --input=/dev/fd/0 | --with-token)
-        return 0
-        ;;
-    esac
-  done
-  return 1
-}
-
-# Authentication may prompt, read credentials, or consult the keychain. Keep it
-# out of ghx's daemon protocol and its IPC timeout entirely.
-if [[ "${1:-}" == "auth" ]]; then
-  run_native_gh "$@"
-fi
-
-# ghx's daemon protocol forwards argv, cwd, and output, but not stdin. Sending
-# stdin-backed mutations through it can turn a valid payload into an empty one.
-if uses_stdin_payload "$@"; then
-  run_native_gh "$@"
-fi
-
-if [[ -n "$ghx_bin" && -x "$ghx_bin" ]]; then
-  # Avoid resolving this gh wrapper when ghx needs the real GitHub CLI.
-  if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 GHX_GH_PATH="$gh_bin" "$ghx_bin" "$@"
-  fi
-  exec env NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0 GH_FORCE_TTY=0 "$ghx_bin" "$@"
-fi
-
-if [[ -z "$gh_bin" || ! -x "$gh_bin" ]]; then
-  printf 'ghx: neither ghx nor GitHub CLI is installed\n' >&2
-  exit 127
-fi
-
-run_native_gh "$@"
+# shellcheck source=gh-support/route.sh
+source "$wrapper_dir/gh-support/route.sh"
+gh_route "$@"
