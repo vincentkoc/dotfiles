@@ -140,6 +140,16 @@ for entry in gh ghx; do
   route gh "$entry" api repos/example/repo --cache=15s
   run 2 "$entry" --no-cache api repos/example/repo --cache 15s
   run 2 env GHX_NO_CACHE=1 "$entry" api repos/example/repo --cache=15s
+  for flag in --template --input -t -iH; do
+    for value in --cache --cache=15s; do
+      route gh "$entry" --no-cache api repos/example/repo "$flag" "$value"
+      [[ "$( <"$TEST_ARGS")" == "api"$'\n'"repos/example/repo"$'\n'"$flag"$'\n'"$value" ]]
+    done
+  done
+  route gh "$entry" --no-cache api -- --cache
+  [[ "$( <"$TEST_ARGS")" == $'api\n--\n--cache' ]]
+  route gh env GHX_NO_CACHE=1 "$entry" api repos/example/repo --template --cache
+  [[ "$( <"$TEST_ARGS")" == $'api\nrepos/example/repo\n--template\n--cache' ]]
   run 2 "$entry" --ttl
   run 2 "$entry" --ttl api repos/example/repo
   run 2 "$entry" --ttl -1 pr view 123

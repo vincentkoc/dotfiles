@@ -65,12 +65,18 @@ gh_native() {
   if [[ "${1:-}" == api ]]; then
     for ((index = 1; index < ${#args[@]}; index += 1)); do
       case "${args[index]}" in
+        --cache | --cache=*)
+          if [[ "${no_cache:-0}" == 1 ]]; then
+            gh_route_error "--no-cache/GHX_NO_CACHE=1 conflicts with api --cache"
+            return 2
+          fi
+          [[ "${args[index]}" != --cache ]] || index=$((index + 1)) ;;
         --jq)
           next=$((index + 1))
           [[ $next -ge ${#args[@]} ]] || args[next]="$(gh_jq_filter "${args[next]}")"
           index="$next" ;;
         --jq=*) args[index]="--jq=$(gh_jq_filter "${args[index]#*=}")" ;;
-        --cache | --field | --header | --hostname | --input | --method | --preview | --raw-field | --template)
+        --field | --header | --hostname | --input | --method | --preview | --raw-field | --template)
           index=$((index + 1)) ;;
         --) break ;;
         --*) ;;
@@ -110,7 +116,7 @@ gh_native() {
 }
 
 gh_route() {
-  local no_cache="${GHX_NO_CACHE:-0}" ttl="" gh_bin ghx_bin="" arg
+  local no_cache="${GHX_NO_CACHE:-0}" ttl="" gh_bin ghx_bin=""
   local controls=()
   while (($#)); do
     case "$1" in
@@ -154,15 +160,6 @@ gh_route() {
   if [[ -n "$ttl" ]]; then
     gh_route_error "--ttl applies only to cacheable structured reads; use api --cache <duration> for an explicitly safe GET"
     return 2
-  fi
-  if [[ "$no_cache" == 1 && "${1:-}" == api ]]; then
-    for arg in "$@"; do
-      case "$arg" in
-        --cache | --cache=*)
-          gh_route_error "--no-cache/GHX_NO_CACHE=1 conflicts with api --cache"
-          return 2 ;;
-      esac
-    done
   fi
   gh_native "$@"
 }

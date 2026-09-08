@@ -54,6 +54,8 @@ with tempfile.TemporaryDirectory() as temporary:
     (backend / "dirname").symlink_to(shutil.which("dirname"))
     for directory in ("a", "b", "home", "config", "cache"):
         (root / directory).mkdir()
+    for name in ("--cache", "--cache=15s"):
+        (root / "a" / name).write_text('{"fixture":"input body"}')
     environment = {
         "PATH": str(backend),
         "HOME": str(root / "home"),
@@ -106,6 +108,19 @@ with tempfile.TemporaryDirectory() as temporary:
         }
         forms = ("--jq", "--jq=", "-q", "-q=", "attached-q")
         for wrapper in wrappers:
+            for value in ("--cache", "--cache=15s"):
+                for options in (["--template", value], ["--input", value, "--method", "GET"]):
+                    expected = invoke(native, "api", data_endpoint, *options).stdout
+                    observed = invoke(wrapper, "--no-cache", "api", data_endpoint, *options).stdout
+                    assert observed == expected, (wrapper.name, options, observed, expected)
+            sentinel_args = ["api", "--help", "--", "--cache"]
+            expected = invoke(native, *sentinel_args).stdout
+            assert invoke(wrapper, "--no-cache", *sentinel_args).stdout == expected
+            request_count = len(requests)
+            for cache_flag in (["--cache", "15s"], ["--cache=15s"]):
+                result = invoke(wrapper, "--no-cache", "api", data_endpoint, *cache_flag, success=False)
+                assert result.returncode == 2 and b"conflicts with api --cache" in result.stderr
+            assert len(requests) == request_count
             for form in forms:
                 def flags(query):
                     return ["-q" + query] if form == "attached-q" else query_args(query, form)
