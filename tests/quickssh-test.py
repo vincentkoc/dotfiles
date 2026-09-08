@@ -44,6 +44,9 @@ class QuicksshTest(unittest.TestCase):
         self.extras = self.root / "extras"
         self.extras.mkdir()
         self.log = self.root / "calls.jsonl"
+        self.tmux_tmpdir = self.root / "tmux-root"
+        self.tmux_tmpdir.mkdir()
+        self.tmux_tmpdir.chmod(0o700)
         for name in ("ssh", "mosh", "tmux", "fzf"):
             stub = self.bin / name
             stub.write_text(STUB)
@@ -62,6 +65,9 @@ class QuicksshTest(unittest.TestCase):
             "CALL_LOG": str(self.log),
             "PANE_COUNT": "1",
             "TERM": "xterm-256color",
+            "TT_ISOLATED_FIXTURE": "1",
+            "TT_TMUX_BIN": str(self.bin / "tmux"),
+            "TMUX_TMPDIR": str(self.tmux_tmpdir),
         }
         for key in ("TMUX", "TMUX_PANE", "TRANSPORT_EXIT"):
             self.env.pop(key, None)

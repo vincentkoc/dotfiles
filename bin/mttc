@@ -138,6 +138,13 @@ if resolved_target="$(resolve_quickssh_alias "$host_input" 2>/dev/null)"; then
   target="$resolved_target"
 fi
 
+scope_session="$session"
+if [[ -z "$scope_session" ]]; then
+  [[ "$tt_profile" == "mobile" ]] && scope_session="mobile" || scope_session="main"
+fi
+"$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tt" \
+  topology-authorize remote-create "$target:$scope_session"
+
 ssh_cmd="${MOSH_TMUX_SSH:-ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3}"
 if [[ -n "$port" ]]; then
   ssh_cmd+=" -p $port"

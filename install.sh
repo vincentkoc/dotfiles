@@ -595,11 +595,14 @@ EOF
 
 setup_codex_dotfiles() {
     local df_dir codex_home codex_agents_src codex_config_src codex_hooks_src codex_config_dest
+    local codex_hooks_renderer codex_hooks_dest
     df_dir="$(dotfiles_dir)"
     codex_home="${CODEX_HOME:-$HOME/.codex}"
     codex_agents_src="$df_dir/.codex/AGENTS.md"
     codex_config_src="$df_dir/.codex/config.toml"
     codex_hooks_src="$df_dir/.codex/hooks.json"
+    codex_hooks_renderer="$df_dir/bin/codex-hooks"
+    codex_hooks_dest="$codex_home/hooks.json"
     codex_config_dest="$codex_home/config.toml"
 
     mkdir -p "$codex_home"
@@ -624,10 +627,14 @@ setup_codex_dotfiles() {
         info "Run the private bootstrap Codex component to create the machine-local config"
     fi
 
-    if [[ -f "$codex_hooks_src" ]]; then
-        link_dotfile "$codex_hooks_src" "$codex_home/hooks.json"
+    if [[ -f "$codex_hooks_src" && -x "$codex_hooks_renderer" ]]; then
+        "$codex_hooks_renderer" register \
+            --integration-id dotfiles.core \
+            --fragment "$codex_hooks_src" \
+            --owned-source "$codex_hooks_src" \
+            --target "$codex_hooks_dest"
     else
-        warn "Codex hooks file missing in dotfiles: $codex_hooks_src"
+        warn "Codex hooks renderer or source missing in dotfiles"
     fi
 
     if [[ "$(uname)" == "Darwin" ]] && ! command -v github-mcp-server &>/dev/null; then

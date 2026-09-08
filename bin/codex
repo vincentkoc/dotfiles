@@ -71,6 +71,58 @@ if [[ "${CODEX_WRAPPER_DEBUG:-0}" == "1" ]]; then
   printf 'codex launcher: %s\n' "$real_codex" >&2
 fi
 
+constrained_network=0
+heavy_work=0
+disk_reserve_gib="${CODEX_DISK_RESERVE_GIB:-8}"
+planned_write_bytes="${CODEX_PLANNED_WRITE_BYTES:-0}"
+forwarded=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --constrained-network)
+      constrained_network=1
+      shift
+      ;;
+    --heavy-work)
+      heavy_work=1
+      shift
+      ;;
+    --disk-reserve-gib)
+      [[ $# -ge 2 ]] || { printf 'codex: --disk-reserve-gib requires a value\n' >&2; exit 2; }
+      disk_reserve_gib="$2"
+      shift 2
+      ;;
+    --planned-write-bytes)
+      [[ $# -ge 2 ]] || { printf 'codex: --planned-write-bytes requires a value\n' >&2; exit 2; }
+      planned_write_bytes="$2"
+      shift 2
+      ;;
+    --)
+      forwarded+=("$@")
+      break
+      ;;
+    *)
+      forwarded+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if (( heavy_work )); then
+  admission="${CODEX_TASK_RUNTIME_BIN:-$wrapper_dir/task-runtime}"
+  [[ -x "$admission" ]] || {
+    printf 'codex: heavy-work admission helper is missing: %s\n' "$admission" >&2
+    exit 127
+  }
+  "$admission" admit \
+    --path "${CODEX_WORK_PATH:-$PWD}" \
+    --reserve-gib "$disk_reserve_gib" \
+    --planned-bytes "$planned_write_bytes" >&2
+fi
+
+if (( constrained_network )); then
+  forwarded=(--disable unbounded_connection_retries "${forwarded[@]}")
+fi
+
 token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_PAT_TOKEN:-}}"
 if [[ -z "$token" ]]; then
   gh_bin="$(PATH="$lookup_path" command -v gh || true)"
@@ -84,4 +136,4 @@ if [[ -n "$token" ]]; then
 fi
 unset gh_bin token
 
-exec "$real_codex" "$@"
+exec "$real_codex" "${forwarded[@]}"

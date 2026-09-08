@@ -20,7 +20,7 @@ fi
 if [[ ! -x "$TMUX_BIN" && -z "${TT_TMUX_BIN:-}" ]]; then
   TMUX_BIN="/usr/bin/tmux"
 fi
-if [[ ! -x "$TMUX_BIN" ]]; then
+if [[ ! -x "$TMUX_BIN" && "${1:-}" != "topology-authorize" ]]; then
   echo "tmux not found at common paths" >&2
   exit 1
 fi
@@ -34,6 +34,68 @@ TT_WSL_BRIDGE_PENDING_PID=""
 TT_WSL_BRIDGE_PENDING_STARTTIME=""
 TT_WSL_BRIDGE_PENDING_NS=""
 TT_WSL_BRIDGE_PENDING_EXE=""
+
+agent_invocation() {
+  [[ -n "${CODEX_THREAD_ID:-}" ||
+    -n "${CODEX_SESSION_ID:-}" ||
+    -n "${CLAUDE_AGENT_ID:-}" ]]
+}
+
+topology_scope_matches() {
+  local expected="$1"
+  local entry
+  local -a entries
+
+  IFS=',' read -r -a entries <<<"${TT_OPERATOR_TMUX_SCOPE:-}"
+  for entry in "${entries[@]}"; do
+    [[ "$entry" == "$expected" ]] && return 0
+  done
+  return 1
+}
+
+isolated_fixture_context() {
+  local root owner mode
+
+  [[ "${TT_ISOLATED_FIXTURE:-0}" == "1" &&
+    -n "${TT_TMUX_BIN:-}" &&
+    -z "${TMUX:-}" &&
+    -n "${TMUX_TMPDIR:-}" &&
+    "$TMUX_TMPDIR" == /* &&
+    -d "$TMUX_TMPDIR" &&
+    -w "$TMUX_TMPDIR" ]] || return 1
+  root="$(cd -P -- "$TMUX_TMPDIR" 2>/dev/null && pwd -P)" || return 1
+  [[ "$root" != "/" && "$root" != "/tmp" && "$root" != "/private/tmp" ]] || return 1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    owner="$(stat -f %u "$root" 2>/dev/null)" || return 1
+    mode="$(stat -f %Lp "$root" 2>/dev/null)" || return 1
+  else
+    owner="$(stat -c %u "$root" 2>/dev/null)" || return 1
+    mode="$(stat -c %a "$root" 2>/dev/null)" || return 1
+  fi
+  [[ "$owner" == "$(id -u)" && "$mode" == "700" ]]
+}
+
+require_operator_topology_scope() {
+  local action="$1"
+  local target="$2"
+  local expected="$action:$target"
+
+  if isolated_fixture_context; then
+    return 0
+  fi
+  agent_invocation || return 0
+  topology_scope_matches "$expected" && return 0
+  printf "tt: agent topology creation requires TT_OPERATOR_TMUX_SCOPE=%q\n" "$expected" >&2
+  return 73
+}
+
+refuse_agent_server_reset() {
+  if isolated_fixture_context || ! agent_invocation; then
+    return 0
+  fi
+  echo "tt: agents cannot use the legacy server-wide reset route" >&2
+  return 73
+}
 
 wsl_bridge_is_wsl() {
   [[ -n "${WSL_DISTRO_NAME:-}" ]] &&
@@ -1178,6 +1240,7 @@ create_plain() {
     attach_or_switch "$session"
   fi
 
+  require_operator_topology_scope create "$session" || exit $?
   if [[ -n "${TMUX:-}" ]]; then
     "$TMUX_BIN" new-session -d -s "$session"
     set_profile_metadata "$session" plain
@@ -1340,13 +1403,6 @@ ops_session_valid() {
   done < <("$TMUX_BIN" list-windows -t "$session" -F '#{window_id}	#W' 2>/dev/null)
 }
 
-ops_session_idle() {
-  local session="$1"
-
-  "$TMUX_BIN" list-panes -t "$session" -F '#{pane_current_command}' 2>/dev/null |
-    awk 'BEGIN { ok=1 } $0 !~ /^(zsh|bash|fish|sh)$/ { ok=0 } END { exit ok ? 0 : 1 }'
-}
-
 create_ops() {
   local session="${1:-cockpit}"
   local start_dir="${2:-$PWD}"
@@ -1384,13 +1440,9 @@ create_ops_detached() {
   if [[ "$session" == "cockpit" ]] &&
     "$TMUX_BIN" has-session -t ops 2>/dev/null &&
     ! "$TMUX_BIN" has-session -t cockpit 2>/dev/null; then
-    if ops_session_idle ops; then
-      "$TMUX_BIN" kill-session -t ops 2>/dev/null || true
-    else
-      echo "tt: old session 'ops' is active; not replacing it with 'cockpit'" >&2
-      echo "tt: finish or rename that session, then run 'tt cockpit' again" >&2
-      exit 2
-    fi
+    echo "tt: old session 'ops' exists; not replacing it with 'cockpit'" >&2
+    echo "tt: use an explicit existing-session or recovery route" >&2
+    exit 2
   fi
 
   if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
@@ -1399,19 +1451,18 @@ create_ops_detached() {
       schedule_ops_shell_upgrade "$session"
       attach_or_switch "$session"
     fi
-    if ops_session_idle "$session"; then
-      "$TMUX_BIN" kill-session -t "$session" 2>/dev/null || true
-    else
-      echo "tt: session '$session' has a non-ops layout and active commands; not rebuilding it" >&2
-      echo "tt: kill or rename that session, then run 'tt ops' again" >&2
-      exit 2
-    fi
+    echo "tt: session '$session' has a non-ops layout; not rebuilding it" >&2
+    echo "tt: use an explicit existing-session or recovery route" >&2
+    exit 2
   fi
 
   if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
     attach_or_switch "$session"
   fi
 
+  if [[ "$recovery_session" != "--recovery-session" ]]; then
+    require_operator_topology_scope create "$session" || exit $?
+  fi
   window_id="$("$TMUX_BIN" new-session -d -x "$width" -y "$height" -P -F '#{window_id}' -s "$session" -n ops -c "$start_dir" "$bootstrap_command")"
   if [[ "$recovery_session" == "--recovery-session" ]]; then
     set_recovery_session_indices "$session" "$window_id"
@@ -1447,6 +1498,9 @@ ensure_studio_layout() {
   shell_command="$(default_login_shell_command)"
 
   if ! "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    if [[ "$recovery_session" != "--recovery-session" ]]; then
+      require_operator_topology_scope create "$session" || exit $?
+    fi
     if [[ -n "$start_dir" ]]; then
       window_id="$("$TMUX_BIN" new-session -d -P -F '#{window_id}' -s "$session" -n main -c "$start_dir" "$shell_command")"
     else
@@ -1465,6 +1519,9 @@ ensure_studio_layout() {
 
   case "$pane_count" in
     1)
+      if [[ "$recovery_session" != "--recovery-session" ]]; then
+        require_operator_topology_scope create "$session" || exit $?
+      fi
       build_studio_layout "$window_id" "$shell_command"
       apply_studio_pane_titles "$window_id"
       ;;
@@ -1510,6 +1567,7 @@ create_mobile() {
     attach_or_switch "$session"
   fi
 
+  require_operator_topology_scope create "$session" || exit $?
   if [[ -n "${TMUX:-}" ]]; then
     "$TMUX_BIN" new-session -d -s "$session"
     set_profile_metadata "$session" mobile
@@ -2600,7 +2658,8 @@ popup_view() {
 status_report() {
   local snapshot agent_snapshot timer="stopped" autosave="off"
   local snapshot_age agent_age history_count history_max success_age="missing" identity
-  local panes codex claude exact unresolved shell waiting spinning menu_left menu_right static_status mouse copy_modes mobile_mode
+  local panes codex claude exact unresolved shell waiting spinning exited failed
+  local menu_left menu_right static_status mouse copy_modes mobile_mode
 
   snapshot="$(codex_cockpit_snapshot_file)"
   agent_snapshot="$(agent_cockpit_state_file)"
@@ -2635,11 +2694,13 @@ status_report() {
     shell="$(awk -F '\t' '$1 !~ /^#/ && $2 == "shell" {n++} END {print n+0}' "$snapshot")"
     exact="$(awk -F '\t' '$1 !~ /^#/ && $7 == "exact" {n++} END {print n+0}' "$snapshot")"
     unresolved="$(awk -F '\t' '$1 !~ /^#/ && $7 == "unresolved" {n++} END {print n+0}' "$snapshot")"
-    waiting="$(awk -F '\t' '$1 !~ /^#/ && ($2 == "codex" || $2 == "claude") && $4 !~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/ {n++} END {print n+0}' "$snapshot")"
-    spinning="$(awk -F '\t' '$1 !~ /^#/ && ($2 == "codex" || $2 == "claude") && $4 ~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/ {n++} END {print n+0}' "$snapshot")"
+    waiting="$(awk -F '\t' '$1 !~ /^#/ && $9 != "exited" && ($2 == "codex" || $2 == "claude") && $4 !~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/ {n++} END {print n+0}' "$snapshot")"
+    spinning="$(awk -F '\t' '$1 !~ /^#/ && $9 != "exited" && ($2 == "codex" || $2 == "claude") && $4 ~ /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂]/ {n++} END {print n+0}' "$snapshot")"
+    exited="$(awk -F '\t' '$1 !~ /^#/ && $9 == "exited" {n++} END {print n+0}' "$snapshot")"
+    failed="$(awk -F '\t' '$1 !~ /^#/ && $9 == "exited" && $10 != "" && $10 != "0" {n++} END {print n+0}' "$snapshot")"
   else
     snapshot_age="missing"
-    panes=0 codex=0 claude=0 shell=0 exact=0 unresolved=0 waiting=0 spinning=0
+    panes=0 codex=0 claude=0 shell=0 exact=0 unresolved=0 waiting=0 spinning=0 exited=0 failed=0
   fi
 
   if [[ -f "$agent_snapshot" ]]; then
@@ -2680,6 +2741,7 @@ status_report() {
   printf 'agents: %s panes, %s codex, %s claude, %s shell\n' "$panes" "$codex" "$claude" "$shell"
   printf 'restore: %s exact, %s unresolved\n' "$exact" "$unresolved"
   printf 'work state: %s waiting, %s spinning\n' "$waiting" "$spinning"
+  printf 'owner exits: %s exited, %s failed\n' "$exited" "$failed"
   printf 'menu: left=%s right=%s\n' "$menu_left" "$menu_right"
   printf 'status: %s\n' "$static_status"
   printf 'mouse: %s, copy-mode panes: %s\n' "$mouse" "$copy_modes"
@@ -3774,6 +3836,19 @@ require_recovery_manifest_sessions_absent() {
   done < "$manifest"
 }
 
+require_operator_manifest_scopes() {
+  local manifest="$1"
+  local session pane dir title command
+  local sessions=" "
+
+  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
+    [[ "$sessions" == *" $session "* ]] && continue
+    sessions="$sessions$session "
+    require_operator_topology_scope recover "$session" || return $?
+  done < "$manifest"
+}
+
 finish_recovery_setup() {
   local server_was_running="$1"
 
@@ -3900,6 +3975,7 @@ recover_agent_cockpit() {
   fi
   [[ -f "$manifest" ]] || { echo "agent cockpit manifest not found: $manifest" >&2; exit 2; }
   manifest_has_entries "$manifest" || { echo "agent cockpit manifest has no sessions: $manifest" >&2; exit 2; }
+  require_operator_manifest_scopes "$manifest" || exit $?
   require_recovery_manifest_sessions_absent "$manifest" || exit 2
 
   tmux_server_running && server_was_running=1
@@ -4019,6 +4095,7 @@ recover_cockpit() {
     exit 2
   fi
 
+  require_operator_topology_scope recover "$session" || exit $?
   wsl_bridge_ensure_for_entry
   snapshot="$(latest_cockpit_snapshot "$snapshot" "$session")" || exit 2
   printf 'tt recovering %s from %s\n' "$session" "$snapshot" >&2
@@ -4045,6 +4122,7 @@ reset_to_profile() {
   local profile="$1"
   local session="${2:-}"
 
+  refuse_agent_server_reset || exit $?
   wsl_bridge_release_server_mount
   kill_server force
 
@@ -4409,6 +4487,13 @@ case "${1:-}" in
         exit 2
         ;;
     esac
+    ;;
+  topology-authorize)
+    [[ -n "${2:-}" && -n "${3:-}" ]] || {
+      echo "usage: tt topology-authorize <action> <target>" >&2
+      exit 2
+    }
+    require_operator_topology_scope "$2" "$3"
     ;;
   pane-menu)
     show_pane_menu "${2:-${TMUX_PANE:-}}" "${3:-P}" "${4:-P}" "${5:-}"

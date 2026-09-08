@@ -1,0 +1,558 @@
+#!/usr/bin/env python3
+"""Bound new heavy work and keep one compact task phase receipt."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import math
+import os
+import pathlib
+import stat
+import tempfile
+import time
+
+
+BLOCKED = 75
+GIB = 1024**3
+
+
+class ReceiptBlocked(Exception):
+    def __init__(self, status: str, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+class ScanBudgetExceeded(Exception):
+    def __init__(self, budget: str, entries: int, directories: int):
+        super().__init__(f"artifact scan {budget} budget exceeded")
+        self.budget = budget
+        self.entries = entries
+        self.directories = directories
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def reserve_bytes(value: str) -> int:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative")
+    return int(parsed * GIB)
+
+
+def emit(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def available_bytes(path: pathlib.Path) -> int:
+    probe = path
+    while not probe.exists():
+        if probe == probe.parent:
+            raise FileNotFoundError(path)
+        probe = probe.parent
+    filesystem = os.statvfs(probe)
+    return filesystem.f_bavail * filesystem.f_frsize
+
+
+def admit(args: argparse.Namespace) -> int:
+    available = available_bytes(args.path)
+    required = args.reserve_bytes + args.planned_bytes
+    allowed = available >= required
+    emit(
+        {
+            "available_bytes": available,
+            "path": str(args.path),
+            "planned_bytes": args.planned_bytes,
+            "reserve_bytes": args.reserve_bytes,
+            "status": "admitted" if allowed else "persistence-degraded",
+        }
+    )
+    return 0 if allowed else BLOCKED
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative")
+    return parsed
+
+
+def reject_symlink_components(path: pathlib.Path) -> None:
+    current = pathlib.Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"artifact path contains a symlink: {current}")
+
+
+def validate_owned_regular(path: pathlib.Path, purpose: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        raise ReceiptBlocked("receipt-corrupt", f"{purpose} is missing: {path}") from None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ReceiptBlocked("receipt-corrupt", f"{purpose} must be a regular file")
+    if metadata.st_uid != os.geteuid():
+        raise ReceiptBlocked("receipt-owner-mismatch", f"{purpose} has another owner")
+    return metadata
+
+
+def bounded_usage(
+    root: pathlib.Path,
+    max_files: int,
+    max_bytes: int,
+    max_entries: int,
+    max_directories: int,
+) -> tuple[int, int, int, int]:
+    files = 0
+    total = 0
+    entries_seen = 0
+    directories_seen = 1
+    if directories_seen > max_directories:
+        raise ScanBudgetExceeded("directory", entries_seen, directories_seen)
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                entries_seen += 1
+                if entries_seen > max_entries:
+                    raise ScanBudgetExceeded("entry", entries_seen, directories_seen)
+                if entry.is_symlink():
+                    raise ValueError(f"artifact root contains a symlink: {entry.path}")
+                if entry.is_dir(follow_symlinks=False):
+                    directories_seen += 1
+                    if directories_seen > max_directories:
+                        raise ScanBudgetExceeded(
+                            "directory", entries_seen, directories_seen
+                        )
+                    stack.append(pathlib.Path(entry.path))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise ValueError(f"artifact root contains a special file: {entry.path}")
+                files += 1
+                total += entry.stat(follow_symlinks=False).st_size
+                if files > max_files or total > max_bytes:
+                    return files, total, entries_seen, directories_seen
+    return files, total, entries_seen, directories_seen
+
+
+def load_state(
+    path: pathlib.Path,
+    task_id: str,
+    max_state_bytes: int,
+    *,
+    allow_missing: bool = False,
+) -> dict[str, object]:
+    if not path.exists() and allow_missing:
+        return {"schema": 1, "task_id": task_id, "phases": {}}
+    validate_owned_regular(path, "task receipt")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ReceiptBlocked("receipt-corrupt", f"cannot open task receipt: {error}") from error
+    with os.fdopen(descriptor, "rb") as handle:
+        payload = handle.read(max_state_bytes + 1)
+    if len(payload) > max_state_bytes:
+        raise ReceiptBlocked("receipt-corrupt", "task receipt exceeds read budget")
+    try:
+        state = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReceiptBlocked("receipt-corrupt", f"task receipt is invalid JSON: {error}") from error
+    if not isinstance(state, dict):
+        raise ReceiptBlocked("receipt-corrupt", "task receipt must be a JSON object")
+    if state.get("schema") != 1 or state.get("task_id") != task_id:
+        raise ReceiptBlocked(
+            "receipt-owner-mismatch",
+            "existing receipt belongs to another task or schema",
+        )
+    if not isinstance(state.get("phases"), dict):
+        raise ReceiptBlocked("receipt-corrupt", "existing receipt has invalid phases")
+    if "completed_phases" in state and not isinstance(state["completed_phases"], list):
+        raise ReceiptBlocked("receipt-corrupt", "completed phases must be an array")
+    if "acceptance" in state and not isinstance(state["acceptance"], list):
+        raise ReceiptBlocked("receipt-corrupt", "acceptance criteria must be an array")
+    for field in ("identity", "last_artifact", "failure"):
+        if field in state and not isinstance(state[field], dict):
+            raise ReceiptBlocked("receipt-corrupt", f"{field} must be an object")
+    return state
+
+
+def acquire_lock(handle: object, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise ReceiptBlocked("lock-timeout", "task receipt lock wait expired")
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+
+
+def open_lock(path: pathlib.Path, *, create: bool) -> object:
+    flags = os.O_RDWR
+    if create:
+        flags |= os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise ReceiptBlocked("receipt-corrupt", f"cannot open task lock: {error}") from error
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        os.close(descriptor)
+        raise ReceiptBlocked("receipt-owner-mismatch", "task lock is not owner-safe")
+    return os.fdopen(descriptor, "r+")
+
+
+def write_atomic(path: pathlib.Path, payload: bytes) -> None:
+    temporary_name = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+        temporary_name = None
+    finally:
+        if temporary_name:
+            pathlib.Path(temporary_name).unlink(missing_ok=True)
+
+
+def validate_existing_root(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    reject_symlink_components(root)
+    try:
+        metadata = root.lstat()
+    except FileNotFoundError:
+        raise ReceiptBlocked("receipt-corrupt", "artifact root is missing") from None
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise ReceiptBlocked(
+            "receipt-owner-mismatch",
+            "artifact root is not an owner-controlled directory",
+        )
+    state_path = root / "task-state.json"
+    lock_path = root / ".task-state.lock"
+    validate_owned_regular(state_path, "task receipt")
+    validate_owned_regular(lock_path, "task lock")
+    return state_path, lock_path
+
+
+def set_optional_metadata(
+    state: dict[str, object], args: argparse.Namespace
+) -> None:
+    if args.owner_id:
+        previous_owner = state.get("owner")
+        if previous_owner not in (None, args.owner_id):
+            raise ReceiptBlocked(
+                "receipt-owner-mismatch", "task receipt belongs to another owner"
+            )
+        state["owner"] = args.owner_id
+
+    identity = state.setdefault("identity", {})
+    assert isinstance(identity, dict)
+    if args.source_id:
+        identity["source"] = args.source_id
+    if args.input_id:
+        identity["input"] = args.input_id
+    if not identity:
+        state.pop("identity", None)
+
+    if args.acceptance is not None:
+        state["acceptance"] = args.acceptance
+
+    artifact_updates = {
+        "ref": args.last_artifact,
+        "kind": args.artifact_kind,
+        "retention": args.retention_intent,
+        "closeout": args.artifact_closeout,
+        "pinned": args.artifact_pin,
+    }
+    if any(value is not None for value in artifact_updates.values()):
+        artifact = state.setdefault("last_artifact", {})
+        assert isinstance(artifact, dict)
+        for field, value in artifact_updates.items():
+            if value is not None:
+                artifact[field] = value
+
+    failure_updates = {
+        "fingerprint": args.failure_fingerprint,
+        "blocker": args.blocker,
+        "retry_event": args.retry_permitting_event,
+        "retry_allowed": args.retry_allowed,
+    }
+    if any(value is not None for value in failure_updates.values()):
+        failure = state.setdefault("failure", {})
+        assert isinstance(failure, dict)
+        for field, value in failure_updates.items():
+            if value is not None:
+                failure[field] = value
+        if "retry_allowed" not in failure:
+            failure["retry_allowed"] = False
+
+
+def phase(args: argparse.Namespace) -> int:
+    root = args.root.absolute()
+    reject_symlink_components(root)
+    if not root.parent.is_dir():
+        raise ValueError("artifact root parent must already exist")
+    created_root = False
+    try:
+        root.mkdir(mode=0o700)
+        created_root = True
+    except FileExistsError:
+        metadata = root.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise ReceiptBlocked(
+                "receipt-owner-mismatch",
+                "artifact root is not an owner-controlled directory",
+            )
+    state_path = root / "task-state.json"
+    lock_path = root / ".task-state.lock"
+    if created_root:
+        lock = open_lock(lock_path, create=True)
+    else:
+        if state_path.exists():
+            load_state(state_path, args.task_id, args.max_state_bytes)
+        if not lock_path.exists() and not state_path.exists():
+            deadline = time.monotonic() + args.lock_timeout_seconds
+            while time.monotonic() < deadline:
+                if lock_path.exists() or state_path.exists():
+                    break
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        if lock_path.exists():
+            validate_owned_regular(lock_path, "task lock")
+            lock = open_lock(lock_path, create=False)
+        elif state_path.exists():
+            load_state(state_path, args.task_id, args.max_state_bytes)
+            lock = open_lock(lock_path, create=True)
+        else:
+            raise ReceiptBlocked(
+                "receipt-owner-mismatch",
+                "existing artifact root has no task ownership receipt",
+            )
+
+    with lock:
+        acquire_lock(lock, args.lock_timeout_seconds)
+        state = load_state(
+            state_path,
+            args.task_id,
+            args.max_state_bytes,
+            allow_missing=created_root,
+        )
+        phases = state["phases"]
+        assert isinstance(phases, dict)
+        phase_state = {
+            "command_exit": args.command_exit,
+            "source_id": args.source_id,
+            "status": args.status,
+            "updated_at": int(time.time()),
+        }
+        if args.input_id:
+            phase_state["input_id"] = args.input_id
+        phases[args.phase] = phase_state
+        if len(phases) > args.max_phases:
+            emit(
+                {
+                    "phase": args.phase,
+                    "status": "phase-budget-exceeded",
+                    "task_id": args.task_id,
+                }
+            )
+            return BLOCKED
+
+        set_optional_metadata(state, args)
+        state["completed_phases"] = sorted(
+            name
+            for name, value in phases.items()
+            if isinstance(value, dict) and value.get("status") == "complete"
+        )
+        state["latest_phase"] = args.phase
+        payload = (json.dumps(state, indent=2, sort_keys=True) + "\n").encode()
+        try:
+            files, used, entries, directories = bounded_usage(
+                root,
+                args.max_files,
+                args.max_bytes,
+                args.max_entries,
+                args.max_directories,
+            )
+        except ScanBudgetExceeded as error:
+            emit(
+                {
+                    "budget": error.budget,
+                    "directories": error.directories,
+                    "entries": error.entries,
+                    "phase": args.phase,
+                    "status": "artifact-scan-budget-exceeded",
+                    "task_id": args.task_id,
+                }
+            )
+            return BLOCKED
+        projected_files = files + 1
+        projected_bytes = used + len(payload)
+        if projected_files > args.max_files or projected_bytes > args.max_bytes:
+            emit(
+                {
+                    "files": files,
+                    "max_bytes": args.max_bytes,
+                    "max_files": args.max_files,
+                    "phase": args.phase,
+                    "status": "artifact-budget-exceeded",
+                    "task_id": args.task_id,
+                    "used_bytes": used,
+                    "entries": entries,
+                    "directories": directories,
+                }
+            )
+            return BLOCKED
+
+        write_atomic(state_path, payload)
+    emit(
+        {
+            "phase": args.phase,
+            "receipt": str(state_path),
+            "status": args.status,
+            "task_id": args.task_id,
+        }
+    )
+    return 0
+
+
+def retry(args: argparse.Namespace) -> int:
+    root = args.root.absolute()
+    state_path, lock_path = validate_existing_root(root)
+    with open_lock(lock_path, create=False) as lock:
+        acquire_lock(lock, args.lock_timeout_seconds)
+        state = load_state(state_path, args.task_id, args.max_state_bytes)
+
+    failure = state.get("failure", {})
+    assert isinstance(failure, dict)
+    expected_event = failure.get("retry_event")
+    permitted = (
+        not failure
+        or failure.get("retry_allowed") is True
+        or (
+            isinstance(expected_event, str)
+            and bool(expected_event)
+            and args.observed_event == expected_event
+        )
+    )
+    emit(
+        {
+            "blocker": failure.get("blocker", ""),
+            "completed_phases": state.get("completed_phases", []),
+            "failure_fingerprint": failure.get("fingerprint", ""),
+            "observed_event": args.observed_event,
+            "retry_permitting_event": expected_event or "",
+            "status": "retry-permitted" if permitted else "retry-blocked",
+            "task_id": args.task_id,
+        }
+    )
+    return 0 if permitted else BLOCKED
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(prog="task-runtime")
+    commands = root.add_subparsers(dest="command", required=True)
+
+    admit_parser = commands.add_parser("admit")
+    admit_parser.add_argument("--path", type=pathlib.Path, default=pathlib.Path.cwd())
+    admit_parser.add_argument(
+        "--reserve-gib",
+        dest="reserve_bytes",
+        type=reserve_bytes,
+        default=reserve_bytes(os.environ.get("AGENT_DISK_RESERVE_GIB", "8")),
+    )
+    admit_parser.add_argument(
+        "--planned-bytes",
+        type=nonnegative_int,
+        default=nonnegative_int(os.environ.get("AGENT_PLANNED_WRITE_BYTES", "0")),
+    )
+    admit_parser.set_defaults(run=admit)
+
+    phase_parser = commands.add_parser("phase")
+    phase_parser.add_argument("--root", type=pathlib.Path, required=True)
+    phase_parser.add_argument("--task-id", required=True)
+    phase_parser.add_argument("--phase", required=True)
+    phase_parser.add_argument("--status", required=True)
+    phase_parser.add_argument("--owner-id", default="")
+    phase_parser.add_argument("--source-id", default="")
+    phase_parser.add_argument("--input-id", default="")
+    phase_parser.add_argument("--acceptance", action="append")
+    phase_parser.add_argument("--command-exit", type=int)
+    phase_parser.add_argument("--last-artifact")
+    phase_parser.add_argument("--artifact-kind")
+    phase_parser.add_argument(
+        "--artifact-pin", action="store_const", const=True, default=None
+    )
+    phase_parser.add_argument("--retention-intent")
+    phase_parser.add_argument("--artifact-closeout")
+    phase_parser.add_argument("--failure-fingerprint")
+    phase_parser.add_argument("--blocker")
+    phase_parser.add_argument(
+        "--retry-allowed",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    phase_parser.add_argument("--retry-permitting-event")
+    phase_parser.add_argument("--max-files", type=nonnegative_int, default=128)
+    phase_parser.add_argument("--max-bytes", type=nonnegative_int, default=1024 * 1024)
+    phase_parser.add_argument("--max-entries", type=nonnegative_int, default=512)
+    phase_parser.add_argument("--max-directories", type=nonnegative_int, default=64)
+    phase_parser.add_argument(
+        "--max-state-bytes", type=nonnegative_int, default=1024 * 1024
+    )
+    phase_parser.add_argument("--max-phases", type=nonnegative_int, default=32)
+    phase_parser.add_argument(
+        "--lock-timeout-seconds", type=nonnegative_float, default=2.0
+    )
+    phase_parser.set_defaults(run=phase)
+
+    retry_parser = commands.add_parser("retry")
+    retry_parser.add_argument("--root", type=pathlib.Path, required=True)
+    retry_parser.add_argument("--task-id", required=True)
+    retry_parser.add_argument("--observed-event", default="")
+    retry_parser.add_argument(
+        "--max-state-bytes", type=nonnegative_int, default=1024 * 1024
+    )
+    retry_parser.add_argument(
+        "--lock-timeout-seconds", type=nonnegative_float, default=2.0
+    )
+    retry_parser.set_defaults(run=retry)
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        return args.run(args)
+    except ReceiptBlocked as error:
+        payload = {"error": str(error), "status": error.status}
+        if hasattr(args, "task_id"):
+            payload["task_id"] = args.task_id
+        emit(payload)
+        return BLOCKED
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        emit({"error": str(error), "status": "invalid"})
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

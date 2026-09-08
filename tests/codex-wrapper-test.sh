@@ -43,7 +43,9 @@ else
 fi
 EOF
 
-chmod +x "$wrapper_dir/codex" "$backend_dir/uname" "$backend_dir/gh" "$backend_dir/ghx" "$backend_dir/codex"
+cp "$repo_root/bin/task-runtime" "$wrapper_dir/task-runtime"
+chmod +x "$wrapper_dir/codex" "$wrapper_dir/task-runtime" \
+  "$backend_dir/uname" "$backend_dir/gh" "$backend_dir/ghx" "$backend_dir/codex"
 
 long_path="$symlink_dir"
 path_entry_count=1
@@ -115,6 +117,30 @@ linux_output="$(
     "$symlink_dir/codex" run "two words"
 )"
 [[ "$linux_output" == "standalone:run two words" ]]
+
+constrained_output="$(
+  env -u GITHUB_PERSONAL_ACCESS_TOKEN -u CODEX_HOME \
+    GITHUB_PAT_TOKEN=test HOME="$darwin_home" PATH="$long_path" \
+    "$symlink_dir/codex" --constrained-network run "two words"
+)"
+[[ "$constrained_output" == "standalone:--disable unbounded_connection_retries run two words" ]]
+
+admission_log="$temporary/admission.log"
+cat >"$temporary/admission" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$CODEX_TEST_ADMISSION_LOG"
+EOF
+chmod +x "$temporary/admission"
+heavy_output="$(
+  env -u GITHUB_PERSONAL_ACCESS_TOKEN -u CODEX_HOME \
+    GITHUB_PAT_TOKEN=test HOME="$darwin_home" PATH="$long_path" \
+    CODEX_TASK_RUNTIME_BIN="$temporary/admission" \
+    CODEX_TEST_ADMISSION_LOG="$admission_log" \
+    "$symlink_dir/codex" --heavy-work --disk-reserve-gib 12 \
+      --planned-write-bytes 4096 run
+)"
+[[ "$heavy_output" == "standalone:run" ]]
+grep -Fx "admit --path $PWD --reserve-gib 12 --planned-bytes 4096" "$admission_log"
 
 if grep -Fq 'gh auth token' "$repo_root/.zshrc"; then
   printf '.zshrc must not fetch GitHub credentials during startup\n' >&2

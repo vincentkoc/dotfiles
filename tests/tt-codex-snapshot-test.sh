@@ -12,8 +12,8 @@ mkdir -p "$fake_bin"
 
 fake_tmux="$temporary/tmux"
 tmux_log="$temporary/tmux.log"
-snapshot="$temporary/codex-cockpit.tsv"
 state_home="$temporary/state"
+snapshot="$state_home/tt/codex-cockpit.tsv"
 session_id="11111111-1111-1111-1111-111111111111"
 
 cat >"$fake_tmux" <<'SH'
@@ -29,7 +29,8 @@ case "${1:-}" in
       [[ -z "${TT_TEST_CHILD_PID_FILE:-}" ]] || printf '%s\n' "$child" >"$TT_TEST_CHILD_PID_FILE"
       wait "$child"
     fi
-    printf 'cockpit:1.1\t100\tcode mode\tcodex\t/tmp/work\n'
+    printf 'cockpit:1.1\t100\tcode mode\tcodex\t/tmp/work\t%s\t%s\n' \
+      "${TT_TEST_PANE_DEAD:-0}" "${TT_TEST_PANE_EXIT_STATUS:-}"
     ;;
   list-windows)
     printf '@1\n'
@@ -40,6 +41,10 @@ chmod +x "$fake_tmux"
 
 cat >"$fake_bin/ps" <<SH
 #!/usr/bin/env bash
+if [[ "\${TT_TEST_PANE_DEAD:-0}" == "1" ]]; then
+  printf '  100     1 /bin/sh\\n'
+  exit 0
+fi
 printf '  100     1 /usr/local/bin/codex --no-alt-screen %s\\n' '$session_id'
 SH
 chmod +x "$fake_bin/ps"
@@ -74,6 +79,7 @@ PATH="$fake_bin:$PATH" \
   "$tt" codex-snapshot "$snapshot" --quiet
 
 grep -Fq $'cockpit:1.1\tcodex\t/tmp/work\tcode mode\tcodex\t11111111-1111-1111-1111-111111111111\texact' "$snapshot"
+grep -Fq $'\trunning\t' "$snapshot"
 history_dir="$state_home/tt/history/codex-cockpit"
 [[ "$(find "$history_dir" -maxdepth 1 -type f -name '*.tsv' | wc -l | tr -d ' ')" == "1" ]]
 [[ -f "$state_home/tt/codex-cockpit.lock" ]]
@@ -83,6 +89,10 @@ history_dir="$state_home/tt/history/codex-cockpit"
 # an inline Python subprocess.
 cat >"$fake_bin/ps" <<'SH'
 #!/usr/bin/env bash
+if [[ "${TT_TEST_PANE_DEAD:-0}" == "1" ]]; then
+  printf '  100     1 /bin/sh\n'
+  exit 0
+fi
 printf '  100     1 /usr/local/bin/codex --no-alt-screen\n'
 SH
 chmod +x "$fake_bin/ps"
@@ -96,6 +106,36 @@ PATH="$fake_bin:$PATH" \
   "$tt" codex-snapshot "$snapshot" --quiet
 
 grep -Fq $'cockpit:1.1\tcodex\t/tmp/work\tcode mode\tcodex\t22222222-2222-2222-2222-222222222222\texact' "$snapshot"
+
+# A dead owner keeps its exact recovery identity and records the exit without
+# relaunching, closing, or renaming the pane.
+: >"$tmux_log"
+PATH="$fake_bin:$PATH" \
+  HOME="$temporary/home" \
+  XDG_STATE_HOME="$state_home" \
+  TT_LOGIN_SHELL=/bin/sh \
+  TT_TMUX_BIN="$fake_tmux" \
+  TT_TEST_TMUX_LOG="$tmux_log" \
+  TT_TEST_PANE_DEAD=1 \
+  TT_TEST_PANE_EXIT_STATUS=17 \
+  "$tt" codex-snapshot "$snapshot" --quiet
+grep -Fq $'\t22222222-2222-2222-2222-222222222222\texact\t' "$snapshot"
+grep -Fq $'\texited\t17' "$snapshot"
+if grep -Eq 'respawn-pane|kill-pane|rename-' "$tmux_log"; then
+  printf 'owner-exit snapshot mutated pane lifecycle\n' >&2
+  exit 1
+fi
+status_output="$(
+  PATH="$fake_bin:$PATH" \
+    HOME="$temporary/home" \
+    XDG_STATE_HOME="$state_home" \
+    TT_LOGIN_SHELL=/bin/sh \
+    TT_TMUX_BIN="$fake_tmux" \
+    TT_TEST_TMUX_LOG="$tmux_log" \
+    "$tt" status
+)"
+grep -Fxq 'owner exits: 1 exited, 1 failed' <<<"$status_output"
+grep -Fxq 'work state: 0 waiting, 0 spinning' <<<"$status_output"
 
 # Advisory locks are released by the kernel when a previous writer dies, even
 # when its old PID metadata remains in the lock file.

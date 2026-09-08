@@ -12,7 +12,7 @@ if [[ $# -ge 1 ]]; then
   SESSION="$1"
 fi
 
-TMUX_BIN="/opt/homebrew/bin/tmux"
+TMUX_BIN="${TT_TMUX_BIN:-/opt/homebrew/bin/tmux}"
 if [[ ! -x "$TMUX_BIN" ]]; then
   TMUX_BIN="/usr/local/bin/tmux"
 fi
@@ -25,6 +25,8 @@ if [[ ! -x "$TMUX_BIN" ]]; then
 fi
 
 if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
+  "$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/tt" \
+    topology-authorize create "$SESSION"
   "$TMUX_BIN" new-session -d -s "$SESSION" -n "$WINDOW"
 
   # 3 columns across.
