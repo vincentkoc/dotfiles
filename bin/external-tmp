@@ -1,54 +1,493 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
-set -euo pipefail
-umask 077
+import json
+import os
+import pathlib
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+from dataclasses import dataclass
 
-if (( $# == 0 )); then
-  printf 'Usage: external-tmp <command...>\n' >&2
-  exit 2
-fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-guard="${WORKTREE_STORAGE_GUARD:-$SCRIPT_DIR/agent-worktree-ops/worktree-storage-guard}"
-if [[ ! -x "$guard" ]]; then
-  guard="$HOME/Library/Application Support/agent-worktree-ops/worktree-storage-guard"
-fi
-if [[ ! -x "$guard" ]]; then
-  printf 'external-tmp: worktree storage guard is unavailable\n' >&2
-  exit 127
-fi
+CHECK_SCHEMA = "external-tmp-check.v1"
+STORAGE_SCHEMA = "external-worktree-storage.v2"
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
-mount_point="$("$guard" --require-config --print-mount-point)"
-scratch_root="$mount_point/.scratch/tmp"
-temporary=""
 
-cleanup() {
-  local status=$?
-  trap - EXIT HUP INT TERM
-  if [[ -n "$temporary" && -e "$temporary" ]]; then
-    if "$guard" >/dev/null 2>&1; then
-      /bin/rm -rf -- "$temporary"
-    else
-      printf 'external-tmp: storage disappeared; refusing cleanup fallback: %s\n' \
-        "$temporary" >&2
-    fi
-  fi
-  exit "$status"
-}
+class ExternalTmpError(RuntimeError):
+    pass
 
-trap cleanup EXIT HUP INT TERM
-mkdir -p "$scratch_root"
-chmod 0700 "$mount_point/.scratch" "$scratch_root"
-temporary="$(mktemp -d "$scratch_root/external-tmp.XXXXXX")"
-"$guard"
 
-physical="$(cd "$temporary" && pwd -P)"
-case "$physical/" in
-  "$mount_point/.scratch/tmp/"*) ;;
-  *)
-    printf 'external-tmp: scratch path escaped configured storage: %s\n' "$physical" >&2
-    exit 78
-    ;;
-esac
+@dataclass(frozen=True)
+class Identity:
+    device: int
+    inode: int
+    uid: int
+    mode: int
 
-TMPDIR="$temporary/" TMP="$temporary" TEMP="$temporary" "$@"
+
+@dataclass
+class Scratch:
+    mount: pathlib.Path
+    mount_fd: int
+    mount_id: Identity
+    scratch_fd: int
+    scratch_id: Identity
+    tmp_fd: int
+    tmp_id: Identity
+    name: str
+    fd: int
+    identity: Identity
+
+    @property
+    def path(self):
+        return self.mount / ".scratch" / "tmp" / self.name
+
+    def close(self):
+        for descriptor in (self.fd, self.tmp_fd, self.scratch_fd, self.mount_fd):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def fail(message):
+    raise ExternalTmpError(message)
+
+
+def directory_identity(metadata, label, device=None):
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail(f"{label} is not a real directory")
+    identity = Identity(
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+    )
+    if identity.uid != os.getuid():
+        fail(f"{label} has the wrong owner")
+    if identity.mode != 0o700:
+        fail(f"{label} must use mode 0700")
+    if device is not None and identity.device != device:
+        fail(f"{label} crosses filesystems")
+    return identity
+
+
+def open_path_no_follow(path):
+    descriptor = os.open(path.anchor, DIRECTORY_FLAGS)
+    try:
+        for component in path.parts[1:]:
+            child = os.open(component, DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def open_root(path):
+    path = pathlib.Path(path)
+    raw = str(path)
+    if not path.is_absolute() or os.path.normpath(raw) != raw:
+        fail("configured storage path is not canonical")
+    if pathlib.Path(os.path.realpath(path)) != path:
+        fail("configured storage path has a symlinked component")
+    try:
+        descriptor = open_path_no_follow(path)
+    except OSError as error:
+        raise ExternalTmpError("configured storage is unavailable") from error
+    try:
+        opened = directory_identity(os.fstat(descriptor), "configured storage")
+        named = directory_identity(
+            os.stat(path, follow_symlinks=False),
+            "configured storage",
+        )
+        if opened != named:
+            fail("configured storage identity changed while opening")
+        return descriptor, opened
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def open_child(parent_fd, name, label, device, create):
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if not create:
+            return None, None
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    identity = directory_identity(metadata, label, device)
+    try:
+        descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as error:
+        raise ExternalTmpError(f"{label} cannot be opened safely") from error
+    if directory_identity(os.fstat(descriptor), label, device) != identity:
+        os.close(descriptor)
+        fail(f"{label} identity changed while opening")
+    return descriptor, identity
+
+
+def guard_path():
+    override = os.environ.get("WORKTREE_STORAGE_GUARD")
+    candidates = (
+        [pathlib.Path(override)]
+        if override
+        else [
+            pathlib.Path(__file__).resolve().parent
+            / "agent-worktree-ops"
+            / "worktree-storage-guard",
+            pathlib.Path.home()
+            / "Library"
+            / "Application Support"
+            / "agent-worktree-ops"
+            / "worktree-storage-guard",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    fail("worktree storage guard is unavailable")
+
+
+def run_guard(path):
+    try:
+        result = subprocess.run(
+            [str(path), "--json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ExternalTmpError("worktree storage guard cannot be executed") from error
+    if result.returncode:
+        fail(
+            "worktree storage guard failed"
+            + (f": {result.stderr.strip()}" if result.stderr.strip() else "")
+        )
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ExternalTmpError(
+            "worktree storage guard returned malformed JSON"
+        ) from error
+    configured = value.get("configured") if isinstance(value, dict) else None
+    if (
+        type(configured) is not bool
+        or value.get("schema_version") != STORAGE_SCHEMA
+    ):
+        fail("worktree storage guard returned an invalid attestation")
+    if configured:
+        mount = value.get("mount_point")
+        if not isinstance(mount, str) or not os.path.isabs(mount):
+            fail("worktree storage guard returned an invalid mount point")
+    return value
+
+
+def open_namespace(mount, create):
+    mount_fd, mount_id = open_root(mount)
+    scratch_fd = tmp_fd = None
+    try:
+        scratch_fd, scratch_id = open_child(
+            mount_fd, ".scratch", "scratch namespace", mount_id.device, create
+        )
+        if scratch_fd is None:
+            return mount_fd, mount_id, None, None, None, None
+        tmp_fd, tmp_id = open_child(
+            scratch_fd, "tmp", "temporary namespace", mount_id.device, create
+        )
+        return mount_fd, mount_id, scratch_fd, scratch_id, tmp_fd, tmp_id
+    except Exception:
+        for descriptor in (tmp_fd, scratch_fd, mount_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+        raise
+
+
+def close_namespace(values):
+    for descriptor in (values[4], values[2], values[0]):
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def check():
+    observed = run_guard(guard_path())
+    configured = observed["configured"]
+    mount = observed.get("mount_point") if configured else None
+    if configured:
+        close_namespace(open_namespace(pathlib.Path(mount), False))
+    print(
+        json.dumps(
+            {
+                "configured": configured,
+                "mount_point": mount,
+                "ready": configured,
+                "schema_version": CHECK_SCHEMA,
+                "scratch_namespace": ".scratch/tmp",
+                "storage_schema": STORAGE_SCHEMA,
+                "tmpdir_scope": "invocation",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+def create_scratch(mount):
+    values = open_namespace(mount, True)
+    mount_fd, mount_id, scratch_fd, scratch_id, tmp_fd, tmp_id = values
+    if scratch_fd is None or tmp_fd is None:
+        close_namespace(values)
+        fail("temporary namespace creation was incomplete")
+    for _ in range(128):
+        name = "external-tmp." + secrets.token_hex(12)
+        try:
+            os.mkdir(name, 0o700, dir_fd=tmp_fd)
+        except FileExistsError:
+            continue
+        except OSError:
+            close_namespace(values)
+            raise
+        try:
+            descriptor, identity = open_child(
+                tmp_fd, name, "invocation scratch", mount_id.device, False
+            )
+        except Exception:
+            close_namespace(values)
+            raise
+        return Scratch(
+            mount,
+            mount_fd,
+            mount_id,
+            scratch_fd,
+            scratch_id,
+            tmp_fd,
+            tmp_id,
+            name,
+            descriptor,
+            identity,
+        )
+    close_namespace(values)
+    fail("invocation scratch name allocation failed")
+
+
+def require_identity(descriptor, expected, label):
+    if directory_identity(
+        os.fstat(descriptor), label, expected.device
+    ) != expected:
+        fail(f"{label} identity changed")
+
+
+def revalidate(scratch):
+    fresh_fd, fresh_id = open_root(scratch.mount)
+    os.close(fresh_fd)
+    if fresh_id != scratch.mount_id:
+        fail("configured storage identity changed")
+    for descriptor, expected, label in (
+        (scratch.mount_fd, scratch.mount_id, "configured storage"),
+        (scratch.scratch_fd, scratch.scratch_id, "scratch namespace"),
+        (scratch.tmp_fd, scratch.tmp_id, "temporary namespace"),
+        (scratch.fd, scratch.identity, "invocation scratch"),
+    ):
+        require_identity(descriptor, expected, label)
+    named = directory_identity(
+        os.stat(scratch.name, dir_fd=scratch.tmp_fd, follow_symlinks=False),
+        "invocation scratch",
+        scratch.mount_id.device,
+    )
+    if named != scratch.identity:
+        fail("invocation scratch identity changed")
+    expected_parent = scratch.mount / ".scratch" / "tmp"
+    if scratch.path.parent != expected_parent:
+        fail("invocation scratch escaped lexically")
+    if pathlib.Path(os.path.realpath(scratch.path)) != scratch.path:
+        fail("invocation scratch escaped physically")
+
+
+def remove_contents(directory_fd, device):
+    for name in os.listdir(directory_fd):
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if metadata.st_dev != device:
+            fail("invocation scratch entry crosses filesystems")
+        if stat.S_ISDIR(metadata.st_mode):
+            child_fd = os.open(name, DIRECTORY_FLAGS, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                ):
+                    fail("invocation scratch entry identity changed")
+                remove_contents(child_fd, device)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
+def cleanup(scratch, guard):
+    observed = run_guard(guard)
+    if (
+        observed["configured"] is not True
+        or observed.get("mount_point") != str(scratch.mount)
+    ):
+        fail("storage changed; refusing cleanup fallback")
+    revalidate(scratch)
+    remove_contents(scratch.fd, scratch.mount_id.device)
+    revalidate(scratch)
+    os.rmdir(scratch.name, dir_fd=scratch.tmp_fd)
+
+
+def run_child(command, environment):
+    watched = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    pending = []
+    first_signal = [None]
+
+    def queue_signal(signum, _frame):
+        if first_signal[0] is None:
+            first_signal[0] = signum
+        pending.append(signum)
+
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, watched)
+    active_mask = previous_mask.difference(watched)
+    previous_handlers = {}
+    child = None
+
+    def activate_child_mask():
+        signal.pthread_sigmask(signal.SIG_SETMASK, active_mask)
+
+    try:
+        for signum in watched:
+            previous_handlers[signum] = signal.signal(signum, queue_signal)
+        child = subprocess.Popen(
+            command,
+            env=environment,
+            preexec_fn=activate_child_mask,
+        )
+    finally:
+        if child is None:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+        signal.pthread_sigmask(
+            signal.SIG_SETMASK,
+            active_mask if child is not None else previous_mask,
+        )
+
+    restored = [False]
+
+    def restore_handlers():
+        if restored[0]:
+            return
+        restored[0] = True
+        signal.pthread_sigmask(signal.SIG_BLOCK, watched)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+    try:
+        while child.returncode is None:
+            while pending and child.poll() is None:
+                signum = pending.pop(0)
+                try:
+                    os.kill(child.pid, signum)
+                except ProcessLookupError:
+                    pass
+            if child.returncode is None:
+                try:
+                    child.wait(timeout=0.05)
+                except subprocess.TimeoutExpired:
+                    pass
+        return child.returncode, first_signal, restore_handlers
+    except BaseException:
+        restore_handlers()
+        raise
+
+
+def run_command(command):
+    guard = guard_path()
+    observed = run_guard(guard)
+    if observed["configured"] is not True:
+        fail("required external worktree storage is not configured")
+    mount = pathlib.Path(observed["mount_point"])
+    scratch = create_scratch(mount)
+    status = 78
+    wrapper_signal = None
+    restore_handlers = None
+    try:
+        current = run_guard(guard)
+        if (
+            current["configured"] is not True
+            or current.get("mount_point") != str(mount)
+        ):
+            fail("storage changed before child execution")
+        revalidate(scratch)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "TMPDIR": str(scratch.path) + "/",
+                "TMP": str(scratch.path),
+                "TEMP": str(scratch.path),
+            }
+        )
+        try:
+            child_status, wrapper_signal, restore_handlers = run_child(
+                command, environment
+            )
+            status = (
+                128 - child_status
+                if child_status < 0
+                else child_status
+            )
+        except FileNotFoundError:
+            print(f"external-tmp: command not found: {command[0]}", file=sys.stderr)
+            status = 127
+        except OSError as error:
+            print(f"external-tmp: child execution failed: {error}", file=sys.stderr)
+            status = 126
+    finally:
+        try:
+            cleanup(scratch, guard)
+        except (ExternalTmpError, OSError) as error:
+            print(f"external-tmp: {error}", file=sys.stderr)
+        scratch.close()
+        if restore_handlers is not None:
+            restore_handlers()
+    if wrapper_signal is not None and wrapper_signal[0] is not None:
+        return 128 + wrapper_signal[0]
+    return status
+
+
+def main(argv):
+    os.umask(0o077)
+    try:
+        if argv == ["--check", "--json"]:
+            return check()
+        if "--check" in argv or "--json" in argv:
+            print(
+                "external-tmp: --check requires --json and cannot be combined "
+                "with a command",
+                file=sys.stderr,
+            )
+            return 2
+        if not argv:
+            print(
+                "Usage: external-tmp --check --json | external-tmp <command...>",
+                file=sys.stderr,
+            )
+            return 2
+        return run_command(argv)
+    except (ExternalTmpError, OSError, ValueError) as error:
+        print(f"external-tmp: {error}", file=sys.stderr)
+        return 78
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

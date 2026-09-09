@@ -53,7 +53,12 @@ External storage behavior:
 - Raw `git worktree prune` is unsafe while required storage is absent because
   Git can mistake temporarily unavailable registrations for stale worktrees.
 - Global `TMPDIR`, Codex sessions/databases/logs, tmux state, and package caches
-  remain internal. Use `external-tmp <command...>` for opt-in per-process scratch.
+  remain internal. Use `external-tmp <command...>` for opt-in per-process
+  scratch. The wrapper creates one mode-`0700`, current-user directory beneath
+  `.scratch/tmp`, revalidates the storage guard and mount identity immediately
+  before child execution, and removes only that exact inode while the same
+  mount remains valid. `external-tmp --check --json` performs a non-mutating
+  readiness check.
 
 Cleanup behavior:
 
