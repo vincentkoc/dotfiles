@@ -14,21 +14,34 @@ fi
 socket="tt-codex-snapshot-test-$$"
 wrapper="$temporary/tmux"
 snapshot="$temporary/codex-cockpit.tsv"
-normal_before="$("$tmux_bin" list-sessions 2>/dev/null || true)"
+unset TMUX TMUX_PANE SSH_AUTH_SOCK SSH_AGENT_PID BASH_ENV ENV CODEX_HOME
+export HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/config"
+export XDG_STATE_HOME="$temporary/state" TMUX_TMPDIR="$temporary/sockets"
+mkdir -p "$HOME" "$TMUX_TMPDIR"
+stop="$temporary/stop"
 
 cleanup() {
-  "$tmux_bin" -L "$socket" kill-server 2>/dev/null || true
+  touch "$stop"
+  for _ in {1..100}; do
+    "$tmux_bin" -L "$socket" has-session -t snapshot-test 2>/dev/null || break
+    sleep 0.1
+  done
+  if "$tmux_bin" -L "$socket" has-session -t snapshot-test 2>/dev/null; then
+    printf 'fixture did not exit after its stop file\n' >&2
+    return 1
+  fi
   rm -rf "$temporary"
 }
 trap cleanup EXIT
 
 cat >"$wrapper" <<SH
 #!/usr/bin/env bash
-exec $(printf '%q' "$tmux_bin") -L $(printf '%q' "$socket") "\$@"
+exec $(printf '%q' "$tmux_bin") -L $(printf '%q' "$socket") -f /dev/null "\$@"
 SH
 chmod +x "$wrapper"
 
-"$tmux_bin" -L "$socket" new-session -d -s snapshot-test 'exec sleep 30'
+"$tmux_bin" -L "$socket" -f /dev/null new-session -d -s snapshot-test \
+  /bin/sh -c 'while [ ! -f "$1" ]; do sleep 0.1; done' sh "$stop"
 target="$("$tmux_bin" -L "$socket" list-panes -t snapshot-test -F '#{session_name}:#{window_index}.#{pane_index}')"
 
 HOME="$temporary/home" \
@@ -39,11 +52,9 @@ HOME="$temporary/home" \
 
 "$tmux_bin" -L "$socket" has-session -t snapshot-test
 grep -Fq "$target"$'\tshell' "$snapshot"
-
-normal_after="$("$tmux_bin" list-sessions 2>/dev/null || true)"
-if [[ "$normal_before" != "$normal_after" ]]; then
-  printf 'snapshot changed the caller tmux server instead of the disposable socket\n' >&2
-  exit 1
-fi
+awk -F '\t' '!/^#/ && NF {
+  if (NF != 10 || $9 != "shell" || $10 != "") exit 1
+  n++
+} END { if (!n) exit 1 }' "$snapshot"
 
 printf 'tt_codex_snapshot_live_test=passed\n'
