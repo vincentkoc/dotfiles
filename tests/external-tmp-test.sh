@@ -260,6 +260,47 @@ for signal_case in HUP:1 INT:2 TERM:15; do
 done
 
 reset_fixture
+cat >"$temporary/blocked-signal-launcher.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+import sys
+
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})
+os.execve(sys.argv[1], sys.argv[1:], os.environ)
+PY
+chmod 0755 "$temporary/blocked-signal-launcher.py"
+ready="$temporary/blocked-HUP.ready"
+received="$temporary/blocked-HUP.received"
+HOME="$home" \
+  WORKTREE_STORAGE_GUARD="$fake_guard" \
+  TEST_MOUNT_POINT="$mount_point" \
+  TEST_GUARD_STATE="$guard_state" \
+  "$temporary/blocked-signal-launcher.py" \
+  "$command_path" "$temporary/signal-child.py" "$ready" "$received" &
+wrapper_pid=$!
+for _ in {1..100}; do
+  [[ -f "$ready" ]] && break
+  sleep 0.02
+done
+[[ -f "$ready" ]]
+child_pid="$(cut -d' ' -f1 "$ready")"
+child_tmpdir="$(cut -d' ' -f2- "$ready")"
+kill -HUP "$wrapper_pid"
+set +e
+wait "$wrapper_pid"
+status=$?
+set -e
+[[ "$status" -eq 129 ]]
+[[ "$(cat "$received")" == "1" ]]
+if kill -0 "$child_pid" 2>/dev/null; then
+  echo "blocked-mask child was not reaped" >&2
+  exit 1
+fi
+[[ ! -e "${child_tmpdir%/}" ]]
+[[ -z "$(find "$mount_point/.scratch/tmp" -mindepth 1 -print -quit)" ]]
+
+reset_fixture
 cat >"$temporary/natural-signal.py" <<'PY'
 #!/usr/bin/env python3
 import os

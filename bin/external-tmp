@@ -357,11 +357,12 @@ def run_child(command, environment):
         pending.append(signum)
 
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, watched)
+    active_mask = previous_mask.difference(watched)
     previous_handlers = {}
     child = None
 
-    def restore_child_mask():
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    def activate_child_mask():
+        signal.pthread_sigmask(signal.SIG_SETMASK, active_mask)
 
     try:
         for signum in watched:
@@ -369,13 +370,16 @@ def run_child(command, environment):
         child = subprocess.Popen(
             command,
             env=environment,
-            preexec_fn=restore_child_mask,
+            preexec_fn=activate_child_mask,
         )
     finally:
         if child is None:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        signal.pthread_sigmask(
+            signal.SIG_SETMASK,
+            active_mask if child is not None else previous_mask,
+        )
 
     restored = [False]
 
