@@ -166,6 +166,9 @@
 - If a contributor PR cannot be edited (`maintainerCanModify=false`), merge it as-is when it is clean and correct. Only direct-land or cherry-pick when the PR branch is uneditable and the landed diff must differ, the PR is conflicted/dirty with unrelated drift, or multiple PRs overlap and one canonical fix is needed.
 - When direct-landing or cherry-picking from a contributor PR is unavoidable, preserve author/co-author credit, explain the exact reason in the PR before closing, link the landed commit, and do not post duplicate close comments.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`.
+- In `openclaw/*`, ignore the 20-open-PR limit for `vincentkoc`: I am an
+  organization admin. Do not block PR creation or other requested work because
+  of this limit. All other review, validation, and landing requirements still apply.
 - In `openclaw/*`, let autoreview report broadly, but keep review-driven edits
   centered on the original request, regressions introduced by the diff, the
   owner boundary, and the touched bug class. Prefer recording adjacent
