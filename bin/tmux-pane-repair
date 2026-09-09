@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Confirm a terminal-state reset without sending commands to a shell."""
+
+import base64
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import time
+
+
+SHELLS = {"bash", "dash", "fish", "ksh", "sh", "zsh"}
+FORMAT = "|".join(
+    "#{" + field + "}"
+    for field in (
+        "pid", "pane_id", "pane_pid", "pane_tty", "pane_current_command",
+        "pane_dead", "session_id", "window_id",
+    )
+)
+
+
+def run(args):
+    return subprocess.run(
+        args, check=True, text=True, capture_output=True, timeout=3
+    ).stdout.rstrip("\n")
+
+
+def context():
+    parts = os.environ.get("TMUX", "").rsplit(",", 2)
+    if len(parts) != 3 or not parts[1].isdigit() or not os.path.isabs(parts[0]):
+        raise ValueError("repair requires an explicit tmux server")
+    binary = shutil.which("tmux")
+    if not binary:
+        raise ValueError("tmux is unavailable")
+    return [binary, "-N", "-S", parts[0]], int(parts[1])
+
+
+def process_identity(pid):
+    fields = run(["ps", "-p", str(pid), "-o", "uid=,pgid=,tpgid=,lstart=,comm="]).split()
+    if len(fields) < 9 or fields[0] != str(os.getuid()):
+        raise ValueError("process owner could not be verified")
+    identity = {"pid": pid, "pgid": int(fields[1]), "foreground": int(fields[2]),
+                "start": " ".join(fields[3:8]),
+                "command": Path(" ".join(fields[8:])).name.lstrip("-")}
+    proc = Path("/proc") / str(pid)
+    if proc.exists():
+        # /proc's start tick disambiguates processes started within one second.
+        identity["start_tick"] = (proc / "stat").read_text().rsplit(")", 1)[1].split()[19]
+    return identity
+
+
+def interactive_shell(pid, command):
+    if command not in SHELLS:
+        raise ValueError("repair is limited to a foreground local shell")
+    proc_args = Path("/proc") / str(pid) / "cmdline"
+    if proc_args.exists():
+        args = [part.decode() for part in proc_args.read_bytes().split(b"\0") if part]
+    else:
+        args = shlex.split(run(["ps", "-p", str(pid), "-o", "args="]))
+    if not args or Path(args[0]).name.lstrip("-") != command:
+        raise ValueError("shell executable changed")
+    allowed = {"--login", "--noprofile", "--norc"}
+    if any(arg not in allowed and not re.fullmatch(r"-[ilf]+", arg) for arg in args[1:]):
+        raise ValueError("scripted or unknown shell invocation; repair refused")
+
+
+def inspect_pane(tmux, expected_server, pane):
+    if not re.fullmatch(r"%[0-9]+", pane):
+        raise ValueError("an exact pane ID is required")
+    socket_path = tmux[-1]
+    socket_stat = os.stat(socket_path)
+    if not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_uid != os.getuid():
+        raise ValueError("tmux socket ownership changed")
+    fields = run(tmux + ["display-message", "-p", "-t", pane, FORMAT]).split("|")
+    if len(fields) != 8 or fields[0] != str(expected_server) or fields[1] != pane:
+        raise ValueError("tmux server or pane identity changed")
+    server, pane_id, pid_text, tty, command, dead, session, window = fields
+    if dead != "0" or not pid_text.isdigit():
+        raise ValueError("repair requires a live shell")
+    pid = int(pid_text)
+    identity = process_identity(pid)
+    interactive_shell(pid, identity["command"])
+    if command != identity["command"]:
+        raise ValueError("foreground application is not the pane's shell")
+    fd = os.open(tty, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        tty_stat = os.fstat(fd)
+        if not stat.S_ISCHR(tty_stat.st_mode) or tty_stat.st_uid != os.getuid():
+            raise ValueError("pane terminal owner changed")
+        if identity["foreground"] != pid or identity["pgid"] != pid:
+            raise ValueError("another process owns the foreground terminal")
+    finally:
+        os.close(fd)
+    return {
+        "host": socket.gethostname(), "uid": os.getuid(),
+        "socket": socket_path, "socket_id": [socket_stat.st_dev, socket_stat.st_ino],
+        "server": process_identity(int(server)), "pane": pane_id,
+        "session": session, "window": window, "process": identity,
+        "tty": tty, "tty_id": [tty_stat.st_dev, tty_stat.st_ino],
+    }
+
+
+def request(tmux, server, pane, client):
+    if not client or any(character in client for character in "\r\n\0"):
+        raise ValueError("an attached client is required for confirmation")
+    proof = {"expires": time.time() + 120, "target": inspect_pane(tmux, server, pane)}
+    token = base64.urlsafe_b64encode(json.dumps(proof).encode()).decode()
+    command = shlex.join([sys.executable, str(Path(__file__).resolve()), "confirm", token])
+    tmux_command = "run-shell -b " + shlex.quote(command)
+    run(tmux + [
+        "confirm-before", "-b", "-t", client, "-p",
+        f"Reset terminal state in {pane}? No shell commands will be sent. (y/n)",
+        tmux_command,
+    ])
+
+
+def confirm(tmux, server, token):
+    if len(token) > 16384:
+        raise ValueError("invalid confirmation")
+    proof = json.loads(base64.b64decode(token, altchars=b"-_", validate=True))
+    if not 0 <= proof["expires"] - time.time() <= 120:
+        raise ValueError("confirmation expired; request repair again")
+    target = proof["target"]
+    current = inspect_pane(tmux, server, target["pane"])
+    if current != target:
+        raise ValueError("pane changed after confirmation; repair refused")
+    pane = target["pane"]
+    # tmux checks the final identity itself; no literal input, Enter, or stty.
+    run(tmux + [
+        "if-shell", "-F", "-t", pane, final_guard(target),
+        f"send-keys -R -t {pane} ''",
+        "display-message 'repair refused: pane changed'",
+    ])
+
+
+def final_guard(target):
+    checks = (
+        ("pid", target["server"]["pid"]),
+        ("pane_id", target["pane"]),
+        ("pane_pid", target["process"]["pid"]),
+        ("pane_dead", "0"),
+        ("pane_current_command", target["process"]["command"]),
+        ("session_id", target["session"]),
+        ("window_id", target["window"]),
+    )
+    condition = "1"
+    for field, value in checks:
+        condition = "#{&&:" + condition + ",#{==:#{" + field + "}," + str(value) + "}}"
+    return condition
+
+
+def main(argv):
+    tmux, server = context()
+    if len(argv) == 4 and argv[1] == "request":
+        request(tmux, server, argv[2], argv[3])
+    elif len(argv) == 3 and argv[1] == "confirm":
+        confirm(tmux, server, argv[2])
+    else:
+        raise ValueError("usage: tmux-pane-repair request %pane client")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv)
+    except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.SubprocessError) as error:
+        print(f"tmux-pane-repair: {error}", file=sys.stderr)
+        sys.exit(1)

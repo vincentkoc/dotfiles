@@ -2,282 +2,104 @@
 set -euo pipefail
 
 state="${1:-reset}"
-source_name="${2:-agent}"
-
-normalize_source() {
-  local lowered
-  lowered="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-
-  case "$lowered" in
-    codex)
-      printf 'CODEX'
-      ;;
-    claude)
-      printf 'CLAUDE'
-      ;;
-    *)
-      printf 'AGENT'
-      ;;
-  esac
-}
-
-source_label="$(normalize_source "$source_name")"
-source_slug="$(printf '%s' "$source_label" | tr '[:upper:]' '[:lower:]')"
-
-pane_title_base() {
-  local short_cwd repo branch git_dir worktree_label leaf title
-
-  short_cwd="${PWD/#$HOME/~}"
-  leaf="$(basename "$PWD")"
-  title="$short_cwd"
-
-  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    repo="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")"
-    branch="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)"
-    git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
-    worktree_label=""
-
-    if [[ "$git_dir" == *"/worktrees/"* ]]; then
-      worktree_label="$(basename "$git_dir")"
-      title="$repo [$worktree_label]"
-    else
-      title="$repo:$branch"
-    fi
-
-    if [[ "$leaf" != "$repo" && ( -z "$worktree_label" || "$leaf" != "$worktree_label" ) ]]; then
-      title="$title · $leaf"
-    fi
-  fi
-
-  if [[ "$source_label" != "AGENT" ]]; then
-    title="$source_slug · $title"
-  fi
-
-  printf '%s' "$title"
-}
-
-set_pane_title() {
-  local title="$1"
-
-  if ! command -v tmux >/dev/null 2>&1; then
-    return
-  fi
-
-  if [[ -z "${TMUX_PANE:-}" ]]; then
-    return
-  fi
-
-  tmux select-pane -t "$TMUX_PANE" -T "$title" >/dev/null 2>&1 || true
-}
-
-set_pane_badge() {
-  local badge="$1"
-
-  if ! command -v tmux >/dev/null 2>&1; then
-    return
-  fi
-
-  if [[ -z "${TMUX_PANE:-}" ]]; then
-    return
-  fi
-
-  if [[ -n "$badge" ]]; then
-    tmux set-option -pt "$TMUX_PANE" @agent_pane_badge "$badge" >/dev/null 2>&1 || true
-  else
-    tmux set-option -pt "$TMUX_PANE" -u @agent_pane_badge >/dev/null 2>&1 || true
-  fi
-}
-
-marker_window_style() {
-  case "${1:-}" in
-    amber) printf 'fg=default,bg=#211d17\n' ;;
-    green) printf 'fg=default,bg=#182318\n' ;;
-    blue) printf 'fg=default,bg=#171f2b\n' ;;
-    dim) printf 'fg=#565f89,bg=#11121a\n' ;;
-    *) printf '\n' ;;
-  esac
-}
-
-marker_active_style() {
-  case "${1:-}" in
-    amber) printf 'fg=default,bg=#292218\n' ;;
-    green) printf 'fg=default,bg=#1f2a1f\n' ;;
-    blue) printf 'fg=default,bg=#1d2736\n' ;;
-    dim) printf 'fg=#565f89,bg=#11121a\n' ;;
-    *) printf '\n' ;;
-  esac
-}
-
-set_pane_style() {
-  local style="${1:-}"
-  local active_style="${2:-}"
-  local marker marker_style marker_active_style
-
-  if ! command -v tmux >/dev/null 2>&1; then
-    return
-  fi
-
-  if [[ -z "${TMUX_PANE:-}" ]]; then
-    return
-  fi
-
-  if [[ -n "$style" ]]; then
-    tmux set-option -pt "$TMUX_PANE" window-style "$style" >/dev/null 2>&1 || true
-    tmux set-option -pt "$TMUX_PANE" window-active-style "$active_style" >/dev/null 2>&1 || true
-    return
-  fi
-
-  marker="$(tmux show-option -pt "$TMUX_PANE" -qv @tt_marker 2>/dev/null || true)"
-  marker_style="$(marker_window_style "$marker")"
-  marker_active_style="$(marker_active_style "$marker")"
-  if [[ -n "$marker_style" && -n "$marker_active_style" ]]; then
-    tmux set-option -pt "$TMUX_PANE" window-style "$marker_style" >/dev/null 2>&1 || true
-    tmux set-option -pt "$TMUX_PANE" window-active-style "$marker_active_style" >/dev/null 2>&1 || true
-  else
-    tmux set-option -pt "$TMUX_PANE" -qu window-style >/dev/null 2>&1 || true
-    tmux set-option -pt "$TMUX_PANE" -qu window-active-style >/dev/null 2>&1 || true
-  fi
-}
-
-set_tmux_state() {
-  local segment="$1"
-  local client_tty
-
-  if ! command -v tmux >/dev/null 2>&1; then
-    return
-  fi
-
-  if ! tmux ls >/dev/null 2>&1; then
-    return
-  fi
-
-  if [[ -n "$segment" ]]; then
-    tmux set-option -gq @agent_attention_state "${state}:${source_label}"
-    tmux set-option -gq @agent_attention_segment "$segment"
-  else
-    tmux set-option -gqu @agent_attention_state || true
-    tmux set-option -gqu @agent_attention_segment || true
-  fi
-
-  while IFS= read -r client_tty; do
-    [[ -n "$client_tty" ]] || continue
-    tmux refresh-client -S -t "$client_tty" >/dev/null 2>&1 || true
-  done < <(tmux list-clients -F '#{client_tty}' 2>/dev/null || true)
-}
-
-write_terminal_bg() {
-  local bg="$1"
-  local cursor="$2"
-  local tty_path
-
-  if [[ -n "${AGENT_ATTN_TTY:-}" ]]; then
-    tty_path="$AGENT_ATTN_TTY"
-  else
-    tty_path="$(tty 2>/dev/null || true)"
-  fi
-
-  if [[ -z "$tty_path" || "$tty_path" == "not a tty" || ! -w "$tty_path" ]]; then
-    return
-  fi
-
-  # OSC 11 updates background; OSC 12 updates cursor color.
-  printf '\033]11;%s\007\033]12;%s\007' "$bg" "$cursor" >"$tty_path" || true
-}
-
-wait_segment() {
-  case "$source_label" in
-    CODEX)
-      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default]'
-      ;;
-    CLAUDE)
-      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default]'
-      ;;
-    *)
-      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default]'
-      ;;
-  esac
-}
-
-approval_segment() {
-  case "$source_label" in
-    CODEX)
-      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default]'
-      ;;
-    CLAUDE)
-      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default]'
-      ;;
-    *)
-      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default]'
-      ;;
-  esac
-}
-
-wait_cursor() {
-  case "$source_label" in
-    CODEX)
-      printf '%s' '#7aa2f7'
-      ;;
-    CLAUDE)
-      printf '%s' '#73daca'
-      ;;
-    *)
-      printf '%s' '#e0af68'
-      ;;
-  esac
-}
-
-wait_pane_badge() {
-  case "$source_label" in
-    CODEX)
-      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] '
-      ;;
-    CLAUDE)
-      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] '
-      ;;
-    *)
-      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#e0af68,bold] WAIT #[default] '
-      ;;
-  esac
-}
-
-approval_pane_badge() {
-  case "$source_label" in
-    CODEX)
-      printf '%s' '#[fg=#1a1b26,bg=#7aa2f7,bold] CODEX #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] '
-      ;;
-    CLAUDE)
-      printf '%s' '#[fg=#1a1b26,bg=#73daca,bold] CLAUDE #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] '
-      ;;
-    *)
-      printf '%s' '#[fg=#1a1b26,bg=#9aa5ce,bold] AGENT #[fg=#1a1b26,bg=#f7768e,bold] APPROVE #[default] '
-      ;;
-  esac
-}
-
 case "$state" in
-  waiting)
-    set_tmux_state ''
-    set_pane_title "$(pane_title_base)"
-    set_pane_badge ''
-    set_pane_style 'fg=default,bg=#241d12' 'fg=default,bg=#2f2517'
-    write_terminal_bg '#241d12' "$(wait_cursor)"
-    ;;
-  permission|approve)
-    set_tmux_state ''
-    set_pane_title "$(pane_title_base)"
-    set_pane_badge ''
-    set_pane_style 'fg=default,bg=#2b1720' 'fg=default,bg=#361b27'
-    write_terminal_bg '#2b1720' '#f7768e'
-    ;;
-  reset|active|idle|clear)
-    set_tmux_state ''
-    set_pane_title "$(pane_title_base)"
-    set_pane_badge ''
-    set_pane_style ''
-    write_terminal_bg '#1a1b26' '#c0caf5'
-    ;;
-  *)
-    echo "usage: agent-attn-set [waiting|permission|reset] [codex|claude]" >&2
-    exit 2
-    ;;
+  waiting) style='fg=default,bg=#241d12'; active='fg=default,bg=#2f2517' ;;
+  permission|approve) state=approve; style='fg=default,bg=#2b1720'; active='fg=default,bg=#361b27' ;;
+  reset|active|idle|clear) state=reset; style=; active= ;;
+  *) printf 'usage: agent-attn-set [waiting|permission|reset] [codex|claude]\n' >&2; exit 2 ;;
 esac
+
+# Hooks without their own pane must not discover or modify a default server.
+[[ -n "${TMUX:-}" && "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] || exit 0
+command -v tmux >/dev/null 2>&1 || exit 0
+socket="${TMUX%,*}"
+server="${socket##*,}"
+socket="${socket%,*}"
+[[ "$server" =~ ^[0-9]+$ && "$socket" == /* && -S "$socket" && -O "$socket" ]] || exit 0
+tmux_command=(tmux -N -S "$socket")
+pane="$TMUX_PANE"
+
+# The hook process must descend from the target pane, not merely inherit its ID.
+pane_pid="$("${tmux_command[@]}" display-message -p -t "$pane" '#{pid}|#{pane_id}|#{pane_pid}|#{pane_dead}' 2>/dev/null)" || exit 0
+IFS='|' read -r actual_server actual_pane pane_pid dead <<<"$pane_pid"
+[[ "$actual_server" == "$server" && "$actual_pane" == "$pane" &&
+   "$pane_pid" =~ ^[0-9]+$ && "$dead" == 0 ]] || exit 0
+ancestor="$$"
+parents=
+if [[ ! -r "/proc/$$/stat" ]]; then
+  parents="$(ps -axo pid=,ppid= 2>/dev/null)" || exit 0
+fi
+for ((depth=0; depth<128 && ancestor>1 && ancestor!=pane_pid; depth++)); do
+  parent=
+  if [[ -r "/proc/$ancestor/stat" ]]; then
+    IFS= read -r process_stat <"/proc/$ancestor/stat" || exit 0
+    process_stat="${process_stat##*) }"
+    read -r _ parent _ <<<"$process_stat"
+  else
+    while read -r candidate candidate_parent; do
+      if [[ "$candidate" == "$ancestor" ]]; then parent="$candidate_parent"; break; fi
+    done <<<"$parents"
+  fi
+  [[ "$parent" =~ ^[0-9]+$ && "$parent" != "$ancestor" ]] || exit 0
+  ancestor="$parent"
+done
+[[ "$ancestor" == "$pane_pid" ]] || exit 0
+
+format='#{pid}|#{pane_id}|#{pane_pid}|#{@tt_marker}|#{window-style}|#{window-active-style}'
+details="$("${tmux_command[@]}" display-message -p -t "$pane" "$format" 2>/dev/null)" || exit 0
+IFS='|' read -r actual_server actual_pane actual_pid marker old_style old_active extra <<<"$details"
+[[ "$actual_server" == "$server" && "$actual_pane" == "$pane" &&
+   "$actual_pid" == "$pane_pid" && -z "$extra" ]] || exit 0
+# Explicit user markers and custom styles/titles are not owned by this hook.
+[[ -z "$marker" ]] || exit 0
+# No -A: an inherited/global value is not proof that this hook owns the pane.
+old_state="$("${tmux_command[@]}" show-option -pt "$pane" -qv @agent_attention_state 2>/dev/null)" || exit 0
+case "$old_state" in waiting|approve|'') ;; *) exit 0 ;; esac
+if [[ "$state" == "$old_state" && "$style" == "$old_style" && "$active" == "$old_active" ]]; then
+  exit 0
+fi
+attention_style() {
+  [[ "$1|$2" == 'fg=default,bg=#241d12|fg=default,bg=#2f2517' ||
+     "$1|$2" == 'fg=default,bg=#2b1720|fg=default,bg=#361b27' ]]
+}
+
+commands=
+add_option() {
+  local option="$1" value="${2:-}"
+  # Saved styles are data, never tmux command syntax.
+  [[ "$value" != *[!a-zA-Z0-9#=,.\ _-]* ]] || return 1
+  if [[ -n "$value" ]]; then
+    commands+="set-option -pt $pane $option '$value'; "
+  else
+    commands+="set-option -pqu -t $pane $option; "
+  fi
+}
+
+if [[ "$state" == reset ]]; then
+  [[ -n "$old_state" ]] || exit 0
+  if attention_style "$old_style" "$old_active"; then
+    add_option window-style
+    add_option window-active-style
+  fi
+  add_option @agent_attention_state
+else
+  if [[ -z "$old_state" ]]; then
+    local_style="$("${tmux_command[@]}" show-option -pt "$pane" -qv window-style 2>/dev/null)" || exit 0
+    local_active="$("${tmux_command[@]}" show-option -pt "$pane" -qv window-active-style 2>/dev/null)" || exit 0
+    # Do not take ownership of existing explicit styling.
+    [[ -z "$local_style" && -z "$local_active" ]] || exit 0
+  elif ! attention_style "$old_style" "$old_active"; then
+    exit 0
+  fi
+  add_option window-style "$style"
+  add_option window-active-style "$active"
+  add_option @agent_attention_state "$state"
+fi
+
+# Recheck the target inside tmux's command queue before applying pane-only options.
+guard="#{&&:#{==:#{pid},$server},#{&&:#{==:#{pane_id},$pane},#{&&:#{==:#{pane_pid},$pane_pid},#{==:#{@tt_marker},}}}}"
+[[ "$old_style$old_active" != *[!a-zA-Z0-9#=,.\ _-]* ]] || exit 0
+old_style="${old_style//,/#,}"
+old_active="${old_active//,/#,}"
+guard="#{&&:$guard,#{&&:#{==:#{window-style},$old_style},#{==:#{window-active-style},$old_active}}}"
+"${tmux_command[@]}" if-shell -F -t "$pane" "$guard" "$commands" >/dev/null 2>&1 || true

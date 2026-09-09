@@ -19,6 +19,36 @@ export COLORTERM="${COLORTERM:-truecolor}"
 export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 
+# Keep cockpit scratch on disk without changing other login environments.
+_cockpit_private_tmp() {
+  [[ -d "$1" && ! -L "$1" && -O "$1" ]] || return 1
+  if [[ -n "${ZSH_VERSION:-}" ]]; then
+    local -A metadata
+    zmodload -F zsh/stat b:zstat 2>/dev/null &&
+      zstat -L -H metadata "$1" 2>/dev/null &&
+      [[ "$(( ${metadata[mode]} & 511 ))" == 448 ]]
+  else
+    [[ "$(stat -c '%a' -- "$1" 2>/dev/null)" == 700 ]]
+  fi
+}
+_cockpit_tmp="$HOME/.cache/cockpit-tmp"
+if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]] &&
+   { { [[ "${TMPDIR:-}" == "$_cockpit_tmp" ]] && _cockpit_private_tmp "$_cockpit_tmp"; } ||
+     { _cockpit_session=$("$TT_TMUX_BIN" display -pt "$TMUX_PANE" '#S' 2>/dev/null) &&
+       [[ "$_cockpit_session" == cockpit ]]; }; }; then
+  if [[ ! -e "$_cockpit_tmp" && ! -L "$_cockpit_tmp" ]]; then
+    (umask 077; mkdir -p -- "$_cockpit_tmp") 2>/dev/null || true
+  fi
+  if _cockpit_private_tmp "$_cockpit_tmp" ||
+     { [[ -d "$_cockpit_tmp" && ! -L "$_cockpit_tmp" && -O "$_cockpit_tmp" ]] &&
+       chmod 0700 -- "$_cockpit_tmp" 2>/dev/null &&
+       _cockpit_private_tmp "$_cockpit_tmp"; }; then
+    export TMPDIR="$_cockpit_tmp"
+  fi
+fi
+unset _cockpit_session _cockpit_tmp
+unset -f _cockpit_private_tmp
+
 path_prepend() {
   local target="$1"
   local remaining="${PATH:-}"

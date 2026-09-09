@@ -121,4 +121,61 @@ grep -Fq 'topology-authorize remote-create "$target"' "$repo/bin/quickssh"
 grep -Fq 'topology-authorize remote-create "$target:$scope_session"' "$repo/bin/mttc"
 grep -Fq 'exec tt shell "$SESSION_NAME"' "$repo/bin/tm"
 
+manifest="$temporary/agents.tsv"
+mkdir -p "$temporary/work"
+printf 'first\t1\t%s\t\tcodex resume 11111111-1111-1111-1111-111111111111\nsecond\t1\t%s\t\tcodex resume 22222222-2222-2222-2222-222222222222\n' \
+  "$temporary/work" "$temporary/work" >"$manifest"
+assert_no_topology() {
+  if grep -Eq '(^| )(new-session|new-window|split-window|respawn-pane|kill-session|kill-server)( |$)' "$tmux_log"; then
+    printf 'denied recovery changed topology\n' >&2
+    exit 1
+  fi
+}
+
+# Both the shell entry and the directly callable helper must preflight the
+# entire frozen selection, including a denied second session with empty titles.
+: >"$tmux_log"
+if TT_OPERATOR_TMUX_SCOPE=recover:first invoke "$tt" recover agents "$manifest" first \
+  >"$temporary/multi.out" 2>&1; then
+  printf 'partial scope authorized multi-session recovery\n' >&2
+  exit 1
+fi
+grep -Fq 'TT_OPERATOR_TMUX_SCOPE=recover:second' "$temporary/multi.out"
+assert_no_topology
+frozen="$(find "$temporary/home/.local/state/tt/recovery-inputs" -type f -name 'agents-*.tsv' -print)"
+[[ -n "$frozen" && -f "$frozen" ]]
+grep -Fq $'first\t1\t'"$temporary/work"$'\t\tcodex resume --no-alt-screen ' "$frozen"
+printf 'source replaced after freeze\n' >"$manifest"
+: >"$tmux_log"
+if TT_OPERATOR_TMUX_SCOPE=recover:first invoke python3 "$repo/bin/tt-codex-snapshot-writer" \
+  --recover-cold agents "$frozen" first 0 >"$temporary/direct.out" 2>&1; then
+  printf 'direct helper bypassed second-session authorization\n' >&2
+  exit 1
+fi
+grep -Fq 'tt recovery refused:' "$temporary/direct.out"
+[[ ! -s "$tmux_log" ]]
+assert_no_topology
+
+: >"$tmux_log"
+if TT_TEST_MULTI_SESSION=1 TT_TEST_EXISTING_SESSION=second \
+  TT_OPERATOR_TMUX_SCOPE=recover:first,recover:second invoke "$tt" recover agents "$frozen" first \
+  >"$temporary/existing.out" 2>&1; then
+  printf 'recovery accepted an existing second session\n' >&2
+  exit 1
+fi
+grep -Fq "session 'second' already exists" "$temporary/existing.out"
+assert_no_topology
+
+# An existing malformed cockpit or legacy ops session is never reclaimed,
+# even when an exact creation scope was supplied.
+for existing in cockpit ops; do
+  : >"$tmux_log"
+  if TT_TEST_EXISTING_SESSION="$existing" TT_OPERATOR_TMUX_SCOPE=create:cockpit \
+    invoke "$tt" cockpit >"$temporary/refuse-$existing.out" 2>&1; then
+    printf 'existing %s was unexpectedly rebuilt\n' "$existing" >&2
+    exit 1
+  fi
+  assert_no_topology
+done
+
 printf 'tt_topology_gate_test=passed\n'

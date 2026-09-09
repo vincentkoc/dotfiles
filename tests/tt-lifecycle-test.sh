@@ -4,16 +4,33 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tt="$repo/bin/tt"
 temporary="$(mktemp -d)"
+unset TMUX TMUX_PANE SSH_AUTH_SOCK SSH_AGENT_PID BASH_ENV ENV CODEX_HOME
+export HOME="$temporary/home" XDG_STATE_HOME="$temporary/state"
+export XDG_CONFIG_HOME="$temporary/config"
+mkdir -p "$HOME" "$temporary/work"
+export TT_AGENT_COCKPIT_MANIFEST="$temporary/empty-agents.tsv"
+printf '# session\tpane\tdir\ttitle\tcommand\n' >"$TT_AGENT_COCKPIT_MANIFEST"
 live_tmux_bin=""
 live_tmux_socket=""
 live_tmux_tmpdir=""
 live_tmux_session=""
+live_tmux_stop="$temporary/status-stop"
 
 cleanup() {
   if [[ -n "$live_tmux_bin" && -n "$live_tmux_socket" && -n "$live_tmux_session" ]]; then
-    TMUX_TMPDIR="$live_tmux_tmpdir" \
-      "$live_tmux_bin" -L "$live_tmux_socket" kill-session -t "$live_tmux_session" \
-      >/dev/null 2>&1 || true
+    touch "$live_tmux_stop"
+    for _ in {1..100}; do
+      TMUX_TMPDIR="$live_tmux_tmpdir" \
+        "$live_tmux_bin" -L "$live_tmux_socket" has-session -t "$live_tmux_session" \
+        >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+    if TMUX_TMPDIR="$live_tmux_tmpdir" \
+      "$live_tmux_bin" -L "$live_tmux_socket" has-session -t "$live_tmux_session" \
+      >/dev/null 2>&1; then
+      printf 'lifecycle fixture did not exit through its stop file\n' >&2
+      return 1
+    fi
   fi
   [[ -z "$live_tmux_tmpdir" ]] || rm -rf "$live_tmux_tmpdir"
   rm -rf "$temporary"
@@ -45,16 +62,24 @@ chmod +x "$fake_tmux"
 session_id="11111111-1111-1111-1111-111111111111"
 snapshot="$temporary/codex.tsv"
 printf '# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\tstatus\trestore\n' >"$snapshot"
-printf 'cockpit:1.1\tcodex\t/tmp/work\ttest\tcodex\t%s\texact\tcd /tmp/work && codex resume --no-alt-screen %s\n' \
-  "$session_id" "$session_id" >>"$snapshot"
+printf 'cockpit:1.1\tcodex\t%s\ttest\tcodex\t%s\texact\tcodex resume --no-alt-screen %s\n' \
+  "$temporary/work" "$session_id" "$session_id" >>"$snapshot"
 
-HOME="$temporary/home" \
+if HOME="$temporary/home" \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TMUX_BIN="$fake_tmux" \
   TT_TEST_TMUX_LOG="$tmux_log" \
-  "$tt" codex-restore pane cockpit:1.1 "$snapshot" --execute >/dev/null
+  "$tt" codex-restore pane cockpit:1.1 "$snapshot" --execute \
+  >"$temporary/restore.out" 2>"$temporary/restore.err"; then
+  printf 'legacy snapshot was executed without server/pane identity\n' >&2
+  exit 1
+fi
 
-grep -Fq "[respawn-pane][-k][-t][cockpit:1.1][cd /tmp/work && codex resume --no-alt-screen $session_id; exec /bin/sh -il]" "$tmux_log"
+grep -Fq 'preview only' "$temporary/restore.err"
+[[ ! -s "$tmux_log" ]]
+TT_TMUX_BIN="$fake_tmux" "$tt" codex-restore pane cockpit:1.1 "$snapshot" \
+  >"$temporary/preview.out" 2>"$temporary/preview.err"
+grep -Fq "$session_id" "$temporary/preview.out"
 
 agent_state="$temporary/agent-state.tsv"
 # shellcheck disable=SC2016
@@ -64,11 +89,11 @@ HOME="$temporary/home" \
   TT_LOGIN_SHELL=/bin/sh \
   TT_TMUX_BIN="$fake_tmux" \
   TT_TEST_AGENT_PREFIX="$agent_prefix" \
-  "$tt" snapshot "$agent_state" --quiet
+  "$tt" snapshot-records >"$agent_state"
 
-grep -Fq $'\tcodex --no-alt-screen' "$agent_state"
+grep -Fxq $'factory2\t1\t/tmp/work\ttest\t' "$agent_state"
 if grep -Fq '; exec /bin/sh -il' "$agent_state"; then
-  printf 'agent snapshot retained the shell fallback suffix\n' >&2
+  printf 'agent collector retained an untrusted launch command\n' >&2
   exit 1
 fi
 
@@ -84,14 +109,15 @@ mkdir -p "$status_home"
 cat >"$live_tmux_wrapper" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$TT_TEST_REAL_TMUX" -L "$TT_TEST_TMUX_SOCKET" "$@"
+exec "$TT_TEST_REAL_TMUX" -L "$TT_TEST_TMUX_SOCKET" -f /dev/null "$@"
 SH
 chmod +x "$live_tmux_wrapper"
 
 HOME="$status_home" \
   TMUX_TMPDIR="$live_tmux_tmpdir" \
   "$live_tmux_bin" -L "$live_tmux_socket" -f /dev/null \
-  new-session -d -s "$live_tmux_session"
+  new-session -d -s "$live_tmux_session" \
+  /bin/sh -c 'while [ ! -f "$1" ]; do sleep 0.1; done' sh "$live_tmux_stop"
 
 history_dir="$status_state/tt/history/codex-cockpit"
 [[ ! -e "$history_dir" ]]
@@ -136,9 +162,5 @@ if HOME="$status_home" \
   printf 'tt status accepted a non-directory history path\n' >&2
   exit 1
 fi
-
-TMUX_TMPDIR="$live_tmux_tmpdir" \
-  "$live_tmux_bin" -L "$live_tmux_socket" kill-session -t "$live_tmux_session"
-live_tmux_session=""
 
 printf 'tt_lifecycle_test=passed\n'

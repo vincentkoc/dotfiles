@@ -100,6 +100,34 @@ separately reviewed tailnet UDP policy before opting into Mosh. `prepare` does
 not install, write, validate, or reload the SSH server; the Ubuntu host must
 already have a working `sshd`.
 
+The Linux tmux profile keeps the desktop status/tab colors, powerline separators,
+indicators, and `tt` note/pane menus without macOS clipboard helpers or GUI setup.
+On an existing server, parse it with `tmux source-file -n ~/.tmux.conf.local`,
+then reload only that file with `tmux source-file ~/.tmux.conf.local`; do not
+reload the full desktop configuration to apply the portable appearance.
+The Linux `prefix r` and edit-config bindings reload only the local profile.
+Plain Ctrl-L belongs to the foreground application and does not erase scrollback;
+`prefix +` uses tmux's native zoom. `prefix R` requests a confirmed terminal-state
+reset only for the same local foreground shell. It sends no shell commands and
+does not run `stty` or reset an agent/SSH pane. If foreground identity cannot be
+verified, it refuses the operation.
+
+Agent attention hooks only style their own unmarked pane. They leave custom pane
+styles, titles, other sessions, and terminal backgrounds alone. Repeated unchanged
+states do not rewrite options or refresh clients. Existing attention-colored
+styles without pane-local ownership state are left untouched. Reconnect-variable
+checks read the global list, preserving separate session overrides and custom
+entries. Shell startup retains all
+noninteractive helper functions; login shells avoid loading the profile twice,
+and inherited private cockpit scratch paths avoid another tmux query.
+
+Snapshots include owner state and exit status; recovery still reads legacy
+eight-column files. Exited session IDs are retained only with matching saved
+server, pane and process-start evidence. Reaped owners without that evidence
+remain unresolved in the new snapshot; prior recovery history is preserved.
+Cold recovery checks every selected session's topology authorization before
+creating the first session, including direct snapshot-helper invocation.
+
 `refresh-user` reruns only the user-owned portion: safe directory modes,
 public shell links, pinned prompt tooling, Node/pnpm, and the public Codex
 launcher. It never invokes sudo, package management, firewall, account, or SSH

@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Build one Codex cockpit restore map without disturbing tmux."""
 
+import json
 import os
 import pathlib
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from shutil import copyfileobj
 
 try:
@@ -21,6 +24,10 @@ except ImportError:
 
 class SnapshotError(RuntimeError):
     """Collection failed before a complete replacement snapshot existed."""
+
+
+class UnresolvedAgentEvidence(SnapshotError):
+    """Collected agent rows cannot safely replace the recovery manifest."""
 
 
 def positive_env(name, default, minimum=1):
@@ -36,32 +43,45 @@ COMMAND_TIMEOUT_SECONDS = positive_env("TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS", 5)
 TOTAL_TIMEOUT_SECONDS = positive_env("TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS", 30)
 DEADLINE = time.monotonic() + TOTAL_TIMEOUT_SECONDS
 
-OUTPUT = pathlib.Path(sys.argv[1])
+AUTOSAVE = len(sys.argv) > 1 and sys.argv[1] == "--autosave"
+AGENT_ONLY = len(sys.argv) > 1 and sys.argv[1] == "--agent-snapshot"
+OUTPUT = pathlib.Path(
+    sys.argv[2] if AUTOSAVE or AGENT_ONLY else sys.argv[1] if len(sys.argv) > 1 else "."
+)
 TMUX = os.environ.get("TT_TMUX_BIN", "tmux")
 LOGIN_SHELL = os.environ.get("TT_LOGIN_SHELL") or "/bin/zsh"
-CODEX_SESSIONS_DIR = pathlib.Path.home() / ".codex" / "sessions"
+CODEX_HOME = pathlib.Path(os.environ.get("CODEX_HOME", pathlib.Path.home() / ".codex"))
+CODEX_SESSION_DIRS = (CODEX_HOME / "sessions", CODEX_HOME / "archived_sessions")
 STATE_HOME = pathlib.Path(
     os.environ.get("XDG_STATE_HOME", str(pathlib.Path.home() / ".local" / "state"))
 )
 LOCK_PATH = STATE_HOME / "tt" / "codex-cockpit.lock"
 HISTORY_DIR = STATE_HOME / "tt" / "history" / "codex-cockpit"
 SID_RE = re.compile(
-    r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+PANE_FORMAT = (
+    "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}\t"
+    "#{pane_tty}\t#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t"
+    "#{pane_dead}\t#{pane_dead_status}"
 )
 
 
-def run(args, *, required=True):
+def run(args, *, required=True, total_budget=False, input_text=None):
     remaining = DEADLINE - time.monotonic()
     if remaining <= 0:
         raise SnapshotError("snapshot collection exceeded its total time budget")
 
-    timeout = min(COMMAND_TIMEOUT_SECONDS, remaining)
+    timeout = remaining if total_budget else min(COMMAND_TIMEOUT_SECONDS, remaining)
     try:
         process = subprocess.Popen(
             args,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             start_new_session=True,
         )
     except OSError as error:
@@ -69,8 +89,10 @@ def run(args, *, required=True):
             raise SnapshotError(f"missing collector {args[0]}") from error
         return ""
     try:
-        stdout, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
+        stdout, _ = process.communicate(input=input_text, timeout=timeout)
+    except (subprocess.TimeoutExpired, SnapshotError) as error:
+        # Do not let the total deadline interrupt the bounded TERM/KILL cleanup.
+        signal.setitimer(signal.ITIMER_REAL, 0)
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -82,8 +104,15 @@ def run(args, *, required=True):
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.communicate()
+            try:
+                process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.stdout.close()
+                if process.stdin:
+                    process.stdin.close()
         raise SnapshotError(f"timed out collecting {' '.join(args[:2])}") from error
+    except UnicodeError as error:
+        raise SnapshotError(f"collector returned invalid UTF-8: {args[0]}") from error
     if process.returncode != 0:
         if required:
             raise SnapshotError(f"collector failed: {' '.join(args[:2])}")
@@ -110,29 +139,29 @@ def files_match(first, second):
                 return True
 
 
-def record_snapshot_history():
+def record_snapshot_history(output=OUTPUT, history_dir=HISTORY_DIR):
     max_history = snapshot_history_limit()
     if max_history == 0:
         return
 
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(
-        HISTORY_DIR.glob("*.tsv"), key=lambda path: path.stat().st_mtime, reverse=True
+        history_dir.glob("*.tsv"), key=lambda path: path.stat().st_mtime, reverse=True
     )
-    if files and files_match(OUTPUT, files[0]):
+    if files and files_match(output, files[0]):
         return
 
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    destination = HISTORY_DIR / f"{timestamp}.tsv"
+    destination = history_dir / f"{timestamp}.tsv"
     if destination.exists():
-        destination = HISTORY_DIR / f"{timestamp}.{os.getpid()}.tsv"
+        destination = history_dir / f"{timestamp}.{os.getpid()}.tsv"
 
     temporary_name = None
     try:
         fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{timestamp}.", dir=str(HISTORY_DIR)
+            prefix=f".{timestamp}.", dir=str(history_dir)
         )
-        with os.fdopen(fd, "wb") as temporary, OUTPUT.open("rb") as source:
+        with os.fdopen(fd, "wb") as temporary, output.open("rb") as source:
             copyfileobj(source, temporary)
             temporary.flush()
             os.fsync(temporary.fileno())
@@ -143,14 +172,15 @@ def record_snapshot_history():
             pathlib.Path(temporary_name).unlink(missing_ok=True)
 
     files = sorted(
-        HISTORY_DIR.glob("*.tsv"), key=lambda path: path.stat().st_mtime, reverse=True
+        history_dir.glob("*.tsv"), key=lambda path: path.stat().st_mtime, reverse=True
     )
     for stale in files[max_history:]:
         stale.unlink(missing_ok=True)
 
 
-def clean(value):
-    return (value or "").replace("\t", " ").replace("\n", " ").strip()
+def records(text):
+    # JSONL and tmux records are separated by literal LF, not Unicode line breaks.
+    return text.removesuffix("\n").split("\n") if text else []
 
 
 def descendants(root, children):
@@ -163,75 +193,303 @@ def descendants(root, children):
     return result
 
 
-def previous_rows():
-    if not OUTPUT.is_file():
-        return {}
-    rows = {}
-    for line in OUTPUT.read_text(errors="replace").splitlines():
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split("\t")
-        if len(fields) >= 8:
-            rows[fields[0]] = fields
-    return rows
+@dataclass(frozen=True)
+class Process:
+    pid: int
+    parent: int
+    group: int
+    foreground: int
+    state: str = field(compare=False)
+    tty: str
+    executable: str
+
+    @property
+    def running(self):
+        return not any(state in self.state for state in "TtZ")
+
+    @property
+    def kind(self):
+        name = pathlib.PurePath(self.executable).name
+        return name if name in ("codex", "claude") else ""
 
 
-def build_rows():
-    ps_children = defaultdict(list)
-    ps_command = {}
-    for line in run(["ps", "-axo", "pid=,ppid=,command="]).splitlines():
-        match = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)", line)
+def collect_processes():
+    processes = {}
+    # comm must be last and wide: macOS otherwise truncates executable paths.
+    for line in records(
+        run(["ps", "-ax", "-ww", "-o", "pid=,ppid=,pgid=,tpgid=,state=,tty=,comm="])
+    ):
+        match = re.fullmatch(
+            r"\s*(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.+)", line
+        )
         if not match:
-            continue
-        pid, ppid, command = match.groups()
-        pid = int(pid)
-        ppid = int(ppid)
-        ps_children[ppid].append(pid)
-        ps_command[pid] = command
+            raise SnapshotError("ps returned an invalid process record")
+        pid, parent, group, foreground, state, tty, executable = match.groups()
+        process = Process(
+            int(pid), int(parent), int(group), int(foreground), state, tty, executable
+        )
+        processes[process.pid] = process
+    return processes
 
-    rows = []
-    previous = previous_rows()
-    pane_format = (
-        "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t"
-        "#{pane_title}\t#{pane_current_command}\t#{pane_current_path}\t"
-        "#{pane_dead}\t#{pane_dead_status}"
-    )
-    for line in run([TMUX, "list-panes", "-a", "-F", pane_format]).splitlines():
-        try:
+
+def collect_panes():
+    panes = {}
+    for line in records(run([TMUX, "list-panes", "-a", "-F", PANE_FORMAT])):
+        fields = line.split("\t")
+        if (
+            len(fields) != 9
+            or any("\r" in field or "\0" in field for field in fields)
+            or not re.fullmatch(r".+:\d+\.\d+", fields[0])
+            or not re.fullmatch(r"%\d+", fields[1])
+            or not fields[2].isdigit()
+            or int(fields[2]) <= 0
+            or fields[7] not in ("0", "1")
+            or not valid_exit_status(fields[8])
+            or (fields[7] == "0" and fields[8] != "")
+            or (
+                not fields[3].startswith("/dev/")
+                and not (fields[7] == "1" and fields[3] == "")
+            )
+            or (
+                not fields[6].startswith("/")
+                and not (fields[7] == "1" and fields[6] == "")
+            )
+            or fields[1] in panes
+        ):
+            raise SnapshotError("tmux returned an invalid pane record")
+        panes[fields[1]] = fields
+    return panes
+
+
+def foreground_job(pane, processes):
+    # A retained dead pane keeps its old PID/TTY, which may now belong to another
+    # process. Its metadata is not evidence of any current foreground owner.
+    if pane[7] == "1":
+        return ()
+    root = processes.get(int(pane[2]))
+    if root is None or root.tty != pane[3].removeprefix("/dev/"):
+        return ()
+    children = defaultdict(list)
+    for process in processes.values():
+        children[process.parent].append(process.pid)
+    members = [root.pid] + descendants(root.pid, children)
+    return tuple(
+        sorted(
             (
-                target,
-                pane_pid,
-                title,
-                current_command,
-                cwd,
-                pane_dead,
-                pane_dead_status,
-            ) = line.split("\t", 6)
-            pane_pid_int = int(pane_pid)
+                process
+                for pid in members
+                if (process := processes[pid]).running
+                and process.tty == root.tty
+                and process.group == root.foreground
+                and process.foreground == root.foreground
+                and process.kind
+            ),
+            key=lambda process: process.pid,
+        )
+    )
+
+
+def collect_commands(pids):
+    if not pids:
+        return {}
+    commands = {}
+    for line in records(
+        run(
+            ["ps", "-ww", "-p", ",".join(map(str, sorted(pids))), "-o", "pid=,command="],
+            required=False,
+        )
+    ):
+        match = re.fullmatch(r"\s*(\d+)\s+(.*)", line)
+        if match:
+            commands[int(match[1])] = match[2]
+    return commands
+
+
+def collect_open_rollouts(pids):
+    paths = defaultdict(set)
+    if not pids:
+        return paths
+    owner = None
+    descriptor = {}
+
+    def record_descriptor():
+        if (
+            owner not in pids
+            or not descriptor.get("f", "").isdigit()
+            or descriptor.get("a") not in ("w", "u")
+            or "AP" not in descriptor.get("G", "").split(";")[0].split(",")
+        ):
+            return
+        path = pathlib.Path(descriptor.get("n", ""))
+        if path.suffix == ".jsonl" and any(
+            directory in path.parents for directory in CODEX_SESSION_DIRS
+        ):
+            paths[owner].add(str(path))
+
+    # Read-only picker/reference handles do not identify the running thread.
+    # Frame both owners and descriptors; lsof's other field order is unspecified.
+    for line in records(
+        run(
+            [
+                "lsof", "-w", "-n", "-P", "-FpfaGn", "+fg",
+                "-p", ",".join(map(str, sorted(pids))),
+            ],
+            required=False,
+        )
+    ):
+        if line.startswith("p"):
+            record_descriptor()
+            owner = int(line[1:]) if line[1:].isdigit() else None
+            descriptor = {}
+        elif line.startswith("f"):
+            record_descriptor()
+            descriptor = {"f": line[1:]}
+        elif line and descriptor:
+            descriptor[line[0]] = line[1:]
+    record_descriptor()
+    return paths
+
+
+def read_metadata(paths):
+    result = {}
+    for path in paths:
+        meta = None
+        try:
+            # Only read the selected writer's open rollouts, never other sessions
+            # or filenames/ancestors as substitutes for the current thread's ID.
+            with open(path, "r", encoding="utf-8", errors="strict", newline="") as handle:
+                remaining = 1024 * 1024
+                while remaining > 0:
+                    line = handle.readline(remaining + 1)
+                    remaining -= len(line)
+                    if not line or remaining < 0:
+                        break
+                    item = json.loads(line)
+                    if isinstance(item, dict) and item.get("type") == "session_meta":
+                        payload = item.get("payload")
+                        if isinstance(payload, dict):
+                            meta = {
+                                "id": payload.get("id"),
+                                "source": payload.get("source"),
+                            }
+                        break
+        except (OSError, UnicodeError, ValueError):
+            pass
+        result[path] = meta
+    return result
+
+
+def collect_metadata(paths):
+    if not paths:
+        return {}
+    # File reads can block too. Keep them inside the same bounded collector group.
+    return json.loads(
+        run(
+            [sys.executable, str(pathlib.Path(__file__).resolve()), "--read-metadata"],
+            input_text=json.dumps(sorted(paths)),
+        )
+    )
+
+
+def exact_session(job, open_rollouts, metadata):
+    ids = set()
+    for path in {path for process in job for path in open_rollouts[process.pid]}:
+        meta = metadata.get(path)
+        if not isinstance(meta, dict):
+            return ""
+        source = meta.get("source")
+        if source == "cli":
+            session_id = meta.get("id")
+            if not isinstance(session_id, str) or not SID_RE.fullmatch(session_id):
+                return ""
+            ids.add(session_id)
+        elif source in ("exec", "mcp", "vscode") or (
+            isinstance(source, dict)
+            and len(source) == 1
+            and next(iter(source)) in ("subagent", "internal", "custom")
+        ):
+            continue
+        else:
+            return ""
+    return next(iter(ids)) if len(ids) == 1 else ""
+
+
+def has_flag(job, commands, flag):
+    for process in job:
+        try:
+            if flag in shlex.split(commands.get(process.pid, "")):
+                return True
         except ValueError:
-            raise SnapshotError("tmux returned an invalid pane record") from None
+            continue
+    return False
 
-        codex_commands = []
-        claude_commands = []
-        ids = []
 
-        for pid in [pane_pid_int] + descendants(pane_pid_int, ps_children):
-            command = ps_command.get(pid, "")
-            if "codex" in command and "tokenjuice" not in command:
-                codex_commands.append(command)
-                command_ids = SID_RE.findall(command)
-                ids.extend(command_ids)
-                if not command_ids:
-                    for lsof_line in run(
-                        ["lsof", "-w", "-F", "n", "-p", str(pid)], required=False
-                    ).splitlines():
-                        if not lsof_line.startswith(f"n{CODEX_SESSIONS_DIR}/"):
-                            continue
-                        ids.extend(SID_RE.findall(lsof_line[1:]))
-            elif re.search(r"(^|/)claude(\s|$)|Claude Code", command):
-                claude_commands.append(command)
+def previous_exit_rows(identity):
+    if identity is None or not OUTPUT.is_file():
+        return {}
+    try:
+        text = read_document(OUTPUT)
+        saved = saved_restore_identity(text)
+        rows = parse_snapshot_rows(text)
+    except (SnapshotError, OSError, ValueError):
+        return {}
+    if saved.get("server") != identity["server"] or not isinstance(saved.get("panes"), dict):
+        return {}
+    retained = {}
+    for row in rows:
+        before = saved["panes"].get(row[0])
+        now = identity["panes"].get(row[0])
+        if (
+            not isinstance(before, dict) or not isinstance(now, dict)
+            or now["dead"] != "1" or row[6] != "exact"
+            or any(before.get(key) != now[key] for key in ("session", "window", "pane", "pid"))
+        ):
+            continue
+        process = before.get("process")
+        # A reaped owner has no independently checkable start identity. Keep its
+        # earlier snapshot in history, but never infer continuity from a PID.
+        if (
+            not isinstance(process, dict)
+            or type(process.get("pid")) is not int or process["pid"] != now["pid"]
+            or type(process.get("uid")) is not int or process["uid"] != os.getuid()
+            or not isinstance(process.get("start"), str) or not process["start"]
+            or process != now.get("process")
+        ):
+            continue
+        retained[row[0]] = row
+    return retained
 
-        ids = list(dict.fromkeys(ids))
+
+def build_rows(*, live_only=False, identity=None):
+    panes = collect_panes()
+    processes = collect_processes()
+    jobs = {pane_id: foreground_job(pane, processes) for pane_id, pane in panes.items()}
+    pids = {process.pid for job in jobs.values() for process in job}
+    commands = collect_commands(pids)
+    codex_pids = {
+        process.pid for job in jobs.values() for process in job if process.kind == "codex"
+    }
+    open_rollouts = collect_open_rollouts(codex_pids)
+    metadata = collect_metadata({path for paths in open_rollouts.values() for path in paths})
+    current_rollouts = collect_open_rollouts(codex_pids)
+    current_processes = collect_processes()
+    current_panes = collect_panes()
+    if {key: value[:4] + value[7:] for key, value in panes.items()} != {
+        key: value[:4] + value[7:] for key, value in current_panes.items()
+    }:
+        raise SnapshotError("pane topology changed during collection")
+    rows = []
+    previous = previous_exit_rows(identity) if not live_only else {}
+    for pane_id, pane in current_panes.items():
+        target, _, _, _, title, current_command, cwd, dead, dead_status = pane
+        if live_only and dead == "1":
+            continue
+        job = jobs[pane_id]
+        current_job = foreground_job(pane, current_processes)
+        stable = job == current_job and all(
+            open_rollouts[process.pid] == current_rollouts[process.pid] for process in job
+        )
+        kinds = {process.kind for process in job + current_job}
         kind = "shell"
         status = "shell"
         session_id = ""
@@ -239,48 +497,40 @@ def build_rows():
         owner_state = "shell"
         exit_status = ""
 
-        if codex_commands:
+        if dead == "1":
+            owner_state, exit_status = "exited", dead_status
+            kind = current_command if current_command in ("codex", "claude") else "shell"
+            status = "unresolved"
+            restore = ""
+            old = previous.get(target)
+            if old is not None:
+                kind, session_id, status = old[1], old[5], "exact"
+                cwd = old[2]
+                restore = f"cd {shlex.quote(cwd)} && {resume_command(kind, session_id, status)}"
+        elif "codex" in kinds or current_command == "codex":
             kind = "codex"
             owner_state = "running"
-            command_text = " ".join(codex_commands)
             dangerous = (
                 " --dangerously-bypass-approvals-and-sandbox"
-                if "--dangerously-bypass-approvals-and-sandbox" in command_text
+                if has_flag(job, commands, "--dangerously-bypass-approvals-and-sandbox")
                 else ""
             )
-            if ids:
-                session_id = ids[0]
+            session_id = exact_session(job, open_rollouts, metadata) if stable else ""
+            if session_id:
                 status = "exact"
                 restore = (
                     f"cd {shlex.quote(cwd)} && codex resume{dangerous} "
                     f"--no-alt-screen {session_id}"
                 )
-            elif "resume --all" in command_text:
-                status = "picker"
-                restore = f"cd {shlex.quote(cwd)} && codex resume --all --no-alt-screen"
             else:
                 status = "unresolved"
-                restore = f"cd {shlex.quote(cwd)} && codex --no-alt-screen"
-        elif claude_commands:
+                restore = ""
+        elif "claude" in kinds:
             kind = "claude"
             owner_state = "running"
-            status = "resume"
-            dangerous = (
-                " --dangerously-skip-permissions"
-                if "--dangerously-skip-permissions" in " ".join(claude_commands)
-                else ""
-            )
-            restore = f"cd {shlex.quote(cwd)} && claude{dangerous} resume"
-
-        if pane_dead == "1":
-            owner_state = "exited"
-            exit_status = pane_dead_status
-            old = previous.get(target)
-            if old and old[1] in {"codex", "claude"}:
-                kind = old[1]
-                session_id = old[5]
-                status = old[6]
-                restore = old[7]
+            # A picker or a cwd is not an exact Claude session identity.
+            status = "unresolved"
+            restore = ""
 
         rows.append(
             [
@@ -299,21 +549,23 @@ def build_rows():
     return rows
 
 
-def write_snapshot(rows):
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+def write_snapshot(rows, output=OUTPUT, header=None):
+    output.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = None
     try:
-        fd, tmp_name = tempfile.mkstemp(prefix=f"{OUTPUT.name}.", dir=str(OUTPUT.parent))
-        with os.fdopen(fd, "w") as handle:
-            handle.write(
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{output.name}.", dir=str(output.parent))
+        with os.fdopen(fd, "w", encoding="utf-8", errors="strict", newline="") as handle:
+            handle.write(header or (
                 "# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\t"
                 "status\trestore\towner_state\texit_status\n"
-            )
+            ))
             for row in rows:
-                handle.write("\t".join(clean(value) for value in row) + "\n")
+                if any(any(char in value for char in "\t\r\n\0") for value in row):
+                    raise SnapshotError("snapshot contains an invalid structural field")
+                handle.write("\t".join(row) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_name, OUTPUT)
+        os.replace(tmp_name, output)
         tmp_name = None
     finally:
         if tmp_name:
@@ -325,12 +577,23 @@ def acquire_snapshot_lock():
         raise SnapshotError("advisory file locking is unavailable")
 
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    handle = LOCK_PATH.open("a+")
+    fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    handle = os.fdopen(fd, "r+")
     try:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise SnapshotError("snapshot lock is not an owned regular file")
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         handle.close()
         return None
+    except BaseException:
+        handle.close()
+        raise
+    current = os.stat(LOCK_PATH, follow_symlinks=False)
+    if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+        handle.close()
+        raise SnapshotError("snapshot lock was replaced")
 
     handle.seek(0)
     handle.truncate()
@@ -340,26 +603,686 @@ def acquire_snapshot_lock():
     return handle
 
 
+def parse_tsv(text, widths):
+    rows = []
+    for line in records(text):
+        if not line or line.startswith("#"):
+            continue
+        row = line.split("\t")
+        if len(row) not in widths or any(
+            any(ord(char) < 32 or ord(char) == 127 for char in value) for value in row
+        ):
+            raise SnapshotError("invalid snapshot fields")
+        rows.append(row)
+    return rows
+
+
+def publish_agent_snapshot(output):
+    text = run(
+        [str(pathlib.Path(__file__).resolve().with_name("tt")), "snapshot-records"],
+        total_budget=True,
+    )
+    rows = parse_tsv(text, (5,))
+    if not rows:
+        return
+    targets = [(row[0], row[1]) for row in rows]
+    if len(set(targets)) != len(targets):
+        raise SnapshotError("agent manifest contains duplicate targets")
+    live = {row[0]: row for row in build_rows()}
+    for row in rows:
+        target = f"{row[0]}:1.{row[1]}"
+        current = live.get(target)
+        if current is None:
+            raise SnapshotError("agent pane disappeared during capture")
+        if current[1] in ("codex", "claude") and current[6] != "exact":
+            raise UnresolvedAgentEvidence("agent manifest has unresolved live session evidence")
+        # The tmux launch string is a wrapper, not recovery evidence. Only the
+        # collector's exact, open session metadata can supply a resume command.
+        row[4] = (
+            resume_command(current[1], current[5], current[6])
+            if current[6] == "exact" else ""
+        )
+    write_snapshot(
+        rows, output, "# session\tpane\tdir\ttitle\tcommand\n"
+    )
+    record_snapshot_history(output, STATE_HOME / "tt" / "history" / "agent-cockpit")
+
+
+def read_document(path):
+    with open(path, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 8 * 1024 * 1024:
+            raise SnapshotError("recovery input is not a bounded regular file")
+        content = handle.read(8 * 1024 * 1024 + 1)
+        after = os.fstat(handle.fileno())
+    if (
+        len(content) > 8 * 1024 * 1024
+        or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    ):
+        raise SnapshotError("recovery input changed while reading")
+    return content.decode("utf-8", errors="strict")
+
+
+SESSION_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+TARGET_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_-]*):(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+
+
+def resume_command(kind, session_id, status):
+    if status != "exact" or not SID_RE.fullmatch(session_id):
+        raise SnapshotError("recovery requires an exact saved UUID")
+    if kind == "codex":
+        return f"codex resume --no-alt-screen {session_id}"
+    if kind == "claude":
+        return f"claude --resume {session_id}"
+    raise SnapshotError("unsupported recovery agent")
+
+
+def manifest_resume_command(command):
+    if not command:
+        return "", ""
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        raise SnapshotError("invalid agent manifest command") from None
+    if not args:
+        raise SnapshotError("empty agent manifest command")
+    kind = args[0]
+    if kind == "codex" and len(args) >= 3 and args[1] == "resume":
+        allowed = {"--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"}
+        flags = args[2:-1]
+    elif kind == "claude" and len(args) == 3 and args[1] in ("resume", "--resume"):
+        allowed, flags = set(), []
+    else:
+        raise SnapshotError("manifest command has no supported exact resume identity")
+    if any(flag not in allowed for flag in flags):
+        raise SnapshotError("unsupported manifest resume arguments")
+    session_id = args[-1]
+    return resume_command(kind, session_id, "exact"), session_id
+
+
+def selected_target(target, mode, selector):
+    if mode == "all":
+        return True
+    if mode == "pane":
+        return target == selector
+    if mode == "window":
+        return target.startswith(selector + ".")
+    if mode == "session":
+        return target.startswith(selector + ":")
+    raise SnapshotError("invalid recovery selection")
+
+
+def valid_exit_status(value):
+    return value == "" or (
+        re.fullmatch(r"0|[1-9][0-9]{0,2}", value) is not None and int(value) <= 255
+    )
+
+
+def parse_snapshot_rows(text):
+    rows = parse_tsv(text, (8, 10))
+    targets = set()
+    for row in rows:
+        target, kind, _, _, _, session_id, status, _ = row[:8]
+        if not TARGET_RE.fullmatch(target):
+            raise SnapshotError("invalid snapshot target")
+        if (
+            target in targets
+            or kind not in ("codex", "claude", "shell")
+            or status not in ("exact", "unresolved", "shell", "resume", "picker")
+            or (session_id and not SID_RE.fullmatch(session_id))
+            or (status == "exact" and (not session_id or kind == "shell"))
+            or (status != "exact" and session_id)
+            or (kind == "shell" and status not in ("shell", "unresolved"))
+            or (kind != "shell" and status == "shell")
+        ):
+            raise SnapshotError("invalid snapshot identity fields")
+        if len(row) == 10:
+            owner, exit_status = row[8:]
+            if (
+                owner not in ("running", "exited", "shell")
+                or not valid_exit_status(exit_status)
+                or (owner != "exited" and exit_status != "")
+                or (owner == "shell" and kind != "shell")
+                or (owner == "running" and kind == "shell")
+            ):
+                raise SnapshotError("invalid snapshot owner state")
+        targets.add(target)
+    return rows
+
+
+def validate_recovery(text, schema, mode="all", selector="", cold=False):
+    rows = parse_tsv(text, (5,)) if schema == "agents" else parse_snapshot_rows(text)
+    validated, targets, ids = [], set(), set()
+    for row in rows:
+        if schema == "agents":
+            session, pane, cwd, title, command = row
+            if not SESSION_RE.fullmatch(session) or not re.fullmatch(r"[1-6]", pane):
+                raise SnapshotError("invalid agent manifest target")
+            target = f"{session}:1.{pane}"
+            command, session_id = manifest_resume_command(command)
+            row[4] = command
+        else:
+            target, kind, cwd, title, _, session_id, status, _ = row[:8]
+            match = TARGET_RE.fullmatch(target)
+            if not match:
+                raise SnapshotError("invalid snapshot target")
+            if not selected_target(target, mode, selector):
+                continue
+            if cold and not (
+                1 <= int(match[2]) <= 5 and 1 <= int(match[3]) <= 6
+            ):
+                raise SnapshotError("snapshot target is outside the recovery grid")
+            if not cold and kind == "shell":
+                continue
+            if kind == "shell" and cold and status == "shell" and not session_id:
+                row[7] = ""
+            else:
+                row[7] = resume_command(kind, session_id, status)
+        if target in targets or (session_id and session_id in ids):
+            raise SnapshotError("duplicate recovery target or session UUID")
+        targets.add(target)
+        if session_id:
+            ids.add(session_id)
+        if not pathlib.Path(cwd).is_absolute() or not pathlib.Path(cwd).is_dir():
+            raise SnapshotError(f"recovery cwd is unavailable: {cwd}")
+        validated.append(row)
+    if not validated:
+        raise SnapshotError("no executable recovery records matched")
+    return validated
+
+
+def private_disk_directory(root):
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise SnapshotError("recovery directory must be private and user-owned")
+    if sys.platform.startswith("linux") and run(
+        ["stat", "-f", "-c", "%T", str(root)]
+    ).strip() in ("tmpfs", "ramfs"):
+        raise SnapshotError("recovery requires disk-backed storage")
+    return root
+
+
+def recovery_environment():
+    scratch = private_disk_directory(pathlib.Path.home() / ".cache/cockpit-tmp")
+    paths = [
+        str(pathlib.Path.home() / ".local/bin"),
+        str(pathlib.Path.home() / "bin"),
+        os.environ.get("PNPM_HOME", str(pathlib.Path(
+            os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local/share")
+        ) / "pnpm")),
+        *os.environ.get("PATH", "/usr/bin:/bin").split(os.pathsep),
+    ]
+    values = {
+        "TMPDIR": str(scratch),
+        "PATH": os.pathsep.join(dict.fromkeys(path for path in paths if path)),
+        "COLORTERM": "truecolor", "CLICOLOR": "1", "CLICOLOR_FORCE": "1", "FORCE_COLOR": "3",
+    }
+    return [argument for key, value in values.items() for argument in ("-e", f"{key}={value}")]
+
+
+def freeze_recovery(schema, source, selector):
+    if schema not in ("codex", "agents"):
+        raise SnapshotError("invalid recovery schema")
+    text = read_document(source)
+    rows = validate_recovery(
+        text, schema, "session" if schema == "codex" else "all", selector, cold=True
+    )
+    if schema == "agents" and selector not in {row[0] for row in rows}:
+        raise SnapshotError("attach session is not present in the validated recovery input")
+    if schema == "codex" and "# restore-identity\t" in text:
+        saved = saved_restore_identity(text).get("server", {})
+        if saved.get("host") != os.uname().nodename or saved.get("uid") != os.getuid():
+            raise SnapshotError("recovery input belongs to another host or user")
+    root = private_disk_directory(STATE_HOME / "tt" / "recovery-inputs")
+    fd, name = tempfile.mkstemp(prefix=f"{schema}-", suffix=".tsv", dir=root)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write("# validated recovery input; outside snapshot retention\n")
+        for row in rows:
+            handle.write("\t".join(row) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        os.fchmod(handle.fileno(), 0o400)
+    return name
+
+
+def process_identity(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        raise SnapshotError("invalid process identity")
+    if sys.platform.startswith("linux"):
+        path = pathlib.Path(f"/proc/{pid}")
+        uid = path.stat().st_uid
+        fields = (path / "stat").read_text().rsplit(") ", 1)[1].split()
+        start = fields[19]
+    else:
+        value = run(["ps", "-p", str(pid), "-o", "uid=,lstart="]).strip().split(None, 1)
+        if len(value) != 2 or not value[0].isdigit():
+            raise SnapshotError("process start identity unavailable")
+        uid, start = int(value[0]), value[1]
+    if uid != os.getuid():
+        raise SnapshotError("process belongs to another user")
+    return {"pid": pid, "uid": uid, "start": start}
+
+
+def server_identity():
+    fields = run([TMUX, "display-message", "-p", "#{pid}\t#{socket_path}"]).strip().split("\t")
+    if len(fields) != 2 or not fields[0].isdigit():
+        raise SnapshotError("tmux server identity unavailable")
+    path = pathlib.Path(fields[1])
+    info = path.lstat()
+    if not path.is_absolute() or not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise SnapshotError("tmux socket is not an owned local socket")
+    return {
+        "host": os.uname().nodename,
+        "uid": os.getuid(),
+        "socket": str(path),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "process": process_identity(int(fields[0])),
+    }
+
+
+RESTORE_IDENTITY_FORMAT = (
+    "#{session_name}:#{window_index}.#{pane_index}\t#{session_id}\t"
+    "#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}"
+)
+
+
+def restore_identity():
+    server = server_identity()
+    panes = {}
+    for row in parse_tsv(run([TMUX, "list-panes", "-a", "-F", RESTORE_IDENTITY_FORMAT]), (6,)):
+        target, session, window, pane, pid, dead = row
+        if (
+            not TARGET_RE.fullmatch(target)
+            or not re.fullmatch(r"\$\d+", session)
+            or not re.fullmatch(r"@\d+", window)
+            or not re.fullmatch(r"%\d+", pane)
+            or not pid.isdigit()
+            or dead not in ("0", "1")
+            or target in panes
+        ):
+            raise SnapshotError("invalid pane restore identity")
+        process = None
+        try:
+            process = process_identity(int(pid))
+        except (SnapshotError, OSError):
+            if dead == "0":
+                raise
+        panes[target] = {
+            "session": session, "window": window, "pane": pane,
+            "pid": int(pid), "dead": dead,
+            "process": process,
+        }
+    if server != server_identity():
+        raise SnapshotError("tmux server changed during collection")
+    return {"version": 1, "server": server, "panes": panes}
+
+
+def saved_restore_identity(text):
+    lines = [line[len("# restore-identity\t"):] for line in records(text)
+             if line.startswith("# restore-identity\t")]
+    if len(lines) != 1:
+        raise SnapshotError("legacy snapshot has no unique server/pane identity; preview only")
+    try:
+        value = json.loads(lines[0])
+    except ValueError:
+        raise SnapshotError("invalid saved restore identity") from None
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise SnapshotError("unsupported saved restore identity")
+    return value
+
+
+def live_session_evidence():
+    rows = build_rows(live_only=True)
+    if any(row[1] in ("codex", "claude") and row[6] != "exact" for row in rows):
+        raise SnapshotError("live agent identities are unresolved; refusing duplicate recovery")
+    return {row[0]: row for row in rows if row[6] == "exact"}
+
+
+def running_session_target(live, row):
+    places = [target for target, item in live.items() if item[5] == row[5]]
+    if places and (places != [row[0]] or live[row[0]][1] != row[1]):
+        raise SnapshotError(f"session UUID is already running elsewhere: {row[0]}")
+    return bool(places)
+
+
+def restore_dead(source, mode, selector):
+    text = read_document(source)
+    rows = validate_recovery(text, "codex", mode, selector)
+    saved = saved_restore_identity(text)
+    current = restore_identity()
+    if saved.get("server") != current["server"]:
+        raise SnapshotError("snapshot belongs to a different host, user, socket or server")
+    saved_panes = saved.get("panes")
+    if not isinstance(saved_panes, dict):
+        raise SnapshotError("snapshot pane identities are unavailable")
+    # Read live UUID evidence without publishing a snapshot. This detects both
+    # successful reruns and an exact session already running in another pane.
+    live = live_session_evidence()
+    plan = []
+    for row in rows:
+        target, kind, cwd, _, _, session_id, _, command = row[:8]
+        before, now = saved_panes.get(target), current["panes"].get(target)
+        if not isinstance(before, dict) or not isinstance(now, dict) or any(
+            before.get(key) != now[key] for key in ("session", "window", "pane")
+        ):
+            raise SnapshotError(f"pane identity changed: {target}")
+        if running_session_target(live, row):
+            plan.append((row, "skip"))
+        elif now["dead"] != "1":
+            raise SnapshotError(f"refusing live occupant: {target}")
+        elif before.get("pid") != now["pid"]:
+            raise SnapshotError(f"pane process changed since snapshot: {target}")
+        elif now.get("process") is not None and before.get("process") != now["process"]:
+            raise SnapshotError(f"pane process start identity changed: {target}")
+        else:
+            plan.append((row, "restore"))
+    restored = 0
+    try:
+        for row, action in plan:
+            target, _, cwd, _, _, _, _, command = row[:8]
+            environment = recovery_environment() if action == "restore" else []
+            live = live_session_evidence()
+            running = running_session_target(live, row)
+            if running != (action == "skip"):
+                raise SnapshotError(f"live session evidence changed: {target}")
+            check = restore_identity()
+            if check["server"] != current["server"] or check["panes"].get(target) != current["panes"][target]:
+                raise SnapshotError(f"restore plan became stale: {target}")
+            if action == "skip":
+                print(f"{target}\talready running exact session; skipped")
+                continue
+            if not pathlib.Path(cwd).is_dir():
+                raise SnapshotError(f"recovery cwd disappeared: {cwd}")
+            pane = current["panes"][target]["pane"]
+            # Never -k: tmux itself must refuse a pane that became active after
+            # the last identity check. No presentation or metadata is changed.
+            run([TMUX, "respawn-pane", "-t", pane, "-c", cwd.replace("#", "##"), *environment,
+                 "/bin/sh", "-c", f"{command}; exec {shlex.quote(LOGIN_SHELL)} -il"])
+            restored += 1
+            print(f"{target}\trestored exact session")
+    except (SnapshotError, OSError):
+        print(f"tt: stopped after {restored} restores; no rollback attempted", file=sys.stderr)
+        raise
+
+
+def recover_cold(schema, source, selector, expected_running):
+    if schema not in ("codex", "agents") or expected_running not in ("0", "1"):
+        raise SnapshotError("invalid cold recovery mode")
+    rows = validate_recovery(
+        read_document(source), schema,
+        "session" if schema == "codex" else "all", selector, cold=True,
+    )
+    plans = {}
+    for row in rows:
+        if schema == "agents":
+            session, pane, cwd, title, command = row
+            window, pane = 1, int(pane)
+        else:
+            match = TARGET_RE.fullmatch(row[0])
+            session, window, pane = match[1], int(match[2]), int(match[3])
+            cwd, title, command = row[2], row[3], row[7]
+        plans.setdefault(session, {})[window, pane] = (cwd, title, command)
+    if selector and selector not in plans:
+        raise SnapshotError("attach session is not present in the validated recovery input")
+    # Direct helper callers get the same gate as tt. Authorize the complete
+    # frozen selection before even preparing the first new session.
+    for session in plans:
+        run([str(pathlib.Path(__file__).resolve().with_name("tt")),
+             "topology-authorize", "recover", session])
+    existing = run([TMUX, "list-sessions", "-F", "#{session_name}"], required=False)
+    server = server_identity() if existing else None
+    if bool(server) != (expected_running == "1"):
+        raise SnapshotError("server appeared or disappeared before recovery")
+    conflicts = set(records(existing)) & (set(plans) | ({"ops"} if "cockpit" in plans else set()))
+    if conflicts:
+        raise SnapshotError("recovery sessions already exist: " + ", ".join(sorted(conflicts)))
+    if server is not None:
+        wanted_ids = {
+            manifest_resume_command(row[4])[1] if schema == "agents" else row[5]
+            for row in rows
+        } - {""}
+        live = build_rows(live_only=True)
+        if any(row[5] in wanted_ids for row in live):
+            raise SnapshotError("an exact recovery session is already running on this server")
+        if wanted_ids and any(row[1] in ("codex", "claude") and row[6] != "exact" for row in live):
+            raise SnapshotError("live agent identities are unresolved; refusing duplicate recovery")
+    environment = recovery_environment()
+    configuration = "/dev/null"
+    if server is None:
+        configuration = str(pathlib.Path(source).with_suffix(".tmux.conf"))
+        content = run([str(pathlib.Path(__file__).resolve().with_name("tt")), "recovery-config"])
+        with open(configuration, "x", encoding="utf-8") as handle:
+            handle.write(content)
+            os.fchmod(handle.fileno(), 0o400)
+    created = set()
+    session_ids = []
+
+    def checked(args):
+        if server is not None and server_identity() != server:
+            raise SnapshotError("server changed during cold recovery")
+        return run([TMUX, *args])
+
+    def pane_settings(pane, title, command):
+        checked(["set-option", "-pt", pane, "@tt_base_title", title])
+        checked(["set-option", "-pt", pane, "@tt_agent_command", command])
+        kind = command.split(" ", 1)[0].upper() if command else "SHELL"
+        checked(["set-option", "-pt", pane, "@tt_agent_kind", kind])
+        checked(["select-pane", "-t", pane, "-T", title])
+
+    def launch_args(item):
+        cwd, _, command = item
+        if not pathlib.Path(cwd).is_dir():
+            raise SnapshotError("recovery cwd disappeared")
+        program = f"exec {shlex.quote(LOGIN_SHELL)} -il"
+        if command:
+            program = f"{command}; {program}"
+        return ["-c", cwd.replace("#", "##"), *environment], ["/bin/sh", "-c", program]
+
+    try:
+        for session, entries in plans.items():
+            default_cwd = next(iter(entries.values()))[0]
+            names = ("ops", "L1", "L2", "L3", "L4") if schema == "codex" else ("main",)
+            session_id = None
+            for window_number, name in enumerate(names, 1):
+                def item(pane_number):
+                    return entries.get(
+                        (window_number, pane_number),
+                        (default_cwd, f"{name}.{pane_number}", ""),
+                    )
+
+                options, program = launch_args(item(1))
+                if session_id is None:
+                    result = checked([
+                        "-f", configuration, "new-session", "-d", "-x", "240", "-y", "80",
+                        "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
+                        "-s", session, "-n", name, *options, *program,
+                    ]).strip().split("\t")
+                    if len(result) != 3:
+                        raise SnapshotError("new-session did not return stable resource IDs")
+                    session_id, window_id, first = result
+                    if (
+                        not re.fullmatch(r"\$\d+", session_id)
+                        or not re.fullmatch(r"@\d+", window_id)
+                        or not re.fullmatch(r"%\d+", first)
+                        or first in created
+                    ):
+                        raise SnapshotError("invalid or reused cold recovery resource ID")
+                    if server is None:
+                        server = server_identity()
+                    session_ids.append(session_id)
+                    checked(["set-option", "-t", session_id, "base-index", "1"])
+                    index = checked(["display-message", "-p", "-t", window_id, "#{window_index}"]).strip()
+                    if index != "1":
+                        checked(["move-window", "-s", window_id, "-t", f"{session_id}:1"])
+                    checked(["set-option", "-t", session_id, "@tt_profile",
+                             "ops" if schema == "codex" else "studio"])
+                else:
+                    result = checked([
+                        "new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
+                        "-t", f"{session_id}:{window_number}", "-n", name, *options, *program,
+                    ]).strip().split("\t")
+                    if len(result) != 2:
+                        raise SnapshotError("new-window did not return stable resource IDs")
+                    window_id, first = result
+                if (
+                    not re.fullmatch(r"\$\d+", session_id)
+                    or not re.fullmatch(r"@\d+", window_id)
+                    or not re.fullmatch(r"%\d+", first)
+                    or first in created
+                ):
+                    raise SnapshotError("invalid or reused cold recovery resource ID")
+                created.add(first)
+                checked(["set-window-option", "-t", window_id, "pane-base-index", "1"])
+                pane_settings(first, *item(1)[1:])
+                columns = [first]
+                window_panes = {first}
+                # tmux's pane order is column-major: 1/2, 3/4, then 5/6.
+                for logical, parent, direction in (
+                    (3, 0, "-h"), (5, 1, "-h"),
+                    (2, 0, "-v"), (4, 1, "-v"), (6, 2, "-v"),
+                ):
+                    observed = set(records(checked([
+                        "list-panes", "-t", window_id, "-F", "#{pane_id}"
+                    ])))
+                    if observed != window_panes:
+                        raise SnapshotError("new recovery window changed; stopping")
+                    options, program = launch_args(item(logical))
+                    pane = checked([
+                        "split-window", "-d", direction, "-P", "-F", "#{pane_id}",
+                        "-t", columns[parent], *options, *program,
+                    ]).strip()
+                    if not re.fullmatch(r"%\d+", pane) or pane in created:
+                        raise SnapshotError("split did not return a new stable pane ID")
+                    created.add(pane)
+                    window_panes.add(pane)
+                    if logical in (3, 5):
+                        columns.append(pane)
+                    if logical == 5:
+                        checked(["select-layout", "-t", window_id, "even-horizontal"])
+                    pane_settings(pane, *item(logical)[1:])
+        current = restore_identity()
+        owned = {target: pane for target, pane in current["panes"].items()
+                 if pane["session"] in session_ids}
+        if current["server"] != server or sorted(pane["pane"] for pane in owned.values()) != sorted(created):
+            raise SnapshotError("cold recovery resource identity changed before completion")
+        proof = {"server": server, "sessions": session_ids, "identities": owned,
+                 "panes": sorted(created), "existing_server": expected_running}
+        proof_path = pathlib.Path(source).with_suffix(".completed.json")
+        with proof_path.open("x", encoding="utf-8") as handle:
+            json.dump(proof, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), 0o400)
+        print(proof_path)
+    except (SnapshotError, OSError):
+        print(f"tt: cold recovery stopped with {len(created)} new panes; no rollback attempted",
+              file=sys.stderr)
+        raise
+
+
+def verify_cold_completion(path, field="state"):
+    proof = json.loads(read_document(path))
+    current = restore_identity()
+    if proof["server"] != current["server"]:
+        raise SnapshotError("cold recovery server identity changed")
+    owned = [pane for pane in current["panes"].values()
+             if pane["session"] in proof["sessions"]]
+    if sorted(pane["pane"] for pane in owned) != proof["panes"]:
+        raise SnapshotError("cold recovery pane set changed")
+    if any(current["panes"].get(target) != pane for target, pane in proof["identities"].items()):
+        raise SnapshotError("cold recovery pane process changed")
+    if proof["existing_server"] == "0" and len(owned) != len(current["panes"]):
+        raise SnapshotError("another session joined the new server; skipping global setup")
+    if field == "state":
+        print(proof["existing_server"])
+    elif field == "windows":
+        print("\n".join(sorted({pane["window"] for pane in owned})))
+    else:
+        raise SnapshotError("invalid completion field")
+
+
 def main():
     lock = None
+
+    def deadline_expired(_signal, _frame):
+        raise SnapshotError("snapshot collection exceeded its total time budget")
+
+    signal.signal(signal.SIGALRM, deadline_expired)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, DEADLINE - time.monotonic()))
     try:
         lock = acquire_snapshot_lock()
         if lock is None:
             return 75
-        rows = build_rows()
-        write_snapshot(rows)
+        if AUTOSAVE or AGENT_ONLY:
+            try:
+                publish_agent_snapshot(
+                    OUTPUT if AGENT_ONLY else STATE_HOME / "tt" / "agent-cockpit.tsv"
+                )
+            except UnresolvedAgentEvidence as error:
+                if AGENT_ONLY:
+                    raise
+                print(f"tt agent snapshot skipped; prior manifest/history preserved: {error}",
+                      file=sys.stderr)
+        if AGENT_ONLY:
+            return 0
+        identity = restore_identity()
+        rows = build_rows(identity=identity)
+        if identity != restore_identity():
+            raise SnapshotError("restore identities changed during collection")
+        header = ("# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\t"
+                  "status\trestore\towner_state\texit_status\n")
+        header += "# restore-identity\t" + json.dumps(identity, sort_keys=True) + "\n"
+        write_snapshot(rows, header=header)
         record_snapshot_history()
     except SnapshotError as error:
         print(f"tt codex snapshot failed: {error}", file=sys.stderr)
         return 1
-    except OSError as error:
+    except (OSError, ValueError) as error:
         print(f"tt codex snapshot failed: {error}", file=sys.stderr)
         return 1
     finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
         if lock is not None:
             lock.close()
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if sys.argv[1:2] in (
+        ["--freeze-recovery"], ["--restore-dead"],
+        ["--recover-cold"], ["--verify-cold-completion"],
+    ):
+        try:
+            if sys.argv[1] == "--freeze-recovery" and len(sys.argv) == 5:
+                print(freeze_recovery(*sys.argv[2:]))
+            elif sys.argv[1] == "--restore-dead" and len(sys.argv) == 5:
+                restore_dead(*sys.argv[2:])
+            elif sys.argv[1] == "--recover-cold" and len(sys.argv) == 6:
+                recover_cold(*sys.argv[2:])
+            elif sys.argv[1] == "--verify-cold-completion" and len(sys.argv) in (3, 4):
+                verify_cold_completion(*sys.argv[2:])
+            else:
+                raise SnapshotError("invalid recovery arguments")
+        except (SnapshotError, OSError, ValueError) as error:
+            print(f"tt recovery refused: {error}", file=sys.stderr)
+            raise SystemExit(1) from None
+    elif sys.argv[1:] == ["--read-metadata"]:
+        sys.stdout.reconfigure(encoding="utf-8", errors="strict")
+        print(json.dumps(read_metadata(json.load(sys.stdin)), ensure_ascii=False))
+    elif sys.argv[1:2] == ["--control-query"]:
+        queries = {
+            "server-pid": ["display-message", "-p", "#{pid}"],
+            "desired-token": ["show-options", "-gqv", "@tt_codex_snapshot_timer_token"],
+        }
+        if len(sys.argv) != 3 or sys.argv[2] not in queries:
+            raise SystemExit(2)
+        try:
+            sys.stdout.write(run([TMUX, *queries[sys.argv[2]]]))
+        except SnapshotError as error:
+            print(f"tt autosave control unavailable: {error}", file=sys.stderr)
+            raise SystemExit(2) from None
+    else:
+        raise SystemExit(main())

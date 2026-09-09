@@ -978,8 +978,14 @@ agent_kind_for_command() {
   esac
 }
 
+agent_effective_kind_format() {
+  printf '%s' '#{?#{!=:#{@tt_agent_kind},},#{@tt_agent_kind},#{?#{==:#{pane_current_command},codex},CODEX,#{?#{==:#{pane_current_command},claude},CLAUDE,SHELL}}}'
+}
+
 agent_label_format() {
-  printf '#{?#{==:#{@tt_agent_kind},CLAUDE},CC,#{?#{==:#{@tt_agent_kind},CODEX},CX,TM}}'
+  local kind
+  kind="$(agent_effective_kind_format)"
+  printf '#{?#{==:%s,CLAUDE},CC,#{?#{==:%s,CODEX},CX,TM}}' "$kind" "$kind"
 }
 
 agent_ready_format() {
@@ -1050,6 +1056,87 @@ clean_agent_command() {
   printf '%s\n' "$command"
 }
 
+recovery_server_config() {
+  # Only native startup settings. The base config's embedded worker is not safe
+  # to run during recovery alongside other servers.
+  cat <<'TMUX_CONFIG'
+set -g default-terminal "tmux-256color"
+setw -g aggressive-resize off
+set -g window-size latest
+setw -g xterm-keys on
+set -s escape-time 0
+set -sg repeat-time 600
+set -s focus-events off
+set -g prefix C-b
+set -g prefix2 C-a
+bind C-a send-prefix -2
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+set -g set-titles on
+set -g display-panes-time 800
+set -g display-time 1000
+set -g history-limit 100000
+set -g mode-keys vi
+set -g status-keys vi
+set -g status-interval 10
+set -g status-position top
+set -g status-right-length 120
+set -g mouse on
+set -g set-clipboard on
+set -g allow-passthrough on
+set -g extended-keys on
+set -g extended-keys-format csi-u
+set -g terminal-features "xterm*:RGB:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
+set -ga terminal-overrides ",*:Tc,linux*:AX@"
+set -g monitor-activity off
+set -g visual-activity off
+set -g bell-action none
+set -g visual-bell off
+set -g monitor-bell off
+set-environment -g ITERM2_DISABLE_SHELL_INTEGRATION 1
+set-environment -g ITERM_DISABLE_PROMPT_MARK 1
+set -g pane-border-status top
+set -g pane-border-format "#{pane_index} #{pane_title}"
+unbind -n C-l
+bind C-c new-session
+bind C-f command-prompt -p find-session 'switch-client -t %%'
+bind BTab switch-client -l
+bind - split-window -v -c "#{pane_current_path}"
+bind _ split-window -h -c "#{pane_current_path}"
+bind -r h select-pane -L
+bind -r j select-pane -D
+bind -r k select-pane -U
+bind -r l select-pane -R
+bind > swap-pane -D
+bind < swap-pane -U
+bind + resize-pane -Z
+bind -r H resize-pane -L 2
+bind -r J resize-pane -D 2
+bind -r K resize-pane -U 2
+bind -r L resize-pane -R 2
+unbind n
+unbind p
+bind -r C-h previous-window
+bind -r C-l next-window
+bind Tab last-window
+bind m set -g mouse
+bind Enter copy-mode
+bind -T copy-mode-vi v send -X begin-selection
+bind -T copy-mode-vi C-v send -X rectangle-toggle
+bind -T copy-mode-vi y send -X copy-selection-and-cancel
+bind -T copy-mode-vi Escape send -X cancel
+bind -T copy-mode-vi H send -X start-of-line
+bind -T copy-mode-vi L send -X end-of-line
+bind b list-buffers
+bind p paste-buffer -p
+bind P choose-buffer
+bind r source-file ~/.tmux.conf.local \; display '~/.tmux.conf.local sourced'
+bind e new-window -n "~/.tmux.conf.local" sh -c '${EDITOR:-vim} "$HOME/.tmux.conf.local" && tmux source-file "$HOME/.tmux.conf.local" && tmux display "~/.tmux.conf.local sourced"'
+bind R run-shell -b 'python3 "$HOME/.dotfiles/bin/tmux-pane-repair" request #{pane_id} #{q:client_name}'
+TMUX_CONFIG
+}
+
 apply_recovery_theme() {
   local ready
   ready="$(agent_ready_format)"
@@ -1059,7 +1146,7 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g base-index 1
   "$TMUX_BIN" set -g pane-base-index 1
   "$TMUX_BIN" set -g default-terminal "tmux-256color"
-  "$TMUX_BIN" set -g terminal-features "xterm*:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
+  "$TMUX_BIN" set -g terminal-features "xterm*:RGB:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
   "$TMUX_BIN" set -ga terminal-overrides ",*:Tc"
   "$TMUX_BIN" set -g allow-passthrough on
   "$TMUX_BIN" set -g set-clipboard on
@@ -1076,7 +1163,7 @@ apply_recovery_theme() {
   "$TMUX_BIN" set-environment -g ITERM2_DISABLE_SHELL_INTEGRATION 1
   "$TMUX_BIN" set-environment -g ITERM_DISABLE_PROMPT_MARK 1
   "$TMUX_BIN" set -g mouse on
-  "$TMUX_BIN" set -g history-limit 50000
+  "$TMUX_BIN" set -g history-limit 100000
   "$TMUX_BIN" set -g status on
   "$TMUX_BIN" set -g status-position top
   "$TMUX_BIN" set -g status-left-length 32
@@ -1090,14 +1177,13 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g pane-border-style "fg=#{?$ready,#ff9e64,#292e42},bg=default"
   "$TMUX_BIN" set -g pane-active-border-style "fg=#{?$ready,#ff9e64,#7aa2f7},bg=default"
   "$TMUX_BIN" set -g status-left "#[fg=#15161e,bg=#ff9e64,bold] ❐ #S #[fg=#ff9e64,bg=#1a1b26,none] "
-  "$TMUX_BIN" set -g status-right "#[fg=#565f89,bg=#1a1b26]#{?client_prefix,⌨ ,  }#{?mouse,↗ ,  }#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#[fg=#9ece6a,bg=#1a1b26,none]#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#f7768e,bg=#9ece6a,none]#[fg=#c0caf5,bg=#f7768e,bold] %R %d %b vincentkoc@#h "
+  "$TMUX_BIN" set -g status-right "#[fg=#565f89,bg=#1a1b26]#{?client_prefix,⌨ ,  }#{?mouse,↗ ,  }#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#[fg=#9ece6a,bg=#1a1b26,none]#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#f7768e,bg=#9ece6a,none]#[fg=#c0caf5,bg=#f7768e,bold] %R %d %b #{user}@#h "
   set_agent_window_status_formats
   "$TMUX_BIN" set -g pane-border-status off
   "$TMUX_BIN" set -g prefix C-b
   "$TMUX_BIN" set -g prefix2 C-a
   "$TMUX_BIN" bind-key C-a send-prefix -2
   "$TMUX_BIN" bind-key s choose-tree -Zs
-  "$TMUX_BIN" bind-key R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
   "$TMUX_BIN" refresh-client -S 2>/dev/null || true
 }
 
@@ -1129,9 +1215,10 @@ ensure_tmux_rgb_terminfo() {
 
 apply_studio_pane_titles() {
   local target="${1:-}"
-  local agent_label
+  local agent_label agent_kind
   local pane_commands pane_count
   agent_label="$(agent_label_format)"
+  agent_kind="$(agent_effective_kind_format)"
 
   if [[ -z "$target" ]]; then
     while IFS= read -r target; do
@@ -1149,7 +1236,7 @@ apply_studio_pane_titles() {
   fi
 
   "$TMUX_BIN" set-window-option -t "$target" -q pane-border-status top
-  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-format " #{pane_index} #{?@tt_note,#[fg=#e0af68]● #[default],}#[fg=#{?#{==:#{@tt_agent_kind},CLAUDE},#bb9af7,#{?#{==:#{@tt_agent_kind},CODEX},#7dcfff,#9ece6a}},bold]$agent_label#[default] #{?@tt_base_title,#{@tt_base_title},#{pane_title}} "
+  "$TMUX_BIN" set-window-option -t "$target" -q pane-border-format " #{pane_index} #{?@tt_note,#[fg=#e0af68]● #[default],}#[fg=#{?#{==:$agent_kind,CLAUDE},#bb9af7,#{?#{==:$agent_kind,CODEX},#7dcfff,#9ece6a}},bold]$agent_label#[default] #{?@tt_base_title,#{@tt_base_title},#{pane_title}} "
   "$TMUX_BIN" set-window-option -t "$target" -q pane-border-style "fg=#292e42,bg=default"
   "$TMUX_BIN" set-window-option -t "$target" -q pane-active-border-style "fg=#7aa2f7,bg=default"
 }
@@ -1449,6 +1536,7 @@ create_ops_detached() {
     if ops_session_valid "$session"; then
       refresh_ops_labels "$session"
       schedule_ops_shell_upgrade "$session"
+      activate_agent_autosave "$preserve_server" "$recovery_session" || true
       attach_or_switch "$session"
     fi
     echo "tt: session '$session' has a non-ops layout; not rebuilding it" >&2
@@ -1457,6 +1545,7 @@ create_ops_detached() {
   fi
 
   if "$TMUX_BIN" has-session -t "$session" 2>/dev/null; then
+    activate_agent_autosave "$preserve_server" "$recovery_session" || true
     attach_or_switch "$session"
   fi
 
@@ -1483,6 +1572,7 @@ create_ops_detached() {
     schedule_ops_shell_upgrade "$session"
   fi
   "$TMUX_BIN" select-window -t "$window_id"
+  activate_agent_autosave "$preserve_server" "$recovery_session" || true
 }
 
 ensure_studio_layout() {
@@ -1541,7 +1631,6 @@ create_studio() {
   wsl_bridge_ensure_for_entry
   ensure_studio_layout "$session"
   install_agent_autosave_hooks
-  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
 
   attach_or_switch "$session"
 }
@@ -2275,60 +2364,6 @@ snapshot_history_dir() {
   printf '%s\n' "$state_home/tt/history/$label"
 }
 
-record_snapshot_history() {
-  local source="$1"
-  local label="$2"
-  local max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
-  local dir ts dest tmp newest file count
-  local -a files=()
-
-  [[ -f "$source" ]] || return 0
-  case "$max" in
-    ''|*[!0-9]*)
-      max=864
-      ;;
-  esac
-  (( max > 0 )) || return 0
-
-  dir="$(snapshot_history_dir "$label")"
-  mkdir -p "$dir" || return 1
-  newest="$(ls -1t "$dir"/*.tsv 2>/dev/null | head -n 1 || true)"
-  if [[ -n "$newest" ]] && cmp -s "$source" "$newest"; then
-    return 0
-  fi
-
-  ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  dest="$dir/$ts.tsv"
-  if [[ -e "$dest" ]]; then
-    dest="$dir/$ts.$$.tsv"
-  fi
-  tmp="$(mktemp "$dir/.${ts}.XXXXXX")" || return 1
-  if ! cp "$source" "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  if ! python3 -c 'import os, sys; fd = os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  if ! mv "$tmp" "$dest"; then
-    rm -f "$tmp"
-    return 1
-  fi
-
-  while IFS= read -r file; do
-    [[ -n "$file" ]] && files+=("$file")
-  done < <(ls -1t "$dir"/*.tsv 2>/dev/null || true)
-
-  count=0
-  for file in "${files[@]}"; do
-    count=$((count + 1))
-    if (( count > max )); then
-      rm -f "$file"
-    fi
-  done
-}
-
 list_snapshot_history() {
   local label="${1:-codex-cockpit}"
   local dir max="${2:-40}"
@@ -2406,11 +2441,12 @@ manifest_value_for() {
   local wanted_session="$2"
   local wanted_pane="$3"
   local wanted_field="$4"
-  local session pane dir title command
+  local session pane dir title command rows
 
   [[ -f "$manifest" ]] || return 0
 
-  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+  rows="$(tsv_records 5 "$manifest")" || return
+  while IFS=$'\034' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
     [[ "$session" == "$wanted_session" && "$pane" == "$wanted_pane" ]] || continue
     case "$wanted_field" in
@@ -2425,7 +2461,7 @@ manifest_value_for() {
         ;;
     esac
     return 0
-  done < "$manifest"
+  done <<<"$rows"
 }
 
 fallback_title_for_path() {
@@ -2439,11 +2475,12 @@ fallback_title_for_path() {
 
 apply_agent_manifest_metadata() {
   local manifest="${1:-}"
-  local session pane dir title command target kind
+  local session pane dir title command target kind rows
 
   [[ -n "$manifest" && -f "$manifest" ]] || return 0
 
-  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+  rows="$(tsv_records 5 "$manifest")" || return
+  while IFS=$'\034' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
     target="$session:1.$pane"
     kind="$(agent_kind_for_command "$command")"
@@ -2451,37 +2488,30 @@ apply_agent_manifest_metadata() {
     "$TMUX_BIN" set-option -pt "$target" @tt_agent_command "$command" 2>/dev/null || true
     "$TMUX_BIN" set-option -pt "$target" @tt_agent_kind "$kind" 2>/dev/null || true
     set_pane_git_label "$target" "$dir"
-  done < "$manifest"
+  done <<<"$rows"
 }
 
-write_agent_cockpit_state() {
-  local output="${1:-}"
-  local quiet="${2:-}"
-  local seed tmp panes session profile window pane window_panes dir start_command current_command live_title base_title seed_title seed_command command kind
-  local rows=0
-
-  [[ -n "$output" ]] || output="$(agent_cockpit_state_file)"
+collect_agent_cockpit_state() {
+  local seed panes session profile window pane window_panes dir start_command current_command live_title base_title seed_title seed_command command title
   seed="$(agent_cockpit_manifest)"
-  if [[ "$seed" == "$output" ]]; then
+  if [[ "$seed" == "$(agent_cockpit_state_file)" ]]; then
     seed="$(agent_cockpit_seed_manifest)"
   fi
 
-  mkdir -p "$(dirname "$output")"
-  tmp="$output.$$"
-  panes="$tmp.panes"
-  printf '# session\tpane\tdir\ttitle\tcommand\n' > "$tmp"
-  if ! "$TMUX_BIN" list-panes -a -F '#{session_name}	#{@tt_profile}	#{window_index}	#{pane_index}	#{window_panes}	#{pane_current_path}	#{pane_start_command}	#{pane_current_command}	#{pane_title}	#{@tt_base_title}' >"$panes" 2>/dev/null; then
-    rm -f "$tmp" "$panes"
+  if ! panes="$("$TMUX_BIN" list-panes -a -F '#{session_name}	#{@tt_profile}	#{window_index}	#{pane_index}	#{window_panes}	#{pane_current_path}	#{pane_start_command}	#{pane_current_command}	#{pane_title}	#{@tt_base_title}' 2>/dev/null | tsv_records 10)"; then
     printf 'tt snapshot failed: could not list tmux panes\n' >&2
     return 1
   fi
 
-  while IFS=$'\t' read -r session profile window pane window_panes dir start_command current_command live_title base_title || [[ -n "${session:-}" ]]; do
+  printf '# session\tpane\tdir\ttitle\tcommand\n'
+  while IFS=$'\034' read -r session profile window pane window_panes dir start_command current_command live_title base_title || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" ]] || continue
     [[ "$session" != ttm-* ]] || continue
     [[ "$profile" != "ops" ]] || continue
     [[ "$profile" != "mobile" ]] || continue
     [[ "$profile" == "studio" || "$window_panes" == "6" ]] || continue
+    # The legacy agent manifest has no window column. Never alias later windows.
+    [[ "$window" == "1" ]] || continue
 
     seed_title="$(manifest_value_for "$seed" "$session" "$pane" title)"
     seed_command="$(manifest_value_for "$seed" "$session" "$pane" command)"
@@ -2498,49 +2528,28 @@ write_agent_cockpit_state() {
       title="$(fallback_title_for_path "$dir")"
     fi
 
-    command="$(clean_agent_command "$start_command")"
-    if [[ -z "$command" && "$current_command" != "zsh" && "$current_command" != "fish" && "$current_command" != "bash" ]]; then
-      command="$seed_command"
-    fi
-    kind="$(agent_kind_for_command "$command")"
+    # The publisher supplies canonical commands from exact live session metadata.
+    command=""
+    printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$pane" "$dir" "$title" "$command"
+  done <<<"$panes"
+}
 
-    printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$pane" "$dir" "$title" "$command" >> "$tmp"
-    rows=$((rows + 1))
-    "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_base_title "$title" 2>/dev/null || true
-    "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_command "$command" 2>/dev/null || true
-    "$TMUX_BIN" set-option -pt "$session:1.$pane" @tt_agent_kind "$kind" 2>/dev/null || true
-    set_pane_git_label "$session:1.$pane" "$dir"
-  done <"$panes"
-  rm -f "$panes"
-
-  if (( rows == 0 )); then
-    rm -f "$tmp"
-    if [[ "$quiet" != "--quiet" ]]; then
-      printf 'tt snapshot skipped: no live agent cockpit panes\n' >&2
-    fi
-    return 0
-  fi
-
-  mv "$tmp" "$output"
-  record_snapshot_history "$output" "agent-cockpit"
+write_agent_cockpit_state() {
+  local output="${1:-}" quiet="${2:-}"
+  [[ -n "$output" ]] || output="$(agent_cockpit_state_file)"
+  # This entry also serves old timers. Only the Python publisher owns the lock;
+  # snapshot-records is collection-only and can never publish or bypass a lock.
+  TT_TMUX_BIN="$TMUX_BIN" "$SCRIPT_DIR/tt-codex-snapshot-writer" --agent-snapshot "$output" || return
   if [[ "$quiet" != "--quiet" ]]; then
-    printf 'tt snapshot saved: %s\n' "$output" >&2
+    printf 'tt snapshot complete: %s\n' "$output" >&2
   fi
 }
 
-write_codex_cockpit_snapshot() {
-  local output="${1:-}"
-  local quiet="${2:-}"
-  local writer status attempts delay attempt=1
-
-  [[ -n "$output" ]] || output="$(codex_cockpit_snapshot_file)"
-  mkdir -p "$(dirname "$output")"
-
-  writer="$SCRIPT_DIR/tt-codex-snapshot-writer"
-  if [[ ! -x "$writer" ]]; then
-    printf 'tt codex snapshot failed: missing writer %s\n' "$writer" >&2
-    return 1
-  fi
+run_codex_snapshot_writer() {
+  local quiet="$1"
+  shift
+  local writer="$SCRIPT_DIR/tt-codex-snapshot-writer"
+  local status attempts delay attempt=1
 
   attempts="${TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS:-5}"
   delay="${TT_CODEX_SNAPSHOT_LOCK_RETRY_DELAY_SECONDS:-1}"
@@ -2549,12 +2558,13 @@ write_codex_cockpit_snapshot() {
   (( attempts > 0 )) || attempts=1
 
   while (( attempt <= attempts )); do
-    if TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" "$writer" "$output"; then
+    if TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" "$writer" "$@"; then
       status=0
     else
       status=$?
     fi
     (( status == 75 && attempt < attempts )) || break
+    # The Python writer has exited and released its lock before we wait.
     sleep "$delay"
     attempt=$((attempt + 1))
   done
@@ -2565,9 +2575,22 @@ write_codex_cockpit_snapshot() {
     fi
     return 75
   fi
-  if (( status != 0 )); then
-    return "$status"
+  return "$status"
+}
+
+write_codex_cockpit_snapshot() {
+  local output="${1:-}"
+  local quiet="${2:-}"
+  local writer="$SCRIPT_DIR/tt-codex-snapshot-writer"
+
+  [[ -n "$output" ]] || output="$(codex_cockpit_snapshot_file)"
+  mkdir -p "$(dirname "$output")"
+
+  if [[ ! -x "$writer" ]]; then
+    printf 'tt codex snapshot failed: missing writer %s\n' "$writer" >&2
+    return 1
   fi
+  run_codex_snapshot_writer "$quiet" "$output" || return
 
   if [[ "$quiet" != "--quiet" ]]; then
     printf 'tt codex snapshot saved: %s\n' "$output" >&2
@@ -2578,12 +2601,14 @@ write_codex_cockpit_snapshot() {
 autosave_snapshot_cycle() {
   local writer="$SCRIPT_DIR/tt-codex-snapshot-writer"
 
+  codex_snapshot_timer_state_available || return
   if [[ ! -x "$writer" ]]; then
     printf 'tt autosave failed: missing executable writer %s\n' "$writer" >&2
     return 1
   fi
-  write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet || return
-  write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet
+  # Each attempt uses one writer lock and deadline for both streams, including
+  # the agent collector. Automatic capture never updates pane metadata or UI.
+  run_codex_snapshot_writer --quiet --autosave "$(codex_cockpit_snapshot_file)"
 }
 
 show_codex_snapshot() {
@@ -2797,6 +2822,32 @@ doctor_tmux() {
   status_report
 }
 
+snapshot_records() {
+  tsv_records '8,10'
+}
+
+tsv_records() {
+  # Bash treats tabs as whitespace and collapses empty fields. Validate the
+  # entire input before emitting a non-whitespace separator for shell readers.
+  local widths="$1"
+  shift
+  awk -F '\t' -v widths=",$widths," '
+    /^#/ || NF == 0 { next }
+    !index(widths, "," NF ",") || index($0, "\034") || index($0, "\r") {
+      invalid = 1
+      next
+    }
+    { gsub(/\t/, "\034"); rows[++count] = $0 }
+    END {
+      if (invalid) {
+        print "tt: invalid snapshot fields or reserved separator" > "/dev/stderr"
+        exit 1
+      }
+      for (i = 1; i <= count; i++) print rows[i]
+    }
+  ' "$@"
+}
+
 codex_restore_matches() {
   local mode="${1:-preview}"
   local selector="${2:-}"
@@ -2805,7 +2856,7 @@ codex_restore_matches() {
   [[ -n "$snapshot" ]] || snapshot="$(codex_cockpit_snapshot_file)"
   [[ -f "$snapshot" ]] || { echo "codex snapshot not found: $snapshot" >&2; return 1; }
 
-  awk -F '\t' -v mode="$mode" -v selector="$selector" '
+  awk -F '\t' -v mode="$mode" -v selector="$selector" -v execute="${4:-}" '
     $1 ~ /^#/ || !($2 == "codex" || $2 == "claude") { next }
     mode == "all" { print; next }
     mode == "pane" && $1 == selector { print; next }
@@ -2819,8 +2870,8 @@ codex_restore_execute() {
   local selector="${2:-}"
   local snapshot="${3:-}"
   local execute="${4:-}"
-  local target kind cwd title current_command session_id status restore
-  local matched=0 restored=0 missing=0
+  local target kind cwd title current_command _session_id status restore marker _bucket records
+  local matched=0
 
   if [[ "$selector" == "--execute" ]]; then
     execute="--execute"
@@ -2851,13 +2902,14 @@ codex_restore_execute() {
       ;;
   esac
 
+  records="$(codex_restore_matches "$mode" "$selector" "$snapshot" "$execute" | snapshot_records)" || return
   if [[ "$execute" != "--execute" ]]; then
     echo "dry run; add --execute to respawn matching panes" >&2
-    while IFS=$'\t' read -r target kind cwd title current_command session_id status restore || [[ -n "${target:-}" ]]; do
+    while IFS=$'\034' read -r target kind cwd title current_command _session_id status restore marker _bucket || [[ -n "${target:-}" ]]; do
       [[ -n "${target:-}" ]] || continue
       matched=$((matched + 1))
       printf '%s\t%s\t%s\t%s\n' "$target" "$kind" "$status" "$restore"
-    done < <(codex_restore_matches "$mode" "$selector" "$snapshot")
+    done <<<"$records"
     if (( matched == 0 )); then
       echo "no matching Codex/Claude panes" >&2
       return 1
@@ -2865,27 +2917,9 @@ codex_restore_execute() {
     return 0
   fi
 
-  while IFS=$'\t' read -r target kind cwd title current_command session_id status restore || [[ -n "${target:-}" ]]; do
-    [[ -n "${target:-}" ]] || continue
-    matched=$((matched + 1))
-    printf '%s\t%s\t%s\t%s\n' "$target" "$kind" "$status" "$restore"
-    if "$TMUX_BIN" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | grep -Fxq "$target"; then
-      "$TMUX_BIN" respawn-pane -k -t "$target" "$(command_with_shell_fallback "$restore")"
-      restored=$((restored + 1))
-    else
-      printf 'missing pane: %s\n' "$target" >&2
-      missing=$((missing + 1))
-    fi
-  done < <(codex_restore_matches "$mode" "$selector" "$snapshot")
-
-  "$TMUX_BIN" set -g status-position top
-  set_agent_window_status_formats
-  apply_studio_pane_titles "$selector"
-  if (( matched == 0 )); then
-    echo "no matching Codex/Claude panes" >&2
-    return 1
-  fi
-  printf 'tt restored %s pane(s), missing %s\n' "$restored" "$missing" >&2
+  [[ -n "$snapshot" ]] || snapshot="$(codex_cockpit_snapshot_file)"
+  TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" \
+    "$SCRIPT_DIR/tt-codex-snapshot-writer" --restore-dead "$snapshot" "$mode" "$selector"
 }
 
 refresh_agent_window_state() {
@@ -2943,7 +2977,7 @@ codex_snapshot_timer_loop() {
   local max_age="${5:-}"
   local interval="${TT_CODEX_SNAPSHOT_INTERVAL:-300}"
   local minimum="${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}"
-  local stop_requested=0 failed=0 sleeper=""
+  local stop_requested=0 failed=0 sleeper="" control_status
 
   [[ "$token" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
   [[ "$expected_server_pid" =~ ^[0-9]+$ ]] || return 2
@@ -2969,33 +3003,29 @@ codex_snapshot_timer_loop() {
   trap ':' HUP
   trap 'codex_snapshot_timer_cleanup "$TT_TIMER_LOOP_TOKEN" "$TT_TIMER_LOOP_SERVER_PID" "$TT_TIMER_LOOP_UID"' EXIT
 
-  codex_snapshot_timer_server_matches "$expected_server_pid" || return 1
-  [[ "$(codex_snapshot_timer_desired_token 2>/dev/null || true)" == "$token" ]] || return 1
+  codex_snapshot_timer_controls_match "$expected_server_pid" "$token" || return
   codex_snapshot_timer_write_state "$$" "$expected_server_pid" "$expected_uid" "$token" "$success_epoch" "$max_age" || return 1
   codex_snapshot_timer_log "start pid=$$ server=$expected_server_pid token=$token"
 
   while (( stop_requested == 0 )); do
-    if ! codex_snapshot_timer_server_matches "$expected_server_pid"; then
-      codex_snapshot_timer_log "stop pid=$$ reason=server-mismatch"
-      break
-    fi
-    if [[ "$(codex_snapshot_timer_desired_token 2>/dev/null || true)" != "$token" ]]; then
-      codex_snapshot_timer_log "stop pid=$$ reason=generation-changed"
-      break
-    fi
     sleep "$interval" &
     sleeper=$!
     wait "$sleeper" 2>/dev/null || true
     sleeper=""
     (( stop_requested == 0 )) || break
-    if ! codex_snapshot_timer_server_matches "$expected_server_pid"; then
-      codex_snapshot_timer_log "stop pid=$$ reason=server-mismatch"
-      break
-    fi
-    if [[ "$(codex_snapshot_timer_desired_token 2>/dev/null || true)" != "$token" ]]; then
-      codex_snapshot_timer_log "stop pid=$$ reason=generation-changed"
-      break
-    fi
+    control_status=0
+    codex_snapshot_timer_controls_match "$expected_server_pid" "$token" || control_status=$?
+    case "$control_status" in
+      1)
+        codex_snapshot_timer_log "stop pid=$$ reason=control-mismatch"
+        break
+        ;;
+      2)
+        codex_snapshot_timer_log "cycle-failed pid=$$ reason=control-unavailable"
+        failed=1
+        continue
+        ;;
+    esac
     if autosave_snapshot_cycle; then
       success_epoch="$(date +%s)"
       if ! codex_snapshot_timer_write_state "$$" "$expected_server_pid" "$expected_uid" "$token" "$success_epoch" "$max_age"; then
@@ -3015,11 +3045,7 @@ codex_snapshot_timer_loop() {
 }
 
 tt_self_command() {
-  if [[ -x "$HOME/bin/tt" ]]; then
-    shell_quote "$HOME/bin/tt"
-  else
-    shell_quote "$SCRIPT_DIR/tt"
-  fi
+  shell_quote "$SCRIPT_PATH"
 }
 
 enforce_static_tmux_status() {
@@ -3257,17 +3283,13 @@ install_agent_status_menu() {
 
 set_agent_autosave_hooks() {
   local self="$1"
+  local hook
 
-  "$TMUX_BIN" set-hook -g "after-new-session[90]" "run-shell -b '$self snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "after-new-window[90]" "run-shell -b '$self snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "after-split-window[90]" "run-shell -b '$self snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "after-kill-pane[90]" "run-shell -b '$self snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "pane-exited[90]" "run-shell -b '$self snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "after-new-session[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "after-new-window[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "after-split-window[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "after-kill-pane[91]" "run-shell -b '$self codex-snapshot --quiet'" &&
-    "$TMUX_BIN" set-hook -g "pane-exited[91]" "run-shell -b '$self codex-snapshot --quiet'"
+  for hook in after-new-session after-new-window after-split-window after-kill-pane pane-exited; do
+    "$TMUX_BIN" set-hook -g "${hook}[90]" "run-shell -b '$self autosave-snapshot --quiet'" || return
+    # Retire the parallel stream; one event now captures both snapshots in order.
+    "$TMUX_BIN" set-hook -gu "${hook}[91]" || return
+  done
 }
 
 unset_agent_autosave_hooks() {
@@ -3298,21 +3320,43 @@ agent_autosave_hooks_healthy() {
   local hook hooks
   for hook in after-new-session after-new-window after-split-window after-kill-pane pane-exited; do
     hooks="$("$TMUX_BIN" show-hooks -g "$hook" 2>/dev/null || true)"
-    printf '%s\n' "$hooks" | grep -q '\[90\].*run-shell.* snapshot --quiet' || return 1
-    printf '%s\n' "$hooks" | grep -q '\[91\].*run-shell.* codex-snapshot --quiet' || return 1
+    printf '%s\n' "$hooks" | grep -q '\[90\].*run-shell.* autosave-snapshot --quiet' || return 1
+    if printf '%s\n' "$hooks" | grep -q '\[91\]'; then
+      return 1
+    fi
   done
 }
 
-install_agent_autosave_hooks() {
-  local self stopped_identity="" identity success_epoch max_age hooks_were_healthy=0 started_new=0
-  self="$(tt_self_command)"
+agent_autosave_off_dir() {
+  printf '%s.disabled\n' "$(codex_cockpit_timer_pid_file)"
+}
 
+activate_agent_autosave() {
+  local mode="${1:-}" recovery_session="${2:-}"
+  local self stopped_identity="" identity success_epoch=0 max_age hooks_were_healthy=0 started_new=0
+  local capture_status=0 identity_status=1 off_dir current_identity
+  [[ "$mode" != "--preserve-server" && "$recovery_session" != "--recovery-session" ]] || return 0
+  self="$(tt_self_command)"
+  off_dir="$(agent_autosave_off_dir)"
+  [[ "$mode" == "--explicit" || ! -e "$off_dir" ]] || return 0
   [[ -x "$SCRIPT_DIR/tt-codex-snapshot-writer" ]] || {
     printf 'tt autosave failed: missing executable writer %s\n' "$SCRIPT_DIR/tt-codex-snapshot-writer" >&2
     return 1
   }
-  autosave_snapshot_cycle || return
-  success_epoch="$(date +%s)"
+  if autosave_snapshot_cycle; then
+    success_epoch="$(date +%s)"
+  else
+    capture_status=$?
+  fi
+  if (( capture_status == 2 )); then
+    echo "tt: autosave ownership could not be established; leaving it unchanged" >&2
+    return 2
+  fi
+  if (( capture_status != 0 )); then
+    codex_snapshot_timer_log "cycle-failed reason=initial-snapshot"
+    echo "tt: autosave unchanged; initial snapshot failed" >&2
+    return "$capture_status"
+  fi
   max_age="$(codex_snapshot_timer_max_age)"
   agent_autosave_hooks_healthy && hooks_were_healthy=1
 
@@ -3320,13 +3364,40 @@ install_agent_autosave_hooks() {
     echo "tt: timed out waiting for autosave timer control lock" >&2
     return 1
   fi
-  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
-  if [[ -n "$identity" ]] && codex_snapshot_timer_identity_valid "$identity"; then
-    codex_snapshot_timer_rewrite_success "$identity" "$success_epoch" "$max_age" || {
+  if ! codex_snapshot_timer_state_available; then
+    codex_snapshot_timer_lock_release
+    return 1
+  fi
+  if [[ -e "$off_dir" ]]; then
+    if [[ "$mode" != "--explicit" ]]; then
       codex_snapshot_timer_lock_release
-      echo "tt: autosave was not enabled; timer state refresh failed" >&2
+      return 0
+    fi
+    if ! rmdir "$off_dir"; then
+      codex_snapshot_timer_lock_release
       return 1
-    }
+    fi
+  fi
+  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  if [[ -n "$identity" ]]; then
+    identity_status=0
+    codex_snapshot_timer_identity_valid "$identity" || identity_status=$?
+  fi
+  if (( identity_status == 2 )); then
+    codex_snapshot_timer_lock_release
+    echo "tt: autosave ownership could not be verified; leaving the timer unchanged" >&2
+    return 2
+  fi
+  if (( identity_status == 0 )); then
+    # The timer alone publishes heartbeats, independently of this control lock.
+    current_identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+    if [[ -z "$current_identity" ]] ||
+      ! codex_snapshot_timer_same_owner "$identity" "$current_identity" ||
+      ! codex_snapshot_timer_identity_valid "$current_identity"; then
+      codex_snapshot_timer_lock_release
+      echo "tt: autosave was not enabled; timer ownership revalidation failed" >&2
+      return 1
+    fi
   elif ! start_codex_snapshot_timer_locked "$success_epoch" "$max_age"; then
     codex_snapshot_timer_lock_release
     echo "tt: autosave was not enabled; timer failed health checks" >&2
@@ -3348,6 +3419,10 @@ install_agent_autosave_hooks() {
     return 1
   fi
   codex_snapshot_timer_lock_release
+}
+
+install_agent_autosave_hooks() {
+  activate_agent_autosave "${1:-}" || return
 
   install_agent_status_menu
   clear_legacy_shell_status_widgets
@@ -3364,6 +3439,14 @@ clear_agent_autosave_hooks() {
     echo "tt: timed out waiting for autosave timer control lock" >&2
     return 1
   fi
+  if ! codex_snapshot_timer_state_available; then
+    codex_snapshot_timer_lock_release
+    return 1
+  fi
+  if ! mkdir -p -m 700 "$(agent_autosave_off_dir)"; then
+    codex_snapshot_timer_lock_release
+    return 1
+  fi
   unset_agent_autosave_hooks
   stopped_identity="$(stop_codex_snapshot_timer_locked 2>/dev/null || true)"
   codex_snapshot_timer_lock_release
@@ -3371,8 +3454,6 @@ clear_agent_autosave_hooks() {
     codex_snapshot_timer_stop_identity "$stopped_identity"
     codex_snapshot_timer_remove_identity_state "$stopped_identity"
   fi
-  install_agent_status_menu
-
   # Remove the unindexed hooks from early versions of this script if they are still present.
   "$TMUX_BIN" set-hook -gu "after-new-session[0]" 2>/dev/null || true
   "$TMUX_BIN" set-hook -gu "after-new-window[0]" 2>/dev/null || true
@@ -3462,39 +3543,38 @@ codex_snapshot_timer_success_fresh() {
   TT_TIMER_SUCCESS_AGE=""
   IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
   [[ "$success_epoch" =~ ^[0-9]+$ && "$max_age" =~ ^[0-9]+$ ]] || return 1
+  (( success_epoch > 0 )) || return 1
   now="$(date +%s)"
   TT_TIMER_SUCCESS_AGE=$((now - success_epoch))
   (( TT_TIMER_SUCCESS_AGE >= 0 && TT_TIMER_SUCCESS_AGE <= max_age ))
 }
 
-codex_snapshot_timer_rewrite_success() {
-  local identity="$1"
-  local success_epoch="$2"
-  local max_age="$3"
-  local pid server_pid uid token ignored current
-  IFS=$'\t' read -r pid server_pid uid token ignored <<<"$identity"
-  current="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
-  [[ "$current" == "$identity" ]] || return 1
-  codex_snapshot_timer_write_state "$pid" "$server_pid" "$uid" "$token" "$success_epoch" "$max_age"
-}
-
 codex_snapshot_timer_server_pid() {
   local pid
-  pid="$("$TMUX_BIN" display-message -p '#{pid}' 2>/dev/null || true)"
-  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  pid="$(TT_TMUX_BIN="$TMUX_BIN" "$SCRIPT_DIR/tt-codex-snapshot-writer" --control-query server-pid)" || return 2
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 2
   printf '%s\n' "$pid"
 }
 
 codex_snapshot_timer_server_matches() {
-  local expected="$1"
-  [[ "$(codex_snapshot_timer_server_pid 2>/dev/null || true)" == "$expected" ]]
+  local expected="$1" current
+  kill -0 "$expected" 2>/dev/null || return 1
+  current="$(codex_snapshot_timer_server_pid)" || return 2
+  [[ "$current" == "$expected" ]]
 }
 
 codex_snapshot_timer_desired_token() {
   local token
-  token="$("$TMUX_BIN" show-options -gqv @tt_codex_snapshot_timer_token 2>/dev/null || true)"
+  token="$(TT_TMUX_BIN="$TMUX_BIN" "$SCRIPT_DIR/tt-codex-snapshot-writer" --control-query desired-token)" || return 2
   [[ "$token" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   printf '%s\n' "$token"
+}
+
+codex_snapshot_timer_controls_match() {
+  local expected_server="$1" expected_token="$2" current
+  codex_snapshot_timer_server_matches "$expected_server" || return
+  current="$(codex_snapshot_timer_desired_token)" || return
+  [[ "$current" == "$expected_token" ]]
 }
 
 codex_snapshot_timer_process_uid() {
@@ -3523,19 +3603,15 @@ codex_snapshot_timer_has_server_ancestor() {
   return 1
 }
 
-codex_snapshot_timer_identity_valid() {
+codex_snapshot_timer_owner_alive() {
   local identity="$1"
-  local pid server_pid uid token success_epoch max_age extra command desired current_server
+  local pid server_pid uid token success_epoch max_age extra command
 
   IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
   [[ "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ && "$uid" =~ ^[0-9]+$ &&
     "$token" =~ ^[A-Za-z0-9._-]+$ && "$success_epoch" =~ ^[0-9]+$ &&
     "$max_age" =~ ^[0-9]+$ && -z "${extra:-}" ]] || return 1
   [[ "$uid" == "$(id -u)" ]] || return 1
-  current_server="$(codex_snapshot_timer_server_pid 2>/dev/null || true)"
-  [[ "$server_pid" == "$current_server" ]] || return 1
-  desired="$(codex_snapshot_timer_desired_token 2>/dev/null || true)"
-  [[ "$token" == "$desired" ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   [[ "$(codex_snapshot_timer_process_uid "$pid" 2>/dev/null || true)" == "$uid" ]] || return 1
   command="$(codex_snapshot_timer_process_command "$pid" 2>/dev/null || true)"
@@ -3543,18 +3619,42 @@ codex_snapshot_timer_identity_valid() {
   codex_snapshot_timer_has_server_ancestor "$pid" "$server_pid"
 }
 
+codex_snapshot_timer_identity_valid() {
+  local identity="$1"
+  local pid server_pid uid token rest
+  codex_snapshot_timer_owner_alive "$identity" || return 1
+  IFS=$'\t' read -r pid server_pid uid token rest <<<"$identity"
+  codex_snapshot_timer_controls_match "$server_pid" "$token"
+}
+
+codex_snapshot_timer_state_available() {
+  local identity pid server_pid rest current_server current_token control_status
+  current_server="$(codex_snapshot_timer_server_pid)" || return 2
+  control_status=0
+  current_token="$(codex_snapshot_timer_desired_token)" || control_status=$?
+  (( control_status != 2 )) || return 2
+  identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
+  [[ -n "$identity" ]] || return 0
+  codex_snapshot_timer_owner_alive "$identity" || return 0
+  IFS=$'\t' read -r pid server_pid rest <<<"$identity"
+  if [[ "$server_pid" != "$current_server" ]]; then
+    echo "tt: autosave state belongs to another live tmux server; leaving it unchanged" >&2
+    return 1
+  fi
+}
+
 codex_snapshot_timer_health() {
   local identity
   TT_TIMER_PID=""
   identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
   [[ -n "$identity" ]] || return 1
-  codex_snapshot_timer_identity_valid "$identity" || return 1
+  codex_snapshot_timer_identity_valid "$identity" || return
   codex_snapshot_timer_success_fresh "$identity" || return 1
   TT_TIMER_PID="${identity%%$'\t'*}"
 }
 
 codex_snapshot_timer_lock_acquire() {
-  local lock owner attempt owner_pid owner_uid owner_time now
+  local lock attempt
   lock="$(codex_cockpit_timer_lock_dir)"
   mkdir -p "$(dirname "$lock")" || return 1
   attempt=0
@@ -3567,28 +3667,9 @@ codex_snapshot_timer_lock_acquire() {
       TT_TIMER_CONTROL_LOCK="$lock"
       return 0
     fi
-    if [[ -d "$lock" && ! -L "$lock" &&
-      "$(codex_snapshot_timer_file_uid "$lock" 2>/dev/null || true)" == "$(id -u)" ]]; then
-      owner="$lock/owner"
-      owner_pid="" owner_uid="" owner_time=""
-      if [[ -f "$owner" && ! -L "$owner" ]]; then
-        IFS=$'\t' read -r owner_pid owner_uid owner_time <"$owner" || true
-      fi
-      now="$(date +%s)"
-      if [[ "$owner_uid" == "$(id -u)" && "$owner_pid" =~ ^[0-9]+$ &&
-        "$owner_time" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null &&
-        (( now - owner_time < 15 )); then
-        :
-      elif [[ "$owner_time" =~ ^[0-9]+$ ]] && (( now - owner_time >= 5 )); then
-        rm -f "$owner" 2>/dev/null || true
-        rmdir "$lock" 2>/dev/null || true
-        continue
-      elif (( attempt >= 10 )); then
-        rm -f "$owner" 2>/dev/null || true
-        rmdir "$lock" 2>/dev/null || true
-        continue
-      fi
-    fi
+    # Preserve the running timer's mkdir/owner ABI. Even a dead owner's record
+    # cannot be unlinked safely after a check: another contender may replace it.
+    # Stale locks require an explicit offline audit, not automatic stealing.
     sleep 0.1
     attempt=$((attempt + 1))
   done
@@ -3597,11 +3678,15 @@ codex_snapshot_timer_lock_acquire() {
 
 codex_snapshot_timer_lock_release() {
   local lock="${TT_TIMER_CONTROL_LOCK:-}"
+  local owner_pid owner_uid owner_time
   [[ -n "$lock" ]] || return 0
   if [[ -d "$lock" && ! -L "$lock" &&
     "$(codex_snapshot_timer_file_uid "$lock" 2>/dev/null || true)" == "$(id -u)" ]]; then
-    rm -f "$lock/owner" 2>/dev/null || true
-    rmdir "$lock" 2>/dev/null || true
+    if IFS=$'\t' read -r owner_pid owner_uid owner_time <"$lock/owner" &&
+      [[ "$owner_pid" == "$$" && "$owner_uid" == "$(id -u)" ]]; then
+      rm -f "$lock/owner" 2>/dev/null || true
+      rmdir "$lock" 2>/dev/null || true
+    fi
   fi
   TT_TIMER_CONTROL_LOCK=""
 }
@@ -3639,6 +3724,8 @@ start_codex_snapshot_timer_locked() {
 
   if codex_snapshot_timer_health; then
     return 0
+  elif [[ "$?" == 2 ]]; then
+    return 2
   fi
 
   state_file="$(codex_cockpit_timer_pid_file)"
@@ -3705,14 +3792,7 @@ codex_snapshot_timer_stop_identity() {
   local pid server_pid uid token success_epoch max_age extra attempt current command
 
   IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
-  [[ "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ && "$uid" == "$(id -u)" &&
-    "$token" =~ ^[A-Za-z0-9._-]+$ && "$success_epoch" =~ ^[0-9]+$ &&
-    "$max_age" =~ ^[0-9]+$ && -z "${extra:-}" ]] || return 0
-  kill -0 "$pid" 2>/dev/null || return 0
-  [[ "$(codex_snapshot_timer_process_uid "$pid" 2>/dev/null || true)" == "$uid" ]] || return 0
-  command="$(codex_snapshot_timer_process_command "$pid" 2>/dev/null || true)"
-  [[ "$command" == *" codex-snapshot-loop $token $server_pid $uid"* ]] || return 0
-  codex_snapshot_timer_has_server_ancestor "$pid" "$server_pid" || return 0
+  codex_snapshot_timer_owner_alive "$identity" || return 0
   kill -TERM "$pid" 2>/dev/null || return 0
   attempt=0
   while (( attempt < 30 )); do
@@ -3825,99 +3905,51 @@ require_recovery_session_absent() {
 
 require_recovery_manifest_sessions_absent() {
   local manifest="$1"
-  local session pane dir title command
+  local session pane dir title command rows
   local sessions=" "
 
-  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+  rows="$(tsv_records 5 "$manifest")" || return
+  while IFS=$'\034' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
     [[ "$sessions" == *" $session "* ]] && continue
     sessions="$sessions$session "
     require_recovery_session_absent "$session" || return 1
-  done < "$manifest"
+  done <<<"$rows"
 }
 
 require_operator_manifest_scopes() {
   local manifest="$1"
-  local session pane dir title command
+  local session pane dir title command rows
   local sessions=" "
 
-  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
+  rows="$(tsv_records 5 "$manifest")" || return
+  while IFS=$'\034' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
     [[ "$sessions" == *" $session "* ]] && continue
     sessions="$sessions$session "
     require_operator_topology_scope recover "$session" || return $?
-  done < "$manifest"
+  done <<<"$rows"
 }
 
 finish_recovery_setup() {
-  local server_was_running="$1"
+  local proof="$1" server_was_running windows window
+  server_was_running="$(TT_TMUX_BIN="$TMUX_BIN" "$SCRIPT_DIR/tt-codex-snapshot-writer" \
+    --verify-cold-completion "$proof")" || return
 
   # Existing servers may contain unrelated operator work. Do not rewrite their
   # global options, hooks, or snapshots while adding a recovered session.
   if [[ "$server_was_running" != "1" ]]; then
     apply_recovery_theme
+  fi
+  windows="$(TT_TMUX_BIN="$TMUX_BIN" "$SCRIPT_DIR/tt-codex-snapshot-writer" \
+    --verify-cold-completion "$proof" windows)" || return
+  while IFS= read -r window; do
+    [[ "$window" =~ ^@[0-9]+$ ]] || return 1
+    apply_studio_pane_titles "$window"
+  done <<<"$windows"
+  if [[ "$server_was_running" != "1" ]]; then
     install_agent_autosave_hooks
   fi
-}
-
-create_agent_cockpit_sessions() {
-  local manifest="$1"
-  local preserve_server="${2:-}"
-  local recovery_session="${3:-}"
-  local session pane dir title command
-  local skip_autosave=""
-  local sessions=" "
-
-  if [[ "$preserve_server" == "--preserve-server" ]]; then
-    skip_autosave="--no-autosave"
-  fi
-
-  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
-    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
-    if [[ "$sessions" != *" $session "* ]]; then
-      create_studio_detached "$session" "$dir" "$skip_autosave" "$preserve_server" "$recovery_session"
-      sessions="$sessions$session "
-    fi
-  done < "$manifest"
-}
-
-restore_agent_cockpit_layouts() {
-  local manifest="$1"
-  local session pane dir title command
-  local sessions=" "
-
-  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
-    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
-    [[ "$sessions" == *" $session "* ]] && continue
-    sessions="$sessions$session "
-    restore_studio_layout "$session" --preserve-server
-  done < "$manifest"
-}
-
-launch_agent_cockpit_panes() {
-  local manifest="$1"
-  local session pane dir title command target kind
-
-  while IFS=$'\t' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
-    [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
-    target="$(recovery_pane_target "$session" 1 "$pane" 2>/dev/null || true)"
-    if [[ -z "$target" ]]; then
-      echo "tt: missing recovery pane $session:1.$pane" >&2
-      continue
-    fi
-    kind="$(agent_kind_for_command "$command")"
-    "$TMUX_BIN" set-option -pt "$target" @tt_base_title "$title" 2>/dev/null || true
-    "$TMUX_BIN" set-option -pt "$target" @tt_agent_command "$command" 2>/dev/null || true
-    "$TMUX_BIN" set-option -pt "$target" @tt_agent_kind "$kind" 2>/dev/null || true
-    set_pane_git_label "$target" "$dir"
-    "$TMUX_BIN" select-pane -t "$target" -T "$title" 2>/dev/null || true
-
-    if [[ -n "${command:-}" ]]; then
-      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(agent_pane_command "$command")"
-    else
-      "$TMUX_BIN" respawn-pane -k -t "$target" -c "$dir" "$(default_login_shell_command)"
-    fi
-  done < "$manifest"
 }
 
 refresh_agent_pane_colors() {
@@ -3962,33 +3994,27 @@ recover_agent_cockpit() {
   local manifest="${1:-}"
   local attach_session="${2:-factory2}"
   local server_was_running=0
-  local preserve_server=""
+  local proof
 
   if [[ -n "${TMUX:-}" ]]; then
     echo "tt recover must be run outside tmux; it refuses to replace live sessions" >&2
     exit 2
   fi
 
-  wsl_bridge_ensure_for_entry
   if [[ -z "$manifest" || "$manifest" == "--default" ]]; then
     manifest="$(agent_cockpit_manifest)"
   fi
   [[ -f "$manifest" ]] || { echo "agent cockpit manifest not found: $manifest" >&2; exit 2; }
-  manifest_has_entries "$manifest" || { echo "agent cockpit manifest has no sessions: $manifest" >&2; exit 2; }
+  manifest="$("$SCRIPT_DIR/tt-codex-snapshot-writer" --freeze-recovery agents "$manifest" "$attach_session")" || exit 2
+  printf 'tt recovering agents from frozen input %s\n' "$manifest" >&2
   require_operator_manifest_scopes "$manifest" || exit $?
   require_recovery_manifest_sessions_absent "$manifest" || exit 2
 
   tmux_server_running && server_was_running=1
-  if [[ "$server_was_running" == "1" ]]; then
-    preserve_server="--preserve-server"
-  fi
-  create_agent_cockpit_sessions "$manifest" "$preserve_server" --recovery-session
-  finish_recovery_setup "$server_was_running"
-  launch_agent_cockpit_panes "$manifest"
-  restore_agent_cockpit_layouts "$manifest"
-  if [[ "$server_was_running" != "1" ]]; then
-    write_agent_cockpit_state "$(agent_cockpit_state_file)" --quiet
-  fi
+  wsl_bridge_ensure_for_entry
+  proof="$(TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" \
+    "$SCRIPT_DIR/tt-codex-snapshot-writer" --recover-cold agents "$manifest" "$attach_session" "$server_was_running")" || return
+  finish_recovery_setup "$proof" || return
 
   wsl_bridge_ensure_for_entry
   if [[ -n "${TMUX:-}" ]]; then
@@ -4011,7 +4037,7 @@ snapshot_has_recoverable_session() {
   local session="${2:-cockpit}"
 
   [[ -f "$snapshot" ]] || return 1
-  awk -F '\t' -v prefix="$session:" '$1 !~ /^#/ && index($1, prefix) == 1 && $2 == "codex" && $7 == "exact" { found=1 } END { exit found ? 0 : 1 }' "$snapshot"
+  awk -F '\t' -v prefix="$session:" '$1 !~ /^#/ && index($1, prefix) == 1 && $2 == "codex" && $7 == "exact" && $8 ~ /[^[:space:]]/ { found=1 } END { exit found ? 0 : 1 }' "$snapshot"
 }
 
 latest_cockpit_snapshot() {
@@ -4048,47 +4074,16 @@ latest_cockpit_snapshot() {
 restore_cockpit_snapshot() {
   local snapshot="$1"
   local session="${2:-cockpit}"
-  local mode="${3:-}"
-  local target restore_target kind cwd title current_command session_id row_status restore shell_command restored=0
-
-  while IFS=$'\t' read -r target kind cwd title current_command session_id row_status restore || [[ -n "${target:-}" ]]; do
-    [[ -n "${target:-}" && "${target:0:1}" != "#" ]] || continue
-    [[ "$target" == "$session:"* ]] || continue
-
-    restore_target="$(recovery_snapshot_pane_target "$target" 2>/dev/null || true)"
-    if [[ -z "$restore_target" ]]; then
-      echo "tt: missing recovery pane $target" >&2
-      continue
-    fi
-    shell_command="cd $(shell_quote "$cwd") && exec $(default_login_shell_command)"
-    "$TMUX_BIN" select-pane -t "$restore_target" -T "$title" 2>/dev/null || true
-    "$TMUX_BIN" respawn-pane -k -t "$restore_target" "$shell_command" 2>/dev/null || true
-  done < "$snapshot"
-
-  while IFS=$'\t' read -r target kind cwd title current_command session_id row_status restore || [[ -n "${target:-}" ]]; do
-    [[ -n "${target:-}" && "${target:0:1}" != "#" ]] || continue
-    [[ "$target" == "$session:"* ]] || continue
-    [[ "$kind" == "codex" && "$row_status" == "exact" && -n "$restore" ]] || continue
-
-    restore_target="$(recovery_snapshot_pane_target "$target" 2>/dev/null || true)"
-    if [[ -z "$restore_target" ]]; then
-      echo "tt: missing recovery pane $target" >&2
-      continue
-    fi
-    "$TMUX_BIN" respawn-pane -k -t "$restore_target" -c "$cwd" "$(agent_pane_command "codex resume --no-alt-screen $session_id")" 2>/dev/null || true
-    restored=$((restored + 1))
-  done < "$snapshot"
-
-  restore_studio_layout "$session" "$mode"
-  apply_studio_pane_titles "$session"
-  printf 'tt restored %s exact Codex pane(s)\n' "$restored" >&2
+  local server_was_running="$3"
+  TT_TMUX_BIN="$TMUX_BIN" TT_LOGIN_SHELL="$(default_login_shell)" \
+    "$SCRIPT_DIR/tt-codex-snapshot-writer" --recover-cold codex "$snapshot" "$session" "$server_was_running"
 }
 
 recover_cockpit() {
   local snapshot="${1:-}"
   local session="${2:-cockpit}"
   local server_was_running=0
-  local preserve_server=""
+  local proof
 
   if [[ -n "${TMUX:-}" ]]; then
     echo "tt recover must be run outside tmux; it refuses to replace a live session" >&2
@@ -4096,9 +4091,9 @@ recover_cockpit() {
   fi
 
   require_operator_topology_scope recover "$session" || exit $?
-  wsl_bridge_ensure_for_entry
   snapshot="$(latest_cockpit_snapshot "$snapshot" "$session")" || exit 2
-  printf 'tt recovering %s from %s\n' "$session" "$snapshot" >&2
+  snapshot="$("$SCRIPT_DIR/tt-codex-snapshot-writer" --freeze-recovery codex "$snapshot" "$session")" || exit 2
+  printf 'tt recovering %s from frozen input %s\n' "$session" "$snapshot" >&2
 
   require_recovery_session_absent "$session" || exit 2
   if [[ "$session" == "cockpit" ]]; then
@@ -4107,12 +4102,9 @@ recover_cockpit() {
     require_recovery_session_absent "ops" || exit 2
   fi
   tmux_server_running && server_was_running=1
-  if [[ "$server_was_running" == "1" ]]; then
-    preserve_server="--preserve-server"
-  fi
-  create_ops_detached "$session" "$HOME" --no-shell-upgrade "$preserve_server" --recovery-session
-  finish_recovery_setup "$server_was_running"
-  restore_cockpit_snapshot "$snapshot" "$session" --preserve-server
+  wsl_bridge_ensure_for_entry
+  proof="$(restore_cockpit_snapshot "$snapshot" "$session" "$server_was_running")" || return
+  finish_recovery_setup "$proof" || return
 
   wsl_bridge_ensure_for_entry
   exec "$TMUX_BIN" attach -t "$session"
@@ -4327,9 +4319,7 @@ run_menu() {
       list_snapshot_history
       ;;
     "autosave [on]    keep agent snapshot warm")
-      install_agent_autosave_hooks
-      write_agent_cockpit_state
-      write_codex_cockpit_snapshot "$(codex_cockpit_snapshot_file)" --quiet
+      activate_agent_autosave --explicit
       ;;
     "autosave [off]   disable agent snapshot hooks")
       clear_agent_autosave_hooks
@@ -4425,6 +4415,9 @@ case "${1:-}" in
   restore-preview)
     restore_preview "${2:-}"
     ;;
+  recovery-config)
+    recovery_server_config
+    ;;
   recover)
     case "${2:-cockpit}" in
       cockpit|ops|--default)
@@ -4444,6 +4437,17 @@ case "${1:-}" in
       write_agent_cockpit_state "" --quiet
     else
       write_agent_cockpit_state "${2:-}" "${3:-}"
+    fi
+    ;;
+  snapshot-capture)
+    write_agent_cockpit_state "" --quiet --capture-only
+    ;;
+  snapshot-records)
+    collect_agent_cockpit_state
+    ;;
+  autosave-snapshot)
+    if [[ ! -e "$(agent_autosave_off_dir)" ]]; then
+      autosave_snapshot_cycle
     fi
     ;;
   codex-snapshot|cx-snapshot)
@@ -4501,7 +4505,7 @@ case "${1:-}" in
   autosave)
     case "${2:-on}" in
       on)
-        install_agent_autosave_hooks
+        activate_agent_autosave --explicit
         ;;
       off)
         clear_agent_autosave_hooks

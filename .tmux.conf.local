@@ -259,13 +259,13 @@ tmux_conf_theme_right_separator_sub='\uE0B3'
 #     - #{username}
 #     - #{username_ssh}
 tmux_conf_theme_status_left=" ❐ #S "
-tmux_conf_theme_status_right="#{prefix}#{mouse}#{pairing}#{synchronized} | %R %d %b $USER@#h "
+tmux_conf_theme_status_right="#{prefix}#{mouse}#{pairing}#{synchronized} | %R %d %b #{user}@#h "
 # Direct overrides: powerline is cheap; shell-backed status segments are not.
 set -g status-style "fg=#565f89,bg=#1a1b26,none" #!important
 setw -g window-style "fg=default,bg=#1a1b26" #!important
 setw -g window-active-style "fg=default,bg=#1a1b26" #!important
 set -g status-left "#[fg=#15161e,bg=#ff9e64,bold] ❐ #S #[fg=#ff9e64,bg=#1a1b26,none] " #!important
-set -g status-right "#[fg=#565f89,bg=#1a1b26]#{?client_prefix,⌨ ,  }#{?mouse,↗ ,  }#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#[fg=#9ece6a,bg=#1a1b26,none]#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#f7768e,bg=#9ece6a,none]#[fg=#c0caf5,bg=#f7768e,bold] %R %d %b vincentkoc@#h " #!important
+set -g status-right "#[fg=#565f89,bg=#1a1b26]#{?client_prefix,⌨ ,  }#{?mouse,↗ ,  }#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#[fg=#9ece6a,bg=#1a1b26,none]#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#f7768e,bg=#9ece6a,none]#[fg=#c0caf5,bg=#f7768e,bold] %R %d %b #{user}@#h " #!important
 setw -g window-status-separator "" #!important
 setw -g window-status-format "#[fg=#1a1b26,bg=#1a1b26,none]#[fg=#565f89,bg=#1a1b26,none] #I #W #[fg=#1a1b26,bg=#1a1b26,none]" #!important
 setw -g window-status-current-format "#[fg=#1a1b26,bg=#7aa2f7,none]#[fg=#1a1b26,bg=#7aa2f7,bold] #I #W #[fg=#7aa2f7,bg=#1a1b26,none]" #!important
@@ -385,8 +385,17 @@ set -ga terminal-features ",xterm*:extkeys"
 set -g pane-border-status off
 
 # Recover a pane after a TUI exits without resetting mouse/bracketed-paste modes.
-bind R send-keys -l "printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?1015l\\033[?2004l'; stty sane; reset" \; send-keys Enter
-bind -T root MouseDown1StatusRight run-shell -b "/Users/vincentkoc/bin/tt codex-snapshot --quiet && tmux display-message 'codex snapshot saved'"
+# Query the same global scope we append to, independent of session overrides.
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq DISPLAY' 'set -ga update-environment DISPLAY'
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq KRB5CCNAME' 'set -ga update-environment KRB5CCNAME'
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq SSH_ASKPASS' 'set -ga update-environment SSH_ASKPASS'
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq SSH_AUTH_SOCK' 'set -ga update-environment SSH_AUTH_SOCK'
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq SSH_AGENT_PID' 'set -ga update-environment SSH_AGENT_PID'
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq SSH_CONNECTION' 'set -ga update-environment SSH_CONNECTION'
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq WINDOWID' 'set -ga update-environment WINDOWID'
+if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq XAUTHORITY' 'set -ga update-environment XAUTHORITY'
+bind R run-shell -b 'python3 "$HOME/bin/tmux-pane-repair" request #{pane_id} #{q:client_name}'
+bind -T root MouseDown1StatusRight run-shell -b "\"\$HOME/bin/tt\" codex-snapshot --quiet && tmux display-message 'codex snapshot saved'"
 bind -T root MouseDown3StatusRight display-menu -T "CX SAVE" -x M -y W \
     "Save now" s "run-shell -b '\$HOME/bin/tt codex-snapshot --quiet && tmux display-message \"codex snapshot saved\"'" \
     "Show snapshot" v "display-popup -w 95% -h 80% -E '\$HOME/bin/tt popup snapshot'" \
