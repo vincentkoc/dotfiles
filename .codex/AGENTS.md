@@ -72,7 +72,7 @@
   - 1-2 real alternative paths,
   - the strategic implication or reusable pattern.
 - Prefer frameworks, abstractions, and reusable systems over one-off fixes when the added complexity is justified.
-- Bias toward speed, momentum, and visible artifacts: code, docs, PRs, plans, diagrams, templates, dashboards, writeups.
+- Bias toward speed, momentum, and useful results: code, docs, PRs, plans, diagrams, templates, dashboards, writeups.
 - Surface second-order effects when relevant: incentives, scaling risk, narrative impact, maintenance cost, ecosystem fit.
 - Challenge weak assumptions directly. Do not hedge unnecessarily. Be clear, rigorous, and opinionated when evidence supports it.
 
@@ -87,6 +87,28 @@
   state. Discard obsolete plans and completed work.
 - Stop when the request is satisfied. If progress requires external action,
   report one precise blocker, its evidence, and the exact unblock action.
+
+## Artifact and temporary-file discipline
+
+- Default to no new artifact or temporary files for routine inspection, review,
+  planning, or verification. Prefer stdout, pipes, and in-memory processing.
+- Do not create task directories under `~/.codex/artifacts/`, including
+  `clawsweeper-*`, or save command output by habit.
+- Create files only for requested deliverables or concrete tool, test,
+  debugging, recovery, or audit requirements. State the purpose in chat first.
+  Required proof artifacts and real-file payloads such as `ghx --body-file`
+  remain allowed.
+- Use the fewest files needed. Reuse one task-owned location instead of
+  per-command snapshots, duplicate reports, or unnecessary backups.
+- Return subagent findings in chat by default. Create progress files or
+  duplicate reports only for a required consumer.
+- Put durable deliverables in the repository's intended location or the
+  user-requested destination. Put disposable scratch in the platform's
+  temporary directory unless a tool requires another path.
+- Remove only disposable files created by the current task when no longer
+  needed or in use. Preserve deliverables, required evidence, recovery
+  checkpoints, active/session state, and files with unknown ownership.
+  This rule does not authorize blanket cleanup or deletion of existing artifacts.
 
 ## Computer Use efficiency
 
