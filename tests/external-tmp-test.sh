@@ -199,6 +199,82 @@ set -e
 [[ -z "$(find "$mount_point/.scratch/tmp" -mindepth 1 -print -quit)" ]]
 
 reset_fixture
+cat >"$temporary/signal-child.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import pathlib
+import signal
+import sys
+
+ready, received = map(pathlib.Path, sys.argv[1:])
+
+def stop(signum, _frame):
+    received.write_text(str(signum))
+    raise SystemExit(128 + signum)
+
+for watched in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(watched, stop)
+ready.write_text(f"{os.getpid()} {os.environ['TMPDIR']}")
+while True:
+    signal.pause()
+PY
+chmod 0755 "$temporary/signal-child.py"
+
+for signal_case in HUP:1 INT:2 TERM:15; do
+  signal_name="${signal_case%%:*}"
+  signal_number="${signal_case##*:}"
+  ready="$temporary/$signal_name.ready"
+  received="$temporary/$signal_name.received"
+  reset_fixture
+  rm -f "$ready" "$received"
+  HOME="$home" \
+    WORKTREE_STORAGE_GUARD="$fake_guard" \
+    TEST_MOUNT_POINT="$mount_point" \
+    TEST_GUARD_STATE="$guard_state" \
+    "$command_path" "$temporary/signal-child.py" "$ready" "$received" &
+  wrapper_pid=$!
+  for _ in {1..100}; do
+    [[ -f "$ready" ]] && break
+    sleep 0.02
+  done
+  [[ -f "$ready" ]]
+  child_pid="$(cut -d' ' -f1 "$ready")"
+  child_tmpdir="$(cut -d' ' -f2- "$ready")"
+  kill -s "$signal_name" "$wrapper_pid"
+  set +e
+  wait "$wrapper_pid"
+  status=$?
+  set -e
+  [[ "$status" -eq $((128 + signal_number)) ]]
+  if [[ ! -f "$received" ]]; then
+    echo "child did not receive $signal_name" >&2
+    exit 1
+  fi
+  [[ "$(cat "$received")" == "$signal_number" ]]
+  if kill -0 "$child_pid" 2>/dev/null; then
+    echo "forwarded child was not reaped for $signal_name" >&2
+    exit 1
+  fi
+  [[ ! -e "${child_tmpdir%/}" ]]
+  [[ -z "$(find "$mount_point/.scratch/tmp" -mindepth 1 -print -quit)" ]]
+done
+
+reset_fixture
+cat >"$temporary/natural-signal.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+os.kill(os.getpid(), signal.SIGTERM)
+PY
+chmod 0755 "$temporary/natural-signal.py"
+set +e
+run_external_tmp "$temporary/natural-signal.py"
+status=$?
+set -e
+[[ "$status" -eq 143 ]]
+[[ -z "$(find "$mount_point/.scratch/tmp" -mindepth 1 -print -quit)" ]]
+
+reset_fixture
 if TEST_GUARD_SCENARIO=malformed run_external_tmp --check --json \
   >"$temporary/malformed.out" 2>&1; then
   echo "malformed guard output must fail" >&2
