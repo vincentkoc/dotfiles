@@ -52,6 +52,7 @@ with tempfile.TemporaryDirectory() as temporary:
     # Deliberately omit jq, including the system jq present on recent macOS.
     (backend / "bash").symlink_to("/bin/bash")
     (backend / "dirname").symlink_to(shutil.which("dirname"))
+    (backend / "readlink").symlink_to(shutil.which("readlink"))
     for directory in ("a", "b", "home", "config", "cache"):
         (root / directory).mkdir()
     for name in ("--cache", "--cache=15s"):
