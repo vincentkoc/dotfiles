@@ -249,6 +249,16 @@ class ParserTests(Fixture):
                 writer.recover_cold("codex", self.source, "cockpit", "0")
             run.assert_not_called()
 
+    def test_cold_grid_bounds_fail_before_any_server_lookup(self):
+        for target in ("cockpit:0.1", "cockpit:100.1", "cockpit:999999.1",
+                       "cockpit:6.0", "cockpit:6.7"):
+            self.document([self.row(), self.row(target=target, sid=OTHER_SID)], identity=False)
+            with self.subTest(target=target), patch.object(
+                writer, "run"
+            ) as run, self.assertRaisesRegex(writer.SnapshotError, "outside the recovery grid"):
+                writer.recover_cold("codex", self.source, "cockpit", "0")
+            run.assert_not_called()
+
 
 class RecoveryTests(Fixture):
     def setUp(self):
@@ -408,6 +418,76 @@ class RecoveryTests(Fixture):
         self.assertFalse(any("respawn-pane" in args or "-k" in args or "-g" in args for args in calls))
         self.assertFalse(any("unaffected" in args for args in calls))
         self.assertEqual(calls[0][1:], ["topology-authorize", "recover", "factory2"])
+
+    def test_cold_cockpit_preserves_saved_windows_and_exact_commands(self):
+        for saved_windows in ([1], list(range(1, 7)), [99]):
+            with self.subTest(saved_windows=saved_windows):
+                rows = []
+                for window in saved_windows:
+                    for pane in range(1, 7):
+                        values = {"target": f"cockpit:{window}.{pane}",
+                                  "sid": f"11111111-1111-1111-1111-{window * 6 + pane:012d}"}
+                        if window == 1 and pane <= 3:
+                            values.update(kind="shell", sid="", status="shell")
+                        rows.append(self.row(**values))
+                self.document(rows, identity=False)
+                calls, windows, commands = [], {}, {}
+
+                def fake_run(args, **kwargs):
+                    calls.append(args)
+                    if args[1] == "list-sessions":
+                        return "unaffected\n"
+                    if "new-session" in args or args[1] == "new-window":
+                        number = 1 if "new-session" in args else int(args[args.index("-t") + 1].split(":")[1])
+                        pane = f"%{len(commands) + 1}"
+                        window = f"@{number}"
+                        windows[window] = [pane]
+                        commands[pane] = args[-1]
+                        prefix = "$2\t" if "new-session" in args else ""
+                        return f"{prefix}{window}\t{pane}\n"
+                    if args[1] == "display-message":
+                        return "1\n"
+                    if args[1] == "list-panes":
+                        return "\n".join(windows[args[args.index("-t") + 1]]) + "\n"
+                    if args[1] == "split-window":
+                        parent = args[args.index("-t") + 1]
+                        panes = next(panes for panes in windows.values() if parent in panes)
+                        pane = f"%{len(commands) + 1}"
+                        panes.insert(panes.index(parent) + 1, pane)
+                        commands[pane] = args[-1]
+                        return pane + "\n"
+                    return ""
+
+                def identity():
+                    return {"server": self.server, "panes": {
+                        f"cockpit:{window[1:]}.{index}": {
+                            "session": "$2", "window": window, "pane": pane,
+                            "pid": 200 + int(pane[1:]), "dead": "0", "process": {"start": pane[1:]},
+                        } for window, panes in windows.items() for index, pane in enumerate(panes, 1)
+                    }}
+
+                with patch.object(writer, "server_identity", return_value=self.server), patch.object(
+                    writer, "restore_identity", side_effect=identity
+                ), patch.object(writer, "build_rows", return_value=[]), patch.object(
+                    writer, "run", side_effect=fake_run
+                ), contextlib.redirect_stdout(io.StringIO()) as output:
+                    writer.recover_cold("codex", self.source, "cockpit", "1")
+                expected_windows = {1, 2, 3, 4, 5} | set(saved_windows)
+                self.assertEqual(set(windows), {f"@{window}" for window in expected_windows})
+                self.assertEqual(len(commands), len(expected_windows) * 6)
+                proof_path = pathlib.Path(output.getvalue().strip())
+                proof = json.loads(proof_path.read_text())
+                self.assertEqual(set(proof["panes"]), set(commands))
+                self.assertEqual(proof["identities"], identity()["panes"])
+                expected = {row[0]: row[5] for row in rows}
+                for target, pane in proof["identities"].items():
+                    sid = expected.get(target, "")
+                    program = (f"codex resume --no-alt-screen {sid}; " if sid else "")
+                    self.assertEqual(commands[pane["pane"]], program + f"exec {writer.LOGIN_SHELL} -il")
+                self.assertEqual(calls[0][1:], ["topology-authorize", "recover", "cockpit"])
+                self.assertFalse(any("respawn-pane" in args or "-k" in args or "-g" in args for args in calls))
+                self.assertFalse(any("unaffected" in args for args in calls))
+                proof_path.unlink()
 
     def test_direct_cold_helper_denial_on_second_session_has_zero_tmux_calls(self):
         self.source.write_text(
