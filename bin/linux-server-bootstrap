@@ -871,7 +871,8 @@ refresh_user_source_files() {
   printf '%s\n' \
     "$repo_root/bin/codex" \
     "$repo_root/bin/dotfiles-audit" \
-    "$repo_root/bin/linux-server-bootstrap"
+    "$repo_root/bin/linux-server-bootstrap" \
+    "$repo_root/bin/mtt"
 }
 
 preflight_dotfiles_source_file() {
@@ -1163,6 +1164,7 @@ bin/dotfiles-platform .local/bin/dotfiles-platform
 bin/gh .local/bin/gh
 bin/ghx .local/bin/ghx
 bin/linux-server-bootstrap .local/bin/linux-server-bootstrap
+bin/mtt .local/bin/mtt
 bin/tt .local/bin/tt
 EOF
 

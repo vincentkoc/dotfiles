@@ -80,6 +80,45 @@ Apply receipts and profile backups live under
 
 ## Headless Linux servers
 
+### Single-pane mobile mirror
+
+`mtt cockpit:2.1` (or `mtt %12`) mirrors exactly one existing pane at its
+source dimensions. `mtt` opens a metadata-only picker; `mtt --check %12`
+prints the resolved ID and dimensions without capturing or sending input.
+Use `--socket /path/to/socket` for an explicit existing server.
+Python 3.9+ with curses and a UTF-8 terminal are required.
+
+For a full-phone single-pane view, run from plain SSH or a local terminal outside
+tmux. Detach the old mobile tmux client first, without closing any panes. Inside
+an already attached multi-pane cockpit, the outer grid still confines `mtt` to
+the calling pane; `mtt` never automatically detaches clients or zooms panes.
+
+The local viewport crops/pans the fixed-size screen and follows the source
+cursor. Resizing the phone never resizes the source; only source-side changes
+update the pad dimensions. No sessions are created or attached, and desktop
+focus, zoom, layouts and sibling panes are left alone.
+
+Input starts after the first validated frame. `Ctrl-] p` disarms input and
+enables local arrows, PageUp/PageDown and Home; `Ctrl-] f` resumes follow/input.
+`--read-only` never forwards input. `Ctrl-] q` exits only the viewer;
+`Ctrl-] Ctrl-]` sends a literal prefix when interactive. Ctrl-C, arrows,
+backspace and ordinary keys go to the source application. Complete bracketed
+paste frames are forwarded literally, up to 4096 bytes including delimiters;
+incomplete or oversized frames close the viewer without sending that paste.
+Typed/pasted newlines retain their normal application behavior; no Enter or
+shell command is generated.
+
+This is a monochrome, current-screen mirror, not a full terminal replica:
+no tmux history, colors/attributes, mouse forwarding or copy-mode navigation.
+Curses handles wide/combining glyphs; terminal/font width differences can
+still affect rendering. The viewer closes on copy/other pane modes, synchronized
+input, capture/send hooks, identity changes or uncertain delivery. Socket and
+process births are checked locally, not atomically inside tmux; each send has a
+separate non-yielding server-side identity/mode guard and acknowledgement.
+Timed-out input is never retried.
+
+### Server Profile
+
 Use the guarded server profile instead of the full desktop installer:
 
 ```bash

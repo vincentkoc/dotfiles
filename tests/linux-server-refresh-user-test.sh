@@ -27,6 +27,7 @@ create_test_repo() {
       bin/gh \
       bin/ghx \
       bin/linux-server-bootstrap \
+      bin/mtt \
       bin/tt
   ) | (
     cd "$destination"
@@ -318,6 +319,10 @@ done
 [[ -x "$home/.local/share/pnpm/pnpx" ]]
 [[ ! -e "$home/.local/share/pnpm/bin" ]]
 [[ "$(readlink "$home/.local/bin/codex")" == "$test_repo/bin/codex" ]]
+[[ "$(readlink "$home/.local/bin/mtt")" == "$test_repo/bin/mtt" ]]
+[[ -x "$home/.local/bin/mtt" ]]
+mtt_help="$(HOME="$home" PATH=/usr/bin:/bin "$home/.local/bin/mtt" --help)"
+[[ "$mtt_help" == *--check* && "$mtt_help" == *--read-only* ]]
 for absent in \
   "$home/.local/bin/quickssh" \
   "$home/.local/bin/op" \
@@ -534,6 +539,12 @@ case "$DRIFT_CASE" in
   source-world-mode)
     chmod 0777 "$repo_root/bin/dotfiles-audit"
     ;;
+  mtt-source-missing)
+    rm "$repo_root/bin/mtt"
+    ;;
+  mtt-source-world-mode)
+    chmod 0777 "$repo_root/bin/mtt"
+    ;;
   source-symlink)
     rm "$repo_root/bin/dotfiles-audit"
     ln -s "$OUTSIDE_ROOT/marker" "$repo_root/bin/dotfiles-audit"
@@ -621,7 +632,7 @@ for case_name in \
   home terminal-parent outside \
   nested-symlink nested-type nested-owner world-mode repo-world-mode non-traversable \
   source-parent-symlink source-parent-file source-parent-owner source-parent-world-mode \
-  source-world-mode source-symlink source-hardlink \
+  source-world-mode source-symlink source-hardlink mtt-source-missing mtt-source-world-mode \
   chmod-failure-root chmod-failure-bin chmod-failure-first-source \
   pnpm-file pnpx-symlink pnpm-owner; do
   case_home="$temporary/drift-$case_name"
@@ -790,6 +801,12 @@ for case_name in \
       ;;
     source-world-mode)
       [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 777 ]]
+      ;;
+    mtt-source-missing)
+      [[ ! -e "$case_repo/bin/mtt" ]]
+      ;;
+    mtt-source-world-mode)
+      [[ "$(mode "$case_repo/bin/mtt")" == 777 ]]
       ;;
     source-symlink)
       [[ "$(readlink "$case_repo/bin/dotfiles-audit")" == \
