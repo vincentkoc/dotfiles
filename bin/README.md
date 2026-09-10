@@ -158,12 +158,15 @@ auth, config, `jq`, or binaries leaves the prior native/ghx route in use.
 Only literal relative `api repos/openclaw/openclaw/...` and
 `api repos/openclaw/octopool/...` GETs can use the relay:
 
-- Repository metadata; PR lists and numeric PR details, files, commits, reviews.
+- PR lists and numeric PR details, files, commits, reviews.
 - Issue lists and numeric issue details or comments.
 - Commit lists and single-segment commit refs, check runs/suites, status/statuses.
 - Numeric check runs or check-suite check-run lists.
 - Actions run lists, numeric runs, attempts and jobs; numeric jobs; workflow
   lists, numeric workflows and their runs. Logs and artifacts stay native.
+
+Repository-root metadata stays native because its permission fields depend on
+the authenticated caller.
 
 Supported flags are `--paginate`, `--slurp` (with pagination and without jq),
 `--jq <filter>`, `-q <filter>`, `--jq=<filter>`, `-X GET`, `--method GET`, and

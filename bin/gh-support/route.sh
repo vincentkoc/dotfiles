@@ -91,18 +91,14 @@ gh_jq_filter() {
 gh_octopool_path() {
   local endpoint="$1" path query part key value
   local LC_ALL=C
-  [[ "$endpoint" =~ ^repos/openclaw/(openclaw|octopool)(/|\?|$) ]] || return 1
+  # Repository-root metadata includes caller-specific permission fields.
+  [[ "$endpoint" =~ ^repos/openclaw/(openclaw|octopool)/ ]] || return 1
   path="${endpoint%%\?*}"
   [[ "$path" =~ ^[a-zA-Z0-9_./-]+$ && "$path" != *..* && "$path" != *//* ]] || return 1
   path="${path#repos/openclaw/}"
   path="${path#*/}"
-  case "$endpoint" in
-    repos/openclaw/openclaw | repos/openclaw/octopool | repos/openclaw/openclaw\?* | repos/openclaw/octopool\?*)
-      path="" ;;
-  esac
   # Exclude permission-management endpoints, logs, and credential-bearing resources.
-  [[ -z "$path" ||
-    "$path" =~ ^pulls(/[0-9]+(/(files|commits|reviews))?)?$ ||
+  [[ "$path" =~ ^pulls(/[0-9]+(/(files|commits|reviews))?)?$ ||
     "$path" =~ ^issues(/[0-9]+(/comments)?)?$ ||
     "$path" =~ ^commits(/[a-zA-Z0-9_-]+(/(check-runs|check-suites|status|statuses))?)?$ ||
     "$path" =~ ^check-runs/[0-9]+$ ||

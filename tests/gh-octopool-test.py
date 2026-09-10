@@ -115,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
         return result, record
 
     accepted = (
-        "", "/pulls", "/pulls/123", "/pulls/123/files", "/pulls/123/commits",
+        "/pulls", "/pulls/123", "/pulls/123/files", "/pulls/123/commits",
         "/pulls/123/reviews", "/issues", "/issues/123", "/issues/123/comments",
         "/commits", "/commits/main", "/commits/abc123/check-runs",
         "/commits/abc123/check-suites", "/commits/abc123/status",
@@ -162,6 +162,8 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
         for repo in ("openclaw", "octopool"):
             for suffix in accepted:
                 invoke(entry, "api", "repos/openclaw/" + repo + suffix, route="octopool")
+            for suffix in ("", "?", "?per_page=100", "/", "/?", "/?page=1&per_page=100"):
+                invoke(entry, "api", "repos/openclaw/" + repo + suffix)
         for flags in (
             [], ["--paginate"], ["--paginate", "--slurp"], ["-X", "GET"],
             ["--method", "GET"], ["--method=GET"], ["--jq", ".number"],
