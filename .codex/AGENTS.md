@@ -88,6 +88,20 @@
 - Stop when the request is satisfied. If progress requires external action,
   report one precise blocker, its evidence, and the exact unblock action.
 
+## Safety notices and optional models
+
+- If a request produces `This content can't be shown` or a cybersecurity safety
+  notice, stop the affected request and preserve/report the notice in the
+  conversation, without a new transcript artifact. Do not automatically retry,
+  paraphrase, or delegate blocked content to another model.
+- `gpt-daybreak-blue-latest` is optional only for a separate, independently
+  permitted, explicitly authorized, scoped defensive task on the same approved
+  identity, project, and product surface. It is not a fallback for blocked content.
+- Never use model changes to bypass access, content, or tool refusals or weaken
+  sandbox, approval, or review gates. Restore the prior model after the permitted
+  task; if the route is unavailable or another refusal occurs, stop and report it.
+  Keep the configured model preference and default unchanged.
+
 ## Artifact and temporary-file discipline
 
 - Default to no new artifact or temporary files for routine inspection, review,
