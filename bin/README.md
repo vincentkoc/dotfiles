@@ -50,6 +50,19 @@ an exact failure timeout. For new work expected to write substantial data, use
 `codex --heavy-work`; tune `CODEX_DISK_RESERVE_GIB`,
 `CODEX_PLANNED_WRITE_BYTES`, or their matching command options.
 
+The launcher optionally delegates model workflows to the executable
+`${CODEX_HOME:-$HOME/.codex}/model-catalogs/render-cli-catalog`. Installing that
+helper is an explicit opt-in; without it, launch behavior is unchanged. The
+helper receives `--binary <resolved-launcher> --codex-home <directory> --exec --`
+followed by the original forwarded arguments. It owns native catalog generation
+and must execute the same physical binary with its catalog override prepended.
+Helper failures stop the launch; there is no fallback to a different catalog.
+Explicit profiles, catalog or provider-route overrides, remote or local-provider
+selection, and `--ignore-user-config` bypass the helper. Help, version,
+authentication, installation, inspection, and other utility commands also stay
+native. Arguments after `--` are never inspected. The launcher does not write
+catalogs, configuration, or authentication files.
+
 Scripts that need durable phase state can call `task-runtime phase` with an
 explicit artifact root. It retains one locked JSON receipt; bounds files, bytes,
 entries, directories, state reads, phases, and lock wait; and returns a small
