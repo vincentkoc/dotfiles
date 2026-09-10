@@ -179,15 +179,21 @@ cli_catalog_eligible() {
         if (( command_seen == 0 )); then
           case "$1" in
             agents|login|logout|mcp|plugin|mcp-server|remote-control|app|completion|\
-            install|update|upgrade|doctor|sandbox|debug|apply|a|queue|archive|delete|\
+            install|update|upgrade|doctor|sandbox|apply|a|queue|archive|delete|\
             migrate-rollouts|unarchive|cloud|exec-server|features|help)
               return 1
               ;;
             app-server) command_seen=2 ;;
+            debug) command_seen=3 ;;
             *) command_seen=1 ;;
           esac
         elif (( command_seen == 2 )); then
           # App-server subcommands generate artifacts instead of serving models.
+          return 1
+        elif (( command_seen == 3 )); then
+          [[ "$1" == models ]] || return 1
+          command_seen=4
+        elif (( command_seen == 4 )); then
           return 1
         fi
         shift
@@ -206,7 +212,7 @@ cli_catalog_eligible() {
         ;;
     esac
   done
-  return 0
+  (( command_seen != 3 ))
 }
 
 catalog_helper="$codex_home/model-catalogs/render-cli-catalog"

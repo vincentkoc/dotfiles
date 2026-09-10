@@ -58,10 +58,11 @@ followed by the original forwarded arguments. It owns native catalog generation
 and must execute the same physical binary with its catalog override prepended.
 Helper failures stop the launch; there is no fallback to a different catalog.
 Explicit profiles, catalog or provider-route overrides, remote or local-provider
-selection, and `--ignore-user-config` bypass the helper. Help, version,
-authentication, installation, inspection, and other utility commands also stay
-native. Arguments after `--` are never inspected. The launcher does not write
-catalogs, configuration, or authentication files.
+selection, and `--ignore-user-config` bypass the helper. `debug models` uses the
+helper to inspect the effective CLI catalog; `debug models --bundled` stays
+native. Help, version, authentication, installation, and other utility commands
+also stay native. Arguments after `--` are never inspected. The launcher does
+not write catalogs, configuration, or authentication files.
 
 Scripts that need durable phase state can call `task-runtime phase` with an
 explicit artifact root. It retains one locked JSON receipt; bounds files, bytes,

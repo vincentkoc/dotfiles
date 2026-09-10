@@ -227,6 +227,9 @@ assert_catalog_route helper exec "" "two words" $'line\nbreak' '*' -- \
   --profile explicit --config model_catalog_json=explicit --heavy-work
 assert_catalog_route helper -- login --version --ignore-user-config
 assert_catalog_route helper exec "a prompt mentioning --profile and --config"
+assert_catalog_route helper debug models
+assert_catalog_route helper --config features.example=true debug models
+assert_catalog_route helper debug models -- --bundled
 
 for option in -p --profile; do
   assert_catalog_route native "$option" explicit exec
@@ -256,6 +259,9 @@ for command in agents login logout mcp plugin mcp-server remote-control app comp
   assert_catalog_route native --config features.example=true "$command"
 done
 assert_catalog_route native debug models --bundled
+assert_catalog_route native debug models --help
+assert_catalog_route native debug other-utility
+assert_catalog_route native debug -- models
 assert_catalog_route native app-server generate-ts
 assert_catalog_route native app-server generate-json-schema
 assert_catalog_route native --config
