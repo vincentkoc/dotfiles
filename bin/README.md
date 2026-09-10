@@ -120,6 +120,48 @@ scalars, arrays, and unfiltered responses retain native output. No external
 `jq` is required. The deployed low-data guard belongs at each entrypoint, once,
 before this helper; the helper never calls one entrypoint from the other.
 
+### Legacy Inner-Shim Auth Repair
+
+`ghx-auth-repair` is an explicit Python 3.9+ migration for one legacy 349-byte
+inner shim, SHA-256
+`1c5c55becb3aaad20409892a3b3e40c18f15a6447efdffd067575346e292d420`.
+It adds only a leading `auth` bypass to independently verified native `gh`.
+It does not install or generate shims, change the shared router or PATH,
+authenticate, enroll an Octopool client, or start a daemon. Non-auth arguments,
+including `--no-cache`, keep their original behavior.
+
+Audit the target and native binary first. Supply absolute paths and their
+current lowercase SHA-256 digests; target and backup parent directories must
+be canonical, user-owned, and not group/world writable. Inspection is the default:
+
+```sh
+ghx-auth-repair --target /absolute/path/to/legacy/ghx \
+  --expected-sha256 TARGET_SHA256 --native-gh /absolute/path/to/native/gh \
+  --native-sha256 NATIVE_SHA256
+```
+
+To apply, append `--apply --backup /absolute/private-directory/ghx.before`.
+Create that private directory with mode `0700` beforehand. The backup must not
+exist; it retains the original bytes with mode `0600`. The helper rechecks the
+target identity and both digests before atomically replacing the target.
+Do not run it alongside another editor or installer. A failure can leave the
+private backup for inspection; there is no automatic rollback.
+
+The target must be a singly linked regular executable owned by the current
+user. Unknown bytes, a symlink target, native scripts/wrappers, changed pins,
+ACLs, file flags, and unsupported extended attributes are refused. On macOS,
+`com.apple.provenance` is preserved and verified; other attributes are refused.
+On Linux, all extended attributes (including ACLs) are refused. Mode, UID,
+GID, atime, and mtime are preserved; replacement necessarily changes inode and
+ctime/birth time. Supported platforms are macOS and Linux.
+
+The inserted command pins the supplied native **path**, not its digest at
+runtime. A symlink is allowed for native `gh`; its resolution and digest are
+verified during migration. Prefer a versioned binary path when later symlink
+updates must not change auth dispatch. An exact repaired shim with the same
+path is a no-op when supplied with its current digest and a verified native
+binary. A different path pin is not an automatic upgrade: audit it separately.
+
 ### Optional Octopool Reads
 
 Both entrypoints can send a narrow set of public REST reads to Octopool before
