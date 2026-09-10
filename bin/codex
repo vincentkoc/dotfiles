@@ -120,7 +120,8 @@ if (( heavy_work )); then
 fi
 
 if (( constrained_network )); then
-  forwarded=(--disable unbounded_connection_retries "${forwarded[@]}")
+  # Guard empty arrays for Bash 3.2 with nounset enabled.
+  forwarded=(--disable unbounded_connection_retries ${forwarded[@]+"${forwarded[@]}"})
 fi
 
 token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_PAT_TOKEN:-}}"
@@ -136,4 +137,88 @@ if [[ -n "$token" ]]; then
 fi
 unset gh_bin token
 
-exec "$real_codex" "${forwarded[@]}"
+cli_catalog_eligible() {
+  local command_seen=0 value key
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)
+        break
+        ;;
+      -p|--profile|-p?*|--profile=*|--ignore-user-config|--ignore-user-config=*|\
+      -h|--help|-V|--version|--bundled|--oss|--local-provider|--local-provider=*|\
+      --remote|--remote=*)
+        return 1
+        ;;
+      -c|--config)
+        [[ $# -ge 2 ]] || return 1
+        value="$2"
+        shift 2
+        ;;
+      -c?*)
+        value="${1#-c}"
+        value="${value#=}"
+        shift
+        ;;
+      --config=*)
+        value="${1#--config=}"
+        shift
+        ;;
+      -m|--model|-i|--image|-s|--sandbox|-a|--ask-for-approval|-C|--cd|\
+      --enable|--disable|--add-dir|--color|--output-schema|-o|--output-last-message|\
+      --listen|--remote-auth-token-env)
+        [[ $# -ge 2 ]] || return 1
+        [[ "$2" != -- ]] || return 1
+        shift 2
+        continue
+        ;;
+      -*)
+        shift
+        continue
+        ;;
+      *)
+        if (( command_seen == 0 )); then
+          case "$1" in
+            agents|login|logout|mcp|plugin|mcp-server|remote-control|app|completion|\
+            install|update|upgrade|doctor|sandbox|apply|a|queue|archive|delete|\
+            migrate-rollouts|unarchive|cloud|exec-server|features|help)
+              return 1
+              ;;
+            app-server) command_seen=2 ;;
+            debug) command_seen=3 ;;
+            *) command_seen=1 ;;
+          esac
+        elif (( command_seen == 2 )); then
+          # App-server subcommands generate artifacts instead of serving models.
+          return 1
+        elif (( command_seen == 3 )); then
+          [[ "$1" == models ]] || return 1
+          command_seen=4
+        elif (( command_seen == 4 )); then
+          return 1
+        fi
+        shift
+        continue
+        ;;
+    esac
+    [[ "$value" == *=* ]] || return 1
+    key="${value%%=*}"
+    key="${key//[[:space:]]/}"
+    key="${key//\"/}"
+    key="${key//\'/}"
+    case "$key" in
+      model_catalog_json|profile|profiles|profiles.*|model_provider|model_providers|\
+      model_providers.*|oss_provider)
+        return 1
+        ;;
+    esac
+  done
+  (( command_seen != 3 ))
+}
+
+catalog_helper="$codex_home/model-catalogs/render-cli-catalog"
+if [[ -x "$catalog_helper" ]] && cli_catalog_eligible ${forwarded[@]+"${forwarded[@]}"}; then
+  exec "$catalog_helper" --binary "$real_codex" --codex-home "$codex_home" \
+    --exec -- ${forwarded[@]+"${forwarded[@]}"}
+fi
+
+exec "$real_codex" ${forwarded[@]+"${forwarded[@]}"}

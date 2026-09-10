@@ -142,6 +142,161 @@ heavy_output="$(
 [[ "$heavy_output" == "standalone:run" ]]
 grep -Fx "admit --path $PWD --reserve-gib 12 --planned-bytes 4096" "$admission_log"
 
+catalog_home="$temporary/catalog home"
+catalog_binary="$catalog_home/packages/standalone/current/bin/codex"
+catalog_helper="$catalog_home/model-catalogs/render-cli-catalog"
+native_args="$temporary/native.args"
+helper_args="$temporary/helper.args"
+order_log="$temporary/order.log"
+mkdir -p "$(dirname "$catalog_binary")" "$(dirname "$catalog_helper")"
+cat >"$catalog_binary" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\0' "$#" "$@" >"$CODEX_TEST_NATIVE_ARGS"
+printf 'native\n' >>"$CODEX_TEST_ORDER_LOG"
+[[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]]
+[[ "$GITHUB_PAT_TOKEN" == native-token ]]
+[[ "$CODEX_TEST_SENTINEL" == preserved ]]
+printf 'native\n'
+EOF
+chmod +x "$catalog_binary"
+
+catalog_run() {
+  env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN \
+    HOME="$temporary/unused-home" CODEX_HOME="$catalog_home" PATH="$long_path" \
+    CODEX_TEST_NATIVE_ARGS="$native_args" CODEX_TEST_HELPER_ARGS="$helper_args" \
+    CODEX_TEST_ORDER_LOG="$order_log" CODEX_TEST_SENTINEL=preserved \
+    CODEX_TEST_HELPER_EXIT="${CODEX_TEST_HELPER_EXIT:-0}" \
+    CODEX_TASK_RUNTIME_BIN="$temporary/catalog-admission" \
+    "$symlink_dir/codex" "$@"
+}
+
+assert_argv() {
+  local actual="$1"
+  shift
+  printf '%s\0' "$#" "$@" >"$temporary/expected.args"
+  cmp "$temporary/expected.args" "$actual"
+}
+
+assert_catalog_route() {
+  local expected="$1" output
+  shift
+  : >"$native_args"
+  : >"$helper_args"
+  : >"$order_log"
+  output="$(catalog_run "$@")"
+  [[ "$output" == "$expected" ]]
+  [[ "$(cat "$order_log")" == "$expected" ]]
+  if [[ "$expected" == helper ]]; then
+    assert_argv "$helper_args" --binary "$catalog_binary" \
+      --codex-home "$catalog_home" --exec -- "$@"
+    [[ ! -s "$native_args" ]]
+  else
+    assert_argv "$native_args" "$@"
+    [[ ! -s "$helper_args" ]]
+  fi
+}
+
+# No helper, or a non-executable opt-in, preserves the native launch.
+assert_catalog_route native
+assert_catalog_route native exec "two words"
+cat >"$catalog_helper" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\0' "$#" "$@" >"$CODEX_TEST_HELPER_ARGS"
+printf 'helper\n' >>"$CODEX_TEST_ORDER_LOG"
+[[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]]
+[[ "$GITHUB_PAT_TOKEN" == native-token ]]
+[[ "$CODEX_TEST_SENTINEL" == preserved ]]
+printf 'helper\n'
+exit "${CODEX_TEST_HELPER_EXIT:-0}"
+EOF
+chmod 644 "$catalog_helper"
+assert_catalog_route native review
+chmod 755 "$catalog_helper"
+
+assert_catalog_route helper
+assert_catalog_route helper "two words"
+for command in exec e review resume fork app-server; do
+  assert_catalog_route helper "$command"
+done
+assert_catalog_route helper --no-alt-screen --model test-model exec --json "two words"
+assert_catalog_route helper -m help -C login -i image.png review
+assert_catalog_route helper -c 'model="test-model"' --config features.example=true exec
+assert_catalog_route helper --config=features.example=true -cfeatures.other=false resume --last
+assert_catalog_route helper app-server --listen unix://example
+assert_catalog_route helper exec "" "two words" $'line\nbreak' '*' -- \
+  --profile explicit --config model_catalog_json=explicit --heavy-work
+assert_catalog_route helper -- login --version --ignore-user-config
+assert_catalog_route helper exec "a prompt mentioning --profile and --config"
+assert_catalog_route helper debug models
+assert_catalog_route helper --config features.example=true debug models
+assert_catalog_route helper debug models -- --bundled
+
+for option in -p --profile; do
+  assert_catalog_route native "$option" explicit exec
+done
+for option in -pexplicit -p=explicit --profile=explicit; do
+  assert_catalog_route native exec "$option"
+done
+for key in model_catalog_json profile profiles profiles.team.model_provider \
+  model_provider model_providers model_providers.custom.base_url oss_provider \
+  '"model_catalog_json"' "model_providers.'custom'.base_url"; do
+  for option in -c --config; do
+    assert_catalog_route native "$option" "$key = \"explicit\"" exec
+  done
+  for option in "-c$key=explicit" "-c=$key=explicit" "--config=$key=explicit"; do
+    assert_catalog_route native exec "$option"
+  done
+done
+for option in --ignore-user-config --ignore-user-config=true -h --help -V --version \
+  --bundled --oss --local-provider=custom --remote=unix://example; do
+  assert_catalog_route native exec "$option"
+done
+assert_catalog_route native --local-provider custom exec
+assert_catalog_route native --remote unix://example
+for command in agents login logout mcp plugin mcp-server remote-control app completion \
+  install update upgrade doctor sandbox debug apply a queue archive delete \
+  migrate-rollouts unarchive cloud exec-server features help; do
+  assert_catalog_route native --config features.example=true "$command"
+done
+assert_catalog_route native debug models --bundled
+assert_catalog_route native debug models --help
+assert_catalog_route native debug other-utility
+assert_catalog_route native debug -- models
+assert_catalog_route native app-server generate-ts
+assert_catalog_route native app-server generate-json-schema
+assert_catalog_route native --config
+assert_catalog_route native -c malformed
+assert_catalog_route native -m -- --profile explicit
+
+cat >"$temporary/catalog-admission" <<'EOF'
+#!/usr/bin/env bash
+printf 'admission\n' >>"$CODEX_TEST_ORDER_LOG"
+printf '%s\0' "$#" "$@" >"$CODEX_TEST_ORDER_LOG.args"
+EOF
+chmod +x "$temporary/catalog-admission"
+: >"$native_args"
+: >"$helper_args"
+: >"$order_log"
+[[ "$(catalog_run --heavy-work --disk-reserve-gib 12 --planned-write-bytes 4096 \
+  --constrained-network exec "two words")" == helper ]]
+[[ "$(cat "$order_log")" == $'admission\nhelper' ]]
+assert_argv "$order_log.args" admit --path "$PWD" --reserve-gib 12 --planned-bytes 4096
+assert_argv "$helper_args" --binary "$catalog_binary" --codex-home "$catalog_home" \
+  --exec -- --disable unbounded_connection_retries exec "two words"
+[[ ! -s "$native_args" ]]
+
+: >"$native_args"
+: >"$helper_args"
+: >"$order_log"
+if failure_output="$(CODEX_TEST_HELPER_EXIT=73 catalog_run exec "two words")"; then
+  printf 'catalog helper failure must not fall back to the native CLI\n' >&2
+  exit 1
+else
+  [[ $? -eq 73 ]]
+fi
+[[ "$failure_output" == helper && "$(cat "$order_log")" == helper ]]
+[[ ! -s "$native_args" && -s "$helper_args" ]]
+
 if grep -Fq 'gh auth token' "$repo_root/.zshrc"; then
   printf '.zshrc must not fetch GitHub credentials during startup\n' >&2
   exit 1
