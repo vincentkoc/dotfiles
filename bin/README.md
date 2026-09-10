@@ -85,7 +85,7 @@ nor restarts an existing daemon. Without native `gh`, both wrappers fail clearly
 
 The proxy is reserved for `pr view`, `pr checks`, `issue view`, and `run view`
 with a numeric item ID, explicit repository, and `--json`. Management commands
-`xdaemon` and `xcache` still reach ghx. All API requests, writes, auth, implicit
+`xdaemon` and `xcache` still reach ghx. By default, API requests, writes, auth, implicit
 repository reads, `GH_REPO`-dependent calls, interactive modes, and unknown
 options go directly to native `gh`. This preserves stdin and avoids relying on
 the proxy's API method classification.
@@ -119,6 +119,75 @@ API jq filters compact actual object results through native `gh`'s formatter;
 scalars, arrays, and unfiltered responses retain native output. No external
 `jq` is required. The deployed low-data guard belongs at each entrypoint, once,
 before this helper; the helper never calls one entrypoint from the other.
+
+### Optional Octopool Reads
+
+Both entrypoints can send a narrow set of public REST reads to Octopool before
+considering ghx. This is explicitly activated per host, never by finding a
+binary or login alone. Install the reviewed Octopool 0.6.3 binary at a stable
+versioned path, native `gh`, and `jq`. Keep existing entrypoints and their
+low-data hooks; the routing change is in `bin/gh-support/route.sh`. No daemon
+restart or ghx configuration change is needed.
+
+After independently verifying the binary and native CLI paths, create the
+private host-local `~/.config/gh-routing/octopool.json` with exactly these keys:
+
+```json
+{
+  "enabled": true,
+  "octopool_path": "/absolute/versioned/octopool",
+  "gh_path": "/absolute/native/gh"
+}
+```
+
+The file is parsed as JSON, not sourced. Unknown keys, relative paths, wrapper
+pins, missing executables, and symlinked configuration files disable activation.
+A valid configuration pins native `gh` for every route, including writes,
+`--no-cache`, and ghx's backend. This avoids PATH selecting another Octopool
+version or a wrapper. Existing `GHX_GH_PATH` and `OCTOPOOL_GH_PATH` cannot override
+the selected backend.
+
+Relay reads additionally require a regular, nonsymlink saved `auth.json` for
+exactly `https://octopool.dev`, pool `maintainers`, and a nonempty caller token.
+Octopool's native auth location is used: `~/Library/Application
+Support/octopool/auth.json` on macOS, or
+`${XDG_CONFIG_HOME:-$HOME/.config}/octopool/auth.json` on Linux. Keep caller
+credentials host-local; never copy auth files between hosts. Missing or invalid
+auth, config, `jq`, or binaries leaves the prior native/ghx route in use.
+
+Only literal relative `api repos/openclaw/openclaw/...` and
+`api repos/openclaw/octopool/...` GETs can use the relay:
+
+- PR lists and numeric PR details, files, commits, reviews.
+- Issue lists and numeric issue details or comments.
+- Commit lists and single-segment commit refs, check runs/suites, status/statuses.
+- Numeric check runs or check-suite check-run lists.
+- Actions run lists, numeric runs, attempts and jobs; numeric jobs; workflow
+  lists, numeric workflows and their runs. Logs and artifacts stay native.
+
+Repository-root metadata stays native because its permission fields depend on
+the authenticated caller.
+
+Supported flags are `--paginate`, `--slurp` (with pagination and without jq),
+`--jq <filter>`, `-q <filter>`, `--jq=<filter>`, `-X GET`, `--method GET`, and
+`--method=GET`. Attached `-q...` and `-XGET` stay native. Allowed query parameters
+are positive `page`, `per_page` from 1 to 100, `state=open|closed|all`, and
+`filter=latest|all`. All other endpoints, options, headers, fields, input files,
+hosts, URL/path escapes, and placeholders stay native. Nonempty `GH_HOST` or
+`GH_REPO` disables relay routing. Top-level commands retain their prior routes.
+
+On the relay path, inherited Octopool caller/admin tokens and destination/backend
+overrides are removed. The service, pool, and native backend are pinned; native
+GitHub credentials remain available only for local fallback. API jq filters use
+the same object-to-JSONL transformation on both routes. No ghx cache surrounds
+Octopool. Relay failures retain Octopool's exit status and native-fallback policy;
+the wrapper neither retries failures nor performs login.
+
+Use `GH_OCTOPOOL=0` to disable relay routing immediately while retaining valid
+native pins. Remove the activation file (or set `enabled` to `false`) to restore
+legacy PATH discovery as well. `--no-cache` and `GHX_NO_CACHE=1` always bypass
+Octopool and ghx. `--ttl` never selects Octopool. `OCTOPOOL_FRESH=1` requests
+relay revalidation but is not the native escape hatch for exact-head decisions.
 
 ## Repo Fetch Policy
 
