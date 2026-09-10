@@ -770,7 +770,7 @@ def validate_recovery(text, schema, mode="all", selector="", cold=False):
             if not selected_target(target, mode, selector):
                 continue
             if cold and not (
-                1 <= int(match[2]) <= 5 and 1 <= int(match[3]) <= 6
+                1 <= int(match[2]) <= 99 and 1 <= int(match[3]) <= 6
             ):
                 raise SnapshotError("snapshot target is outside the recovery grid")
             if not cold and kind == "shell":
@@ -1084,9 +1084,10 @@ def recover_cold(schema, source, selector, expected_running):
     try:
         for session, entries in plans.items():
             default_cwd = next(iter(entries.values()))[0]
-            names = ("ops", "L1", "L2", "L3", "L4") if schema == "codex" else ("main",)
+            windows = sorted({1, 2, 3, 4, 5} | {window for window, _ in entries}) if schema == "codex" else [1]
             session_id = None
-            for window_number, name in enumerate(names, 1):
+            for window_number in windows:
+                name = ("ops" if window_number == 1 else f"L{window_number - 1}") if schema == "codex" else "main"
                 def item(pane_number):
                     return entries.get(
                         (window_number, pane_number),
