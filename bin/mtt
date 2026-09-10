@@ -20,7 +20,7 @@ TIMEOUT = 2.0
 OUTPUT_LIMIT = 2 * 1024 * 1024
 INPUT_LIMIT = 4096
 SNAPSHOT_INTERVAL = 0.2
-PREFIX = "\x1d"
+PREFIXES = ("\x02", "\x1d")
 PASTE_START = "\x1b[200~"
 PASTE_END = "\x1b[201~"
 FIELDS = (
@@ -394,7 +394,7 @@ class Controls:
     def __init__(self, read_only=False):
         self.read_only = read_only
         self.view = Viewport()
-        self.prefix = False
+        self.prefix = ""
         self.escape = ""
         self.escape_at = 0.0
         self.paste = ""
@@ -437,7 +437,7 @@ class Controls:
                     self.escape = candidate
                     if candidate == PASTE_START:
                         self.escape = ""
-                        self.prefix = False
+                        self.prefix = ""
                         self.pasting, self.paste_at = True, now
                         self.paste_size = 0
                     return []
@@ -448,18 +448,18 @@ class Controls:
             self.escape, self.escape_at = key, now
             return []
         if self.prefix:
-            self.prefix = False
-            if key == "q":
+            prefix, self.prefix = self.prefix, ""
+            if key in ("d", "q"):
                 self.quit = True
             elif key == "p":
                 self.view.follow = False
             elif key == "f":
                 self.view.follow = True
-            elif key == PREFIX and self.interactive:
-                return [PREFIX.encode()]
+            elif key == prefix and self.interactive:
+                return [prefix.encode()]
             return []
-        if key == PREFIX:
-            self.prefix = True
+        if key in PREFIXES:
+            self.prefix = key
             return []
         if not self.view.follow:
             self.view.pan(key, rows)
@@ -590,8 +590,11 @@ def picker(screen, panes):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog=("Ctrl-] p: pan (input off); arrows/PageUp/PageDown/Home pan locally. "
-                "Ctrl-] f: follow/resume; Ctrl-] q: quit viewer; Ctrl-] Ctrl-]: literal prefix. "
+        epilog=("Ctrl-b p: pan (input off); arrows/PageUp/PageDown/Home pan locally. "
+                "Ctrl-b f: follow/resume; Ctrl-b d or q: quit only the viewer. "
+                "Ctrl-b Ctrl-b sends literal Ctrl-b when interactive. "
+                "Legacy Ctrl-] supports the same actions; Ctrl-] Ctrl-] sends literal Ctrl-]. "
+                "Run from plain SSH outside tmux: an outer tmux intercepts Ctrl-b. "
                 "Ctrl-C and normal keys go to the source. Bracketed pastes up to 4096 bytes "
                 "are sent as complete literal frames; incomplete/oversize pastes close the viewer. "
                 "Newlines in typed or pasted input retain their normal behavior; no Enter is added. "

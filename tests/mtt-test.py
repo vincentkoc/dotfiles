@@ -223,33 +223,78 @@ class ControlsAndCells(unittest.TestCase):
         return result
 
     def test_local_controls(self):
-        controls = mtt.Controls()
-        self.assertEqual(self.feed(controls, "\x1dp"), [])
-        self.assertFalse(controls.interactive)
-        self.assertEqual(self.feed(controls, "not sent"), [])
-        self.feed(controls, "\x1df")
-        self.assertTrue(controls.interactive)
-        self.assertEqual(self.feed(controls, "\x1d\x1d"), [b"\x1d"])
-        self.feed(controls, "\x1dq")
-        self.assertTrue(controls.quit)
+        for prefix in ("\x02", "\x1d"):
+            with self.subTest(prefix=repr(prefix)):
+                controls = mtt.Controls()
+                self.assertEqual(self.feed(controls, prefix + "p"), [])
+                self.assertFalse(controls.interactive)
+                self.assertEqual(self.feed(controls, "not sent" + prefix * 2), [])
+                self.assertEqual(controls.key(curses.KEY_RIGHT, 9, 1), [])
+                self.assertEqual(controls.view.left, 1)
+                self.assertEqual(self.feed(controls, prefix + "f"), [])
+                self.assertTrue(controls.interactive)
+                self.assertEqual(self.feed(controls, prefix * 2), [prefix.encode()])
+
+    def test_exit_aliases(self):
+        for prefix in ("\x02", "\x1d"):
+            for action in ("d", "q"):
+                for read_only in (False, True):
+                    with self.subTest(prefix=repr(prefix), action=action, read_only=read_only):
+                        controls = mtt.Controls(read_only)
+                        self.assertEqual(self.feed(controls, prefix + action), [])
+                        self.assertTrue(controls.quit)
+                        self.assertFalse(controls.prefix)
+
+    def test_mixed_prefixes_and_unknown_actions_are_consumed(self):
+        for prefix, other in (("\x02", "\x1d"), ("\x1d", "\x02")):
+            for action in (other, "x", curses.KEY_UP):
+                with self.subTest(prefix=repr(prefix), action=repr(action)):
+                    controls = mtt.Controls()
+                    self.assertEqual(self.feed(controls, prefix), [])
+                    self.assertEqual(controls.prefix, prefix)
+                    self.assertEqual(controls.key(action, 9, 1), [])
+                    self.assertFalse(controls.prefix)
+                    self.assertFalse(controls.quit)
+                    self.assertTrue(controls.interactive)
+                    self.assertEqual(self.feed(controls, "q"), [b"q"])
 
     def test_readonly_cannot_resume_input(self):
-        controls = mtt.Controls(True)
-        self.feed(controls, "\x1dp\x1df")
-        self.assertFalse(controls.interactive)
-        self.assertEqual(self.feed(controls, "a\x03"), [])
+        for prefix in ("\x02", "\x1d"):
+            with self.subTest(prefix=repr(prefix)):
+                controls = mtt.Controls(True)
+                self.feed(controls, prefix + "p" + prefix + "f")
+                self.assertTrue(controls.read_only)
+                self.assertFalse(controls.interactive)
+                self.assertEqual(self.feed(controls, "a\x03" + prefix * 2), [])
 
     def test_normal_keys(self):
         controls = mtt.Controls()
         self.assertEqual(self.feed(controls, "\x03\x7f\r"), [b"\x03", b"\x7f", b"\r"])
+        self.assertEqual(self.feed(controls, "dqpf"), [b"d", b"q", b"p", b"f"])
+        self.assertFalse(controls.quit)
+        self.assertTrue(controls.interactive)
         self.assertEqual(controls.key(curses.KEY_UP, 9, 1), ["Up"])
 
     def test_paste_preserves_prefix_and_newlines(self):
         controls = mtt.Controls()
-        frame = mtt.PASTE_START + "a\x1dq\nb\x1b[A" + mtt.PASTE_END
+        frame = mtt.PASTE_START + "a\x02d\x02p\x1dq\x1dp\nb\x1b[A" + mtt.PASTE_END
         self.assertEqual(self.feed(controls, frame), [frame.encode()])
         self.assertFalse(controls.quit)
         self.assertFalse(controls.prefix)
+        self.assertTrue(controls.interactive)
+
+    def test_paste_clears_pending_prefix(self):
+        for prefix in ("\x02", "\x1d"):
+            with self.subTest(prefix=repr(prefix)):
+                controls = mtt.Controls()
+                frame = mtt.PASTE_START + "\x02q\x1dd\n" + mtt.PASTE_END
+                self.assertEqual(self.feed(controls, prefix + mtt.PASTE_START), [])
+                self.assertFalse(controls.prefix)
+                self.assertTrue(controls.pasting)
+                self.assertEqual(self.feed(controls, "\x02q\x1dd\n" + mtt.PASTE_END),
+                                 [frame.encode()])
+                self.assertFalse(controls.quit)
+                self.assertEqual(self.feed(controls, "d"), [b"d"])
 
     def test_paste_bound_and_timeout(self):
         for suffix in ("x" * 4091,):
@@ -262,9 +307,17 @@ class ControlsAndCells(unittest.TestCase):
             controls.tick(4)
 
     def test_paste_readonly_discard(self):
-        controls = mtt.Controls(True)
-        self.assertEqual(self.feed(controls, mtt.PASTE_START + "\x1dq" + mtt.PASTE_END), [])
-        self.assertFalse(controls.quit)
+        for prefix in ("\x02", "\x1d"):
+            for read_only in (False, True):
+                with self.subTest(prefix=repr(prefix), read_only=read_only):
+                    controls = mtt.Controls(read_only)
+                    if not read_only:
+                        self.feed(controls, prefix + "p")
+                    frame = mtt.PASTE_START + "\x02q\x1dd" + mtt.PASTE_END
+                    self.assertEqual(self.feed(controls, prefix + frame), [])
+                    self.assertFalse(controls.quit)
+                    self.assertFalse(controls.prefix)
+                    self.assertFalse(controls.interactive)
 
     def test_escape_timeout(self):
         controls = mtt.Controls()

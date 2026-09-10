@@ -92,16 +92,20 @@ For a full-phone single-pane view, run from plain SSH or a local terminal outsid
 tmux. Detach the old mobile tmux client first, without closing any panes. Inside
 an already attached multi-pane cockpit, the outer grid still confines `mtt` to
 the calling pane; `mtt` never automatically detaches clients or zooms panes.
+An outer tmux also intercepts `Ctrl-b`, so use the shortcuts below from plain SSH.
 
 The local viewport crops/pans the fixed-size screen and follows the source
 cursor. Resizing the phone never resizes the source; only source-side changes
 update the pad dimensions. No sessions are created or attached, and desktop
 focus, zoom, layouts and sibling panes are left alone.
 
-Input starts after the first validated frame. `Ctrl-] p` disarms input and
-enables local arrows, PageUp/PageDown and Home; `Ctrl-] f` resumes follow/input.
-`--read-only` never forwards input. `Ctrl-] q` exits only the viewer;
-`Ctrl-] Ctrl-]` sends a literal prefix when interactive. Ctrl-C, arrows,
+Input starts after the first validated frame. `Ctrl-b p` disarms input and
+enables local arrows, PageUp/PageDown and Home; `Ctrl-b f` resumes follow/input.
+`--read-only` never forwards input. `Ctrl-b d` or `Ctrl-b q` exits only the viewer,
+leaving the source running. `Ctrl-b Ctrl-b` sends a literal Ctrl-b when interactive.
+The legacy `Ctrl-]` prefix supports the same `d`, `q`, `p` and `f` actions;
+`Ctrl-] Ctrl-]` sends a literal Ctrl-]. Mixed prefixes and unknown prefixed
+actions are consumed locally. Ctrl-C, arrows,
 backspace and ordinary keys go to the source application. Complete bracketed
 paste frames are forwarded literally, up to 4096 bytes including delimiters;
 incomplete or oversized frames close the viewer without sending that paste.

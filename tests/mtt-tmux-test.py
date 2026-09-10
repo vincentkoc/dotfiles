@@ -190,6 +190,27 @@ class IsolatedMirror(unittest.TestCase):
             self.assertFalse(self.result_path.exists(), self.capture(self.phone))
         self.drain()
 
+    def start_direct_viewer(self, options=()):
+        self.master, self.slave = pty.openpty()
+        self.resize(40, 10)
+        self.client = subprocess.Popen(
+            [sys.executable, str(SELF), "--viewer", str(self.directory),
+             self.socket, self.source, *options],
+            stdin=self.slave, stdout=self.slave, stderr=self.slave,
+            start_new_session=True,
+        )
+        os.set_blocking(self.master, False)
+        self.wait_output(b"\x1b[?2004h")
+        self.assertFalse(self.result_path.exists())
+
+    def wait_output(self, expected):
+        output = bytearray()
+        def received():
+            output.extend(self.drain())
+            self.assertLessEqual(len(output), mtt.OUTPUT_LIMIT)
+            return expected in output
+        wait_for(received, "direct viewer output " + repr(expected))
+
     @property
     def result_path(self):
         return self.directory / "viewer.result"
@@ -311,6 +332,53 @@ class IsolatedMirror(unittest.TestCase):
         self.keys(payload)
         wait_for(lambda: self.input() == payload, "literal complete paste")
         self.assertFalse(self.result_path.exists())
+        self.finish()
+
+    def test_direct_mobile_prefix_controls(self):
+        self.start_direct_viewer()
+        self.keys(b"\x02\x1d\x1d\x02\x02x\x1dxdqpf\x03\x02\x02\x1d\x1d")
+        expected = b"dqpf\x03\x02\x1d"
+        wait_for(lambda: self.input() == expected, "literal input and consumed unknown actions")
+        for prefix in (b"\x02", b"\x1d"):
+            with self.subTest(prefix=repr(prefix)):
+                self.keys(prefix + b"pDISCARD-TRANSITION")
+                self.wait_output(b"pan")
+                self.keys(b"\x1bOCnot-sent" + prefix * 2)
+                self.assertEqual(self.input(), expected)
+                self.keys(prefix + b"fDISCARD-TRANSITION")
+                self.wait_output(b"input")
+                self.keys(b"ok")
+                expected += b"ok"
+                wait_for(lambda: self.input() == expected, "follow resumes without queued keys")
+        frame = b"\x1b[200~first\n\x02d\x02p\x1dq\x1dp\x1b[A\x1b[201~"
+        self.keys(b"\x02" + frame + b"z")
+        expected += frame + b"z"
+        wait_for(lambda: self.input() == expected, "paste clears prefix and preserves literal controls")
+        self.assertFalse(self.result_path.exists())
+        self.keys(b"\x02dDISCARD-EXIT")
+        wait_for(lambda: self.result_path.exists(), "mobile detach exits only viewer")
+        self.assertEqual(self.input(), expected)
+        self.finish()
+
+    def test_direct_readonly_prefix_controls(self):
+        self.start_direct_viewer(options=("--read-only",))
+        for prefix in (b"\x02", b"\x1d"):
+            with self.subTest(prefix=repr(prefix)):
+                self.keys(prefix + b"p")
+                self.wait_output(b"pan")
+                self.keys(prefix + b"f")
+                self.wait_output(b"read-only")
+        self.keys(b"\x02\x02\x1d\x1dabc\x03\x02\x1b[200~\x02d\x1dq\n\x1b[201~")
+        self.keys(b"\x02q")
+        wait_for(lambda: self.result_path.exists(), "read-only mobile quit")
+        self.assertEqual(self.input(), b"")
+        self.finish()
+
+    def test_direct_legacy_detach_alias(self):
+        self.start_direct_viewer()
+        self.keys(b"\x1ddDISCARD-EXIT")
+        wait_for(lambda: self.result_path.exists(), "legacy detach exits only viewer")
+        self.assertEqual(self.input(), b"")
         self.finish()
 
     def test_incomplete_paste_restores_terminal(self):
