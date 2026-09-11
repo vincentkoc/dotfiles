@@ -1,31 +1,641 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+"""A fixed-size, current-screen mirror of one existing tmux pane."""
 
-usage() {
-  cat <<'EOF'
-usage: mtt [session]
+import argparse
+import curses
+import locale
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
 
-mobile tmux helper for this machine:
-- with no args, open the mobile pane picker (`tt mobile`)
-- with a session arg, attach or create that explicit mobile session
 
-examples:
-  mtt
-  mtt mobile
-EOF
+TIMEOUT = 2.0
+OUTPUT_LIMIT = 2 * 1024 * 1024
+INPUT_LIMIT = 4096
+SNAPSHOT_INTERVAL = 0.2
+PREFIXES = ("\x02", "\x1d")
+PASTE_START = "\x1b[200~"
+PASTE_END = "\x1b[201~"
+FIELDS = (
+    "pid", "session_id", "window_id", "pane_id", "pane_pid", "pane_tty",
+    "session_name", "window_index", "pane_index", "pane_width", "pane_height",
+    "cursor_x", "cursor_y", "cursor_flag", "pane_dead", "pane_in_mode",
+    "synchronize-panes",
+)
+META_FORMAT = "\t".join("#{" + field + "}" for field in FIELDS)
+NAMED_KEYS = {
+    curses.KEY_UP: "Up", curses.KEY_DOWN: "Down",
+    curses.KEY_LEFT: "Left", curses.KEY_RIGHT: "Right",
+    curses.KEY_PPAGE: "PPage", curses.KEY_NPAGE: "NPage",
+    curses.KEY_HOME: "Home", curses.KEY_END: "End",
+    curses.KEY_BACKSPACE: "BSpace", curses.KEY_DC: "DC",
+    curses.KEY_IC: "IC", curses.KEY_BTAB: "BTab", curses.KEY_ENTER: "Enter",
 }
+NAMED_KEYS.update({curses.KEY_F0 + n: "F" + str(n) for n in range(1, 13)})
+ALLOWED_KEYS = frozenset(NAMED_KEYS.values())
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    ;;
-  "")
-    exec tt mobile
-    ;;
-  restore)
-    exec tt restore "${@:2}"
-    ;;
-  *)
-    exec tt mobile "$@"
-    ;;
-esac
+
+class Refused(Exception):
+    pass
+
+
+def bounded_run(argv, timeout=TIMEOUT, limit=OUTPUT_LIMIT, env=None):
+    """Bound both elapsed time and pipe memory; never retry a command."""
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, env=env,
+    ) as process:
+        output = bytearray()
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise Refused("command timed out")
+                    for key, _ in selector.select(remaining):
+                        chunk = os.read(key.fd, min(65536, limit + 1 - len(output)))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        output.extend(chunk)
+                        if len(output) > limit:
+                            raise Refused("command output exceeded limit")
+            process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            if process.returncode:
+                # Server output is untrusted terminal text; do not print it.
+                raise Refused("command failed (status {})".format(process.returncode))
+        except BaseException:
+            if process.poll() is None:
+                process.kill()  # Only this invocation's client, never the server.
+            process.wait()
+            raise
+    return bytes(output)
+
+
+def process_identity(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        raise Refused("invalid process ID")
+    try:
+        if sys.platform.startswith("linux"):
+            record = Path("/proc/{}/stat".format(pid)).read_text()
+            fields = record[record.rindex(")") + 2:].split()
+            if fields[0] in ("Z", "X"):
+                raise Refused("process is no longer live")
+            return fields[19], int(fields[1])
+        record = bounded_run(
+            ["ps", "-p", str(pid), "-o", "ppid=", "-o", "lstart="],
+            limit=1024, env=dict(os.environ, LC_ALL="C"),
+        ).decode("ascii").strip().split(None, 1)
+        if len(record) != 2:
+            raise Refused("process birth unavailable")
+        return record[1], int(record[0])
+    except (OSError, ValueError, IndexError) as exc:
+        raise Refused("process birth unavailable") from exc
+
+
+def socket_identity(path):
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise Refused("socket disappeared") from exc
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise Refused("socket must be owned by this user")
+    return info.st_uid, info.st_dev, info.st_ino
+
+
+def decimal(value, minimum=0, maximum=2**31 - 1):
+    if not re.fullmatch(r"[0-9]+", value):
+        raise Refused("invalid numeric metadata")
+    number = int(value)
+    if not minimum <= number <= maximum:
+        raise Refused("metadata outside bounds")
+    return number
+
+
+@dataclass(frozen=True)
+class Pane:
+    server: int
+    session: str
+    window: str
+    pane: str
+    root: int
+    tty: str
+    name: str
+    window_index: int
+    pane_index: int
+    width: int
+    height: int
+    x: int
+    y: int
+    cursor: int
+    dead: int
+    mode: int
+    sync: int
+
+    @classmethod
+    def parse(cls, line):
+        values = line.split("\t")
+        if len(values) != len(FIELDS):
+            raise Refused("malformed pane inventory")
+        server, session, window, pane, root, tty, name = values[:7]
+        for value, pattern in (
+            (session, r"\$[0-9]+"), (window, r"@[0-9]+"), (pane, r"%[0-9]+"),
+            (tty, r"/dev/(?:pts/[0-9]+|tty[A-Za-z0-9]+)"),
+        ):
+            if not re.fullmatch(pattern, value):
+                raise Refused("invalid pane identity")
+        if not name or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise Refused("invalid session name")
+        wi, pi = (decimal(v) for v in values[7:9])
+        width, height = (decimal(v, 1, 1000) for v in values[9:11])
+        if width * height > 200000:
+            raise Refused("pane exceeds mirror size limit")
+        x = decimal(values[11], 0, width)  # tmux may report wrap-pending x == width.
+        y = decimal(values[12], 0, height - 1)
+        cursor, dead = (decimal(v, 0, 1) for v in values[13:15])
+        mode = decimal(values[15])
+        sync = decimal(values[16], 0, 1)
+        return cls(decimal(server, 1), session, window, pane, decimal(root, 1),
+                   tty, name, wi, pi, width, height, min(x, width - 1), y,
+                   cursor, dead, mode, sync)
+
+    @property
+    def label(self):
+        return "{}:{}.{}".format(self.name, self.window_index, self.pane_index)
+
+    @property
+    def target(self):
+        return "{}:{}.{}".format(self.session, self.window, self.pane)
+
+    @property
+    def identity(self):
+        return self.server, self.session, self.window, self.pane, self.root, self.tty
+
+    def safe(self):
+        if self.dead or self.mode or self.sync:
+            raise Refused("source dead, in a mode, or synchronize-panes enabled")
+
+
+def resolve(panes, target):
+    matches = [pane for pane in panes if target in (pane.pane, pane.label)]
+    if len(matches) != 1:
+        raise Refused("target must exactly match one inventory pane ID or session:window.pane")
+    return matches[0]
+
+
+def refuse_self(pane, socket_path):
+    inherited = os.environ.get("TMUX", "").rsplit(",", 2)
+    if len(inherited) == 3:
+        same = (os.path.realpath(inherited[0]) == socket_path
+                and inherited[1] == str(pane.server))
+        if same and os.environ.get("TMUX_PANE") == pane.pane:
+            raise Refused("cannot mirror this viewer's pane")
+    for fd in (0, 1, 2):
+        if os.isatty(fd) and os.path.realpath(os.ttyname(fd)) == pane.tty:
+            raise Refused("cannot mirror this viewer's TTY")
+    pid = os.getpid()
+    for _ in range(128):
+        if pid == pane.root:
+            raise Refused("cannot mirror an ancestor pane")
+        if pid <= 1:
+            return
+        _, parent = process_identity(pid)
+        if parent == pid:
+            break
+        pid = parent
+    raise Refused("cannot verify viewer ancestry")
+
+
+def condition(pane):
+    # Only validated IDs, numbers and a restricted /dev path enter tmux syntax.
+    expected = {
+        "pid": pane.server, "session_id": pane.session, "window_id": pane.window,
+        "pane_id": pane.pane, "pane_pid": pane.root, "pane_tty": pane.tty,
+        "pane_dead": 0, "pane_in_mode": 0, "synchronize-panes": 0,
+        "after-capture-pane": "", "after-send-keys": "",
+    }
+    checks = ["#{==:#{%s},%s}" % (key, value) for key, value in expected.items()]
+    result = checks.pop()
+    for check in reversed(checks):
+        result = "#{&&:" + check + "," + result + "}"
+    return result
+
+
+def guarded(pane, body):
+    return ["if-shell", "-F", "-t", pane.target, condition(pane), body,
+            "display-message -p MTT_REFUSED"]
+
+
+def input_command(pane, events):
+    if not events or len(events) > 64:
+        raise Refused("input batch outside bounds")
+    commands = []
+    size = 0
+    for event in events:
+        if isinstance(event, bytes) and event:
+            size += len(event)
+            command = "send-keys -H -t {} {}".format(
+                pane.target, " ".join("{:02x}".format(b) for b in event))
+        elif isinstance(event, str) and event in ALLOWED_KEYS:
+            size += 1
+            command = "send-keys -t {} {}".format(pane.target, event)
+        else:
+            raise Refused("unsupported input")
+        commands.append(command)
+    if size > INPUT_LIMIT:
+        raise Refused("input batch outside bounds")
+    commands.append("display-message -p MTT_SENT")
+    return guarded(pane, " ; ".join(commands))
+
+
+class Mirror:
+    def __init__(self, socket_path, read_only=False):
+        self.socket = os.path.realpath(socket_path)
+        self.socket_stamp = socket_identity(self.socket)
+        self.server = None
+        self.server_birth = None
+        self.pane = None
+        self.root_birth = None
+        self.read_only = read_only
+        self.failed = False
+        self.inflight = False
+        self.last_snapshot = 0.0
+        self.env = dict(os.environ)
+        self.env.pop("TMUX", None)
+        self.env.pop("TMUX_PANE", None)
+
+    def preflight(self):
+        if socket_identity(self.socket) != self.socket_stamp:
+            raise Refused("socket replaced")
+        if self.server is not None:
+            if process_identity(self.server)[0] != self.server_birth:
+                raise Refused("server identity changed")
+        if self.pane is not None:
+            if process_identity(self.pane.root)[0] != self.root_birth:
+                raise Refused("pane process identity changed")
+
+    def call(self, command, sending=False):
+        if self.failed or self.inflight:
+            raise Refused("mirror is closed; input is not retried")
+        self.inflight = True
+        try:
+            self.preflight()
+            output = bounded_run(["tmux", "-N", "-u", "-S", self.socket] + command,
+                                 env=self.env)
+            self.preflight()
+            if output == b"MTT_REFUSED\n":
+                raise Refused("source identity, mode, sync, or capture/send hook guard refused")
+            return output.decode("utf-8", errors="strict")
+        except (Refused, OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+            self.failed = True
+            if sending:
+                raise Refused("delivery uncertain or refused; forwarding stopped, never retried") from exc
+            raise Refused(str(exc)) from exc
+        finally:
+            self.inflight = False
+
+    def inventory(self):
+        if self.server is not None:
+            raise Refused("inventory may only be resolved once")
+        result = self.call(["list-panes", "-a", "-F", META_FORMAT])
+        panes = [Pane.parse(line) for line in result.splitlines()]
+        if not panes or len({pane.server for pane in panes}) != 1:
+            raise Refused("no unambiguous existing server")
+        self.server = panes[0].server
+        self.server_birth = process_identity(self.server)[0]
+        self.preflight()
+        return panes
+
+    def pin(self, pane):
+        if self.pane is not None or pane.server != self.server:
+            raise Refused("target cannot be changed")
+        pane.safe()
+        refuse_self(pane, self.socket)
+        self.pane = pane
+        self.root_birth = process_identity(pane.root)[0]
+        return self.metadata()
+
+    def metadata(self):
+        body = 'display-message -p -t {} "{}"'.format(self.pane.target, META_FORMAT)
+        value = self.call(guarded(self.pane, body))
+        pane = Pane.parse(value.rstrip("\n"))
+        if pane.identity != self.pane.identity:
+            raise Refused("pane identity changed")
+        pane.safe()
+        return pane
+
+    def snapshot(self):
+        delay = self.last_snapshot + SNAPSHOT_INTERVAL - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        self.last_snapshot = time.monotonic()
+        body = ('display-message -p -t {0} "{1}" ; '
+                'capture-pane -p -N -t {0} ; display-message -p MTT_FRAME').format(
+                    self.pane.target, META_FORMAT)
+        output = self.call(guarded(self.pane, body))
+        lines = output.split("\n")
+        pane = Pane.parse(lines[0])
+        if pane.identity != self.pane.identity:
+            raise Refused("pane identity changed")
+        pane.safe()
+        if len(lines) != pane.height + 3 or lines[-2:] != ["MTT_FRAME", ""]:
+            raise Refused("incomplete frame")
+        rows = lines[1:-2]
+        if any(ord(c) < 32 or ord(c) == 127 for row in rows for c in row):
+            raise Refused("unsupported control character in frame")
+        return pane, rows
+
+    def send(self, events):
+        if self.read_only:
+            raise Refused("read-only mirror cannot send input")
+        command = input_command(self.pane, events)
+        if self.call(command, sending=True) != "MTT_SENT\n":
+            self.failed = True
+            raise Refused("no delivery acknowledgement; forwarding stopped, never retried")
+
+
+@dataclass
+class Viewport:
+    top: int = 0
+    left: int = 0
+    follow: bool = True
+
+    def fit(self, pane, rows, cols):
+        rows, cols = max(1, rows), max(1, cols)
+        if self.follow:
+            self.top = min(self.top, pane.y)
+            self.left = min(self.left, pane.x)
+            self.top = max(self.top, pane.y - rows + 1)
+            self.left = max(self.left, pane.x - cols + 1)
+        self.top = max(0, min(self.top, pane.height - rows))
+        self.left = max(0, min(self.left, pane.width - cols))
+
+    def pan(self, key, rows):
+        if key == curses.KEY_HOME:
+            self.top = self.left = 0
+        elif key in (curses.KEY_UP, curses.KEY_DOWN):
+            self.top += -1 if key == curses.KEY_UP else 1
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            self.left += -1 if key == curses.KEY_LEFT else 1
+        elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
+            self.top += (-1 if key == curses.KEY_PPAGE else 1) * max(1, rows)
+
+
+class Controls:
+    def __init__(self, read_only=False):
+        self.read_only = read_only
+        self.view = Viewport()
+        self.prefix = ""
+        self.escape = ""
+        self.escape_at = 0.0
+        self.paste = ""
+        self.paste_size = 0
+        self.pasting = False
+        self.paste_at = 0.0
+        self.quit = False
+
+    @property
+    def interactive(self):
+        return self.view.follow and not self.read_only
+
+    def tick(self, now):
+        if self.pasting and now - self.paste_at > TIMEOUT:
+            raise Refused("incomplete bracketed paste; nothing from this paste was sent")
+        if self.escape and now - self.escape_at > 0.05:
+            if self.escape != "\x1b":
+                raise Refused("incomplete paste delimiter; forwarding stopped")
+            pending, self.escape = self.escape, ""
+            return [pending.encode("utf-8")] if self.interactive else []
+        return []
+
+    def key(self, key, rows, now):
+        if self.pasting:
+            if not isinstance(key, str):
+                raise Refused("unsupported bracketed paste; nothing from this paste was sent")
+            self.paste += key
+            self.paste_size += len(key.encode("utf-8"))
+            if self.paste_size + len(PASTE_START) > INPUT_LIMIT:
+                raise Refused("paste exceeds 4096 bytes; nothing from this paste was sent")
+            if self.paste.endswith(PASTE_END):
+                frame = (PASTE_START + self.paste).encode("utf-8")
+                self.pasting, self.paste = False, ""
+                return [frame] if self.interactive else []
+            return []
+        if self.escape:
+            if isinstance(key, str):
+                candidate = self.escape + key
+                if PASTE_START.startswith(candidate):
+                    self.escape = candidate
+                    if candidate == PASTE_START:
+                        self.escape = ""
+                        self.prefix = ""
+                        self.pasting, self.paste_at = True, now
+                        self.paste_size = 0
+                    return []
+            pending, self.escape = self.escape, ""
+            result = [pending.encode("utf-8")] if self.interactive else []
+            return result + self.key(key, rows, now)
+        if key == "\x1b":
+            self.escape, self.escape_at = key, now
+            return []
+        if self.prefix:
+            prefix, self.prefix = self.prefix, ""
+            if key in ("d", "q"):
+                self.quit = True
+            elif key == "p":
+                self.view.follow = False
+            elif key == "f":
+                self.view.follow = True
+            elif key == prefix and self.interactive:
+                return [prefix.encode()]
+            return []
+        if key in PREFIXES:
+            self.prefix = key
+            return []
+        if not self.view.follow:
+            self.view.pan(key, rows)
+            return []
+        if not self.interactive:
+            return []
+        if isinstance(key, str):
+            return [key.encode("utf-8")]
+        if key in NAMED_KEYS:
+            return [NAMED_KEYS[key]]
+        return []
+
+
+def make_pad(pane, rows):
+    pad = curses.newpad(pane.height, pane.width)
+    pad.erase()
+    for y, row in enumerate(rows):
+        try:
+            # Curses, not Python string offsets, owns cell width and combining.
+            pad.addstr(y, 0, row)
+        except curses.error:
+            # Writing the bottom-right cell succeeds but cannot advance.
+            if y != pane.height - 1 or pad.getyx() != (y, pane.width - 1):
+                raise Refused("terminal cannot render source row")
+    return pad
+
+
+def draw(screen, pad, pane, controls):
+    height, width = screen.getmaxyx()
+    if height < 2 or width < 2:
+        raise Refused("viewer terminal must be at least 2x2")
+    rows = height - 1
+    view = controls.view
+    view.fit(pane, rows, width)
+    screen.erase()
+    state = "pan" if not view.follow else ("read-only" if controls.read_only else "input")
+    status = "mtt {} {}x{} {} {},{}".format(
+        pane.pane, pane.width, pane.height, state, view.left, view.top)
+    screen.addnstr(height - 1, 0, status, width - 1, curses.A_REVERSE)
+    screen.noutrefresh()
+    visible = (view.top <= pane.y < view.top + rows
+               and view.left <= pane.x < view.left + width)
+    pad.move(pane.y, pane.x)
+    pad.leaveok(not visible)
+    try:
+        curses.curs_set(1 if pane.cursor and visible else 0)
+    except curses.error:
+        pass
+    pad.noutrefresh(view.top, view.left, 0, 0,
+                    min(rows, pane.height - view.top) - 1,
+                    min(width, pane.width - view.left) - 1)
+    curses.doupdate()
+
+
+def viewer(screen, mirror):
+    curses.raw()
+    curses.noecho()
+    curses.nonl()
+    curses.set_escdelay(25)
+    screen.keypad(True)
+    screen.timeout(20)
+    controls = Controls(mirror.read_only)
+    pane, rows = mirror.snapshot()
+    pad = make_pad(pane, rows)
+    draw(screen, pad, pane, controls)
+    curses.flushinp()
+    next_frame = time.monotonic() + SNAPSHOT_INTERVAL
+    # Only local terminal modes. The complete bounded frame is sent as bytes.
+    sys.stdout.write("\x1b[?2004h")
+    sys.stdout.flush()
+    try:
+        while not controls.quit:
+            now = time.monotonic()
+            if now >= next_frame:
+                pane, rows = mirror.snapshot()
+                pad = make_pad(pane, rows)
+                next_frame = time.monotonic() + SNAPSHOT_INTERVAL
+            events = controls.tick(now)
+            for _ in range(64):
+                screen.keypad(not controls.pasting)
+                try:
+                    key = screen.get_wch()
+                except curses.error:
+                    break
+                if key == curses.KEY_RESIZE:
+                    break
+                was_follow = controls.view.follow
+                events.extend(controls.key(key, screen.getmaxyx()[0] - 1, time.monotonic()))
+                if controls.quit or controls.view.follow != was_follow:
+                    events.clear()
+                    curses.flushinp()
+                    break
+                if events:
+                    # One decoded key or one complete paste frame per batch.
+                    break
+            if events and controls.interactive and not controls.quit:
+                mirror.send(events)
+            draw(screen, pad, pane, controls)
+    finally:
+        curses.flushinp()
+        sys.stdout.write("\x1b[?2004l")
+        sys.stdout.flush()
+
+
+def picker(screen, panes):
+    screen.keypad(True)
+    selected = 0
+    while True:
+        height, width = screen.getmaxyx()
+        screen.erase()
+        first = max(0, selected - max(1, height - 2))
+        for y, pane in enumerate(panes[first:first + max(1, height - 1)]):
+            label = "{}  {}  {}x{}".format(pane.pane, pane.label, pane.width, pane.height)
+            screen.addnstr(y, 0, label, max(0, width - 1),
+                           curses.A_REVERSE if first + y == selected else 0)
+        screen.refresh()
+        key = screen.get_wch()
+        if key in ("q", "\x1b"):
+            return None
+        if key in ("\n", "\r", curses.KEY_ENTER):
+            return panes[selected]
+        if key == curses.KEY_UP:
+            selected = max(0, selected - 1)
+        elif key == curses.KEY_DOWN:
+            selected = min(len(panes) - 1, selected + 1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=("Ctrl-b p: pan (input off); arrows/PageUp/PageDown/Home pan locally. "
+                "Ctrl-b f: follow/resume; Ctrl-b d or q: quit only the viewer. "
+                "Ctrl-b Ctrl-b sends literal Ctrl-b when interactive. "
+                "Legacy Ctrl-] supports the same actions; Ctrl-] Ctrl-] sends literal Ctrl-]. "
+                "Run from plain SSH outside tmux: an outer tmux intercepts Ctrl-b. "
+                "Ctrl-C and normal keys go to the source. Bracketed pastes up to 4096 bytes "
+                "are sent as complete literal frames; incomplete/oversize pastes close the viewer. "
+                "Newlines in typed or pasted input retain their normal behavior; no Enter is added. "
+                "Monochrome current screen only, no history, mouse, or color fidelity."),
+    )
+    parser.add_argument("target", nargs="?", help="exact pane ID or session:window.pane")
+    parser.add_argument("--socket", help="existing tmux socket (default: TMUX or default socket)")
+    parser.add_argument("--read-only", action="store_true")
+    parser.add_argument("--check", action="store_true", help="metadata-only check; requires an exact target")
+    args = parser.parse_args()
+    if args.check and not args.target:
+        parser.error("--check requires an exact target")
+    if not args.check and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        parser.error("viewer/picker requires a terminal; use --check for metadata")
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+        if not args.check and locale.getpreferredencoding(False).lower().replace("-", "") != "utf8":
+            raise Refused("viewer requires a UTF-8 locale")
+        inherited = os.environ.get("TMUX", "").rsplit(",", 2)
+        socket_path = args.socket or (inherited[0] if len(inherited) == 3 else
+            os.path.join(os.environ.get("TMUX_TMPDIR", "/tmp"),
+                         "tmux-{}".format(os.getuid()), "default"))
+        mirror = Mirror(socket_path, args.read_only)
+        panes = mirror.inventory()
+        pane = resolve(panes, args.target) if args.target else curses.wrapper(picker, panes)
+        if pane is None:
+            return 0
+        pane = mirror.pin(pane)
+        if args.check:
+            print("{} {}x{}".format(pane.pane, pane.width, pane.height))
+            return 0
+        def stop(_signum, _frame):
+            raise Refused("viewer interrupted")
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, stop)
+        curses.wrapper(viewer, mirror)
+        return 0
+    except (Refused, OSError, curses.error, ValueError, KeyboardInterrupt) as exc:
+        print("mtt: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
