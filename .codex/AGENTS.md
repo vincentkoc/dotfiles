@@ -97,6 +97,9 @@
 - `gpt-daybreak-blue-latest` is optional only for a separate, independently
   permitted, explicitly authorized, scoped defensive task on the same approved
   identity, project, and product surface. It is not a fallback for blocked content.
+- `gpt-daybreak-red-latest` is optional only for a separate, independently
+  permitted, explicitly authorized, scoped cybersecurity task on the same approved
+  identity, project, and product surface. It is not a fallback for blocked content.
 - Never use model changes to bypass access, content, or tool refusals or weaken
   sandbox, approval, or review gates. Restore the prior model after the permitted
   task; if the route is unavailable or another refusal occurs, stop and report it.
