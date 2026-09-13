@@ -38,6 +38,7 @@ fi
 
 export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
+export TOKENJUICE_STATS=off
 
 # Load Rust environment if it has been bootstrapped
 if [ -f "$HOME/.cargo/env" ]; then

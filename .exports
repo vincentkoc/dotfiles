@@ -325,6 +325,8 @@ fi
 # Development Tools
 #
 
+export TOKENJUICE_STATS=off
+
 # Less
 export LESS='-F -i -J -M -R -W -x4 -X -z-4'
 export LESS_TERMCAP_mb=$'\E[01;31m'

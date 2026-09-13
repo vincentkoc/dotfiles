@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Non-login hook shells inherit policy from the Codex parent.
+export TOKENJUICE_STATS=off
+
 wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 codex_home="${CODEX_HOME:-$HOME/.codex}"
 platform="$(uname -s)"
