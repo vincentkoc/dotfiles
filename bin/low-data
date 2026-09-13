@@ -28,7 +28,7 @@ is_active() {
     reason="not enrolled"
     return 1
   fi
-  read_mode
+  read_mode || mode=invalid
   if [[ "${LOW_DATA_ALLOW_NETWORK:-}" == 1 ]]; then
     reason="explicit per-command override"
     return 1

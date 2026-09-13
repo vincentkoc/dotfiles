@@ -48,6 +48,13 @@ for cost in constrained expensive unavailable unexpected ""; do
   expect_status 0 env TEST_COST="$cost" low-data active
 done
 expect_status 1 env TEST_COST=unmetered low-data active
+# A failed mode-file open/read must not fall back to an unmetered detector.
+expect_status 0 env TEST_COST=unmetered bash -c '
+  source "$1" active || true
+  read_mode() { return 1; }
+  is_active
+  [[ "$mode" == invalid ]]
+' bash "$root/bin/low-data"
 expect_status 0 env TEST_COST=unmetered TEST_COST_EXIT=1 low-data active
 expect_status 0 env TEST_COST=constrained low-data status
 grep -Fq constrained "$temporary/stdout"
