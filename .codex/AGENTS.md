@@ -290,6 +290,9 @@ Recovery mode rules:
   holder checks pass. There is no minimum age or second approval for that exact
   contract. This exception does not authorize broad maintenance, old-tree
   cleanup, force, prune, branch deletion, or changes to other sessions.
+- The current holder backend is unqualified for release or removal. Keep
+  checkouts retained and use report-only inspection until a reviewed backend
+  proves full holder coverage. Installing these commands does not activate cleanup.
 - Use `gwt finish-status` and report-only `gwt finish-check` to inspect retained
   reasons. End with `retained`, `blocked`, or verified `removed`, the exact path
   and remaining action. Details and stacked examples: `functions/gwt/README.md`.
