@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""Local owner policy and self-contained, history-free Git snapshots."""
+
+import argparse
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from urllib.parse import urlsplit
+
+
+ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"}
+
+
+def git(repo, *args, check=True, input=None):
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], env=ENV, input=input,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if check and result.returncode:
+        raise ValueError(result.stderr.decode(errors="replace").strip())
+    return result
+
+
+def value(repo, *args):
+    return os.fsdecode(git(repo, *args).stdout).strip()
+
+
+def identity(url):
+    if re.match(r"^[^/@:]+@[^/:]+:", url):
+        host, path = url.split("@", 1)[1].split(":", 1)
+        port = None
+    else:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("https", "http", "ssh", "git") or not parsed.hostname:
+            raise ValueError("owner policy requires a network origin identity")
+        host, path = parsed.hostname, parsed.path
+        port = parsed.port
+        if port == {"https": 443, "http": 80, "ssh": 22, "git": 9418}[parsed.scheme]:
+            port = None
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    authority = host.lower() + (f":{port}" if port else "")
+    parts = path.split("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", host) or len(parts) < 2 or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", p) or p in (".", "..") for p in parts):
+        raise ValueError("unsupported repository identity")
+    identity_path = "/".join(parts)
+    return authority + "/" + (identity_path.lower() if authority == "github.com" else identity_path)
+
+
+def direct(path):
+    path = Path(path).expanduser().absolute()
+    if path != path.resolve():
+        raise ValueError(f"path must have no symlink components: {path}")
+    return path
+
+
+def inside(path, root):
+    return path == root or root in path.parents
+
+
+def synthetic_root():
+    return direct(Path.home() / "GIT" / "_Synthetic")
+
+
+def policy():
+    path = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "gwt/storage.json"
+    if not path.exists() and not path.is_symlink():
+        return {"version": 1, "owners": {}, "protected": []}
+    direct(path)
+    if not path.is_file() or path.stat().st_uid != os.getuid():
+        raise ValueError("storage policy must be a current-user regular file")
+    data = json.loads(path.read_text())
+    if data.get("version") != 1 or not isinstance(data.get("owners"), dict) or not isinstance(data.get("protected"), list):
+        raise ValueError("invalid gwt storage policy version or fields")
+    return data
+
+
+def common(repo):
+    return Path(value(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+
+
+def protected(repo, data):
+    path = Path(repo).resolve()
+    store = common(path)
+    for entry in data["protected"]:
+        base = direct(entry)
+        if inside(path, base) or inside(store, base):
+            raise ValueError(f"protected checkout or shared Git store: {base}")
+
+
+def healthy_owner(repo, data):
+    repo = direct(repo)
+    if not repo.is_dir() or repo.stat().st_uid != os.getuid():
+        raise ValueError("owner must be a current-user directory")
+    if common(repo) != repo / ".git" or not (repo / ".git").is_dir():
+        raise ValueError("owner must be a non-bare owning checkout")
+    if Path(value(repo, "rev-parse", "--show-toplevel")).resolve() != repo:
+        raise ValueError("owner worktree configuration points elsewhere")
+    roots = [synthetic_root(), Path.home() / ".codex/worktrees", Path.home() / "GIT/_Worktrees"]
+    if any(inside(repo, root.resolve()) for root in roots) or ".worktrees" in repo.parts:
+        raise ValueError("generated checkout cannot be a preferred owner")
+    if (repo / ".git/gwt-synthetic.json").exists():
+        raise ValueError("synthetic history cannot be a worktree owner")
+    protected(repo, data)
+    if value(repo, "rev-parse", "--is-shallow-repository") != "false":
+        raise ValueError("owner is shallow")
+    partial = git(repo, "config", "--get-regexp", r"^(remote\..*\.(promisor|partialclonefilter)|extensions\.partialclone)$", check=False)
+    if partial.returncode not in (0, 1):
+        raise ValueError("cannot inspect owner partial-clone configuration")
+    if partial.stdout:
+        raise ValueError("owner has partial-clone configuration")
+    if (repo / ".git/objects/info/alternates").exists():
+        raise ValueError("owner borrows another object store")
+    if os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        raise ValueError("external object alternates are not supported")
+    return repo
+
+
+def commit(repo, ref):
+    return value(repo, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}")
+
+
+def select(args):
+    data = policy()
+    current = Path(value(args.repo, "rev-parse", "--show-toplevel")).resolve()
+    source_owner = common(current).parent
+    origin = git(current, "config", "--get", "remote.origin.url", check=False)
+    try:
+        key = identity(os.fsdecode(origin.stdout).strip())
+    except ValueError:
+        key = ""
+    selected = healthy_owner(data["owners"].get(key, str(source_owner)), data)
+    start = args.start
+    if selected != source_owner:
+        if identity(value(selected, "config", "--get", "remote.origin.url")) != key:
+            raise ValueError("preferred owner origin does not match the source repository")
+        branch_ref = "refs/heads/" + args.branch
+        existing = git(current, "show-ref", "--verify", "--hash", branch_ref, check=False)
+        if existing.returncode == 0:
+            target = git(selected, "show-ref", "--verify", "--hash", branch_ref, check=False)
+            if target.returncode or target.stdout != existing.stdout:
+                raise ValueError("existing branch differs or is absent in preferred owner; resume its current owner")
+        if start:
+            remote = start.split("/", 1)[0]
+            remotes = value(current, "remote").splitlines()
+            if remote not in remotes and not start.startswith("refs/remotes/"):
+                start = commit(current, start)
+                commit(selected, start)  # Do not move or fetch local-only history.
+        print(f"gwt: new work uses preferred owner {selected}", file=sys.stderr)
+    print(selected)
+    print(start)
+
+
+def transfer_tree(source, target, tree):
+    producer = subprocess.Popen(
+        ["git", "-C", str(source), "-c", "pack.threads=1", "-c", "pack.windowMemory=256m",
+         "pack-objects", "--stdout", "--revs"], env=ENV,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    producer.stdin.write((tree + "\n").encode())
+    producer.stdin.close()
+    receiver = subprocess.run(
+        ["git", "-C", str(target), "index-pack", "--stdin"], env=ENV,
+        stdin=producer.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    producer.stdout.close()
+    error = producer.stderr.read()
+    producer.wait()
+    if producer.returncode or receiver.returncode:
+        raise ValueError((error + receiver.stderr).decode(errors="replace"))
+
+
+def snapshot(args):
+    data = policy()
+    source = healthy_owner(common(args.source).parent, data)
+    key = identity(value(source, "config", "--get", "remote.origin.url"))
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", args.task):
+        raise ValueError("task must be a simple, unique directory name")
+    owner = os.environ.get("CODEX_THREAD_ID") or os.environ.get("GWT_OWNER_ID")
+    if not owner:
+        raise ValueError("set a task-specific GWT_OWNER_ID outside Codex")
+    source_commit = commit(args.source, args.ref)
+    tree = value(source, "rev-parse", source_commit + "^{tree}")
+    root = synthetic_root()
+    destination = direct(root / key / args.task)
+    if destination.exists():
+        raise ValueError(f"destination already exists: {destination}")
+    entries = git(source, "ls-tree", "-r", "-z", tree).stdout.split(b"\0")
+    if any(entry.startswith(b"160000 ") for entry in entries):
+        raise ValueError("snapshot does not support submodules; use a normal checkout")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.mkdir(mode=0o700)
+    # Only the newly created repository is written. No temporary alternates.
+    git(destination, "init", "--quiet", "--template=", "--initial-branch=snapshot",
+        "--object-format=" + value(source, "rev-parse", "--show-object-format"))
+    metadata = destination / ".git/gwt-synthetic.json"
+    record = {"version": 1, "kind": "snapshot", "state": "creating", "source_owner": str(source),
+              "source_commit": source_commit, "source_tree": tree, "purpose": args.purpose,
+              "task_owner": owner, "repository": key, "borrowed_object_stores": []}
+    metadata.write_text(json.dumps(record, indent=2) + "\n")
+    try:
+        git(destination, "config", "maintenance.auto", "false")
+        git(destination, "config", "gc.auto", "0")
+        git(destination, "config", "push.default", "nothing")
+        hooks = destination / ".git/gwt-hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-push"
+        hook.write_text("#!/bin/sh\necho 'gwt: synthetic history must not be published' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        git(destination, "config", "core.hooksPath", str(hooks))
+        transfer_tree(source, destination, tree)
+        synthetic = os.fsdecode(git(destination, "-c", "user.name=GWT Snapshot", "-c",
+            "user.email=gwt-snapshot@example.invalid", "-c", "commit.gpgSign=false",
+            "commit-tree", tree, "-m", "Synthetic snapshot").stdout).strip()
+        git(destination, "update-ref", "refs/heads/snapshot", synthetic)
+        git(destination, "read-tree", "--reset", "-u", "HEAD")
+        git(destination, "fsck", "--connectivity-only", "--no-reflogs")
+        if value(destination, "write-tree") != tree or git(destination, "status", "--porcelain").stdout:
+            raise ValueError("snapshot checkout or tree verification failed")
+        record.update(state="ready", synthetic_commit=synthetic)
+    except Exception:
+        record["state"] = "failed"
+        print(f"gwt: failed snapshot retained for inspection: {destination}", file=sys.stderr)
+        raise
+    finally:
+        metadata.write_text(json.dumps(record, indent=2) + "\n")
+    print(destination)
+
+
+def cow(args):
+    """Experimental post-checkout deduplication. Never copy an index or metadata."""
+    started = time.monotonic()
+    if os.environ.get("GWT_NEW_WORKTREE") != str(direct(args.target)):
+        raise ValueError("CoW is internal to gwt new; no newly created target was supplied")
+    report = {"cloned_files": 0, "cloned_logical_bytes": 0, "skipped_files": 0}
+    if sys.platform != "darwin":
+        report["fallback"] = "native checkout retained; clonefile requires macOS"
+        print(json.dumps(report))
+        return
+    source, target = direct(args.source), direct(args.target)
+    data = policy()
+    protected(source, data)
+    protected(target, data)
+    if source == target or common(source) == target / ".git":
+        raise ValueError("CoW target must be a separate linked worktree")
+    if not (target / ".git").is_file() or common(target) == target / ".git":
+        raise ValueError("CoW target must be a linked worktree")
+    if value(source, "rev-parse", "HEAD^{tree}") != value(target, "rev-parse", "HEAD^{tree}"):
+        raise ValueError("CoW seed and target trees differ")
+    for repo in (source, target):
+        if git(repo, "status", "--porcelain", "--untracked-files=no").stdout:
+            raise ValueError("CoW requires clean tracked files")
+    libc = ctypes.CDLL(None, use_errno=True)
+    clone = libc.fclonefileat
+    clone.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    clone.restype = ctypes.c_int
+    copy_metadata = libc.fcopyfile
+    copy_metadata.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    copy_metadata.restype = ctypes.c_int
+    list_attributes = libc.flistxattr
+    list_attributes.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    list_attributes.restype = ctypes.c_ssize_t
+    remove_attribute = libc.fremovexattr
+    remove_attribute.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    remove_attribute.restype = ctypes.c_int
+
+    def signature(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def digest(fd):
+        os.lseek(fd, 0, os.SEEK_SET)
+        h = hashlib.sha256()
+        while chunk := os.read(fd, 1024 * 1024):
+            h.update(chunk)
+        return h.digest()
+
+    for entry in git(target, "ls-files", "--stage", "-z").stdout.split(b"\0"):
+        if not entry:
+            continue
+        info, name = entry.split(b"\t", 1)
+        if info.split()[0] not in (b"100644", b"100755"):
+            report["skipped_files"] += 1
+            continue
+        relative = Path(os.fsdecode(name))
+        src, dst = source / relative, target / relative
+        temporary = dst.with_name(".gwt-cow-" + uuid.uuid4().hex)
+        try:
+            direct(src)
+            direct(dst)
+            with src.open("rb") as seed, dst.open("rb") as current:
+                before, destination_before = os.fstat(seed.fileno()), os.fstat(current.fileno())
+                # A read-only mode alone is not an immutable seed.
+                if not (before.st_flags & stat.UF_IMMUTABLE) or before.st_dev != destination_before.st_dev:
+                    report["skipped_files"] += 1
+                    continue
+                if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(destination_before.st_mode):
+                    raise ValueError("CoW encountered a non-regular tracked file")
+                if digest(seed.fileno()) != digest(current.fileno()):
+                    report["skipped_files"] += 1  # Includes differing checkout filters.
+                    continue
+                os.lseek(seed.fileno(), 0, os.SEEK_SET)
+                if clone(seed.fileno(), -2, os.fsencode(temporary), 0):
+                    report["skipped_files"] += 1
+                    continue
+                os.chflags(temporary, 0)
+                # Preserve the destination ACL, flags, ownership and xattrs.
+                with temporary.open("rb") as replacement:
+                    size = list_attributes(replacement.fileno(), None, 0, 0)
+                    if size < 0:
+                        raise OSError(ctypes.get_errno(), "cannot inspect clone attributes")
+                    if size:
+                        attributes = ctypes.create_string_buffer(size)
+                        if list_attributes(replacement.fileno(), attributes, size, 0) != size:
+                            raise OSError("clone attributes changed")
+                        for attribute in attributes.raw.rstrip(b"\0").split(b"\0"):
+                            if remove_attribute(replacement.fileno(), attribute, 0):
+                                raise OSError(ctypes.get_errno(), "cannot clear seed attributes")
+                    if copy_metadata(current.fileno(), replacement.fileno(), None, 7):
+                        raise OSError(ctypes.get_errno(), "cannot preserve checkout metadata")
+                if signature(src.stat()) != signature(before) or signature(dst.stat()) != signature(destination_before):
+                    raise ValueError("CoW source or destination changed; native files retained")
+                os.replace(temporary, dst)
+                report["cloned_files"] += 1
+                report["cloned_logical_bytes"] += before.st_size
+        except FileNotFoundError:
+            report["skipped_files"] += 1  # Sparse paths stay sparse.
+        finally:
+            if temporary.exists():
+                os.chflags(temporary, 0)
+                temporary.unlink()
+    if git(target, "status", "--porcelain", "--untracked-files=no").stdout:
+        raise ValueError("CoW verification failed; retain the worktree")
+    report["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    report["physical_bytes_saved"] = None  # APFS st_blocks does not measure exclusive extents.
+    print(json.dumps(report))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    owner = commands.add_parser("owner", help="validate and select an owner for new work")
+    owner.add_argument("--repo", default=".")
+    owner.add_argument("--branch", default="")
+    owner.add_argument("--start", default="")
+    snap = commands.add_parser("snapshot", help="create a local snapshot without source history")
+    snap.add_argument("--source", default=".")
+    snap.add_argument("--ref", default="HEAD")
+    snap.add_argument("--task", required=True)
+    snap.add_argument("--purpose", required=True)
+    prototype = commands.add_parser("cow", help="internal to gwt new --cow-from")
+    prototype.add_argument("--source", required=True)
+    prototype.add_argument("--target", required=True)
+    args = parser.parse_args()
+    try:
+        routing = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_SHALLOW_FILE",
+                   "GIT_NAMESPACE", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
+        if any(name in os.environ for name in routing):
+            raise ValueError("unset repository-routing Git environment variables before using gwt-storage")
+        {"owner": select, "snapshot": snapshot, "cow": cow}[args.command](args)
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        print(f"gwt-storage: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -39,6 +39,10 @@ _gwt_git_probe() {
     GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 command git "$@"
 }
 
+_gwt_storage() {
+    python3 "$DOTFILES_GWT_CHECKOUT_ROOT/bin/gwt-storage" "$@"
+}
+
 _gwt_path_is_clouddocs() {
     case "$1" in
         *"/Library/Mobile Documents/com~apple~CloudDocs"|*"/Library/Mobile Documents/com~apple~CloudDocs/"*)
@@ -818,6 +822,19 @@ _gwt_fzf_table() {
     return 0
 }
 
+_gwt_refresh_remote_ref() {
+    local remote="$1" branch="$2"
+    _gwt_git_probe config --get "remote.$remote.url" >/dev/null 2>&1 || return 1
+    _gwt_git_probe check-ref-format "refs/heads/$branch" || return 1
+    git -c maintenance.auto=false -c gc.auto=0 fetch --no-tags --no-prune \
+        --no-prune-tags --no-write-fetch-head --recurse-submodules=no \
+        --no-auto-maintenance --refmap= -- "$remote" \
+        "+refs/heads/$branch:refs/remotes/$remote/$branch" || {
+        echo "gwt: ref refresh failed; pass a verified local commit explicitly to work offline" >&2
+        return 1
+    }
+}
+
 _gwt_default_start_point() {
     local requested="$1"
     if [[ -n "$requested" ]]; then
@@ -828,7 +845,7 @@ _gwt_default_start_point() {
     local remote="origin"
     local remote_head=""
     if remote_head=$(_gwt_git_probe symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null); then
-        git fetch --quiet "$remote" "${remote_head#${remote}/}" >/dev/null 2>&1 || true
+        _gwt_refresh_remote_ref "$remote" "${remote_head#${remote}/}" || return 1
         if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$remote_head"; then
             printf '%s\n' "$remote_head"
             return 0
@@ -836,7 +853,7 @@ _gwt_default_start_point() {
     fi
 
     if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$remote/main"; then
-        git fetch --quiet "$remote" main >/dev/null 2>&1 || true
+        _gwt_refresh_remote_ref "$remote" main || return 1
         printf '%s\n' "$remote/main"
         return 0
     fi
@@ -845,7 +862,7 @@ _gwt_default_start_point() {
     if upstream=$(_gwt_git_probe rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null); then
         local up_remote="${upstream%%/*}"
         local up_branch="${upstream#*/}"
-        git fetch --quiet "$up_remote" "$up_branch" >/dev/null 2>&1 || true
+        _gwt_refresh_remote_ref "$up_remote" "$up_branch" || return 1
         if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$upstream"; then
             printf '%s\n' "$upstream"
             return 0
@@ -889,11 +906,12 @@ _gwt_resolve_start_point() {
         fi
         seen="${seen}${candidate}|"
 
-        if [[ "$candidate" == */* && "$candidate" != refs/* ]]; then
-            remote="${candidate%%/*}"
-            remote_branch="${candidate#*/}"
-            if [[ -n "$remote" && -n "$remote_branch" && "$remote" != "$candidate" ]]; then
-                git fetch --quiet "$remote" "$remote_branch" >/dev/null 2>&1 || true
+        local remote_candidate="${candidate#refs/remotes/}"
+        if [[ "$remote_candidate" == */* && "$remote_candidate" != refs/* ]]; then
+            remote="${remote_candidate%%/*}"
+            remote_branch="${remote_candidate#*/}"
+            if _gwt_git_probe config --get "remote.$remote.url" >/dev/null 2>&1; then
+                _gwt_refresh_remote_ref "$remote" "$remote_branch" || return 1
             fi
         fi
 
@@ -1055,9 +1073,10 @@ _gwt_print_help() {
 Usage: gwt <command> [args]
 
 Commands:
-  gwt clone <repo> [dest] [--profile <name>|--full]
+  gwt clone <repo> [dest] [--checkout <profile>|--full] [--history full|blobless]
   gwt new <branch> [start-point]   Create/add worktree under ~/.codex/worktrees
   gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]
+  gwt new <branch> [start-point] --cow-from <immutable-seed>  Experimental APFS sharing
   gwt ls [--raw|--plain|--color|--no-color]
   gwt audit [agent-worktree-clean args...]
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
@@ -1078,6 +1097,9 @@ Commands:
   gwt sparse add <path...>          Expand the current sparse checkout with extra paths
   gwt sparse full                   Disable sparse checkout for the current worktree
   gwt root                          Print configured worktree root
+  gwt owner [--repo <path>]          Validate the preferred owner for new work
+  gwt snapshot --task <id> --purpose <text> [--source <owner>] [--ref <commit>]
+                                    Create one-commit history in ~/GIT/_Synthetic
 
 Env:
   DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1  Also link nested workspace node_modules trees
@@ -1112,6 +1134,10 @@ gwt() {
     done
 
     case "$subcommand" in
+        owner|snapshot)
+            _gwt_storage "$subcommand" "$@"
+            return $?
+            ;;
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             ;;
@@ -1128,7 +1154,7 @@ gwt() {
             return $?
             ;;
         clone)
-            local repo_url="" dest="" profile=""
+            local repo_url="" dest="" profile="" history=""
             local clone_slug="" clone_filter=""
             local clone_profile_dir=""
             local use_sparse=true
@@ -1136,14 +1162,23 @@ gwt() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --profile)
+                    --profile|--checkout)
+                        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { echo "gwt: missing checkout profile" >&2; return 1; }
+                        [[ -z "$profile" || "$profile" == "$2" ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="$2"
                         shift 2
                         ;;
                     --full|--no-sparse)
+                        [[ -z "$profile" || "$profile" == full ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="full"
                         use_sparse=false
                         shift
+                        ;;
+                    --history)
+                        [[ $# -ge 2 && ( "$2" == full || "$2" == blobless ) ]] || { echo "gwt: history must be full or blobless" >&2; return 1; }
+                        [[ -z "$history" || "$history" == "$2" ]] || { echo "gwt: conflicting history options" >&2; return 1; }
+                        history="$2"
+                        shift 2
                         ;;
                     -*)
                         echo "Usage: gwt clone <repo> [dest] [--profile <name>|--full]"
@@ -1177,6 +1212,8 @@ gwt() {
 
             clone_args=(clone)
             clone_filter=$(_gwt_sparse_clone_filter "$clone_slug" 2>/dev/null || true)
+            [[ "$history" == full ]] && clone_filter=""
+            [[ "$history" == blobless ]] && clone_filter="blob:none"
             clone_profile_dir=$(_gwt_sparse_repo_dir_from_slug "$clone_slug")
             if [[ -n "$clone_filter" ]]; then
                 clone_args+=("--filter=$clone_filter")
@@ -1184,11 +1221,11 @@ gwt() {
 
             if [[ -n "$profile" && "$profile" != "full" ]]; then
                 clone_args+=(--sparse)
-            elif [[ "$use_sparse" == true && -d "$clone_profile_dir" ]]; then
+            elif [[ -z "$profile" && "$use_sparse" == true && -d "$clone_profile_dir" ]]; then
                 clone_args+=(--sparse)
             fi
 
-            git "${clone_args[@]}" "$repo_url" "$dest" || return 1
+            git "${clone_args[@]}" -- "$repo_url" "$dest" || return 1
             dest=$(cd "$dest" && pwd) || return 1
 
             if [[ -n "$profile" ]]; then
@@ -1319,6 +1356,7 @@ gwt() {
             local branch=""
             local start_point=""
             local profile=""
+            local cow_source=""
             local root repo_slug branch_slug worktree_parent worktree_path repo_root
             local use_sparse=false
             local checkout_risk=""
@@ -1333,13 +1371,25 @@ gwt() {
                         finish_managed=true
                         shift
                         ;;
-                    --profile)
+                    --cow-from)
+                        [[ $# -ge 2 && -d "$2" ]] || { echo "gwt: missing CoW seed directory" >&2; return 1; }
+                        cow_source=$(builtin cd -- "$2" && pwd -P) || return 1
+                        shift 2
+                        ;;
+                    --profile|--checkout)
+                        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { echo "gwt: missing checkout profile" >&2; return 1; }
+                        [[ -z "$profile" || "$profile" == "$2" ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="$2"
                         shift 2
                         ;;
                     --full|--no-sparse)
+                        [[ -z "$profile" || "$profile" == full ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="full"
                         shift
+                        ;;
+                    -*)
+                        echo "gwt: unknown new option '$1'" >&2
+                        return 1
                         ;;
                     *)
                         if [[ -z "$branch" ]]; then
@@ -1397,6 +1447,26 @@ gwt() {
                 return 0
             fi
 
+            # Existing paths keep their current owner. Only new work may route.
+            local selected_output selected_owner
+            local -a selection
+            selected_output=$(_gwt_storage owner --repo "$repo_root" --branch "$branch" --start "$start_point") || return 1
+            selection=("${(@f)selected_output}")
+            selected_owner="${selection[1]}"
+            if [[ "$selected_owner/.git" != "$(_gwt_common_dir "$repo_root")" ]]; then
+                local -a routed_args
+                routed_args=(new "$branch")
+                [[ -n "${selection[2]:-}" ]] && routed_args+=("${selection[2]}")
+                [[ -n "$profile" ]] && routed_args+=(--profile "$profile")
+                [[ -n "$cow_source" ]] && routed_args+=(--cow-from "$cow_source")
+                (builtin cd -- "$selected_owner" && gwt "${routed_args[@]}") || return 1
+                repo_slug=$(_gwt_repo_slug "$selected_owner") || return 1
+                worktree_path="$root/$repo_slug/$branch_slug"
+                cd "$worktree_path" || return 1
+                _gwt_tmux_sync_context
+                return 0
+            fi
+
             checkout_risk=$(_gwt_worktree_source_checkout_risk "$repo_root" 2>/dev/null || true)
             if [[ -n "$checkout_risk" ]]; then
                 echo "gwt: refusing to create a worktree from an unsafe base repo ($checkout_risk)" >&2
@@ -1436,6 +1506,12 @@ gwt() {
             if [[ "$use_sparse" == true ]]; then
                 git -C "$worktree_path" checkout -f >/dev/null 2>&1 || git -C "$worktree_path" read-tree -mu HEAD || {
                     [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
+                    return 1
+                }
+            fi
+            if [[ -n "$cow_source" ]]; then
+                GWT_NEW_WORKTREE="$worktree_path" _gwt_storage cow --source "$cow_source" --target "$worktree_path" || {
+                    echo "gwt: CoW failed; new checkout retained at $worktree_path" >&2
                     return 1
                 }
             fi
