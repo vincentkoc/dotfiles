@@ -285,3 +285,18 @@ It updates only a ref below `refs/remotes/<remote>/`; source and destination
 must be explicit full refs. It honors installed low-data protection. Maintenance
 and broader refspec narrowing require a separate owner/active-upstream audit;
 these helpers never schedule them.
+
+## Gitcrawl environment wrapper
+
+`gitcrawl` loads optional defaults from `OPENCLAW_CRAWL_ENV`, or
+`${XDG_CONFIG_HOME:-$HOME/.config}/openclaw-crawl/remote.env`. This is a dotfiles
+convention; Gitcrawl does not load that file itself. The file is trusted shell
+code. Its output is suppressed, and a source failure stops dispatch with a fixed
+diagnostic. Only values exported by the file reach the backend. Caller exports,
+including empty values and custom token variable names, take precedence.
+
+The wrapper prefers the existing `$HOME/.local/bin/gitcrawl` backend, then
+Homebrew on macOS, then PATH. It skips itself, symlink aliases, and marked wrapper
+copies. Arguments, stdin, working directory, and backend exit status are retained.
+It does not install a backend, read auth configuration, select a token source, or
+change credentials. Gitcrawl and Crawlkit remain the owners of token resolution.
