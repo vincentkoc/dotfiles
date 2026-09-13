@@ -2059,6 +2059,8 @@ pane_marker_color() {
     amber) printf '#e0af68\n' ;;
     green) printf '#9ece6a\n' ;;
     blue) printf '#7aa2f7\n' ;;
+    violet) printf '#bb9af7\n' ;;
+    cyan) printf '#7dcfff\n' ;;
     dim) printf '#565f89\n' ;;
     *) printf '#565f89\n' ;;
   esac
@@ -2069,6 +2071,8 @@ pane_marker_window_style() {
     amber) printf 'fg=default,bg=#211d17\n' ;;
     green) printf 'fg=default,bg=#182318\n' ;;
     blue) printf 'fg=default,bg=#171f2b\n' ;;
+    violet) printf 'fg=default,bg=#211a2c\n' ;;
+    cyan) printf 'fg=default,bg=#17242a\n' ;;
     dim) printf 'fg=#565f89,bg=#11121a\n' ;;
     *) printf '\n' ;;
   esac
@@ -2079,6 +2083,8 @@ pane_marker_active_style() {
     amber) printf 'fg=default,bg=#292218\n' ;;
     green) printf 'fg=default,bg=#1f2a1f\n' ;;
     blue) printf 'fg=default,bg=#1d2736\n' ;;
+    violet) printf 'fg=default,bg=#2a2139\n' ;;
+    cyan) printf 'fg=default,bg=#1c2e35\n' ;;
     dim) printf 'fg=#565f89,bg=#11121a\n' ;;
     *) printf '\n' ;;
   esac
@@ -2098,7 +2104,7 @@ apply_pane_marker_style() {
       "$TMUX_BIN" set-option -pt "$target" -qu window-active-style 2>/dev/null || true
       return 0
       ;;
-    amber|green|blue|dim)
+    amber|green|blue|violet|cyan|dim)
       ;;
     *)
       echo "unknown pane marker: $marker" >&2
@@ -2156,13 +2162,13 @@ set_pane_marker() {
       rm -f "$file"
       apply_pane_marker_style "$target" default
       ;;
-    amber|green|blue|dim)
+    amber|green|blue|violet|cyan|dim)
       write_pane_marker_file "$file" "$session" "$window" "$pane" "$cwd" "$title" "$hash" "$marker"
       apply_pane_marker_style "$target" "$marker"
       "$TMUX_BIN" set-option -pt "$target" @tt_marker_file "$file" 2>/dev/null || true
       ;;
     *)
-      echo "usage: tt marker set <pane> [default|amber|green|blue|dim]" >&2
+      echo "usage: tt marker set <pane> [default|amber|green|blue|violet|cyan|dim]" >&2
       return 2
       ;;
   esac
@@ -2631,15 +2637,25 @@ restore_preview() {
 
   awk -F '\t' '
     BEGIN {
-      printf "%-16s %-7s %-10s %-28s %-38s %s\n", "target", "kind", "status", "title", "cwd", "restore"
-      printf "%-16s %-7s %-10s %-28s %-38s %s\n", "------", "----", "------", "-----", "---", "-------"
+      printf "%-16s %-7s %-10s %-12s %-28s %-38s %s\n", "target", "kind", "status", "bucket", "title", "cwd", "restore"
+      printf "%-16s %-7s %-10s %-12s %-28s %-38s %s\n", "------", "----", "------", "------", "-----", "---", "-------"
+    }
+    $1 == "# target" {
+      bucket_column = 0
+      for (column = 2; column <= NF; column++) {
+        if ($column == "bucket") bucket_column = column
+      }
+      next
     }
     $1 !~ /^#/ && ($2 == "codex" || $2 == "claude") {
       title = $4
       cwd = $3
       if (length(title) > 27) title = substr(title, 1, 24) "..."
       if (length(cwd) > 37) cwd = "..." substr(cwd, length(cwd) - 33)
-      printf "%-16s %-7s %-10s %-28s %-38s %s\n", $1, $2, $7, title, cwd, $8
+      # Legacy columns 9/10 held marker/bucket; current snapshots use owner/exit.
+      bucket = bucket_column && bucket_column <= NF ? $bucket_column : ""
+      if (bucket == "") bucket = "-"
+      printf "%-16s %-7s %-10s %-12s %-28s %-38s %s\n", $1, $2, $7, bucket, title, cwd, $8
     }
   ' "$snapshot"
 }
@@ -4576,7 +4592,7 @@ case "${1:-}" in
         list_pane_markers
         ;;
       *)
-        echo "usage: tt marker [set <pane> default|amber|green|blue|dim|clear <pane>|sync [pane|all]|list]" >&2
+        echo "usage: tt marker [set <pane> default|amber|green|blue|violet|cyan|dim|clear <pane>|sync [pane|all]|list]" >&2
         exit 2
         ;;
     esac

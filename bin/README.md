@@ -85,6 +85,11 @@ Codex cockpit snapshots retain an exited owner's exact recovery identity and
 record its exit status separately. `tt status` reports exited and failed owners;
 it does not rename, close, or relaunch their panes.
 
+`tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
+through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
+show a bucket only when the snapshot header declares it, so current owner and
+exit fields are never mistaken for old bucket columns.
+
 Let enabled plugins own their MCP registrations, including Computer Use. Avoid
 duplicate `[mcp_servers.computer-use]` overrides and paths into versioned plugin
 caches; plugin launchers manage their binary location and working directory.
