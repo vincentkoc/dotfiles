@@ -93,6 +93,11 @@ inside tmux, the socket and pane default to the invoking pane. Agent calls need
 `TT_OPERATOR_TMUX_SCOPE=new-window:<socket>:<session-id>:<window-id>`.
 Existing windows and raw `tmux new-window` calls keep their current behavior.
 
+`tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
+through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
+show a bucket only when the snapshot header declares it, so current owner and
+exit fields are never mistaken for old bucket columns.
+
 Let enabled plugins own their MCP registrations, including Computer Use. Avoid
 duplicate `[mcp_servers.computer-use]` overrides and paths into versioned plugin
 caches; plugin launchers manage their binary location and working directory.
