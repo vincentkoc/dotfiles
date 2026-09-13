@@ -221,6 +221,35 @@ Recovery mode rules:
 - If the current worktree was cleaned up or no longer exists, stop and ask whether to recreate it.
 - Do not start duplicate heavy checks if another session is likely already running them.
 
+
+## Git storage and clone policy
+
+- Keep durable clones in their normal `~/GIT` categories, such as `~/GIT/_Perso`.
+- Create branch worktrees through `gwt new` or the repository's native wrapper.
+- Worktrees share their owner's Git history. Do not clone or hydrate history for each worktree.
+- Use full, non-promisor owning checkouts for development, review, release, and merge work.
+- Keep blobless disabled by default. Use `gwt clone --history blobless` only for an explicit read-mostly clone.
+- Use `--history full` to override a repository's clone filter. `--full` controls checkout paths, not history.
+- Keep OpenClaw maintainer owners full. Sparse checkout may reduce their working files without removing history.
+- Use `gwt owner` to inspect the owner policy before new work.
+- Store host-specific owner paths and protected paths in `~/.config/gwt/storage.json`, backed by private dotfiles.
+- Preserve protected paths and their shared Git and dependency resources. Owner selection does not authorize changes to them.
+- Preferred owners apply only to new work. Preserve existing worktrees, local-only commits, and their current owners.
+- Check `low-data status` before Git downloads. Never bypass protection without explicit consent.
+- A failed refresh does not prove freshness. For offline work, pass a verified local commit explicitly.
+- Put agent-created synthetic repositories under `~/GIT/_Synthetic/<host>/<org>/<repo>/<task-id>`.
+- Use `gwt snapshot --task <id> --purpose <text>` for a self-contained tree with one synthetic commit.
+- Record the source owner, source commit, source tree, purpose, task owner, and borrowed-object dependencies.
+- Never publish synthetic carrier history. Keep repository-native Testbox isolation and source-capsule contracts intact.
+- Tool-owned temporary fixtures may retain their required temporary paths. Do not turn them into general workspace clones.
+- Synthetic directories do not authorize cleanup. Preserve task ownership and recovery evidence.
+- Never independently index `~/GIT/_Synthetic` or a repository with `.git/gwt-synthetic.json`.
+- Treat `--cow-from` as an opt-in experiment. It requires an immutable seed and reports logical sharing, not reclaimed disk space.
+- Do not reuse dependencies without matching install inputs, runtime compatibility, and correct workspace-link targets.
+- A wrapper refusal does not authorize raw-Git clones, copied repositories, or automatic history hydration.
+- Git maintenance requires separate, exact authorization. Do not prune objects, clear locks, or consolidate active owners automatically.
+- See `functions/gwt/README.md` for options, policy format, and prototype limits.
+
 ## Managed worktree finish
 
 - For a new PR task using personal GWT, use `gwt new <branch> <base> --finish-managed`.
@@ -260,3 +289,4 @@ Recovery mode rules:
 - Use `gwt finish-status` and report-only `gwt finish-check` to inspect retained
   reasons. End with `retained`, `blocked`, or verified `removed`, the exact path
   and remaining action. Details and stacked examples: `functions/gwt/README.md`.
+

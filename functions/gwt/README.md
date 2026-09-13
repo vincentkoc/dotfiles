@@ -2,6 +2,113 @@
 
 `gwt` shell module.
 
+## Git storage
+
+Keep durable clones in their normal `~/GIT` categories. Linked worktrees share
+their owner's Git objects and history. Their checked-out source files use
+separate storage unless the filesystem shares those bytes.
+
+Use full, non-promisor owners for development and maintainer work. This includes
+OpenClaw review, release, merge-base, and ancestry checks. Sparse checkout limits
+working files without removing history. A shallow or blobless clone can serve
+an explicit browsing or proof task, but cannot own new GWT worktrees.
+
+```sh
+gwt clone https://github.com/example/project.git ~/GIT/_Perso/project --history full
+gwt clone https://github.com/example/archive.git ~/GIT/_Perso/archive --history blobless
+gwt new fix/example <verified-commit> --checkout full
+gwt owner
+```
+
+`--checkout <profile>` and `--profile <profile>` are aliases. `--full` remains
+the full-checkout alias. `--history full` disables the configured clone filter.
+`--history blobless` explicitly requests `blob:none`. Without `--history`, only
+an existing repository-specific `clone.filter` can enable filtering. OpenClaw
+has no clone filter. No option automatically unshallows an existing owner.
+
+Remote start points refresh one exact branch into its remote-tracking ref.
+Refreshes disable automatic maintenance, tags, pruning, and shared `FETCH_HEAD`
+writes. A failed refresh stops creation. Pass a verified local commit explicitly
+when working offline. Cached refs do not prove freshness.
+
+## Preferred owners
+
+Keep host-specific policy in private dotfiles. Install a regular, current-user
+file at `${XDG_CONFIG_HOME:-~/.config}/gwt/storage.json`:
+
+```json
+{
+  "version": 1,
+  "owners": {
+    "github.com/example/project": "~/GIT/_Perso/project"
+  },
+  "protected": ["~/GIT/_Perso/project-active-base"]
+}
+```
+
+The policy selects an owner only when `gwt new` creates a new path. Existing
+registered worktrees retain their owners. Selection requires matching origin
+identity, a direct physical owner path, full history, and no object alternates.
+Protected paths also cover linked worktrees through their common Git directory.
+Owner selection, snapshots, and CoW enforce these exclusions. Native Git and
+existing maintenance helpers do not read this file.
+An existing branch must have the same tip in both owners. Local-only start
+commits must already exist in the selected owner. Selection never migrates them.
+
+These checks establish eligibility, not a full object-integrity audit. They do
+not change the behavior of repository-native worktree commands. Run native
+OpenClaw PR commands from the selected owner. Do not relocate active bases.
+
+## Synthetic snapshots
+
+```sh
+gwt snapshot --task source-proof --purpose 'inspect the selected source tree' --ref HEAD
+```
+
+The command creates `~/GIT/_Synthetic/<host>/<org>/<repo>/<task-id>`. It transfers
+only the selected tree's objects and creates one parentless commit. The result
+has independent Git metadata, no remote, and no borrowed object store. Source
+history stays in the owner. Submodules require a normal checkout.
+
+`.git/gwt-synthetic.json` records provenance, purpose, task ownership, state, and
+object dependencies. Outside Codex, set a task-specific `GWT_OWNER_ID`. Existing
+destinations fail closed. A failed creation remains available for inspection.
+The command does not install dependencies or enroll the snapshot for cleanup.
+
+The local pre-push hook and `push.default=nothing` prevent accidental publishing.
+They are not a security boundary against explicit hook or config overrides.
+Never independently index a synthetic root or a marked synthetic repository.
+Do not reuse synthetic history for contributor PRs or maintainer operations.
+
+Repository-native bounded source capsules and Testbox clones retain their own
+contracts. Temporary test fixtures may retain tool-required locations. Use this
+directory for durable agent-created proof repositories, not every temporary file.
+
+## Experimental APFS source sharing
+
+`gwt new <branch> <commit> --cow-from <immutable-seed>` first creates a normal
+Git worktree. It then replaces identical regular files with `fclonefileat`
+copies. Git administration, indexes, symlinks, and dependencies remain separate.
+
+The seed must have a matching committed tree, clean tracked files, and immutable
+file flags (`uchg`). The prototype never sets those flags on an existing owner.
+It skips mutable seeds, sparse paths, different checkout bytes, and unsupported
+clones. Normal files remain usable when sharing is unavailable. Seed and target
+must reside on the same filesystem. Executable modes follow the target checkout.
+
+Sharing reports include elapsed time and cloned logical bytes. They do not
+measure exclusive physical extents or promise faster checkout. Initial native
+checkout still writes files. Errors retain the newly created worktree. Keep this
+opt-in until representative same-tree benchmarks justify wider use.
+
+A local 8 MiB random-file fixture took 1.655 seconds for native creation and
+3.434 seconds with the CoW pass. The pass cloned 8 MiB in 0.756 seconds. These
+small-fixture timings prove neither production speed nor physical space savings.
+
+Dependency compatibility and managed-finish deployment are separate contracts.
+Storage selection does not establish a compatible pnpm installation or authorize
+cleanup. Preserve pending owner changes when integrating this module.
+
 Exports:
 
 - `gwt clone`
@@ -13,6 +120,8 @@ Exports:
 - `gwt rm`
 - `gwt prune`
 - `gwt sparse ...`
+- `gwt owner`
+- `gwt snapshot`
 
 Key responsibilities:
 

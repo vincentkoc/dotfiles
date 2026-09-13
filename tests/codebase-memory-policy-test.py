@@ -33,7 +33,7 @@ for phrase in (
     "Linked worktrees rewrite to their owning checkout",
     (
         "Independent indexing is denied for ~/.codex/worktrees, "
-        "~/GIT/_Worktrees, any repo-local .worktrees path, /tmp, "
+        "~/GIT/_Worktrees, any repo-local .worktrees path, ~/GIT/_Synthetic, marked synthetic repositories, /tmp, "
         "and /private/tmp."
     ),
 ):
