@@ -85,6 +85,14 @@ Codex cockpit snapshots retain an exited owner's exact recovery identity and
 record its exit status separately. `tt status` reports exited and failed owners;
 it does not rename, close, or relaunch their panes.
 
+In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
+and **New At End** create a 3x2 grid with pane titles, starting in the source
+pane's directory. Other sessions get a single pane. These bindings call
+`tt new-window [--after] --socket <socket> --target <pane-id|window-id>`;
+inside tmux, the socket and pane default to the invoking pane. Agent calls need
+`TT_OPERATOR_TMUX_SCOPE=new-window:<socket>:<session-id>:<window-id>`.
+Existing windows and raw `tmux new-window` calls keep their current behavior.
+
 Let enabled plugins own their MCP registrations, including Computer Use. Avoid
 duplicate `[mcp_servers.computer-use]` overrides and paths into versioned plugin
 caches; plugin launchers manage their binary location and working directory.

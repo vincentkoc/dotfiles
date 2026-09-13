@@ -384,6 +384,29 @@ set -ga terminal-features ",xterm*:extkeys"
 # Work around a tmux 3.6a/macOS copy-mode crash path involving pane border UI.
 set -g pane-border-status off
 
+# Cockpit windows use the same grid and titles as their initial windows.
+bind c run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' #!important
+bind -T root MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{window_name}" -t = -x W -y W \
+    "#{?#{>:#{session_windows},1},,-}Swap Left" l { swap-window -t :-1 } \
+    "#{?#{>:#{session_windows},1},,-}Swap Right" r { swap-window -t :+1 } \
+    "#{?pane_marked_set,,-}Swap Marked" s { swap-window } \
+    "" Kill X { kill-window } Respawn R { respawn-window -k } \
+    "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
+    Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
+    "" \
+    "New After" w { run-shell -b '"$HOME/bin/tt" new-window --after --socket #{q:socket_path} --target #{pane_id}' } \
+    "New At End" W { run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' }
+bind -T root M-MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{window_name}" -t = -x W -y W \
+    "#{?#{>:#{session_windows},1},,-}Swap Left" l { swap-window -t :-1 } \
+    "#{?#{>:#{session_windows},1},,-}Swap Right" r { swap-window -t :+1 } \
+    "#{?pane_marked_set,,-}Swap Marked" s { swap-window } \
+    "" Kill X { kill-window } Respawn R { respawn-window -k } \
+    "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
+    Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
+    "" \
+    "New After" w { run-shell -b '"$HOME/bin/tt" new-window --after --socket #{q:socket_path} --target #{pane_id}' } \
+    "New At End" W { run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' }
+
 # Recover a pane after a TUI exits without resetting mouse/bracketed-paste modes.
 # Query the same global scope we append to, independent of session overrides.
 if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq DISPLAY' 'set -ga update-environment DISPLAY'

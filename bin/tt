@@ -1350,16 +1350,19 @@ first_window_id() {
 build_studio_layout() {
   local target="$1"
   local pane_command="${2:-}"
+  local start_dir="${3:-}"
   local pane1 pane2 pane3
+  local -a split_options=(-d)
+  [[ -z "$start_dir" ]] || split_options+=(-c "$start_dir")
 
   if [[ -n "$pane_command" ]]; then
     pane1="$("$TMUX_BIN" list-panes -t "$target" -F '#{pane_id}' | head -n 1)"
-    pane2="$("$TMUX_BIN" split-window -d -h -P -F '#{pane_id}' -t "$pane1" "$pane_command")"
-    pane3="$("$TMUX_BIN" split-window -d -h -P -F '#{pane_id}' -t "$pane2" "$pane_command")"
+    pane2="$("$TMUX_BIN" split-window "${split_options[@]}" -h -P -F '#{pane_id}' -t "$pane1" "$pane_command")"
+    pane3="$("$TMUX_BIN" split-window "${split_options[@]}" -h -P -F '#{pane_id}' -t "$pane2" "$pane_command")"
     "$TMUX_BIN" select-layout -t "$target" even-horizontal
-    "$TMUX_BIN" split-window -d -v -t "$pane1" "$pane_command"
-    "$TMUX_BIN" split-window -d -v -t "$pane2" "$pane_command"
-    "$TMUX_BIN" split-window -d -v -t "$pane3" "$pane_command"
+    "$TMUX_BIN" split-window "${split_options[@]}" -v -t "$pane1" "$pane_command"
+    "$TMUX_BIN" split-window "${split_options[@]}" -v -t "$pane2" "$pane_command"
+    "$TMUX_BIN" split-window "${split_options[@]}" -v -t "$pane3" "$pane_command"
     return
   else
     "$TMUX_BIN" split-window -h -t "$target"
@@ -1394,6 +1397,51 @@ label_grid_window() {
   if (( ${#commands[@]} )); then
     "$TMUX_BIN" "${commands[@]}" 2>/dev/null || true
   fi
+}
+
+new_window_tmux() {
+  # The new-window entry point pins every helper call to the invoking server.
+  "$new_window_tmux_bin" -N -S "$new_window_socket" "$@"
+}
+
+create_profile_window() {
+  local new_window_tmux_bin="$TMUX_BIN"
+  local new_window_socket="${TMUX:-}" source="${TMUX_PANE:-}" after=0
+  local TMUX_BIN=new_window_tmux
+  local session window pane start_dir profile created
+  local -a placement
+  new_window_socket="${new_window_socket%%,*}"
+
+  while (( $# )); do
+    case "$1" in
+      --after) after=1; shift ;;
+      --socket|--target)
+        [[ $# -ge 2 ]] || { echo "tt new-window: $1 needs a value" >&2; return 2; }
+        if [[ "$1" == "--socket" ]]; then new_window_socket="$2"; else source="$2"; fi
+        shift 2
+        ;;
+      *) echo "usage: tt new-window [--after] [--socket path] [--target pane-id|window-id]" >&2; return 2 ;;
+    esac
+  done
+  [[ "$new_window_socket" == /* && "$source" =~ ^[%@][0-9]+$ ]] || {
+    echo "tt new-window: an exact socket and source pane/window ID are required" >&2
+    return 2
+  }
+  read -r session window pane < <("$TMUX_BIN" display-message -p -t "$source" '#{session_id} #{window_id} #{pane_id}')
+  [[ "$session" =~ ^\$[0-9]+$ && "$window" =~ ^@[0-9]+$ && "$pane" =~ ^%[0-9]+$ ]] || return 2
+  start_dir="$("$TMUX_BIN" display-message -p -t "$pane" '#{pane_current_path}')"
+  profile="$("$TMUX_BIN" show-options -qv -t "$session" @tt_profile)"
+  require_operator_topology_scope new-window "$new_window_socket:$session:$window" || return $?
+
+  placement=(-t "$session:")
+  if (( after )); then placement=(-a -t "$session:$window"); fi
+  if [[ "$profile" == "ops" ]]; then placement+=(-c "$start_dir"); fi
+  created="$("$TMUX_BIN" new-window -d -P -F '#{window_id}' "${placement[@]}")"
+  if [[ "$profile" == "ops" ]]; then
+    build_studio_layout "$created" "$(default_login_shell_command)" "$start_dir"
+    label_grid_window "$created" shell
+  fi
+  "$TMUX_BIN" select-window -t "$session:$created"
 }
 
 cockpit_window_names() {
@@ -4366,6 +4414,10 @@ case "${1:-}" in
   ops|cockpit)
     create_ops "${2:-cockpit}"
     ;;
+  new-window)
+    shift
+    create_profile_window "$@"
+    ;;
   upgrade-ops-shells)
     upgrade_ops_shells "${2:-cockpit}"
     ;;
@@ -4629,7 +4681,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|ops [session]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|new-window [--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;
