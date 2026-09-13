@@ -18,6 +18,7 @@ export LESS='-F -i -J -M -R -W -x4 -X -z-4'
 export COLORTERM="${COLORTERM:-truecolor}"
 export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
+export TOKENJUICE_STATS=off
 
 # Keep cockpit scratch on disk without changing other login environments.
 _cockpit_private_tmp() {

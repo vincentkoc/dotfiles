@@ -692,7 +692,8 @@ setup_claude_dotfiles() {
     if ! claude_settings_output="$(
         python3 "$claude_settings_helper" \
             --dotfiles-dir "$df_dir" \
-            --claude-dir "$claude_dir"
+            --claude-dir "$claude_dir" \
+            --tokenjuice-stats-off
     )"; then
         error "$claude_settings_output"
         return 1

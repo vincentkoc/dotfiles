@@ -109,6 +109,93 @@ mkdir -p "$(dirname "$absent_claude")"
 cmp -s "$absent_repo/.claude/settings.json" "$absent_claude/settings.managed.json"
 assert_repo_clean "$absent_repo"
 
+for initial in regular managed legacy absent; do
+  repo="$(new_repo "stats-$initial")"
+  claude="$fixture/stats-$initial/home/.claude"
+  mkdir -p "$claude"
+  case "$initial" in
+    regular|managed)
+      target="$claude/settings.json"
+      if [[ "$initial" == managed ]]; then
+        target="$claude/settings.managed.json"
+        ln -s settings.managed.json "$claude/settings.json"
+      fi
+      printf '{"hooks":{"machine":true},"env":{"OTHER_SETTING":"keep","TOKENJUICE_STATS":"on"}}\n' >"$target"
+      chmod 0640 "$target"
+      ;;
+    legacy)
+      ln -s "$repo/.claude/settings.json" "$claude/settings.json"
+      ;;
+  esac
+  "$helper" --dotfiles-dir "$repo" --claude-dir "$claude" --tokenjuice-stats-off >/dev/null
+  python3 - "$claude/settings.json" "$initial" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+settings = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+expected = {"hooks": {"baseline": True}, "env": {"TOKENJUICE_STATS": "off"}}
+if sys.argv[2] in ("regular", "managed"):
+    expected = {
+        "hooks": {"machine": True},
+        "env": {"OTHER_SETTING": "keep", "TOKENJUICE_STATS": "off"},
+    }
+assert settings == expected
+environment = dict(os.environ, TOKENJUICE_STATS="on")
+environment.update(settings["env"])
+subprocess.run(
+    ["/bin/bash", "--noprofile", "--norc", "-c", '[[ "$TOKENJUICE_STATS" == off ]]'],
+    env=environment, check=True,
+)
+PY
+  before="$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_ino)' "$claude/settings.json")"
+  "$helper" --dotfiles-dir "$repo" --claude-dir "$claude" --tokenjuice-stats-off >/dev/null
+  [[ "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_ino)' "$claude/settings.json")" == "$before" ]]
+  [[ ! -e "$claude/.settings.json.tokenjuice-stats" ]]
+  [[ ! -e "$claude/.settings.json.managed-link" ]]
+  [[ ! -e "$claude/.settings.managed.json.seed" ]]
+  assert_repo_clean "$repo"
+done
+
+for initial in regular managed; do
+  for point in before_stats_publish after_stats_publish before_stats_cleanup; do
+    name="stats-interrupt-$initial-$point"
+    repo="$(new_repo "$name")"
+    claude="$fixture/$name/home/.claude"
+    mkdir -p "$claude"
+    target="$claude/settings.json"
+    if [[ "$initial" == managed ]]; then
+      target="$claude/settings.managed.json"
+      ln -s settings.managed.json "$claude/settings.json"
+    fi
+    printf '{"hooks":{"machine":true}}\n' >"$target"
+    set +e
+    CLAUDE_MANAGED_SETTINGS_FAILPOINT="$point" "$helper" \
+      --dotfiles-dir "$repo" --claude-dir "$claude" --tokenjuice-stats-off >/dev/null
+    status=$?
+    set -e
+    [[ "$status" == 86 ]]
+    [[ -f "$claude/.settings.json.tokenjuice-stats" ]]
+    if [[ "$point" == before_stats_publish ]]; then
+      [[ "$(cat "$target")" == '{"hooks":{"machine":true}}' ]]
+    else
+      [[ "$(cat "$claude/.settings.json.tokenjuice-stats")" == '{"hooks":{"machine":true}}' ]]
+    fi
+    stage_hash="$(shasum -a 256 "$claude/.settings.json.tokenjuice-stats" | awk '{print $1}')"
+    target_hash="$(shasum -a 256 "$target" | awk '{print $1}')"
+    if output="$("$helper" --dotfiles-dir "$repo" --claude-dir "$claude" --tokenjuice-stats-off)"; then
+      printf 'expected interrupted update to require recovery\n' >&2
+      exit 1
+    fi
+    [[ "$output" == "claude_managed_settings=blocked reason=recovery_required" ]]
+    [[ "$(shasum -a 256 "$claude/.settings.json.tokenjuice-stats" | awk '{print $1}')" == "$stage_hash" ]]
+    [[ "$(shasum -a 256 "$target" | awk '{print $1}')" == "$target_hash" ]]
+    assert_repo_clean "$repo"
+  done
+done
+
 for link_target in /tmp/absolute.json ../escape.json missing.json intermediate.json; do
   name="$(printf '%s' "$link_target" | tr '/.' '__')"
   repo="$(new_repo "hostile-$name")"
@@ -307,9 +394,17 @@ HOME="$setup_home" PATH="$fake_bin:$PATH" bash -c '
   setup_claude_dotfiles
 ' _ "$root" >/dev/null
 [[ "$(readlink "$setup_home/.claude/settings.json")" == settings.managed.json ]]
-cmp -s \
+python3 - \
   "$setup_home/GIT/_Perso/dotfiles/.claude/settings.json" \
-  "$setup_home/.claude/settings.managed.json"
+  "$setup_home/.claude/settings.managed.json" <<'PY'
+import json
+import pathlib
+import sys
+
+expected = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+expected["env"] = {"TOKENJUICE_STATS": "off"}
+assert json.loads(pathlib.Path(sys.argv[2]).read_bytes()) == expected
+PY
 assert_repo_clean "$setup_home/GIT/_Perso/dotfiles"
 
 printf 'claude_managed_settings_test=passed\n'

@@ -56,6 +56,8 @@ class StartupTests(unittest.TestCase):
             '(( $+functions[doctor] )) || exit 33\n'
             '(( $+functions[mcd] )) || exit 34\n'
             '[[ ${(j.:.)path} == "$PATH" ]] || exit 35\n'
+            '[[ "$TOKENJUICE_STATS" == off ]] || exit 36\n'
+            '/bin/bash --noprofile --norc -c \'[[ "$TOKENJUICE_STATS" == off ]]\' || exit 37\n'
         )
 
     def test_four_shell_modes(self):
@@ -80,6 +82,11 @@ class StartupTests(unittest.TestCase):
         self.env["TMPDIR"] = str(scratch)
         self.shell("-lc", self.check_command())
         self.assertFalse((self.home / "tmux.log").exists())
+
+    def test_stats_policy_overrides_stale_parent_in_every_mode(self):
+        self.env["TOKENJUICE_STATS"] = "on"
+        self.env["DOTFILES_EXPORTS_LOADED"] = "1"
+        self.test_four_shell_modes()
 
     def test_profile_in_sh_emulation(self):
         self.shell("-lc", 'emulate sh\nsource "$HOME/.profile"\n'

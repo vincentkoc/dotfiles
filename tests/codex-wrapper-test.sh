@@ -156,7 +156,10 @@ printf 'native\n' >>"$CODEX_TEST_ORDER_LOG"
 [[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]]
 [[ "$GITHUB_PAT_TOKEN" == native-token ]]
 [[ "$CODEX_TEST_SENTINEL" == preserved ]]
+[[ "$TOKENJUICE_STATS" == off ]]
+/bin/bash --noprofile --norc -c '[[ "$TOKENJUICE_STATS" == off ]]' || exit 67
 printf 'native\n'
+exit "${CODEX_TEST_NATIVE_EXIT:-0}"
 EOF
 chmod +x "$catalog_binary"
 
@@ -206,6 +209,8 @@ printf 'helper\n' >>"$CODEX_TEST_ORDER_LOG"
 [[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]]
 [[ "$GITHUB_PAT_TOKEN" == native-token ]]
 [[ "$CODEX_TEST_SENTINEL" == preserved ]]
+[[ "$TOKENJUICE_STATS" == off ]]
+/bin/bash --noprofile --norc -c '[[ "$TOKENJUICE_STATS" == off ]]' || exit 67
 printf 'helper\n'
 exit "${CODEX_TEST_HELPER_EXIT:-0}"
 EOF
@@ -296,6 +301,43 @@ else
 fi
 [[ "$failure_output" == helper && "$(cat "$order_log")" == helper ]]
 [[ ! -s "$native_args" && -s "$helper_args" ]]
+
+for inherited in unset on; do
+  (
+    if [[ "$inherited" == unset ]]; then
+      unset TOKENJUICE_STATS
+    else
+      export TOKENJUICE_STATS=on
+    fi
+    export DOTFILES_EXPORTS_LOADED=1
+    assert_catalog_route native --version "" "two words"
+    assert_catalog_route helper exec "" "two words"
+    for route in native helper; do
+      if [[ "$route" == native ]]; then
+        export CODEX_TEST_NATIVE_EXIT=74
+        args=(--version "" "two words")
+      else
+        export CODEX_TEST_HELPER_EXIT=73
+        args=(exec "" "two words")
+      fi
+      if output="$(catalog_run "${args[@]}")"; then
+        printf 'expected %s exit code to survive wrapper\n' "$route" >&2
+        exit 1
+      else
+        status=$?
+      fi
+      [[ "$output" == "$route" ]]
+      if [[ "$route" == native ]]; then
+        [[ "$status" == 74 ]]
+        assert_argv "$native_args" "${args[@]}"
+      else
+        [[ "$status" == 73 ]]
+        assert_argv "$helper_args" --binary "$catalog_binary" \
+          --codex-home "$catalog_home" --exec -- "${args[@]}"
+      fi
+    done
+  )
+done
 
 if grep -Fq 'gh auth token' "$repo_root/.zshrc"; then
   printf '.zshrc must not fetch GitHub credentials during startup\n' >&2

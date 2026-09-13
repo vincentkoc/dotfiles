@@ -1,3 +1,5 @@
+export TOKENJUICE_STATS=off
+
 # Source fzf if available
 [ -f ~/.fzf.bash ] && source ~/.fzf.bash
 
