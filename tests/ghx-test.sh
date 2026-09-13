@@ -110,6 +110,37 @@ TEST_BOOTSTRAP_RACE=symlink run 1 bash "$root/bin/ghx-bootstrap"
 rm "$HOME/.ghx/config.yaml"
 mv "$HOME/.ghx/saved" "$HOME/.ghx/config.yaml"
 
+
+# Preserve the fleet's 45-entry PATH and directory-symlink regression.
+symlink_dir="$temporary/symlink-bin"
+ln -s "$wrapper" "$symlink_dir"
+long_path="$symlink_dir"
+path_entry_count=1
+for index in {1..41}; do
+  filler="$temporary/filler-$index-with-a-deliberately-long-path-segment"
+  mkdir -p "$filler"
+  long_path="$long_path:$filler"
+  path_entry_count=$((path_entry_count + 1))
+done
+long_path="$long_path:$backend:/usr/bin:/bin"
+path_entry_count=$((path_entry_count + 3))
+[[ "$path_entry_count" -eq 45 ]]
+
+route ghx env PATH="$long_path" "$symlink_dir/ghx" pr view 123 -R example/repo --json number
+[[ "$(sed -n '5p' "$TEST_ENV")" -ef "$backend/gh" ]]
+route ghx env PATH="$long_path" "$symlink_dir/gh" pr view 456 -R example/repo --json number
+[[ "$(sed -n '5p' "$TEST_ENV")" -ef "$backend/gh" ]]
+route gh env PATH="$long_path" "$symlink_dir/ghx" auth token
+route gh env PATH="$long_path" "$symlink_dir/gh" auth status
+printf 'preserved body' >"$temporary/long-path-body"
+TEST_READ_STDIN=1 route gh env PATH="$long_path" "$symlink_dir/ghx" \
+  pr edit 123 --body-file - <"$temporary/long-path-body"
+cmp "$temporary/long-path-body" "$TEST_INPUT"
+printf 'token-value' >"$temporary/long-path-token"
+TEST_READ_STDIN=1 route gh env PATH="$long_path" "$symlink_dir/ghx" \
+  auth login --with-token <"$temporary/long-path-token"
+cmp "$temporary/long-path-token" "$TEST_INPUT"
+
 for entry in gh ghx; do
   route ghx "$entry" pr view 123 --repo example/repo --json number,title
   route ghx "$entry" --ttl 15 issue view 123 -Rexample/repo --json=number --jq=.number
