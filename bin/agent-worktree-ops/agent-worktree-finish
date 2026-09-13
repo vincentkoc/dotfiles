@@ -1,0 +1,647 @@
+#!/usr/bin/env python3
+"""Explicit worktree completion, independent of agent transcripts and idle age."""
+
+import argparse
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import socket
+import sqlite3
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+
+SCHEMA = "gwt-finish-policy.v1"
+PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/([1-9][0-9]*)/?\Z")
+SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+
+
+class Retain(RuntimeError):
+    pass
+
+
+def run(command, *, cwd=None, allowed=(0,)):
+    env = os.environ.copy()
+    if Path(command[0]).name == "git":
+        # A tool shell may inherit a different Git context. -C alone does not
+        # override GIT_DIR/INDEX_FILE/config injection; proof must address this row.
+        env = {key: value for key, value in env.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
+               GH_PROMPT_DISABLED="1", LC_ALL="C")
+    try:
+        child = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        raise Retain(f"{Path(command[0]).name}-unavailable") from error
+    output = [bytearray(), bytearray()]
+    deadline = time.monotonic() + 30
+    try:
+        with selectors.DefaultSelector() as selector:
+            for index, stream in enumerate((child.stdout, child.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, index)
+            while selector.get_map():
+                if time.monotonic() >= deadline:
+                    raise Retain(f"{Path(command[0]).name}-timed-out")
+                for key, _ in selector.select(min(0.25, deadline - time.monotonic())):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    else:
+                        output[key.data].extend(chunk)
+                        if sum(map(len, output)) > 16 * 1024 * 1024:
+                            raise Retain(f"{Path(command[0]).name}-output-too-large")
+        child.wait(timeout=max(0.001, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as error:
+        raise Retain(f"{Path(command[0]).name}-timed-out") from error
+    finally:
+        if child.poll() is None:
+            child.kill()  # This exact child was started here; never signal a group.
+        child.wait()
+        child.stdout.close()
+        child.stderr.close()
+    result = subprocess.CompletedProcess(command, child.returncode, bytes(output[0]), bytes(output[1]))
+    if result.returncode not in allowed:
+        # Do not echo command output: URLs or helpers can contain credentials.
+        raise Retain(f"{Path(command[0]).name}-failed")
+    return result
+
+
+def git(path, *args):
+    return run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                "-c", "core.untrackedCache=false", "-c", "gc.auto=0",
+                "-c", "maintenance.auto=false", "-C", str(path), *args]).stdout.decode(errors="surrogateescape").rstrip("\n")
+
+
+def host_key():
+    if sys.platform != "darwin":
+        return socket.gethostname()
+    value = run(["scutil", "--get", "LocalHostName"]).stdout.decode().strip()
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,63}", value):
+        raise Retain("stable-host-identity-unavailable")
+    return value
+
+
+def physical(path):
+    return str(Path(path).expanduser().resolve(strict=True))
+
+
+def inside(child, parent):
+    return child == parent or child.startswith(parent.rstrip("/") + "/")
+
+
+def identity(path):
+    details = os.lstat(path)
+    if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid():
+        raise Retain("directory-identity-unsafe")
+    return [details.st_dev, details.st_ino]
+
+
+def records(owner):
+    fields = git(owner, "worktree", "list", "--porcelain", "-z").split("\0")
+    result, item = [], {}
+    for field in fields:
+        if not field:
+            if item:
+                result.append(item)
+                item = {}
+            continue
+        key, _, value = field.partition(" ")
+        item[key] = value
+    if item:
+        result.append(item)
+    return result
+
+
+def repository(origin):
+    match = re.fullmatch(r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?", origin)
+    if not match:
+        raise Retain("origin-is-not-an-unambiguous-github-repository")
+    return match[1].lower()
+
+
+def snapshot(path, managed_root):
+    path = physical(path)
+    managed_root = physical(managed_root)
+    if not inside(path, managed_root) or path == managed_root:
+        raise Retain("outside-managed-root")
+    if not (Path(path) / ".git").is_file() or (Path(path) / ".git").is_symlink():
+        raise Retain("not-a-linked-worktree")
+    common = physical(git(path, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    gitdir = physical(git(path, "rev-parse", "--absolute-git-dir"))
+    listed = records(path)
+    if not listed:
+        raise Retain("registration-missing")
+    owner = physical(listed[0]["worktree"])
+    if owner == path or inside(owner, managed_root):
+        raise Retain("canonical-owner-required")
+    matching = [row for row in listed if row.get("worktree") == path]
+    if len(matching) != 1 or "locked" in matching[0] or "prunable" in matching[0]:
+        raise Retain("registration-missing-or-locked")
+    branch = matching[0].get("branch", "")
+    if not branch.startswith("refs/heads/"):
+        raise Retain("named-local-branch-required")
+    head = git(path, "rev-parse", "HEAD")
+    if not SHA.fullmatch(head):
+        raise Retain("invalid-head")
+    if git(owner, "rev-parse", "--path-format=absolute", "--git-common-dir") != common:
+        raise Retain("owner-common-directory-changed")
+    dependency_links = {}
+    dependency = Path(path) / "node_modules"
+    if dependency.is_symlink():
+        target = str(dependency.resolve(strict=True))
+        if inside(target, owner) and dependency.is_dir():
+            link_details = dependency.lstat()
+            dependency_links["node_modules"] = [target, link_details.st_dev, link_details.st_ino]
+    return {"path": path, "root": managed_root, "owner": owner, "common": common,
+            "gitdir": gitdir, "path_id": identity(path), "gitdir_id": identity(gitdir),
+            "common_id": identity(common), "owner_id": identity(owner), "branch": branch,
+            "repo": repository(git(owner, "remote", "get-url", "origin")), "head": head,
+            "dependency_links": dependency_links}
+
+
+def immutable(snap):
+    return {key: value for key, value in snap.items() if key != "head"}
+
+
+def revalidate(row):
+    recorded = json.loads(row["identity"])
+    current = snapshot(row["path"], recorded["root"])
+    if immutable(current) != recorded:
+        raise Retain("worktree-identity-changed")
+    return current
+
+
+def private_file(path):
+    details = os.lstat(path)
+    if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid()
+            or details.st_nlink != 1 or details.st_mode & 0o077):
+        raise Retain("private-file-permissions-required")
+
+
+@contextlib.contextmanager
+def ledger(state_dir, *, create=False):
+    root = Path(state_dir).expanduser()
+    if not root.exists():
+        if not create:
+            yield None
+            return
+        root.mkdir(mode=0o700, parents=True)
+    details = root.lstat()
+    if (not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid()
+            or details.st_mode & 0o077):
+        raise Retain("private-state-directory-required")
+    if not create and not os.path.lexists(root / "lifecycle.sqlite"):
+        yield None
+        return
+    lock_path = root / "lifecycle.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    db = None
+    try:
+        private_file(lock_path)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Retain("lifecycle-busy") from error
+        database = root / "lifecycle.sqlite"
+        if database.exists():
+            private_file(database)
+        elif not create:
+            yield None
+            return
+        else:
+            fresh = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            os.close(fresh)
+        db = sqlite3.connect(database, timeout=1)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys = ON")
+        if create:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS worktrees (
+                    id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, identity TEXT NOT NULL,
+                    created_at INTEGER NOT NULL, observed_at INTEGER, checked_at INTEGER,
+                    finish_head TEXT, primary_pr TEXT, target TEXT, dependencies TEXT,
+                    state TEXT NOT NULL, reason TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS owners (
+                    worktree_id TEXT NOT NULL REFERENCES worktrees(id), owner TEXT NOT NULL,
+                    released INTEGER NOT NULL DEFAULT 0, recovery_reviewed INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (worktree_id, owner));
+                CREATE TABLE IF NOT EXISTS pins (
+                    worktree_id TEXT NOT NULL REFERENCES worktrees(id), owner TEXT NOT NULL,
+                    reason TEXT NOT NULL, PRIMARY KEY (worktree_id, owner, reason));
+            """)
+        yield db
+    finally:
+        if db is not None:
+            db.close()
+        os.close(fd)
+
+
+def owner_id(args):
+    runtime_owner = os.environ.get("CODEX_THREAD_ID")
+    if runtime_owner and args.owner and args.owner != runtime_owner:
+        raise Retain("owner-conflicts-with-live-thread")
+    value = runtime_owner or args.owner or os.environ.get("GWT_OWNER_ID")
+    if not value or len(value) > 200 or any(ord(char) < 32 for char in value):
+        raise Retain("set-GWT_OWNER_ID-or-pass-owner")
+    return value
+
+
+def get_row(db, worktree):
+    if db is None:
+        raise Retain("not-enrolled")
+    # Keep a missing/replaced path addressable for retained-state reporting.
+    path = os.path.abspath(Path(worktree).expanduser())
+    row = db.execute("SELECT * FROM worktrees WHERE path = ?", (path,)).fetchone()
+    if row is None:
+        row = db.execute("SELECT * FROM worktrees WHERE path = ?", (str(Path(path).resolve()),)).fetchone()
+    if row is None:
+        raise Retain("not-enrolled")
+    return row
+
+
+def claim(db, row, owner):
+    if row["state"] in ("retiring", "removed"):
+        raise Retain("retirement-in-progress-or-complete")
+    revalidate(row)
+    with db:
+        db.execute("INSERT INTO owners VALUES (?, ?, 0, 0) ON CONFLICT(worktree_id, owner) "
+                   "DO UPDATE SET released = 0, recovery_reviewed = 0", (row["id"], owner))
+        db.execute("UPDATE worktrees SET state = 'active', finish_head = NULL, reason = ? WHERE id = ?",
+                   ("owner-resumed", row["id"]))
+
+
+def pr(url):
+    match = PR_URL.fullmatch(url)
+    if not match:
+        raise Retain("full-github-pr-url-required")
+    repo, number = match[1].lower(), int(match[2])
+    data = json.loads(run(["ghx", "--no-cache", "api", f"repos/{repo}/pulls/{number}"]).stdout)
+    if (not isinstance(data, dict) or data.get("number") != number
+            or not isinstance(data.get("base"), dict)
+            or not isinstance(data["base"].get("repo"), dict)
+            or str(data["base"]["repo"].get("full_name", "")).lower() != repo
+            or not isinstance(data.get("head"), dict)):
+        raise Retain("github-pr-identity-mismatch")
+    head = data.get("head", {}).get("sha", "")
+    target = data.get("base", {}).get("ref", "")
+    if not isinstance(head, str) or not SHA.fullmatch(head) or not isinstance(target, str) or not target or type(data.get("merged")) is not bool:
+        raise Retain("github-pr-proof-incomplete")
+    merged = data["merged"] and bool(data.get("merged_at"))
+    return {"url": f"https://github.com/{repo}/pull/{number}", "repo": repo,
+            "head": head, "target": target, "merged": merged,
+            "state": data.get("state"), "merge": data.get("merge_commit_sha")}
+
+
+def default_target(repo):
+    data = json.loads(run(["ghx", "--no-cache", "api", f"repos/{repo}"]).stdout)
+    if not isinstance(data, dict) or str(data.get("full_name", "")).lower() != repo or not isinstance(data.get("default_branch"), str):
+        raise Retain("github-repository-proof-incomplete")
+    return data["default_branch"]
+
+
+def finish(db, row, args):
+    snap = revalidate(row)
+    who = owner_id(args)
+    known = db.execute("SELECT * FROM owners WHERE worktree_id = ? AND owner = ?", (row["id"], who)).fetchone()
+    if known is None or known["released"]:
+        raise Retain("resume-before-finishing")
+    primary = pr(args.pr)
+    target = args.target or default_target(snap["repo"])
+    if primary["repo"] != snap["repo"] or primary["head"] != snap["head"]:
+        raise Retain("primary-pr-repository-or-head-mismatch")
+    if primary["target"] != target:
+        raise Retain("primary-pr-not-targeting-final-branch")
+    dependencies = []
+    for url in dict.fromkeys(args.wait_for):
+        dependency = pr(url)
+        if dependency["repo"] != snap["repo"] or dependency["url"] == primary["url"]:
+            raise Retain("invalid-stack-dependency")
+        if dependency["target"] != target:
+            raise Retain("stack-pr-not-targeting-final-branch")
+        dependencies.append({"url": dependency["url"], "head": dependency["head"], "target": target})
+    if revalidate(row)["head"] != snap["head"]:
+        raise Retain("head-changed-during-finish")
+    with db:
+        db.execute("UPDATE worktrees SET finish_head = ?, primary_pr = ?, target = ?, dependencies = ?, "
+                   "state = 'finished', reason = 'awaiting-owner-release' WHERE id = ?",
+                   (snap["head"], primary["url"], target, json.dumps(dependencies), row["id"]))
+
+
+def holders(path):
+    # Query open descriptors as well as CWDs: a parked shell can still have a
+    # compiler, editor, or log descriptor in the worktree. Unknown is retained.
+    result = run(["lsof", "-nP", "-F0pn", "+D", path], allowed=(0, 1))
+    if result.stderr:
+        raise Retain("holder-scan-incomplete")
+    selected = any(field.lstrip(b"\n").startswith((b"p", b"n")) for field in result.stdout.split(b"\0") if field)
+    if result.returncode == 0 and not selected or result.returncode == 1 and selected:
+        raise Retain("holder-scan-inconsistent")
+    # lsof selected by inode. Reported aliases and embedded newlines must not
+    # turn a successful selection into a false no-holder result.
+    return selected
+
+
+def local_checks(row):
+    snap = revalidate(row)
+    if not row["finish_head"] or snap["head"] != row["finish_head"]:
+        raise Retain("unfinished-or-head-changed")
+    for directory in (Path(snap["gitdir"]), Path(snap["common"])):
+        if any(directory.glob("*.lock")):
+            raise Retain("git-lock-present")
+        for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge", "rebase-apply", "sequencer"):
+            if (directory / marker).exists():
+                raise Retain("git-operation-in-progress")
+    # Git can delete ignored files during a non-force removal. Preserve all of
+    # them; known dependency symlinks are the only generated path exception.
+    output = git(snap["path"], "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                 "--ignored=matching", "--ignore-submodules=none")
+    for item in output.split("\0"):
+        if not item:
+            continue
+        relative = item[3:].rstrip("/")
+        if item.startswith(("!! ", "?? ")) and relative in snap["dependency_links"]:
+            if item.startswith("?? "):
+                raise Retain("managed-dependency-link-is-untracked")
+            continue
+        raise Retain("dirty-untracked-or-ignored-artifacts")
+    if holders(snap["path"]) or holders(snap["gitdir"]):
+        raise Retain("worktree-has-live-holders")
+    return snap
+
+
+def release(db, row, args):
+    who = owner_id(args)
+    if not args.recovery_reviewed:
+        raise Retain("review-recovery-references-before-release")
+    snap = revalidate(row)
+    if row["state"] != "finished":
+        raise Retain("finish-before-release")
+    if holders(row["path"]) or holders(snap["gitdir"]):
+        raise Retain("owner-or-process-still-holds-worktree")
+    known = db.execute("SELECT * FROM owners WHERE worktree_id = ? AND owner = ?", (row["id"], who)).fetchone()
+    if known is None:
+        raise Retain("caller-is-not-a-recorded-owner")
+    if db.execute("SELECT 1 FROM pins WHERE worktree_id = ? AND owner = ?", (row["id"], who)).fetchone():
+        raise Retain("owner-recovery-pin-present")
+    with db:
+        db.execute("UPDATE owners SET released = 1, recovery_reviewed = 1 WHERE worktree_id = ? AND owner = ?",
+                   (row["id"], who))
+
+
+def merged_checks(row):
+    primary = pr(row["primary_pr"])
+    snap = json.loads(row["identity"])
+    if primary["repo"] != snap["repo"] or primary["head"] != row["finish_head"] or primary["target"] != row["target"]:
+        raise Retain("primary-pr-proof-changed")
+    proofs = [primary]
+    for expected in json.loads(row["dependencies"]):
+        current = pr(expected["url"])
+        if current["head"] != expected["head"] or current["target"] != expected["target"] or current["target"] != row["target"]:
+            raise Retain("stack-proof-changed-repeat-finish")
+        proofs.append(current)
+    for proof in proofs:
+        if not proof["merged"] or not SHA.fullmatch(proof["merge"] or ""):
+            raise Retain("pr-closed-unmerged" if proof["state"] == "closed" else "pr-not-merged")
+
+
+def candidate(db, row):
+    if row["state"] != "finished":
+        raise Retain(row["state"])
+    if db.execute("SELECT 1 FROM owners WHERE worktree_id = ? AND (released = 0 OR recovery_reviewed = 0)", (row["id"],)).fetchone():
+        raise Retain("owner-not-released")
+    if db.execute("SELECT 1 FROM pins WHERE worktree_id = ?", (row["id"],)).fetchone():
+        raise Retain("recovery-pin-present")
+    storage_guard()
+    local_checks(row)
+    merged_checks(row)
+    local_checks(row)
+
+
+def authorize(policy_path, row):
+    if not policy_path or not Path(policy_path).exists():
+        raise Retain("apply-requires-reviewed-policy")
+    private_file(policy_path)
+    policy = json.loads(Path(policy_path).read_text())
+    snap = json.loads(row["identity"])
+    if (policy.get("schema") != SCHEMA or policy.get("mode") != "apply"
+            or policy.get("host") != host_key()
+            or {"owner": snap["owner"], "common_id": snap["common_id"], "root": snap["root"]}
+            not in policy.get("repositories", [])):
+        raise Retain("apply-policy-does-not-authorize-this-worktree")
+
+
+@contextlib.contextmanager
+def maintenance_lock():
+    root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "locks"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    details = root.lstat()
+    if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid() or details.st_mode & 0o022:
+        raise Retain("maintenance-lock-directory-unsafe")
+    path = root / "agent-worktree-maintain.lock"
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise Retain("maintenance-lock-present") from error
+    owned = identity(path)
+    pid_file = path / "pid"
+    value = f"{os.getpid()}\n".encode()
+    try:
+        descriptor = os.open(pid_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+        yield
+    finally:
+        # Never clear somebody else's lock or a replaced pid record.
+        if identity(path) == owned and pid_file.read_bytes() == value:
+            private_file(pid_file)
+            pid_file.unlink()
+            path.rmdir()
+
+
+def remove(db, row, args):
+    authorize(args.policy, row)
+    with maintenance_lock():
+        candidate(db, row)
+        storage_guard()
+        # Both locks stay held through removal. A crash after intent is recorded
+        # leaves 'retiring'; later checks reconcile absence, never retry deletion.
+        local_checks(row)
+        authorize(args.policy, row)
+        with db:
+            db.execute("UPDATE worktrees SET state = 'retiring', reason = 'removal-started' WHERE id = ?", (row["id"],))
+        snap = json.loads(row["identity"])
+        git(snap["owner"], "worktree", "remove", "--", row["path"])
+        verify_removed(db, row)
+
+
+def verify_removed(db, row):
+    storage_guard()
+    snap = json.loads(row["identity"])
+    if (os.path.lexists(row["path"])
+            or any(item.get("worktree") == row["path"] for item in records(snap["owner"]))):
+        raise Retain("retirement-interrupted-review-required")
+    if identity(snap["owner"]) != snap["owner_id"] or identity(snap["common"]) != snap["common_id"]:
+        raise Retain("owner-identity-changed")
+    if git(snap["owner"], "rev-parse", snap["branch"]) != row["finish_head"]:
+        raise Retain("branch-retention-not-verified")
+    with db:
+        db.execute("UPDATE worktrees SET state = 'removed', reason = 'path-and-registration-absent-branch-kept' WHERE id = ?", (row["id"],))
+
+
+def storage_guard():
+    run([str(Path(__file__).resolve().with_name("worktree-storage-guard"))])
+
+
+def check(db, row, args):
+    reason = "eligible-report-only"
+    try:
+        if row["state"] == "retiring":
+            verify_removed(db, row)
+            reason = "removed"
+        elif args.apply:
+            remove(db, row, args)
+            reason = "removed"
+        else:
+            candidate(db, row)
+    except (Retain, OSError, ValueError) as error:
+        reason = str(error) if isinstance(error, Retain) else "proof-unavailable"
+    with db:
+        db.execute("UPDATE worktrees SET reason = ?, observed_at = COALESCE(observed_at, ?), checked_at = ? WHERE id = ?",
+                   (reason, int(time.time()), int(time.time()), row["id"]))
+    return reason
+
+
+def summary(db, row, reason=None):
+    return {"id": row["id"], "worktree": row["path"], "state": row["state"],
+            "reason": reason or row["reason"], "pr": row["primary_pr"],
+            "owners": [dict(item) for item in db.execute("SELECT owner, released, recovery_reviewed FROM owners WHERE worktree_id = ? ORDER BY owner", (row["id"],))],
+            "pins": [dict(item) for item in db.execute("SELECT owner, reason FROM pins WHERE worktree_id = ? ORDER BY owner, reason", (row["id"],))]}
+
+
+def parser():
+    result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    result.add_argument("command", choices=("enroll", "finish", "release", "resume", "pin", "unpin", "status", "check", "owner-root"))
+    result.add_argument("--worktree", default=os.getcwd())
+    result.add_argument("--managed-root", default=os.environ.get("DOTFILES_WORKTREES_ROOT", str(Path.home() / ".codex/worktrees")))
+    result.add_argument("--state-dir", default=os.environ.get("DOTFILES_GWT_FINISH_STATE", str(Path.home() / ".local/state/gwt-finish")))
+    result.add_argument("--owner")
+    result.add_argument("--pr")
+    result.add_argument("--target")
+    result.add_argument("--wait-for", action="append", default=[])
+    result.add_argument("--reason")
+    result.add_argument("--recovery-reviewed", action="store_true")
+    result.add_argument("--if-enrolled", action="store_true")
+    result.add_argument("--all", action="store_true")
+    result.add_argument("--apply", action="store_true")
+    result.add_argument("--policy", default=os.environ.get("DOTFILES_GWT_FINISH_POLICY", str(Path.home() / ".config/gwt-finish/policy.json")))
+    return result
+
+
+def process_one(db, row, args):
+    if args.command not in ("status", "check", "enroll"):
+        storage_guard()
+    if args.command == "finish":
+        finish(db, row, args)
+    elif args.command == "resume":
+        claim(db, row, owner_id(args))
+    elif args.command == "release":
+        release(db, row, args)
+        if Path(args.policy).exists():
+            row = db.execute("SELECT * FROM worktrees WHERE id = ?", (row["id"],)).fetchone()
+            args.apply = True
+            check(db, row, args)
+    elif args.command in ("pin", "unpin"):
+        if not args.reason or len(args.reason) > 500:
+            raise Retain("pin-reason-required")
+        who = owner_id(args)
+        if args.command == "pin":
+            claim(db, row, who)
+            with db:
+                db.execute("INSERT OR IGNORE INTO pins VALUES (?, ?, ?)", (row["id"], who, args.reason))
+        else:
+            with db:
+                changed = db.execute("DELETE FROM pins WHERE worktree_id = ? AND owner = ? AND reason = ?", (row["id"], who, args.reason)).rowcount
+            if not changed:
+                raise Retain("no-matching-owner-pin")
+    elif args.command == "check":
+        check(db, row, args)
+    current = db.execute("SELECT * FROM worktrees WHERE id = ?", (row["id"],)).fetchone()
+    return summary(db, current)
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    if args.apply and args.command != "check":
+        raise Retain("apply-is-only-valid-for-check")
+    if args.all and args.command not in ("status", "check"):
+        raise Retain("all-is-only-valid-for-status-or-check")
+    if args.command == "finish" and (not args.pr or len(args.wait_for) > 16):
+        raise Retain("finish-requires-primary-pr-and-at-most-16-dependencies")
+    if args.all:
+        with ledger(args.state_dir) as db:
+            if db is None:
+                print("[]")
+                return 0
+            if args.command == "status":
+                print(json.dumps([summary(db, row) for row in db.execute("SELECT * FROM worktrees ORDER BY path")], sort_keys=True))
+                return 0
+            # Fair, bounded batches release the cooperative lock between rows.
+            # The authoritative row is read again after reacquiring it.
+            paths = [row[0] for row in db.execute(
+                "SELECT path FROM worktrees WHERE state IN ('finished', 'retiring') "
+                "ORDER BY COALESCE(checked_at, 0), path LIMIT 16")]
+        output = []
+        failed = False
+        for path in paths:
+            with ledger(args.state_dir) as db:
+                row = get_row(db, path)
+                result = process_one(db, row, args)
+                output.append(result)
+                if result["state"] == "retiring":
+                    failed = True
+                    break
+        print(json.dumps(output, sort_keys=True))
+        return int(failed)
+    with ledger(args.state_dir, create=args.command == "enroll") as db:
+        if args.command == "enroll":
+            storage_guard()
+            snap = snapshot(args.worktree, args.managed_root)
+            if db.execute("SELECT 1 FROM worktrees WHERE path = ?", (snap["path"],)).fetchone():
+                raise Retain("already-enrolled-or-path-reused")
+            worktree_id = str(uuid.uuid4())
+            who = owner_id(args)
+            with db:
+                db.execute("INSERT INTO worktrees(id, path, identity, created_at, state, reason) VALUES (?, ?, ?, ?, 'active', 'owner-active')",
+                           (worktree_id, snap["path"], json.dumps(immutable(snap), sort_keys=True), int(time.time())))
+                db.execute("INSERT INTO owners VALUES (?, ?, 0, 0)", (worktree_id, who))
+        try:
+            row = get_row(db, args.worktree)
+        except Retain:
+            if args.if_enrolled and args.command == "resume":
+                return 0
+            raise
+        if args.command == "owner-root":
+            storage_guard()
+            print(revalidate(row)["owner"])
+            return 0
+        result = process_one(db, row, args)
+        print(json.dumps([result], sort_keys=True))
+        return int(result["state"] == "retiring")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (Retain, OSError, sqlite3.Error, ValueError) as error:
+        reason = str(error) if isinstance(error, Retain) else "state-or-proof-unavailable"
+        print(f"gwt finish: retained ({reason})", file=sys.stderr)
+        raise SystemExit(1)

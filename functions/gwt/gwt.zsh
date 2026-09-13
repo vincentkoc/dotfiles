@@ -155,18 +155,10 @@ _gwt_worktree_source_checkout_risk() {
     printf '%s\n' "${(j: :)reasons}"
 }
 
-_gwt_cleanup_failed_worktree() {
+_gwt_preserve_failed_worktree() {
     local worktree_path="$1"
-    local repo_root=""
-
-    [[ -n "$worktree_path" ]] || return 0
-    repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null || true)
-    if [[ -n "$repo_root" && "$worktree_path" == "$repo_root" ]]; then
-        echo "gwt: refusing to clean up the main worktree ($worktree_path)" >&2
-        return 1
-    fi
-
-    git worktree remove --force "$worktree_path" >/dev/null 2>&1 || rm -rf "$worktree_path"
+    echo "gwt: setup failed; preserved worktree and registration at $worktree_path" >&2
+    echo "gwt: inspect the path before retrying setup or explicitly removing it" >&2
 }
 
 _gwt_sparse_profile_file() {
@@ -591,6 +583,21 @@ _gwt_require_worktree_storage() {
     "$guard_path"
 }
 
+_gwt_finish_tool() {
+    local finish_tool
+    finish_tool=$(_gwt_tool_path agent-worktree-finish) || {
+        echo "gwt: agent-worktree-finish not found" >&2
+        return 127
+    }
+    "$finish_tool" "$@"
+}
+
+_gwt_claim_if_enrolled() {
+    # Claim before entering so an enrolled retirement cannot race gwt cd/new.
+    [[ -e "${DOTFILES_GWT_FINISH_STATE:-$HOME/.local/state/gwt-finish}/lifecycle.sqlite" ]] || return 0
+    _gwt_finish_tool resume --if-enrolled --worktree "$1"
+}
+
 _gwt_validate_cleanup_args() {
     local command_name="$1"
     shift
@@ -934,6 +941,7 @@ _gwt_shared_install_source() {
 
 _gwt_find_workspace_node_modules() {
     local repo_root="$1"
+    local worktrees_root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
 
     if [[ -d "$repo_root/node_modules" ]]; then
         printf '%s\n' "$repo_root/node_modules"
@@ -944,9 +952,14 @@ _gwt_find_workspace_node_modules() {
     find "$repo_root" \
         \( \
             -path "$repo_root/.git" -o \
-            -path "$repo_root/.git/*" -o \
             -path "$repo_root/node_modules" -o \
-            -path "$repo_root/node_modules/*" \
+            \( -type d ! -path "$repo_root" \
+                \( -name .git -o -name .worktrees -o \
+                    -path "$worktrees_root" -o -path "$HOME/GIT/_Worktrees" -o \
+                    -path '*/.codex/worktrees' -o -path '*/.claude/worktrees' -o \
+                    -exec test -e '{}/.git' \; -o -exec test -L '{}/.git' \; \
+                \) \
+            \) \
         \) -prune -o \
         -type d -name node_modules -print -prune
 }
@@ -954,17 +967,32 @@ _gwt_find_workspace_node_modules() {
 _gwt_link_shared_node_modules() {
     local source_root="$1"
     local target_root="$2"
+    local mode="${3:-link}"
+    local discovered target_parent
     local source_path relative_path target_path
 
+    discovered=$(_gwt_find_workspace_node_modules "$source_root") || return 1
     while IFS= read -r source_path; do
         [[ -n "$source_path" ]] || continue
 
         relative_path="${source_path#$source_root/}"
         target_path="$target_root/$relative_path"
+        target_parent="${target_path:h:A}"
+        if [[ "$target_parent" != "${target_root:A}" && "$target_parent" != "${target_root:A}/"* ]]; then
+            echo "gwt: refusing dependency path outside worktree: $target_path" >&2
+            return 1
+        fi
 
         if [[ -L "$target_path" ]]; then
+            if [[ ! -d "$source_path" || ! -d "$target_path" || "${target_path:A}" != "${source_path:A}" ]]; then
+                echo "gwt: dependency link does not resolve to $source_path: $target_path" >&2
+                return 1
+            fi
             continue
         fi
+
+        # Reuse checks existing shared links only; it never repairs or replaces dependencies.
+        [[ "$mode" == "validate" ]] && continue
 
         if [[ -e "$target_path" ]]; then
             echo "gwt: refusing to replace existing path $target_path" >&2
@@ -973,23 +1001,40 @@ _gwt_link_shared_node_modules() {
 
         mkdir -p "$(dirname "$target_path")" || return 1
         ln -s "$source_path" "$target_path" || return 1
-    done < <(_gwt_find_workspace_node_modules "$source_root")
+    done <<< "$discovered"
 }
 
 _gwt_bootstrap_worktree() {
     local worktree_path="$1"
+    local mode="${2:-link}"
     local install_source=""
 
     _gwt_is_pnpm_repo "$worktree_path" || return 0
 
+    if [[ "$mode" == "validate" && ! -L "$worktree_path/node_modules" ]]; then
+        if [[ ! -d "$worktree_path/node_modules" ]]; then
+            echo "gwt: reusing code-only worktree without local dependencies; use remote validation or prepare dependencies explicitly"
+        fi
+        return 0
+    fi
+
     if ! install_source=$(_gwt_shared_install_source "$worktree_path"); then
+        if [[ "$mode" == "validate" ]]; then
+            echo "gwt: cannot validate shared dependency link without a canonical install: $worktree_path/node_modules" >&2
+            return 1
+        fi
         echo "gwt: pnpm repo detected, but no canonical node_modules tree exists yet" >&2
-        echo "gwt: run pnpm install once in the main checkout, then create worktrees from there" >&2
+        echo "gwt: created a code-only worktree; use remote validation or prepare dependencies explicitly" >&2
         return 0
     fi
 
     if [[ "$install_source" == "$worktree_path" ]]; then
         return 0
+    fi
+
+    if [[ "$mode" == "validate" ]]; then
+        _gwt_link_shared_node_modules "$install_source" "$worktree_path" validate
+        return $?
     fi
 
     echo "gwt: linking shared pnpm install from $install_source"
@@ -1012,12 +1057,20 @@ Usage: gwt <command> [args]
 Commands:
   gwt clone <repo> [dest] [--profile <name>|--full]
   gwt new <branch> [start-point]   Create/add worktree under ~/.codex/worktrees
-  gwt new <branch> [start-point] [--profile <name>|--full]
+  gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]
   gwt ls [--raw|--plain|--color|--no-color]
   gwt audit [agent-worktree-clean args...]
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
+  gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...]
+                                    Record task completion; park this shell at owner
+  gwt release --worktree <path> --recovery-reviewed  Release this owner after leaving
+  gwt resume [--worktree <path>]      Claim an enrolled tree before resuming work
+  gwt finish-pin --reason <text>      Pin recovery evidence or a dependent task
+  gwt finish-unpin --reason <text>    Clear only this owner's exact pin
+  gwt finish-status [--all]           Show local lifecycle state
+  gwt finish-check [--all]            Check enrolled completion; report only
   gwt prune                         Prune stale worktree metadata
   gwt sparse status                 Show sparse-checkout state for the current worktree
   gwt sparse list                   List available sparse profiles for the current repo
@@ -1028,6 +1081,7 @@ Commands:
 
 Env:
   DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1  Also link nested workspace node_modules trees
+  GWT_OWNER_ID=<stable task id>       Required outside Codex for enrolled worktrees
 EOF
 }
 
@@ -1060,6 +1114,18 @@ gwt() {
     case "$subcommand" in
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+            ;;
+        finish-status|finish-check)
+            for help_arg in "$@"; do
+                case "$help_arg" in
+                    --apply|--apply=*)
+                        echo "gwt: finish-status/finish-check are report-only; apply belongs to the policy-scoped worker" >&2
+                        return 1
+                        ;;
+                esac
+            done
+            _gwt_finish_tool "${subcommand#finish-}" "$@"
+            return $?
             ;;
         clone)
             local repo_url="" dest="" profile=""
@@ -1144,6 +1210,30 @@ gwt() {
 
     case "$subcommand" in
         ""|help|-h|--help|root|clone)
+            ;;
+        finish|release|resume|finish-pin|finish-unpin)
+            local lifecycle_command="${subcommand#finish-}"
+            local lifecycle_path="$PWD" lifecycle_owner="" arg_index=1
+            local -a lifecycle_args
+            lifecycle_args=("$@")
+            while (( arg_index <= ${#lifecycle_args} )); do
+                if [[ "${lifecycle_args[$arg_index]}" == "--worktree="* ]]; then
+                    lifecycle_path="${lifecycle_args[$arg_index]#--worktree=}"
+                elif [[ "${lifecycle_args[$arg_index]}" == "--worktree" ]]; then
+                    (( arg_index++ ))
+                    lifecycle_path="${lifecycle_args[$arg_index]}"
+                fi
+                (( arg_index++ ))
+            done
+            if [[ "$subcommand" == "finish" ]]; then
+                lifecycle_owner=$(_gwt_finish_tool owner-root "$@") || return
+            fi
+            _gwt_finish_tool "$lifecycle_command" "$@" || return
+            if [[ "$subcommand" == "finish" ]]; then
+                builtin cd -- "$lifecycle_owner" || return
+                _gwt_tmux_sync_context
+                echo "gwt: completion recorded; retained until every owner leaves and runs gwt release --worktree ${(q)lifecycle_path} --recovery-reviewed"
+            fi
             ;;
         ls|list)
             local repo_root list_table color_mode="auto"
@@ -1233,11 +1323,16 @@ gwt() {
             local use_sparse=false
             local checkout_risk=""
             local created_worktree=false
+            local finish_managed=false
 
             _gwt_require_worktree_storage || return
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
+                    --finish-managed)
+                        finish_managed=true
+                        shift
+                        ;;
                     --profile)
                         profile="$2"
                         shift 2
@@ -1277,6 +1372,10 @@ gwt() {
 
             if [[ -e "$worktree_path" || -L "$worktree_path" ]]; then
                 local existing_path existing_branch
+                if [[ "$finish_managed" == true ]]; then
+                    echo "gwt: --finish-managed only enrolls a newly created worktree; existing path retained" >&2
+                    return 1
+                fi
                 if [[ ! -d "$worktree_path" ]]; then
                     echo "gwt: existing worktree path is not a directory: $worktree_path" >&2
                     return 1
@@ -1290,6 +1389,8 @@ gwt() {
                     echo "gwt: existing worktree branch '$existing_branch' does not match '$branch'" >&2
                     return 1
                 fi
+                _gwt_bootstrap_worktree "$existing_path" validate || return 1
+                _gwt_claim_if_enrolled "$existing_path" || return
                 echo "gwt: worktree already exists at $existing_path"
                 cd "$existing_path" || return 1
                 _gwt_tmux_sync_context
@@ -1329,19 +1430,25 @@ gwt() {
             created_worktree=true
 
             _gwt_sparse_apply_default_profile "$worktree_path" "$profile" || {
-                [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                 return 1
             }
             if [[ "$use_sparse" == true ]]; then
                 git -C "$worktree_path" checkout -f >/dev/null 2>&1 || git -C "$worktree_path" read-tree -mu HEAD || {
-                    [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                    [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                     return 1
                 }
             fi
             _gwt_bootstrap_worktree "$worktree_path" || {
-                [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                 return 1
             }
+            if [[ "$finish_managed" == true ]]; then
+                _gwt_finish_tool enroll --worktree "$worktree_path" --managed-root "$root" || {
+                    echo "gwt: enrollment failed; new worktree retained at $worktree_path" >&2
+                    return 1
+                }
+            fi
             cd "$worktree_path" || return 1
             _gwt_tmux_sync_context
             ;;
@@ -1369,6 +1476,7 @@ gwt() {
                 return 1
             fi
 
+            _gwt_claim_if_enrolled "$target_path" || return
             cd "$target_path" || return 1
             _gwt_tmux_sync_context
             ;;
