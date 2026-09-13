@@ -59,6 +59,41 @@ These checks establish eligibility, not a full object-integrity audit. They do
 not change the behavior of repository-native worktree commands. Run native
 OpenClaw PR commands from the selected owner. Do not relocate active bases.
 
+## Scheduled Git maintenance
+
+Use daily commit-graph maintenance for explicitly enrolled, healthy owning
+clones. Worktrees share that owner's graph. `maintenance.config` is a reviewed
+Git 2.55 profile. Storing it here does not install or activate it.
+
+The profile disables foreground automatic maintenance, background prefetch,
+object packing, ref packing, reflog expiry, worktree pruning and rerere cleanup.
+It improves history queries without claiming to reclaim pack storage. Keep
+protected, shallow, partial, borrowed and unresolved-lock stores unenrolled.
+
+Before activation, review the exact owners, effective config, hooks, Git version,
+locks and existing registrations (`git config --global --get-all maintenance.repo`).
+Apply the profile to each approved owner's local config before registration.
+Inspect the effective settings, including `core.commitGraph`, after all includes.
+Do not set this profile globally or enroll each linked worktree.
+
+`git maintenance register` changes local config and enrolls the current repository.
+An existing scheduler can start processing it immediately. On macOS,
+`git maintenance start --scheduler=launchctl` creates the native user jobs and
+registers the current repository. Starting it affects every registered owner.
+Inspect the entire list first. Report profile settings, enrollment, loaded jobs
+and observed execution separately. A successful command or lock collision alone
+is not proof that a graph was written.
+
+Keep object repacking a separate operation with measured temporary space and
+recovery checks. Do not enable it as an automatic response to low disk space.
+Never enable prefetch as a side effect of registration: the incremental default
+includes it unless explicitly disabled. Direct `--task` invocations override
+task selection settings, so the profile does not constrain arbitrary Git commands.
+Recheck task defaults when upgrading Git.
+
+Contract: [Git maintenance](https://git-scm.com/docs/git-maintenance) and
+[Git 2.55 task selection](https://github.com/git/git/blob/v2.55.0/builtin/gc.c).
+
 ## Synthetic snapshots
 
 ```sh
@@ -105,8 +140,8 @@ A local 8 MiB random-file fixture took 1.655 seconds for native creation and
 3.434 seconds with the CoW pass. The pass cloned 8 MiB in 0.756 seconds. These
 small-fixture timings prove neither production speed nor physical space savings.
 
-Dependency compatibility and managed-finish deployment are separate contracts.
-Storage selection does not establish a compatible pnpm installation or authorize
+Dependency qualification and managed-finish deployment are separate contracts.
+Storage selection does not authorize
 cleanup. Preserve pending owner changes when integrating this module.
 
 Exports:
@@ -171,16 +206,71 @@ External storage behavior:
 
 Dependency bootstrap:
 
-- `gwt new` links the selected canonical pnpm install when one is available.
-  Without it, the worktree remains usable for code-only work or remote validation.
-- Deep linking skips nested Git repositories, `.worktrees`, and configured or
-  conventional agent worktree roots.
+- `gwt new` links a canonical pnpm install only after the compatibility check.
+  Otherwise the worktree remains usable for code-only work or remote validation.
+- Deep sharing is disabled pending qualification of each nested installation.
+  The discovery helper excludes nested Git repositories and managed worktree roots.
 - Existing dependency symlinks must resolve to the exact selected source.
   Broken or foreign links fail without replacement.
 - Reusing a worktree validates shared links when root `node_modules` is a symlink.
   It does not create missing links or change owned dependency directories.
 - A setup failure preserves the new worktree, its branch, and its registration.
   Inspect the reported path before retrying setup or explicitly removing it.
+
+Explicit dependency source:
+
+```sh
+gwt new <branch> [start-point] --full --dependency-source /absolute/install-root
+gwt add <branch> [start-point] --full --dependency-source /absolute/install-root
+```
+
+- The value is the install root containing `node_modules`, not that directory
+  itself. Compatibility checks require a Git checkout root. Only one absolute
+  value, separated from the option by a space, is accepted. Python 3 performs the identity checks and exclusive link.
+- Creation selects this install before the first root link. Source, owner,
+  consumer, registration and HEAD checks protect the binding boundary. A
+  concurrent entry is preserved. A late failure retains the worktree and branch.
+- Repeat the selector on `new` or `add` reuse. Reuse requires the exact existing
+  symlink. It never creates, replaces or adopts an entry. Missing, real-directory,
+  foreign or broken entries fail. Non-pnpm worktrees also fail explicitly.
+- Explicit donors cannot combine with `--finish-managed`: that lifecycle currently
+  records owner-local dependencies only. Use a code-only managed checkout.
+- This option links only root `node_modules`. It refuses
+  `DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1`, source/target overlap and escaping
+  target parents. It does not change the environment.
+- Omitting the selector preserves the canonical install and code-only behavior
+  above. No donor choice is remembered. Omission does not adopt a foreign link.
+- The caller must have the install owner's permission and preserve its stability
+  during use. The checks compare recorded install inputs and runtime facts. They
+  do not prove native build correctness. No install, copy or donor mutation occurs.
+- Existing storage/source/profile guards, cwd changes and tmux context sync still
+  apply. `--help` takes precedence even with malformed selector arguments.
+
+Dependency compatibility:
+
+- New links require an explicit frozen-install receipt. The install owner creates
+  it after a successful frozen install with the intended Node runtime:
+
+  ```sh
+  gwt dependencies record --source /absolute/install-root --after-frozen-install
+  gwt dependencies check --source /absolute/install-root --target /absolute/worktree
+  ```
+
+- Recording is an operator attestation. It does not run or prove the install.
+  The receipt lives under `${XDG_STATE_HOME:-~/.local/state}/gwt/dependencies`.
+  It binds the physical install directory, input hashes, exact pnpm version,
+  installed lockfile, pnpm layout, Node version/ABI, OS and architecture.
+- Consumer manifests, workspace configuration, patches and lockfile must match.
+  Missing sparse inputs, absent receipts, changed metadata or unknown layouts
+  leave new worktrees code-only. An explicit source fails and retains the new
+  checkout. Existing links are validated without repair or replacement.
+- Links inside the install must resolve within its physical `node_modules`.
+  Workspace links into donor source are refused. Deep workspace sharing remains
+  unavailable until each installation has its own qualification contract.
+- The receipt does not hash every installed package or prove native artifacts.
+  Keep the donor stable while consumers use it. Package installs, native rebuilds,
+  platform changes and uncertain state require a separate qualified install.
+  Do not run an install through a shared symlink.
 
 Cleanup behavior:
 

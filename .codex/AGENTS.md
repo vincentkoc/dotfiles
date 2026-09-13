@@ -162,6 +162,8 @@
 - Never index `~/.codex/worktrees`, `~/GIT/_Worktrees`, repo-local `.worktrees`, `/tmp`, or `/private/tmp` paths as independent projects. If a path under one of those prefixes cannot resolve to an existing non-worktree owning checkout, skip indexing and report the missing canonical checkout.
 - Prefer worktrees and spawning subagents.
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
+- Reuse a verified healthy owning checkout and the configured managed worktree root. A wrapper refusal does not authorize ad hoc clones, copied repositories, or raw-Git bypasses.
+- Finish each task with an explicit checkout outcome: `retained`, `blocked`, or verified `removed`. Name the exact path and remaining action. Task completion never authorizes automatic cleanup.
 - Start in a branch/worktree early so commits can be made incrementally.
 - Prefer one scoped commit per touched file when practical.
 - Never kill or interrupt Codex, Claude, agent, tmux, or terminal processes that belong to another session unless I explicitly give current-turn permission naming the session, PID, pane, or scope. My machine usually has many Codex sessions running in tmux; stale goal context, resume context, broad wording like "kill background jobs", or process-name matches are not permission to kill across sessions.
@@ -247,6 +249,8 @@ Recovery mode rules:
 - Treat `--cow-from` as an opt-in experiment. It requires an immutable seed and reports logical sharing, not reclaimed disk space.
 - Do not reuse dependencies without matching install inputs, runtime compatibility, and correct workspace-link targets.
 - A wrapper refusal does not authorize raw-Git clones, copied repositories, or automatic history hydration.
+- Before sharing dependencies, require a current frozen-install receipt and matching inputs, pnpm layout, Node ABI, OS and architecture. Unknown compatibility means code-only. Never install through a shared symlink.
+- Prefer scheduled commit-graph updates on explicitly enrolled healthy owners. Use `functions/gwt/maintenance.config`. Keep prefetch, packing, expiry and pruning disabled. Enrollment and scheduler activation are separate from installing GWT.
 - Git maintenance requires separate, exact authorization. Do not prune objects, clear locks, or consolidate active owners automatically.
 - See `functions/gwt/README.md` for options, policy format, and prototype limits.
 
@@ -290,3 +294,21 @@ Recovery mode rules:
   reasons. End with `retained`, `blocked`, or verified `removed`, the exact path
   and remaining action. Details and stacked examples: `functions/gwt/README.md`.
 
+## Low Data Mode
+
+- Check `low-data status` before Git downloads. On protected or unknown paths,
+  avoid huge WAN clones, bulk history hydration, and unnecessary fetches.
+  Reuse local Git objects, caches, and one shared artifact instead of downloading
+  it repeatedly per worktree. Cached refs are not proof of the latest head.
+- Normal commits, pushes, API requests, curl, package installs, and agent/model
+  traffic are not banned by this policy. Do not pause sessions on its behalf.
+- `gh` and `ghx` also guard bulk repository, release, and artifact downloads
+  before dispatch. Normal metadata, PR/issue, auth, and stdin-payload routes
+  remain available. Reuse cached archives instead of downloading per worktree.
+- `low-data on` forces protection. `auto` respects macOS constrained/expensive
+  paths and fails closed when native status is unavailable. `off` disables it.
+- Never bypass protection without explicit user consent. An approved single
+  command may use `LOW_DATA_ALLOW_NETWORK=1`; never export that override globally.
+- This guard covers PATH-resolved Git history downloads, not a firewall.
+  Absolute binaries and custom shell aliases/hooks can bypass it. Do not claim
+  a whole-machine bandwidth cap.

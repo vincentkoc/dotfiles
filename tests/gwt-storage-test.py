@@ -2,12 +2,14 @@
 """Real Git boundaries for owner routing, snapshot storage and APFS sharing."""
 import json
 import os
+import runpy
 from pathlib import Path
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "bin/gwt-storage"
@@ -22,7 +24,7 @@ class StorageTest(unittest.TestCase):
         self.home.mkdir()
         self.env = {**os.environ, "HOME": str(self.home), "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
-                    "XDG_CONFIG_HOME": str(self.home / ".config"), "GWT_OWNER_ID": "fixture",
+                    "XDG_CONFIG_HOME": str(self.home / ".config"), "XDG_STATE_HOME": str(self.home / ".local/state"), "GWT_OWNER_ID": "fixture",
                     "DOTFILES_WORKTREES_ROOT": str(self.home / ".codex/worktrees"), "TMUX": ""}
         self.env.pop("DOTFILES_GWT_LOADED", None)
         self.env.pop("DOTFILES_GIT_SPARSE_ROOT", None)
@@ -92,6 +94,87 @@ class StorageTest(unittest.TestCase):
         self.other_owner()
         self.git(self.repo, "commit", "--allow-empty", "-qm", "local")
         self.gwt("new", "fresh", "HEAD", "--full", ok=False)
+
+    def prepare_dependencies(self):
+        (self.repo / "package.json").write_text('{"packageManager":"pnpm@10.12.1"}\n')
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-qm", "dependency fixture")
+        modules = self.repo / "node_modules"
+        (modules / ".pnpm").mkdir(parents=True)
+        (modules / ".modules.yaml").write_text("packageManager: pnpm@10.12.1\nnodeLinker: isolated\nvirtualStoreDir: .pnpm\n")
+        (modules / ".pnpm/lock.yaml").write_bytes((self.repo / "pnpm-lock.yaml").read_bytes())
+        return modules
+
+    def test_dependency_receipt_gates_new_sharing_and_input_drift(self):
+        modules = self.prepare_dependencies()
+        self.gwt("new", "unknown-deps", "HEAD", "--full")
+        worktrees = self.home / ".codex/worktrees/example-project"
+        self.assertFalse((worktrees / "unknown-deps/node_modules").exists())
+        self.helper("dependencies", "record", "--source", self.repo, ok=False)
+        self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install")
+        self.gwt("new", "compatible", "HEAD", "--full")
+        target = worktrees / "compatible"
+        self.assertEqual((target / "node_modules").resolve(), modules)
+        (target / "package.json").write_text('{"packageManager":"pnpm@10.12.1","engines":{"node":">=24"}}')
+        self.gwt("new", "compatible", "HEAD", "--full", ok=False)
+        self.assertEqual((target / "node_modules").resolve(), modules)
+        (modules / ".modules.yaml").write_text("packageManager: pnpm@9.0.0\n")
+        self.helper("dependencies", "check", "--source", self.repo, "--target", target, ok=False)
+
+    def test_dependency_selector_survives_owner_routing(self):
+        self.prepare_dependencies()
+        self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install")
+        owner = self.other_owner()
+        self.gwt("new", "routed-deps", "HEAD", "--full", "--dependency-source", self.repo)
+        target = self.home / ".codex/worktrees/example-project/routed-deps"
+        self.assertEqual(self.git(target, "rev-parse", "--git-common-dir"), str(owner / ".git"))
+        self.assertEqual((target / "node_modules").resolve(), self.repo / "node_modules")
+        self.gwt("new", "routed-deps", "HEAD", "--full", "--dependency-source", self.repo, cwd=owner)
+
+    def test_dependency_receipt_rejects_external_links_and_protected_donors(self):
+        modules = self.prepare_dependencies()
+        (modules / "workspace").symlink_to(self.repo, target_is_directory=True)
+        result = self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install", ok=False)
+        self.assertIn("symlink escapes", result.stderr)
+        (modules / "workspace").unlink()
+        self.configure(protected=[str(self.repo)])
+        result = self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install", ok=False)
+        self.assertIn("protected", result.stderr)
+        self.assertFalse((self.home / ".local/state/gwt/dependencies").exists())
+
+    def test_dependency_scan_failure_is_not_compatibility_proof(self):
+        modules = self.prepare_dependencies()
+        original = os.scandir
+        def unreadable(path):
+            if Path(path) == modules / ".pnpm":
+                raise PermissionError("fixture unreadable directory")
+            return original(path)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            helper = runpy.run_path(str(HELPER))
+            with mock.patch("os.scandir", side_effect=unreadable):
+                with self.assertRaisesRegex(PermissionError, "unreadable"):
+                    helper["dependency_install"](self.repo)
+
+    def test_explicit_donor_cannot_enroll_unsupported_finish_contract(self):
+        self.prepare_dependencies()
+        result = self.gwt("new", "unsupported", "HEAD", "--full", "--finish-managed", "--dependency-source", self.repo, ok=False)
+        self.assertIn("not supported by managed finish", result.stderr)
+        self.assertFalse((self.home / ".codex/worktrees/example-project/unsupported").exists())
+        self.git(self.repo, "show-ref", "--verify", "refs/heads/unsupported", ok=False)
+
+    def test_scheduled_profile_runs_only_commit_graph(self):
+        self.git(self.repo, "remote", "set-url", "origin", str(self.repo))
+        self.git(self.repo, "config", "--local", "include.path", str(ROOT / "functions/gwt/maintenance.config"))
+        trace = self.root / "maintenance-trace.jsonl"
+        self.env["GIT_TRACE2_EVENT"] = str(trace)
+        self.git(self.repo, "maintenance", "run", "--schedule=daily", "--no-detach", "--no-quiet")
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        tasks = [event["label"] for event in events if event.get("event") == "region_enter" and event.get("category") == "maintenance"]
+        self.assertEqual(tasks, ["commit-graph"])
+        self.assertTrue((self.repo / ".git/objects/info/commit-graphs/commit-graph-chain").exists())
+        self.assertEqual(self.git(self.repo, "config", "--get", "maintenance.auto"), "false")
 
     def test_git_environment_cannot_redirect_snapshot_writes(self):
         before = (self.repo / ".git/index").read_bytes()
