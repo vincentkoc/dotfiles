@@ -57,12 +57,18 @@ class LifecycleTests(unittest.TestCase):
         self.proof_patch.start()
         self.target_patch = mock.patch.object(FINISH, "default_target", return_value="main")
         self.target_patch.start()
+        # Positive lifecycle fixtures exercise the remaining gates; this does
+        # not qualify the shipped holder backend or provide a runtime bypass.
+        self.qualification_patch = mock.patch.object(FINISH, "holder_qualification", return_value={
+            "schema": FINISH.HOLDER_SCHEMA, "backend": "fixture", "qualified": True, "reason": ""})
+        self.qualification_patch.start()
         self.holder_patch = mock.patch.object(FINISH, "holders", return_value=False)
         self.holders = self.holder_patch.start()
         self.enroll()
 
     def tearDown(self):
         self.holder_patch.stop()
+        self.qualification_patch.stop()
         self.target_patch.stop()
         self.proof_patch.stop()
         self.env.stop()
@@ -171,6 +177,39 @@ class LifecycleTests(unittest.TestCase):
         self.holders.return_value = True
         with self.assertRaisesRegex(FINISH.Retain, "still-holds"):
             self.call("release", "--recovery-reviewed")
+
+    def test_unqualified_backend_cannot_release_an_owner(self):
+        self.call("finish", "--pr", self.url)
+        self.qualification_patch.stop()
+        with self.assertRaisesRegex(FINISH.Retain, "holder-backend-unqualified"):
+            self.call("release", "--recovery-reviewed")
+        self.holders.assert_not_called()
+        row = self.call("status")[1][0]
+        self.assertEqual(row["state"], "finished")
+        self.assertEqual([(item["released"], item["recovery_reviewed"]) for item in row["owners"]], [(0, 0)])
+
+    def test_unqualified_backend_blocks_removal_before_lock_or_candidate_work(self):
+        self.finish_release()
+        policy = self.authorize()
+        self.qualification_patch.stop()
+        self.holders.reset_mock()
+        with mock.patch.object(FINISH, "maintenance_lock") as lock, \
+                mock.patch.object(FINISH, "candidate") as candidate:
+            self.assertEqual(self.check_reason("--apply", "--policy", policy), "holder-backend-unqualified")
+        lock.assert_not_called()
+        candidate.assert_not_called()
+        self.holders.assert_not_called()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(self.call("status")[1][0]["state"], "finished")
+
+    def test_report_only_check_retains_an_unqualified_released_record(self):
+        self.finish_release()
+        self.qualification_patch.stop()
+        self.holder_patch.stop()
+        with mock.patch.object(FINISH, "run", wraps=FINISH.run) as calls:
+            self.assertEqual(self.check_reason(), "holder-backend-unqualified")
+        self.assertFalse(any(Path(call.args[0][0]).name == "lsof" for call in calls.call_args_list))
+        self.assertTrue(self.wt.exists())
 
     def test_ignored_untracked_and_git_locks_retain(self):
         self.finish_release()
@@ -365,6 +404,11 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(self.check_reason(), "dirty-untracked-or-ignored-artifacts")
         self.assertFalse((self.base / "foreign-index").exists())
 
+    def test_git_proofs_deny_transport_even_when_environment_and_config_allow_it(self):
+        with mock.patch.dict(os.environ, {"GIT_ALLOW_PROTOCOL": "file"}):
+            result = FINISH.run(["git", "-c", "protocol.file.allow=always", "ls-remote", str(self.repo)], allowed=(128,))
+        self.assertIn(b"transport 'file' not allowed", result.stderr)
+
     def test_policy_revocation_during_proof_prevents_removal(self):
         self.finish_release()
         policy = Path(self.authorize())
@@ -408,7 +452,7 @@ gwt new wrapper HEAD --finish-managed || exit
 [[ "$PWD" == "$3" ]] || exit 91
 gwt finish --pr https://github.com/example/repo/pull/1 || exit
 [[ "$PWD" == "$2" ]] || exit 92
-gwt release --worktree "$3" --recovery-reviewed || exit
+if gwt release --worktree "$3" --recovery-reviewed; then exit 94; fi
 gwt cd wrapper || exit
 gwt finish-status || exit
 if gwt new wrapper HEAD --finish-managed; then exit 93; fi
@@ -417,10 +461,32 @@ if gwt new wrapper HEAD --finish-managed; then exit 93; fi
                                 env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"reason": "owner-resumed"', result.stdout)
+        self.assertIn("holder-backend-unqualified", result.stderr)
         self.assertTrue(wrapper_tree.exists())
 
 
 class WrapperTests(unittest.TestCase):
+    def test_qualification_has_no_state_lock_or_probe_side_effects(self):
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with mock.patch.object(FINISH, "ledger") as ledger, \
+                mock.patch.object(FINISH, "run") as run, redirect_stdout(output):
+            self.assertEqual(FINISH.main(["holder-qualification"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "schema": FINISH.HOLDER_SCHEMA, "backend": "lsof-recursive",
+            "qualified": False, "reason": "holder-backend-unqualified"})
+        ledger.assert_not_called()
+        run.assert_not_called()
+
+    def test_unqualified_backend_never_accepts_an_empty_lsof_result(self):
+        for platform in ("darwin", "linux", "win32"):
+            with self.subTest(platform=platform), mock.patch.object(FINISH.sys, "platform", platform), \
+                    mock.patch.object(FINISH, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")) as run:
+                with self.assertRaisesRegex(FINISH.Retain, "holder-backend-unqualified"):
+                    FINISH.holders("/fixture/worktree")
+                run.assert_not_called()
+
     def test_absent_status_is_a_noop_and_help_has_no_side_effects(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
