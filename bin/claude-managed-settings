@@ -15,6 +15,7 @@ import sys
 MANAGED_LINK = "settings.managed.json"
 LINK_SIBLING = ".settings.json.managed-link"
 SEED_SIBLING = ".settings.managed.json.seed"
+STATS_SIBLING = ".settings.json.tokenjuice-stats"
 RENAME_EXCL = 0x00000004
 RENAME_SWAP = 0x00000002
 
@@ -307,28 +308,143 @@ def finish_managed_recovery(parent: dict, legacy_target: str) -> None:
     unlink_exact(parent, LINK_SIBLING, sibling)
 
 
-def apply(dotfiles: pathlib.Path, claude_dir: pathlib.Path) -> str:
+def stats_off_payload(payload: bytes) -> bytes:
+    def unique_object(pairs: list) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ManagedSettingsError("duplicate_json_key")
+            result[key] = value
+        return result
+
+    def invalid_constant(value: str) -> None:
+        raise ManagedSettingsError("invalid_json")
+
+    try:
+        parsed = json.loads(
+            payload,
+            object_pairs_hook=unique_object,
+            parse_constant=invalid_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ManagedSettingsError("invalid_json") from error
+    if not isinstance(parsed, dict):
+        raise ManagedSettingsError("invalid_json")
+    environment = parsed.get("env", {})
+    if not isinstance(environment, dict):
+        raise ManagedSettingsError("invalid_env")
+    if environment.get("TOKENJUICE_STATS") == "off":
+        return payload
+    environment["TOKENJUICE_STATS"] = "off"
+    parsed["env"] = environment
+    return (json.dumps(parsed, indent=2, ensure_ascii=True) + "\n").encode()
+
+
+def check_stats_parent(parent: dict) -> None:
+    check_directory(parent)
+    metadata = os.fstat(parent["fd"])
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise ManagedSettingsError("parent_incompatible")
+
+
+def update_stats_off(parent: dict, name: str, original: dict, link: dict) -> None:
+    payload = stats_off_payload(original["payload"])
+
+    def check_target(expected: dict) -> None:
+        check_stats_parent(parent)
+        if name != "settings.json" and not same(
+            classify(parent["fd"], "settings.json"),
+            link,
+        ):
+            raise ManagedSettingsError("target_changed")
+        if not same(classify(parent["fd"], name, include_payload=True), expected):
+            raise ManagedSettingsError("target_changed")
+
+    check_target(original)
+    if payload == original["payload"]:
+        return
+    try:
+        descriptor = os.open(
+            STATS_SIBLING,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent["fd"],
+        )
+    except FileExistsError as error:
+        raise ManagedSettingsError("recovery_required") from error
+    try:
+        write_all(descriptor, payload)
+        os.fchmod(descriptor, original["mode"])
+        os.fsync(descriptor)
+        os.fsync(parent["fd"])
+        staged = classify(parent["fd"], STATS_SIBLING, include_payload=True)
+        opened = os.fstat(descriptor)
+        if (
+            staged.get("payload") != payload
+            or staged.get("uid") != os.getuid()
+            or staged.get("mode") != original["mode"]
+            or (staged.get("device"), staged.get("inode")) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ManagedSettingsError("target_changed")
+        failpoint("before_stats_publish")
+        check_target(original)
+        if not same(classify(parent["fd"], STATS_SIBLING, include_payload=True), staged):
+            raise ManagedSettingsError("target_changed")
+        # Keep the exchanged original until both identities and bytes are verified.
+        # A mismatch or interruption retains recovery evidence, never a blind rollback.
+        rename_atomic(parent["fd"], STATS_SIBLING, name, RENAME_SWAP)
+        failpoint("after_stats_publish")
+        check_target(staged)
+        if not same(classify(parent["fd"], STATS_SIBLING, include_payload=True), original):
+            raise ManagedSettingsError("target_changed")
+        failpoint("before_stats_cleanup")
+        check_target(staged)
+        unlink_exact(
+            parent,
+            STATS_SIBLING,
+            {key: value for key, value in original.items() if key != "payload"},
+        )
+    finally:
+        os.close(descriptor)
+
+
+def apply(
+    dotfiles: pathlib.Path,
+    claude_dir: pathlib.Path,
+    tokenjuice_stats_off: bool = False,
+) -> str:
     baseline_spec, baseline_payload = validate_baseline(dotfiles)
+    seed_payload = stats_off_payload(baseline_payload) if tokenjuice_stats_off else baseline_payload
     baseline_path = str(dotfiles / ".claude/settings.json")
     parent = open_directory(claude_dir, create=True)
     try:
         check_directory(parent)
+        if tokenjuice_stats_off:
+            check_stats_parent(parent)
+            # Stats updates never adopt an earlier run's stage or recovery files.
+            for residue in (STATS_SIBLING, SEED_SIBLING, LINK_SIBLING):
+                if classify(parent["fd"], residue)["kind"] != "absent":
+                    raise ManagedSettingsError("recovery_required")
         settings = classify(parent["fd"], "settings.json", include_payload=True)
         sibling = classify(parent["fd"], LINK_SIBLING)
         if settings["kind"] == "file":
             if sibling["kind"] != "absent":
                 raise ManagedSettingsError("recovery_required")
             validate_json_file(settings, "target_incompatible")
+            if tokenjuice_stats_off:
+                update_stats_off(parent, "settings.json", settings, settings)
             state = "regular"
         elif settings["kind"] == "symlink" and settings.get("target") == MANAGED_LINK:
             validate_symlink(settings, MANAGED_LINK)
             managed = classify(parent["fd"], MANAGED_LINK, include_payload=True)
             validate_json_file(managed, "managed_target_incompatible")
             finish_managed_recovery(parent, baseline_path)
+            if tokenjuice_stats_off:
+                update_stats_off(parent, MANAGED_LINK, managed, settings)
             state = "managed"
         elif settings["kind"] == "symlink" and settings.get("target") == baseline_path:
             validate_symlink(settings, baseline_path)
-            ensure_managed_target(parent, baseline_payload)
+            ensure_managed_target(parent, seed_payload)
             ensure_link_sibling(parent)
             if not same(classify(parent["fd"], "settings.json"), settings):
                 raise ManagedSettingsError("target_changed")
@@ -341,7 +457,7 @@ def apply(dotfiles: pathlib.Path, claude_dir: pathlib.Path) -> str:
             unlink_exact(parent, LINK_SIBLING, settings)
             state = "migrated"
         elif settings["kind"] == "absent":
-            ensure_managed_target(parent, baseline_payload)
+            ensure_managed_target(parent, seed_payload)
             ensure_link_sibling(parent)
             if classify(parent["fd"], "settings.json")["kind"] != "absent":
                 raise ManagedSettingsError("target_changed")
@@ -365,12 +481,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dotfiles-dir", type=pathlib.Path, required=True)
     parser.add_argument("--claude-dir", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--tokenjuice-stats-off",
+        action="store_true",
+        help="Set env.TOKENJUICE_STATS to off while preserving other settings.",
+    )
     args = parser.parse_args()
     if not args.dotfiles_dir.is_absolute() or not args.claude_dir.is_absolute():
         print("claude_managed_settings=blocked reason=path_not_absolute")
         return 2
     try:
-        state = apply(args.dotfiles_dir, args.claude_dir)
+        state = apply(args.dotfiles_dir, args.claude_dir, args.tokenjuice_stats_off)
     except ManagedSettingsError as error:
         print(f"claude_managed_settings=blocked reason={error.reason}")
         return 2

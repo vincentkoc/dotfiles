@@ -1,5 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "TOKENJUICE_STATS": "off"
+  },
   "attribution": {
     "commit": "",
     "pr": ""
