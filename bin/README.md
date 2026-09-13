@@ -102,6 +102,53 @@ Let enabled plugins own their MCP registrations, including Computer Use. Avoid
 duplicate `[mcp_servers.computer-use]` overrides and paths into versioned plugin
 caches; plugin launchers manage their binary location and working directory.
 
+## Low Data Protection
+
+`low-data` guards PATH-resolved Git history downloads and bulk GitHub downloads.
+Installing these source files does not enroll a machine. With neither a mode
+file nor a native detector, commands pass through unchanged. Either enrollment
+path, including a dangling link, retains the policy. A missing mode with an
+existing detector means `auto`; invalid or unreadable mode data stays protected.
+
+```sh
+low-data status
+low-data on
+low-data auto
+low-data off
+```
+
+The mode lives at `${XDG_CONFIG_HOME:-$HOME/.config}/low-data/mode`. Automatic
+mode uses the optional `$HOME/.local/libexec/low-data/network-cost` detector.
+It reads macOS Network.framework path flags without network probes. Constrained,
+expensive, unsatisfied, unknown, or failed detection protects downloads. Only a
+satisfied, unconstrained, inexpensive path is unprotected. Explicitly selecting
+`auto` without a detector stays protected. Source installation never builds or
+replaces the detector, changes a saved mode, or stops existing transfers.
+
+The Git wrapper discovers a real backend in PATH and rejects itself, symlink
+aliases, and marked wrapper copies. Protection limits clone/fetch/pull,
+submodule downloads, remote updates, and maintenance to Git's file transport;
+Git still resolves local paths and URL rewrites. It also disables lazy object
+fetches. Normal commits, pushes and metadata commands remain available.
+
+`gh` and `ghx` block repository clones, release/run downloads, repository
+archives, Actions artifact ZIPs, and binary release-asset requests before native
+or proxy dispatch. Metadata, PR/issue operations, authentication and stdin pass
+through normally. Individual entrypoint symlinks resolve their source helpers.
+An enrolled machine with a missing runtime or required support fails explicitly.
+
+A reviewed native detector can be built from `low-data-support/network-cost.c`
+with the existing macOS toolchain and installed separately. Keep dotfiles `bin`
+ahead of the native Git backend. A new shell (or `rehash` in zsh, `hash -r` in
+bash) picks up changed command paths.
+
+For one explicitly approved download, prefix that command with
+`LOW_DATA_ALLOW_NETWORK=1`; never export it globally. This is a command guard,
+not a firewall: absolute binaries, custom aliases/hooks and direct daemon calls
+can bypass it, and file transports can address network mounts. Curl, package
+installs and model traffic are outside its scope. Cached refs do not prove the
+current remote head.
+
 ## GitHub Throughput
 
 `gh` and `ghx` use the same routing helper. Run `ghx-bootstrap` once after linking

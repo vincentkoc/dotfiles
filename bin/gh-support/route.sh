@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 : "${wrapper_dir:?entrypoint must set wrapper_dir}"
 
+gh_low_data_guard() {
+  if [[ -f "$wrapper_dir/low-data" && -x "$wrapper_dir/low-data" ]]; then
+    "$wrapper_dir/low-data" github-check "$@"
+  elif [[ -e "${XDG_CONFIG_HOME:-$HOME/.config}/low-data/mode" ||
+          -L "${XDG_CONFIG_HOME:-$HOME/.config}/low-data/mode" ||
+          -e "$HOME/.local/libexec/low-data/network-cost" ||
+          -L "$HOME/.local/libexec/low-data/network-cost" ]]; then
+    gh_route_error "enrolled low-data runtime is unavailable"
+    return 126
+  fi
+}
+
 gh_backend() {
   local name="$1" remaining="${PATH:-}" entry candidate done="" octopool=""
   if [[ "$name" == gh ]]; then
