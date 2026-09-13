@@ -7,11 +7,38 @@ codex-update-all() {
     codex-standalone-install
 }
 
-up() {
-    echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
-    sudo -v
+_up_brew_owns() {
+    local tool_path cellar_path
+    tool_path=$(whence -p -- "$1") || return 2
+    command -v brew >/dev/null 2>&1 || return 1
+    cellar_path=$(brew --cellar "$1" 2>/dev/null) || return 2
+    [[ -n "$cellar_path" ]] || return 2
+    [[ "${tool_path:A}" == "${cellar_path:A}/"* ]] || return 1
+    brew list --versions "$1" >/dev/null 2>&1 || return 2
+}
 
-    while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+up() {
+    local updates_only=false
+    case "$#:${1:-}" in
+        0:) ;;
+        1:--updates-only) updates_only=true ;;
+        1:--help|1:-h)
+            printf '%s\n' 'usage: up [--updates-only | --help]' \
+                '  --updates-only  update tools without cleanup, DNS signals, project pip/Go/Flutter changes, or a sudo keepalive' \
+                '  no arguments    retain the legacy update and cleanup workflow'
+            return 0
+            ;;
+        *) printf '%s\n' 'usage: up [--updates-only | --help]' >&2; return 2 ;;
+    esac
+    if $updates_only; then
+        local -x HOMEBREW_NO_INSTALL_CLEANUP=1
+    fi
+    echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
+    sudo -v || return $?
+
+    if ! $updates_only; then
+        while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+    fi
 
     echo -e "\n🔄 Starting system update...\n"
 
@@ -31,7 +58,7 @@ up() {
         if brew update && \
            brew upgrade && \
            brew upgrade --cask && \
-           brew cleanup && \
+           { $updates_only || brew cleanup; } && \
            brew doctor; then
             echo "✅ Homebrew updates complete"
         else
@@ -103,7 +130,7 @@ up() {
         fi
     fi
 
-    if command -v pip &> /dev/null; then
+    if ! $updates_only && command -v pip &> /dev/null; then
         echo "🐍 Updating Python packages..."
         local pip_update_success=true
         if ! pip install --upgrade pip setuptools wheel; then
@@ -155,7 +182,7 @@ sys.stdout.write("\n".join(names))
         fi
     fi
 
-    if command -v pip3 &> /dev/null; then
+    if ! $updates_only && command -v pip3 &> /dev/null; then
         echo "🐍 Updating Python3 packages..."
         local pip3_update_success=true
         if ! pip3 install --upgrade pip setuptools wheel; then
@@ -211,7 +238,7 @@ sys.stdout.write("\n".join(names))
         echo "💎 Updating Ruby Gems..."
         if sudo gem update --system --no-document && \
            sudo gem update --no-document && \
-           sudo gem cleanup; then
+           { $updates_only || sudo gem cleanup; }; then
             echo "✅ Ruby Gems updated"
         else
             failed_updates+=("Ruby Gems")
@@ -246,7 +273,7 @@ sys.stdout.write("\n".join(names))
         fi
     fi
 
-    if command -v go &> /dev/null; then
+    if ! $updates_only && command -v go &> /dev/null; then
         echo "🐹 Updating Go packages..."
         if go get -u all; then
             echo "✅ Go packages updated"
@@ -256,8 +283,13 @@ sys.stdout.write("\n".join(names))
     fi
 
     if command -v deno &> /dev/null; then
-        echo "🦕 Updating Deno..."
-        if deno upgrade; then
+        local deno_owner=1
+        if $updates_only; then _up_brew_owns deno; deno_owner=$?; fi
+        if [[ $deno_owner -eq 0 ]]; then
+            echo 'Deno is managed by Homebrew; its update is covered above.'
+        elif [[ $deno_owner -eq 2 ]]; then
+            failed_updates+=("Deno ownership check")
+        elif deno upgrade; then
             echo "✅ Deno updated"
         else
             failed_updates+=("Deno")
@@ -265,8 +297,13 @@ sys.stdout.write("\n".join(names))
     fi
 
     if command -v bun &> /dev/null; then
-        echo "🥟 Updating Bun..."
-        if bun upgrade; then
+        local bun_owner=1
+        if $updates_only; then _up_brew_owns bun; bun_owner=$?; fi
+        if [[ $bun_owner -eq 0 ]]; then
+            echo 'Bun is managed by Homebrew; its update is covered above.'
+        elif [[ $bun_owner -eq 2 ]]; then
+            failed_updates+=("Bun ownership check")
+        elif bun upgrade; then
             echo "✅ Bun updated"
         else
             failed_updates+=("Bun")
@@ -276,14 +313,14 @@ sys.stdout.write("\n".join(names))
     if command -v flutter &> /dev/null; then
         echo "📱 Updating Flutter..."
         if flutter upgrade && \
-           flutter pub get; then
+           { $updates_only || flutter pub get; }; then
             echo "✅ Flutter updated"
         else
             failed_updates+=("Flutter")
         fi
     fi
 
-    if command -v updatedb &> /dev/null; then
+    if ! $updates_only && command -v updatedb &> /dev/null; then
         echo "🔍 Updating locate database..."
         if sudo updatedb 2> /dev/null; then
             echo "✅ Locate database updated"
@@ -310,6 +347,12 @@ sys.stdout.write("\n".join(names))
         echo -e "\nAll other updates completed successfully.\n"
     fi
 
+    if $updates_only; then
+        echo 'Skipped cleanup, DNS signals, project pip/Go/Flutter steps, and locate database rebuild.'
+        (( ${#failed_updates[@]} == 0 ))
+        return $?
+    fi
+
     echo "🧹 Cleaning up system..."
     if [ "$(uname)" = "Darwin" ]; then
         sudo rm -rf /private/var/log/asl/*.asl
@@ -330,4 +373,5 @@ sys.stdout.write("\n".join(names))
     fi
 
     echo -e "\n✨ System update and cleanup complete!\n"
+    (( ${#failed_updates[@]} == 0 ))
 }
