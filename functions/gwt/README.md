@@ -9,7 +9,7 @@ their owner's Git objects and history. Their checked-out source files use
 separate storage unless the filesystem shares those bytes.
 
 Use full, non-promisor owners for development and maintainer work. This includes
-OpenClaw review, release, merge-base, and ancestry checks. Sparse checkout limits
+OpenClaw review, release, merge-base, and ancestry operations. Sparse checkout limits
 working files without removing history. A shallow or blobless clone can serve
 an explicit browsing or proof task, but cannot own new GWT worktrees.
 
@@ -26,7 +26,7 @@ the full-checkout alias. `--history full` disables the configured clone filter.
 an existing repository-specific `clone.filter` can enable filtering. OpenClaw
 has no clone filter. No option automatically unshallows an existing owner.
 
-Remote start points refresh one exact branch into its remote-tracking ref.
+Remote branch bases refresh one exact branch into its remote-tracking ref.
 Refreshes disable automatic maintenance, tags, pruning, and shared `FETCH_HEAD`
 writes. A failed refresh stops creation. Pass a verified local commit explicitly
 when working offline. Cached refs do not prove freshness.
@@ -52,10 +52,10 @@ identity, a direct physical owner path, full history, and no object alternates.
 Protected paths also cover linked worktrees through their common Git directory.
 Owner selection, snapshots, and CoW enforce these exclusions. Native Git and
 existing maintenance helpers do not read this file.
-An existing branch must have the same tip in both owners. Local-only start
+An existing branch must have the same tip in both owners. Local-only base
 commits must already exist in the selected owner. Selection never migrates them.
 
-These checks establish eligibility, not a full object-integrity audit. They do
+Owner selection establishes eligibility, not full object integrity. It does
 not change the behavior of repository-native worktree commands. Run native
 OpenClaw PR commands from the selected owner. Do not relocate active bases.
 
@@ -77,15 +77,15 @@ Inspect the effective settings, including `core.commitGraph`, after all includes
 Do not set this profile globally or enroll each linked worktree.
 
 `git maintenance register` changes local config and enrolls the current repository.
-An existing scheduler can start processing it immediately. On macOS,
+An existing scheduler can process it immediately. On macOS,
 `git maintenance start --scheduler=launchctl` creates the native user jobs and
-registers the current repository. Starting it affects every registered owner.
+registers the current repository. Activation affects every registered owner.
 Inspect the entire list first. Report profile settings, enrollment, loaded jobs
 and observed execution separately. A successful command or lock collision alone
 is not proof that a graph was written.
 
 Keep object repacking a separate operation with measured temporary space and
-recovery checks. Do not enable it as an automatic response to low disk space.
+recovery review. Do not enable it as an automatic response to low disk space.
 Never enable prefetch as a side effect of registration: the incremental default
 includes it unless explicitly disabled. Direct `--task` invocations override
 task selection settings, so the profile does not constrain arbitrary Git commands.
