@@ -165,6 +165,24 @@ class StorageTest(unittest.TestCase):
         self.assertIn("ref refresh failed", result.stderr)
         self.git(self.repo, "show-ref", "--verify", "refs/heads/fresh", ok=False)
 
+    def test_ref_refresh_updates_only_the_named_branch(self):
+        old = self.git(self.repo, "rev-parse", "HEAD")
+        self.git(self.repo, "commit", "--allow-empty", "-qm", "upstream")
+        current = self.git(self.repo, "rev-parse", "HEAD")
+        remote = self.root / "remote.git"
+        self.git(self.repo, "clone", "--bare", "-q", str(self.repo), str(remote))
+        self.git(remote, "update-ref", "refs/heads/unrelated", current)
+        self.git(remote, "update-ref", "refs/tags/not-requested", current)
+        self.git(self.repo, "remote", "set-url", "origin", str(remote))
+        self.git(self.repo, "update-ref", "refs/remotes/origin/main", old)
+        fetch_head = self.repo / ".git/FETCH_HEAD"
+        fetch_head.write_text("preserved fixture\n")
+        self.gwt("new", "fresh", "origin/main", "--full")
+        self.assertEqual(self.git(self.repo, "rev-parse", "refs/heads/fresh"), current)
+        self.assertEqual(fetch_head.read_text(), "preserved fixture\n")
+        self.git(self.repo, "show-ref", "--verify", "refs/remotes/origin/unrelated", ok=False)
+        self.git(self.repo, "show-ref", "--verify", "refs/tags/not-requested", ok=False)
+
     def test_clone_flags_are_separate_and_conflicts_fail(self):
         destination = self.root / "clone"
         self.gwt("clone", self.repo, destination, "--checkout", "full", "--history", "full")
@@ -172,6 +190,13 @@ class StorageTest(unittest.TestCase):
         self.gwt("clone", self.repo, self.root / "conflict", "--history", "full", "--history", "blobless", ok=False)
         self.gwt("clone", self.repo, self.root / "conflict", "--profile", "core", "--full", ok=False)
         self.assertFalse((self.root / "conflict").exists())
+        # Keep all local fixture objects present: the download guard can disable
+        # lazy hydration. This checks option/config forwarding, not server filtering.
+        filtered = self.root / "blobless"
+        self.gwt("clone", self.repo.as_uri(), filtered, "--full", "--history", "blobless")
+        self.assertEqual(self.git(filtered, "config", "remote.origin.partialclonefilter"), "blob:none")
+        self.assertEqual((filtered / "file").read_text(), "current\n")
+        self.helper("owner", "--repo", filtered, ok=False)
 
     @unittest.skipUnless(sys.platform == "darwin", "APFS prototype")
     def test_cow_immutable_seed_isolation_and_modes(self):

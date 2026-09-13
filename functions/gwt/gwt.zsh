@@ -829,7 +829,7 @@ _gwt_refresh_remote_ref() {
     git -c maintenance.auto=false -c gc.auto=0 fetch --no-tags --no-prune \
         --no-prune-tags --no-write-fetch-head --recurse-submodules=no \
         --no-auto-maintenance --refmap= -- "$remote" \
-        "+refs/heads/$branch:refs/remotes/$remote/$branch" || {
+        "+refs/heads/${branch}:refs/remotes/${remote}/${branch}" || {
         echo "gwt: ref refresh failed; pass a verified local commit explicitly to work offline" >&2
         return 1
     }
