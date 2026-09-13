@@ -19,6 +19,8 @@ import uuid
 
 
 SCHEMA = "gwt-finish-policy.v1"
+HOLDER_SCHEMA = "gwt-finish-holder-qualification.v1"
+HOLDER_UNQUALIFIED = "holder-backend-unqualified"
 PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/([1-9][0-9]*)/?\Z")
 SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 
@@ -33,7 +35,7 @@ def run(command, *, cwd=None, allowed=(0,)):
         # A tool shell may inherit a different Git context. -C alone does not
         # override GIT_DIR/INDEX_FILE/config injection; proof must address this row.
         env = {key: value for key, value in env.items() if not key.startswith("GIT_")}
-        env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_ALLOW_PROTOCOL="")
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
                GH_PROMPT_DISABLED="1", LC_ALL="C")
     try:
@@ -78,7 +80,8 @@ def run(command, *, cwd=None, allowed=(0,)):
 def git(path, *args):
     return run(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                 "-c", "core.untrackedCache=false", "-c", "gc.auto=0",
-                "-c", "maintenance.auto=false", "-C", str(path), *args]).stdout.decode(errors="surrogateescape").rstrip("\n")
+                "-c", "maintenance.auto=false", "-c", "protocol.allow=never",
+                "-C", str(path), *args]).stdout.decode(errors="surrogateescape").rstrip("\n")
 
 
 def host_key():
@@ -336,7 +339,20 @@ def finish(db, row, args):
                    (snap["head"], primary["url"], target, json.dumps(dependencies), row["id"]))
 
 
+def holder_qualification():
+    # Recursive lsof can silently omit processes. No platform currently has
+    # a qualified backend; an empty result cannot authorize owner release.
+    return {"schema": HOLDER_SCHEMA, "backend": "lsof-recursive",
+            "qualified": False, "reason": HOLDER_UNQUALIFIED}
+
+
+def require_holder_qualification():
+    if holder_qualification().get("qualified") is not True:
+        raise Retain(HOLDER_UNQUALIFIED)
+
+
 def holders(path):
+    require_holder_qualification()
     # Query open descriptors as well as CWDs: a parked shell can still have a
     # compiler, editor, or log descriptor in the worktree. Unknown is retained.
     result = run(["lsof", "-nP", "-F0pn", "+D", path], allowed=(0, 1))
@@ -379,6 +395,7 @@ def local_checks(row):
 
 
 def release(db, row, args):
+    require_holder_qualification()
     who = owner_id(args)
     if not args.recovery_reviewed:
         raise Retain("review-recovery-references-before-release")
@@ -468,6 +485,7 @@ def maintenance_lock():
 
 
 def remove(db, row, args):
+    require_holder_qualification()
     authorize(args.policy, row)
     with maintenance_lock():
         candidate(db, row)
@@ -529,7 +547,7 @@ def summary(db, row, reason=None):
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    result.add_argument("command", choices=("enroll", "finish", "release", "resume", "pin", "unpin", "status", "check", "owner-root"))
+    result.add_argument("command", choices=("enroll", "finish", "release", "resume", "pin", "unpin", "status", "check", "owner-root", "holder-qualification"))
     result.add_argument("--worktree", default=os.getcwd())
     result.add_argument("--managed-root", default=os.environ.get("DOTFILES_WORKTREES_ROOT", str(Path.home() / ".codex/worktrees")))
     result.add_argument("--state-dir", default=os.environ.get("DOTFILES_GWT_FINISH_STATE", str(Path.home() / ".local/state/gwt-finish")))
@@ -586,6 +604,9 @@ def main(argv=None):
         raise Retain("all-is-only-valid-for-status-or-check")
     if args.command == "finish" and (not args.pr or len(args.wait_for) > 16):
         raise Retain("finish-requires-primary-pr-and-at-most-16-dependencies")
+    if args.command == "holder-qualification":
+        print(json.dumps(holder_qualification(), sort_keys=True))
+        return 0
     if args.all:
         with ledger(args.state_dir) as db:
             if db is None:

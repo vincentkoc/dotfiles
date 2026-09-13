@@ -106,6 +106,20 @@ infer completion from branch names, commit prefixes, agent turns, or age.
 Only a worktree created with `--finish-managed` participates. Existing worktrees
 and repository-native PR worktrees keep their existing lifecycle.
 
+Owner release and worker removal currently stop with
+`holder-backend-unqualified` on every platform. Recursive `lsof +D` can silently
+omit processes, so an empty result cannot prove that a tree has no holders.
+The helper does not run that scan while the backend is unqualified. Enrollment,
+resume, finish, pins, status and report-only checks remain available; retain
+the checkout until a qualified holder backend is implemented.
+
+The following command reports the qualification as JSON without opening the
+ledger, taking locks or starting probes:
+
+```sh
+agent-worktree-finish holder-qualification
+```
+
 ```sh
 # Codex supplies CODEX_THREAD_ID. Outside Codex, set a stable task identity.
 export GWT_OWNER_ID=payment-fix
@@ -117,6 +131,7 @@ gwt finish --pr https://github.com/example/project/pull/123
 
 # After every long-lived agent, terminal, editor and test process has left,
 # review saved recovery references and release the same owner from outside it.
+# This currently returns holder-backend-unqualified and retains the owner.
 gwt release --worktree /path/to/managed/payment-fix --recovery-reviewed
 ```
 
@@ -127,16 +142,16 @@ move its parent agent. If release says a process still holds the tree, keep it,
 exit or deliberately park that agent, then release under the same owner ID.
 Never kill another session to satisfy cleanup.
 
-The separate local worker can remove a signed-off, released tree immediately
-under its installed host/repository policy. There is no minimum age. It checks
-fresh GitHub merge evidence and the local safety conditions again at removal.
-Without an apply policy, completion and checks remain report-only.
+The lifecycle supports immediate removal after sign-off and release, without
+a minimum age. The shipped holder backend keeps that path disabled, even when
+an apply policy is present. A future qualified backend must still check fresh
+GitHub merge evidence and every local safety condition before removal.
 
 ## What finished means
 
 | Situation | Action |
 | --- | --- |
-| A fix or feature is merged and post-merge proof is complete | `finish`, then release after leaving and reviewing recovery references |
+| A fix or feature is merged and post-merge proof is complete | `finish`; retain while holder qualification is unavailable |
 | Work is complete but the PR is waiting to merge | `finish` may record the intent; the worker retains it until GitHub confirms the merge |
 | Auto-merge is enabled, CI is green, a review is done, or commits are pushed | These alone do not establish completion or merge |
 | A PR is closed without merging | Retain; never treat closure as merge |
@@ -203,7 +218,11 @@ known shared root `node_modules` symlink. It does not use the Codex state DB.
 Changing or recreating any recorded identity invalidates enrollment; no path
 or branch-name reuse grants old deletion authority.
 
-Removal requires explicit finish, all owners released with recovery reviewed,
+Removal first requires a qualified holder backend, before maintenance-lock or
+candidate work. Release checks qualification before changing an owner's
+release state. Neither path has an environment or CLI override.
+
+Removal also requires explicit finish, all owners released with recovery reviewed,
 no pins, fresh merged primary and dependency PRs, unchanged HEAD/identity, no
 Git operation/locks, and clean tracked, untracked and ignored state. Unknown
 or failed Git, GitHub, storage, or holder probes retain the tree. Ignored files
@@ -225,6 +244,10 @@ An interrupted removal remains `retiring`. A later check can verify complete
 absence and the retained branch, but never blindly retries deletion. If the
 original tree remains, both removal and resume stop for an explicit recovery
 review; ordinary entry cannot clear ambiguous deletion state.
+
+Local Git proof commands disable all transports, including lazy fetch and
+protocol-specific configuration overrides. Missing local objects retain the
+tree; fresh GitHub metadata continues through the explicit `ghx` API calls.
 
 The local scheduler and exact host/repository policy belong in private
 dotfiles. Installing the public runtime alone does not install a scheduler.
