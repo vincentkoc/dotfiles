@@ -4,13 +4,17 @@
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BASH = os.environ.get("ATTENTION_TEST_BASH", "/bin/bash")
 STUB = r"""#!/usr/bin/env python3
 import json,os,sys
 from pathlib import Path
@@ -30,6 +34,16 @@ elif args[0] == "show-option":
 elif args[0] != "if-shell":
     raise AssertionError(args)
 """
+PS_STUB = r"""#!/usr/bin/env python3
+import os,sys
+assert sys.argv[1:] == ["-axo", "pid=,ppid="], sys.argv
+with open(os.environ["TEST_PS_LOG"], "a") as log:
+    log.write("capture\n")
+rows = [f"{1000000+i} 1" for i in range(int(os.environ.get("TEST_PS_ROWS", "0")))]
+parent = f'{os.environ["TEST_HOOK_PID"]} {os.environ["TEST_PARENT_PID"]}'
+rows.insert(len(rows) if os.environ.get("TEST_PS_TAIL") else 0, parent)
+print("\n".join(rows))
+"""
 
 
 class AttentionTests(unittest.TestCase):
@@ -42,6 +56,10 @@ class AttentionTests(unittest.TestCase):
         stub = self.root / "bin/tmux"
         stub.write_text(STUB)
         stub.chmod(0o700)
+        if sys.platform == "darwin":
+            ps = self.root / "bin/ps"
+            ps.write_text(PS_STUB)
+            ps.chmod(0o700)
         self.data = {
             "server": "42", "pane_pid": str(os.getpid()), "marker": "", "state": "",
             "style": "fg=default,bg=#1a1b26", "active": "fg=default,bg=#1a1b26",
@@ -51,6 +69,7 @@ class AttentionTests(unittest.TestCase):
             "TMUX": f"{self.root / 'socket'},42,0", "TMUX_PANE": "%7",
             "TEST_SOCKET": str(self.root / "socket"), "TEST_DATA": str(self.root / "data"),
             "TEST_LOG": str(self.root / "log"), "LC_ALL": "C",
+            "TEST_PS_LOG": str(self.root / "ps-log"), "TEST_PARENT_PID": str(os.getpid()),
         }
 
     def tearDown(self):
@@ -59,15 +78,57 @@ class AttentionTests(unittest.TestCase):
 
     def hook(self, state="waiting"):
         (self.root / "data").write_text(json.dumps(self.data))
-        subprocess.run(
-            ["/bin/bash", str(ROOT / "bin/agent-attn-set"), state, "codex"],
-            env=self.env, check=True, timeout=10,
+        # The exec keeps the recorded PID equal to this fixture's real child.
+        process = subprocess.Popen(
+            [BASH, "-c", 'export TEST_HOOK_PID=$$; exec "$@"', "attention-test",
+             BASH, str(ROOT / "bin/agent-attn-set"), state, "codex"],
+            env=self.env, start_new_session=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
         )
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+        finally:
+            # Bound failed regressions without touching an operator's processes.
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=1)
+            deadline = time.monotonic() + 1
+            while self.process_group_exists(process.pid) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if self.process_group_exists(process.pid):
+                os.killpg(process.pid, signal.SIGKILL)
+                self.fail("fixture left a process-substitution writer running")
         log = self.root / "log"
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     def mutations(self, calls):
         return [call for call in calls if call[3] == "if-shell"]
+
+    @staticmethod
+    def process_group_exists(pid):
+        try:
+            os.killpg(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin uses the frozen ps snapshot")
+    def test_large_snapshot_preserves_ancestry_and_reaps_writer(self):
+        for tail, ancestor in ((False, True), (True, True), (False, False)):
+            with self.subTest(tail=tail, ancestor=ancestor):
+                self.env["TEST_PS_ROWS"] = "4000"
+                self.env["TEST_PS_TAIL"] = "1" if tail else ""
+                self.data["pane_pid"] = str(os.getpid()) if ancestor else "99999999"
+                calls = self.hook()
+                self.assertEqual(len(self.mutations(calls)), int(ancestor))
+                self.assertEqual((self.root / "ps-log").read_text(), "capture\n")
+                (self.root / "log").unlink()
+                (self.root / "ps-log").unlink()
 
     def test_no_tmux_context_means_no_calls(self):
         del self.env["TMUX"]

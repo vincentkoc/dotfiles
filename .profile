@@ -31,11 +31,11 @@ if [ -z "${MPLCONFIGDIR:-}" ]; then
 fi
 mkdir -p "$FONTCONFIG_CACHE" "$MPLCONFIGDIR" 2>/dev/null || true
 
-# Load OpenClaw release-provider credentials only when a release lane needs them.
+# Load OpenClaw provider credentials only on an explicit function call.
 openclaw_release_provider_env() {
   local private_env openai_key anthropic_key
 
-  private_env="${DOTFILES_PRIVATE_DIR:-$HOME/GIT/_Perso/dotfiles-private}/release/openclaw-provider-env.sh"
+  private_env="${DOTFILES_PRIVATE_DIR:-$HOME/GIT/_Perso/dotfiles-private}/openclaw/provider-env.sh"
   [ -r "$private_env" ] && . "$private_env"
   [ -n "${OPENCLAW_1P_ACCOUNT:-}" ] || return 1
   [ -n "${OPENCLAW_OPENAI_1P_ITEM:-}" ] || return 1
@@ -55,4 +55,8 @@ if [ -d "/opt/homebrew/opt/openblas" ]; then
   export CPPFLAGS="-I/opt/homebrew/opt/openblas/include${CPPFLAGS:+ $CPPFLAGS}"
   export PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
   export CMAKE_PREFIX_PATH="/opt/homebrew/opt/openblas${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+fi
+
+if [ -d "$HOME/.lmstudio/bin" ]; then
+  export PATH="$PATH:$HOME/.lmstudio/bin"
 fi

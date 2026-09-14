@@ -597,7 +597,7 @@ _gwt_finish_tool() {
 }
 
 _gwt_claim_if_enrolled() {
-    # Claim before entering so an enrolled retirement cannot race gwt cd/new.
+    # Resume before entering so prior completion cannot survive gwt cd/new.
     [[ -e "${DOTFILES_GWT_FINISH_STATE:-$HOME/.local/state/gwt-finish}/lifecycle.sqlite" ]] || return 0
     _gwt_finish_tool resume --if-enrolled --worktree "$1"
 }
@@ -1250,13 +1250,14 @@ Commands:
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
   gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...]
-                                    Record task completion; park this shell at owner
-  gwt release --worktree <path> --recovery-reviewed  Release this owner after leaving
-  gwt resume [--worktree <path>]      Claim an enrolled tree before resuming work
-  gwt finish-pin --reason <text>      Pin recovery evidence or a dependent task
-  gwt finish-unpin --reason <text>    Clear only this owner's exact pin
-  gwt finish-status [--all]           Show local lifecycle state
-  gwt finish-check [--all]            Check enrolled completion; report only
+                                    Record explicit completion; retain checkout
+  gwt resume [--worktree <path>]    Resume an enrolled worktree
+  gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
+  gwt finish-unpin --reason <text>  Clear this owner's exact pin
+  gwt finish-status [--all]         Show local completion state
+  gwt finish-check [--all] [--policy <path>]
+                                    Refresh filtered completion proof; report only
+                                    Managed release/removal is unavailable
   gwt prune                         Prune stale worktree metadata
   gwt sparse status                 Show sparse-checkout state for the current worktree
   gwt sparse list                   List available sparse profiles for the current repo
@@ -1310,11 +1311,15 @@ gwt() {
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             ;;
+        release)
+            echo "gwt: managed release/removal is unavailable; checkout retained" >&2
+            return 1
+            ;;
         finish-status|finish-check)
             for help_arg in "$@"; do
                 case "$help_arg" in
                     --apply|--apply=*)
-                        echo "gwt: finish-status/finish-check are report-only; apply belongs to the policy-scoped worker" >&2
+                        echo "gwt: managed release/removal is unavailable; checkout retained" >&2
                         return 1
                         ;;
                 esac
@@ -1417,28 +1422,11 @@ gwt() {
     case "$subcommand" in
         ""|help|-h|--help|root|clone)
             ;;
-        finish|release|resume|finish-pin|finish-unpin)
+        finish|resume|finish-pin|finish-unpin)
             local lifecycle_command="${subcommand#finish-}"
-            local lifecycle_path="$PWD" lifecycle_owner="" arg_index=1
-            local -a lifecycle_args
-            lifecycle_args=("$@")
-            while (( arg_index <= ${#lifecycle_args} )); do
-                if [[ "${lifecycle_args[$arg_index]}" == "--worktree="* ]]; then
-                    lifecycle_path="${lifecycle_args[$arg_index]#--worktree=}"
-                elif [[ "${lifecycle_args[$arg_index]}" == "--worktree" ]]; then
-                    (( arg_index++ ))
-                    lifecycle_path="${lifecycle_args[$arg_index]}"
-                fi
-                (( arg_index++ ))
-            done
-            if [[ "$subcommand" == "finish" ]]; then
-                lifecycle_owner=$(_gwt_finish_tool owner-root "$@") || return
-            fi
             _gwt_finish_tool "$lifecycle_command" "$@" || return
             if [[ "$subcommand" == "finish" ]]; then
-                builtin cd -- "$lifecycle_owner" || return
-                _gwt_tmux_sync_context
-                echo "gwt: completion recorded; retained until every owner leaves and runs gwt release --worktree ${(q)lifecycle_path} --recovery-reviewed"
+                echo "gwt: completion recorded; managed release/removal is unavailable; checkout retained"
             fi
             ;;
         ls|list)

@@ -28,11 +28,20 @@ else
 	DOTFILES_ENV="$HOME/.dotfiles/.env"
 fi
 if [[ -r "$DOTFILES_ENV" ]]; then
-	set -a
-	source "$DOTFILES_ENV"
-	set +a
+	# Sourcing an iCloud placeholder hydrates it and can block shell startup.
+	if [[ "$OSTYPE" == darwin* ]] && {
+		! _dotfiles_env_flags=$(/usr/bin/stat -L -f %f "$DOTFILES_ENV" 2>/dev/null) ||
+		[[ "$_dotfiles_env_flags" != <0-4294967295> ]] ||
+		(( _dotfiles_env_flags & 0x40000000 ))
+	}; then
+		print -ru2 -- "dotfiles: skipped .env (iCloud data is not local or metadata is unavailable)"
+	else
+		set -a
+		source "$DOTFILES_ENV"
+		set +a
+	fi
 fi
-unset DOTFILES_ENV
+unset DOTFILES_ENV _dotfiles_env_flags
 
 # Interactive shells should not inherit agent/no-color defaults. They break TUIs
 # like Codex, especially when launched directly instead of through wrappers.
@@ -766,3 +775,7 @@ export PATH
 
 # OpenClaw completion
 [[ -r "$HOME/.openclaw/completions/openclaw.zsh" ]] && source "$HOME/.openclaw/completions/openclaw.zsh"
+
+if [[ -d "$HOME/.lmstudio/bin" ]]; then
+	export PATH="$PATH:$HOME/.lmstudio/bin"
+fi

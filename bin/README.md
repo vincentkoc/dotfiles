@@ -85,9 +85,69 @@ Codex cockpit snapshots retain an exited owner's exact recovery identity and
 record its exit status separately. `tt status` reports exited and failed owners;
 it does not rename, close, or relaunch their panes.
 
+`tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
+through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
+show a bucket only when the snapshot header declares it, so current owner and
+exit fields are never mistaken for old bucket columns.
+
+In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
+and **New At End** create a 3x2 grid with pane titles, starting in the source
+pane's directory. Other sessions get a single pane. These bindings call
+`tt new-window [--after] --socket <socket> --target <pane-id|window-id>`;
+inside tmux, the socket and pane default to the invoking pane. Agent calls need
+`TT_OPERATOR_TMUX_SCOPE=new-window:<socket>:<session-id>:<window-id>`.
+Existing windows and raw `tmux new-window` calls keep their current behavior.
+
 Let enabled plugins own their MCP registrations, including Computer Use. Avoid
 duplicate `[mcp_servers.computer-use]` overrides and paths into versioned plugin
 caches; plugin launchers manage their binary location and working directory.
+
+## Low Data Protection
+
+`low-data` guards PATH-resolved Git history downloads and bulk GitHub downloads.
+Installing these source files does not enroll a machine. With neither a mode
+file nor a native detector, commands pass through unchanged. Either enrollment
+path, including a dangling link, retains the policy. A missing mode with an
+existing detector means `auto`; invalid or unreadable mode data stays protected.
+
+```sh
+low-data status
+low-data on
+low-data auto
+low-data off
+```
+
+The mode lives at `${XDG_CONFIG_HOME:-$HOME/.config}/low-data/mode`. Automatic
+mode uses the optional `$HOME/.local/libexec/low-data/network-cost` detector.
+It reads macOS Network.framework path flags without network probes. Constrained,
+expensive, unsatisfied, unknown, or failed detection protects downloads. Only a
+satisfied, unconstrained, inexpensive path is unprotected. Explicitly selecting
+`auto` without a detector stays protected. Source installation never builds or
+replaces the detector, changes a saved mode, or stops existing transfers.
+
+The Git wrapper discovers a real backend in PATH and rejects itself, symlink
+aliases, and marked wrapper copies. Protection limits clone/fetch/pull,
+submodule downloads, remote updates, and maintenance to Git's file transport;
+Git still resolves local paths and URL rewrites. It also disables lazy object
+fetches. Normal commits, pushes and metadata commands remain available.
+
+`gh` and `ghx` block repository clones, release/run downloads, repository
+archives, Actions artifact ZIPs, and binary release-asset requests before native
+or proxy dispatch. Metadata, PR/issue operations, authentication and stdin pass
+through normally. Individual entrypoint symlinks resolve their source helpers.
+An enrolled machine with a missing runtime or required support fails explicitly.
+
+A reviewed native detector can be built from `low-data-support/network-cost.c`
+with the existing macOS toolchain and installed separately. Keep dotfiles `bin`
+ahead of the native Git backend. A new shell (or `rehash` in zsh, `hash -r` in
+bash) picks up changed command paths.
+
+For one explicitly approved download, prefix that command with
+`LOW_DATA_ALLOW_NETWORK=1`; never export it globally. This is a command guard,
+not a firewall: absolute binaries, custom aliases/hooks and direct daemon calls
+can bypass it, and file transports can address network mounts. Curl, package
+installs and model traffic are outside its scope. Cached refs do not prove the
+current remote head.
 
 ## GitHub Throughput
 
@@ -285,3 +345,18 @@ It updates only a ref below `refs/remotes/<remote>/`; source and destination
 must be explicit full refs. It honors installed low-data protection. Maintenance
 and broader refspec narrowing require a separate owner/active-upstream audit;
 these helpers never schedule them.
+
+## Gitcrawl environment wrapper
+
+`gitcrawl` loads optional defaults from `OPENCLAW_CRAWL_ENV`, or
+`${XDG_CONFIG_HOME:-$HOME/.config}/openclaw-crawl/remote.env`. This is a dotfiles
+convention; Gitcrawl does not load that file itself. The file is trusted shell
+code. Its output is suppressed, and a source failure stops dispatch with a fixed
+diagnostic. Only values exported by the file reach the backend. Caller exports,
+including empty values and custom token variable names, take precedence.
+
+The wrapper prefers the existing `$HOME/.local/bin/gitcrawl` backend, then
+Homebrew on macOS, then PATH. It skips itself, symlink aliases, and marked wrapper
+copies. Arguments, stdin, working directory, and backend exit status are retained.
+It does not install a backend, read auth configuration, select a token source, or
+change credentials. Gitcrawl and Crawlkit remain the owners of token resolution.

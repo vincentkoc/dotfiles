@@ -1,0 +1,81 @@
+#!/bin/bash
+# low-data-git-shim: backend discovery rejects copies of this wrapper.
+set -u
+
+script="${BASH_SOURCE[0]}"
+for ((links = 0; links < 40; links++)); do
+  [[ -L "$script" ]] || break
+  directory="$(cd -P -- "$(dirname -- "$script")" && pwd)" || exit 126
+  link="$(readlink "$script")" || exit 126
+  case "$link" in /*) script="$link" ;; *) script="$directory/$link" ;; esac
+done
+[[ ! -L "$script" ]] || { printf 'git: entrypoint symlink loop\n' >&2; exit 126; }
+script_dir="$(cd -P -- "$(dirname -- "$script")" && pwd)" || exit 126
+
+git_backend() {
+  local remaining="${PATH:-}" entry candidate last="" first second
+  while :; do
+    case "$remaining" in
+      *:*) entry="${remaining%%:*}"; remaining="${remaining#*:}" ;;
+      *) entry="$remaining"; last=1 ;;
+    esac
+    candidate="${entry:-.}/git"
+    if [[ -f "$candidate" && -x "$candidate" && ! "$candidate" -ef "$script" ]]; then
+      first="" second=""
+      { IFS= read -r -n 512 first || true; IFS= read -r -n 512 second || true; } < "$candidate"
+      if [[ "$first" != '#!'* || "$second" != '# low-data-git-shim:'* ]]; then
+        printf '%s/git\n' "$(cd -P -- "${entry:-.}" && pwd)"
+        return 0
+      fi
+    fi
+    [[ -z "$last" ]] || return 1
+  done
+}
+real_git="$(git_backend)" || { printf 'git: no nonrecursive native backend found in PATH\n' >&2; exit 126; }
+
+guard_status=0
+if [[ -f "$script_dir/low-data" && -x "$script_dir/low-data" ]]; then
+  "$script_dir/low-data" active || guard_status=$?
+elif [[ -e "${XDG_CONFIG_HOME:-$HOME/.config}/low-data/mode" ||
+        -L "${XDG_CONFIG_HOME:-$HOME/.config}/low-data/mode" ||
+        -e "$HOME/.local/libexec/low-data/network-cost" ||
+        -L "$HOME/.local/libexec/low-data/network-cost" ]]; then
+  printf 'git: enrolled low-data runtime is unavailable\n' >&2
+  exit 126
+else
+  guard_status=1
+fi
+if [[ "$guard_status" != 1 ]]; then
+  git_command=
+  subcommand=
+  skip_value=0
+  for arg in "$@"; do
+    if [[ -n "$git_command" ]]; then
+      case "$arg" in
+        -*) continue ;;
+        *) subcommand="$arg"; break ;;
+      esac
+    fi
+    if [[ "$skip_value" == 1 ]]; then
+      skip_value=0
+      continue
+    fi
+    case "$arg" in
+      -C|-c|--git-dir|--work-tree|--namespace|--config-env)
+        skip_value=1 ;;
+      -*) ;;
+      *) git_command="$arg" ;;
+    esac
+  done
+  if [[ "$git_command" != push ]]; then
+    export GIT_NO_LAZY_FETCH=1
+  fi
+  case "$git_command:$subcommand" in
+    clone:*|fetch:*|pull:*|submodule:add|submodule:update|remote:update|maintenance:run)
+      # Let Git resolve local sources, rewrites, and remote names before gating.
+      export GIT_ALLOW_PROTOCOL=file
+      printf 'git: low-data protection blocks network history downloads; local file transport remains available\n' >&2
+      ;;
+  esac
+fi
+exec "$real_git" "$@"

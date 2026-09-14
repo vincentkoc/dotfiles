@@ -36,9 +36,10 @@ for ((depth=0; depth<128 && ancestor>1 && ancestor!=pane_pid; depth++)); do
     process_stat="${process_stat##*) }"
     read -r _ parent _ <<<"$process_stat"
   else
+    # Stream the frozen snapshot; a large here-string can block before read starts.
     while read -r candidate candidate_parent; do
       if [[ "$candidate" == "$ancestor" ]]; then parent="$candidate_parent"; break; fi
-    done <<<"$parents"
+    done < <(printf '%s\n' "$parents")
   fi
   [[ "$parent" =~ ^[0-9]+$ && "$parent" != "$ancestor" ]] || exit 0
   ancestor="$parent"

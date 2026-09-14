@@ -3,7 +3,19 @@
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
-wrapper_dir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+wrapper_source="${BASH_SOURCE[0]}"
+for ((links = 0; links < 40; links++)); do
+  [[ -L "$wrapper_source" ]] || break
+  wrapper_parent="$(cd -P -- "$(dirname -- "$wrapper_source")" && pwd)"
+  wrapper_link="$(readlink "$wrapper_source")"
+  case "$wrapper_link" in
+    /*) wrapper_source="$wrapper_link" ;;
+    *) wrapper_source="$wrapper_parent/$wrapper_link" ;;
+  esac
+done
+[[ ! -L "$wrapper_source" ]] || { printf '%s: entrypoint symlink loop\n' "${0##*/}" >&2; exit 126; }
+wrapper_dir="$(cd -P -- "$(dirname -- "$wrapper_source")" && pwd)"
 # shellcheck source=gh-support/route.sh
 source "$wrapper_dir/gh-support/route.sh"
+gh_low_data_guard "$@"
 gh_route "$@"

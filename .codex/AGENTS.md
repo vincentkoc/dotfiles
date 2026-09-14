@@ -248,54 +248,33 @@ Recovery mode rules:
 - Never independently index `~/GIT/_Synthetic` or a repository with `.git/gwt-synthetic.json`.
 - Treat `--cow-from` as an opt-in experiment. It requires an immutable seed and reports logical sharing, not reclaimed disk space.
 - Do not reuse dependencies without matching install inputs, runtime compatibility, and correct workspace-link targets.
-- A wrapper refusal does not authorize raw-Git clones, copied repositories, or automatic history hydration.
+- A wrapper refusal stops worktree creation. Diagnose and repair the same verified owner within the task's existing authorization, then let the wrapper recheck it. Do not bypass it with raw-Git creation, copied repositories, or ad hoc clones.
+- Task-required additive fetch or unshallow is not GC, repacking, pruning, or owner consolidation. Recheck current state; do not repeat completed repair or ask again for an already authorized step. Respect low-data protection and contention, suppress automatic maintenance/pruning, and preserve local branches, HEAD/index, patches, and registrations.
 - Before sharing dependencies, require a current frozen-install receipt and matching inputs, pnpm layout, Node ABI, OS and architecture. Unknown compatibility means code-only. Never install through a shared symlink.
 - Prefer scheduled commit-graph updates on explicitly enrolled healthy owners. Use `functions/gwt/maintenance.config`. Keep prefetch, packing, expiry and pruning disabled. Enrollment and scheduler activation are separate from installing GWT.
-- Git maintenance requires separate, exact authorization. Do not prune objects, clear locks, or consolidate active owners automatically.
+- GC, repacking, pruning, and owner consolidation require their own exact authorized scope; an additive fetch does not authorize them. Do not prune objects, clear locks, or consolidate active owners automatically.
 - See `functions/gwt/README.md` for options, policy format, and prototype limits.
 
-## Managed worktree finish
+## Managed worktree completion
 
-- For a new PR task using personal GWT, use `gwt new <branch> <base> --finish-managed`.
-  This explicitly enrolls only the newly created checkout. Never adopt existing,
-  shared, or repository-native PR worktrees into this lifecycle automatically.
-- `gwt finish --pr <full URL> [--worktree <exact path>]` is local job sign-off.
-  Use it only when implementation, review, requested merge work, and required
-  post-merge proof are done. If only the merge is pending, finish may record
-  intent; cleanup still waits for fresh GitHub `MERGED` proof of the exact head.
-  Pushed commits, green CI, an enabled auto-merge, a completed turn, handoff, or
-  closed-unmerged PR are not merge proof. Do not use Stop/SessionEnd as sign-off.
-- For stacks, a lower PR merge is not completion of an unfinished feature.
-  Keep its checkout claimed/pinned while upper work needs it. Use repeatable
-  `--wait-for <PR URL>` for dependent PRs; each pins its own head and must merge.
-  Explicitly refresh finish after dependent rebases. One checkout per layer
-  signs off independently. Never infer completion from `fix/` or `feat/` names.
-- Before resuming or directly entering an enrolled checkout, run
-  `gwt resume --worktree <path>`; `gwt cd` and existing-tree `gwt new` do this
-  automatically. Resume cancels prior finish. Claims never expire with age.
-  Preserve the runtime `CODEX_THREAD_ID` owner; outside Codex use a stable,
-  task-specific `GWT_OWNER_ID`, never a shared catch-all owner.
-- Record required recovery/dependency evidence with `gwt finish-pin --reason
-  <text>`; clear only your exact resolved pin with `gwt finish-unpin --reason
-  <text>`. Unknown recovery needs retain the checkout; do not erase snapshots,
-  histories, session data or artifacts to make cleanup eligible.
-- Finish parks only its calling shell. Once the long-lived owner and all its
-  processes have actually left, inspect known active/saved recovery references,
-  then run `gwt release --worktree <path> --recovery-reviewed` as that same owner.
-  A child-shell `cd` does not move its parent agent. Never release another owner
-  or kill another session for cleanup. Retain and report an active holder.
-- For these explicitly enrolled and signed-off jobs, the installed local
-  finish policy is standing authority for immediate non-force removal after
-  every owner releases and all merge/identity/dirty/ignored/recovery/storage/
-  holder checks pass. There is no minimum age or second approval for that exact
-  contract. This exception does not authorize broad maintenance, old-tree
-  cleanup, force, prune, branch deletion, or changes to other sessions.
-- The current holder backend is unqualified for release or removal. Keep
-  checkouts retained and use report-only inspection until a reviewed backend
-  proves full holder coverage. Installing these commands does not activate cleanup.
-- Use `gwt finish-status` and report-only `gwt finish-check` to inspect retained
-  reasons. End with `retained`, `blocked`, or verified `removed`, the exact path
-  and remaining action. Details and stacked examples: `functions/gwt/README.md`.
+- Enroll only a newly created personal worktree with
+  `gwt new <branch> <base> --finish-managed`. Never adopt existing, shared or
+  repository-native worktrees automatically.
+- `gwt finish --pr <full URL>` records explicit owner completion against the
+  exact PR head. Repeat `--wait-for <full URL>` for stack dependencies.
+  Pushed commits, green CI, auto-merge, closed-unmerged PRs, age and session
+  completion are not merge proof.
+- `gwt resume`, `gwt cd` and reuse through `gwt new` reactivate an enrolled
+  checkout and invalidate its prior completion proof. Claims do not expire.
+  Outside Codex, use a stable task-specific `GWT_OWNER_ID`.
+- Use `gwt finish-pin` and `gwt finish-unpin` for recovery evidence or dependent
+  work. Use `gwt finish-status` and report-only `gwt finish-check` to inspect
+  the result. `gwt finish-check --all --policy <path>` may filter that report
+  to reviewed repository identities; the policy grants no mutation authority.
+- Managed owner release and checkout removal are unavailable. Completion
+  tracking never invokes `git worktree remove`, never deletes branches and
+  never treats an unqualified holder scan as authority. Report the checkout as
+  `retained` and name any remaining completion blocker.
 
 ## Low Data Mode
 
