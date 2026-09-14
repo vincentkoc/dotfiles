@@ -28,6 +28,7 @@ create_test_repo() {
       bin/ghx \
       bin/linux-server-bootstrap \
       bin/mtt \
+      bin/task-runtime \
       bin/tt
   ) | (
     cd "$destination"
@@ -38,7 +39,8 @@ create_test_repo() {
   chmod 0775 \
     "$destination/bin/codex" \
     "$destination/bin/dotfiles-audit" \
-    "$destination/bin/linux-server-bootstrap"
+    "$destination/bin/linux-server-bootstrap" \
+    "$destination/bin/task-runtime"
 }
 
 fakebin="$temporary/fakebin"
@@ -203,6 +205,9 @@ HOME="$home" \
 [[ "$(mode "$test_repo/bin/codex")" == 755 ]]
 [[ "$(mode "$test_repo/bin/linux-server-bootstrap")" == 755 ]]
 [[ "$(mode "$test_repo/bin/dotfiles-audit")" == 755 ]]
+[[ "$(mode "$test_repo/bin/task-runtime")" == 755 ]]
+[[ "$(readlink "$home/.local/bin/task-runtime")" == "$test_repo/bin/task-runtime" ]]
+[[ -x "$home/.local/bin/task-runtime" ]]
 
 run_refresh_component_case() {
   local name="$1"
@@ -234,6 +239,36 @@ run_refresh_component_case() {
   [[ "$(mode "$case_repo/bin/linux-server-bootstrap")" == 755 ]]
   [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 755 ]]
 }
+
+admission_home="$temporary/admission-home"
+mkdir "$admission_home"
+run_refresh_component_case admission "$admission_home" "$admission_home/.local/share/pnpm"
+admission_bin="$temporary/admission-bin"
+mkdir "$admission_bin"
+printf '#!/bin/bash\nprintf "Linux\\n"\n' >"$admission_bin/uname"
+chmod +x "$admission_bin/uname"
+admission_native="$admission_home/.codex/packages/standalone/current/bin/codex"
+mkdir -p "$(dirname "$admission_native")"
+printf '#!/bin/bash\nprintf "native-fixture:%%s\\n" "$*"\n' >"$admission_native"
+chmod +x "$admission_native"
+for planned in 0 999999999999999999; do
+  admission_status=0
+  env -u CODEX_TASK_RUNTIME_BIN -u CODEX_WORK_PATH \
+    HOME="$admission_home" CODEX_HOME="$admission_home/.codex" \
+    PATH="$admission_bin:/usr/bin:/bin" GITHUB_PERSONAL_ACCESS_TOKEN=fixture \
+    "$admission_home/.local/bin/codex" --heavy-work --disk-reserve-gib 0 \
+    --planned-write-bytes "$planned" --version \
+    >"$temporary/admission.stdout" 2>"$temporary/admission.stderr" || admission_status=$?
+  if [[ "$planned" == 0 ]]; then
+    [[ "$admission_status" == 0 ]]
+    grep -Fxq 'native-fixture:--version' "$temporary/admission.stdout"
+    grep -Fq '"status":"admitted"' "$temporary/admission.stderr"
+  else
+    [[ "$admission_status" == 75 ]]
+    [[ ! -s "$temporary/admission.stdout" ]]
+    grep -Fq '"status":"persistence-degraded"' "$temporary/admission.stderr"
+  fi
+done
 
 direct_home="$temporary/direct-home"
 mkdir "$direct_home"
@@ -539,6 +574,12 @@ case "$DRIFT_CASE" in
   source-world-mode)
     chmod 0777 "$repo_root/bin/dotfiles-audit"
     ;;
+  task-runtime-source-missing)
+    rm "$repo_root/bin/task-runtime"
+    ;;
+  task-runtime-source-world-mode)
+    chmod 0777 "$repo_root/bin/task-runtime"
+    ;;
   mtt-source-missing)
     rm "$repo_root/bin/mtt"
     ;;
@@ -633,6 +674,7 @@ for case_name in \
   nested-symlink nested-type nested-owner world-mode repo-world-mode non-traversable \
   source-parent-symlink source-parent-file source-parent-owner source-parent-world-mode \
   source-world-mode source-symlink source-hardlink mtt-source-missing mtt-source-world-mode \
+  task-runtime-source-missing task-runtime-source-world-mode \
   chmod-failure-root chmod-failure-bin chmod-failure-first-source \
   pnpm-file pnpx-symlink pnpm-owner; do
   case_home="$temporary/drift-$case_name"
@@ -801,6 +843,12 @@ for case_name in \
       ;;
     source-world-mode)
       [[ "$(mode "$case_repo/bin/dotfiles-audit")" == 777 ]]
+      ;;
+    task-runtime-source-missing)
+      [[ ! -e "$case_repo/bin/task-runtime" ]]
+      ;;
+    task-runtime-source-world-mode)
+      [[ "$(mode "$case_repo/bin/task-runtime")" == 777 ]]
       ;;
     mtt-source-missing)
       [[ ! -e "$case_repo/bin/mtt" ]]
