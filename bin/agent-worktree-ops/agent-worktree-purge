@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -104,6 +105,11 @@ def list_quarantine_targets(quarantine_root: Path) -> list[Path]:
 
 
 def delete_path(path: Path) -> None:
+    # A configured quarantine root must not bypass an unresolved finish intent.
+    helper = Path(__file__).resolve().with_name("agent-worktree-finish")
+    subprocess.run([str(helper), "guard", "--worktree", str(path)], check=True,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=10)
     if path.is_symlink() or path.is_file():
         path.unlink(missing_ok=True)
         return

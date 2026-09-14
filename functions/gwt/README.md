@@ -306,69 +306,138 @@ private scheduler's physical-path write-denial sandbox.
 
 ## Managed worktree completion
 
-`gwt finish` records explicit completion for a newly enrolled personal
-worktree. It does not release or remove the checkout. Managed release/removal is
-unavailable, so every command and JSON summary reports the checkout as retained.
+`gwt finish` records completion. `gwt finish --release` additionally signs off
+this owner's future checkout use. Release is deliberate; generic Codex Stop is
+turn-scoped attention state and never creates completion or release.
 
 ```sh
-# Codex supplies CODEX_THREAD_ID. Outside Codex, use a stable task identity.
+# Codex supplies CODEX_THREAD_ID. Otherwise use a stable task identity.
 export GWT_OWNER_ID=payment-fix
 gwt new fix/payment origin/main --finish-managed
 
-# Record the exact PR head after implementation and requested review work.
+# Implementation is complete, but keep this owner's checkout claim.
 gwt finish --pr https://github.com/example/project/pull/123
-gwt finish-check
+
+# Once the checkout is no longer needed, sign off explicitly.
+gwt finish --pr https://github.com/example/project/pull/123 --release
 ```
 
-Only `--finish-managed` on a newly created worktree can enroll it. Existing,
-shared and repository-native worktrees are never adopted automatically.
-Enrollment records the canonical owner, Git common/admin directories,
-filesystem identities, local branch, repository and initial owner in a private
-SQLite ledger under `~/.local/state/gwt-finish`.
+Only newly created `--finish-managed` worktrees receive release-capable
+records. Creation uses a private checkout/admin directory and a native Git lock
+with a unique lifecycle marker. Existing report-only enrollments, shared and
+repository-native worktrees are never adopted. Existing ancestor permissions
+are not changed. The private SQLite ledger remains under
+`~/.local/state/gwt-finish`.
 
-`finish` verifies the full GitHub PR URL, repository, exact local head and final
-target branch. For a stack, repeat `--wait-for` for every dependent PR:
+A finished fix or feature is eligible as soon as every owner has completed and
+released, its exact PR head has merged into the final target, and native
+admission passes. There is no age delay. `gwt release` can sign off an already
+completed owner without repeating the PR arguments.
 
-```sh
-gwt finish --pr https://github.com/example/project/pull/123 \
-  --wait-for https://github.com/example/project/pull/124
-```
-
-Each owner must record completion against the same head and dependency set.
-Changing that proof resets earlier owner completion. `gwt resume`, `gwt cd` and
-reuse through `gwt new` reactivate an enrolled worktree and invalidate its prior
-proof. Claims never expire with age.
-
-Use owner-scoped pins for recovery evidence or dependent work:
+For stacked work, retain a pin while another task still needs this checkout.
+Repeat `--wait-for` for every dependent PR and name the final integration branch:
 
 ```sh
 gwt finish-pin --reason 'upper PR still uses this checkout'
+# Later, after that dependency no longer needs the checkout:
 gwt finish-unpin --reason 'upper PR still uses this checkout'
+gwt finish --pr https://github.com/example/project/pull/123 --target main \
+  --wait-for https://github.com/example/project/pull/124 --release
 ```
 
-`gwt finish-status` reads the recorded state. `gwt finish-check` refreshes local
-identity, clean-worktree and GitHub merge proof without removing anything:
+Every listed PR must target that final branch. Open or closed-unmerged PRs
+retain the checkout; a head or target change invalidates the recorded proof.
+Pushed commits, green CI and auto-merge are
+not merged proof. Every enrolled owner, including the creator, must sign off
+against the same head and dependency set. A proof change resets completion;
+`gwt resume`, `gwt cd`, reuse through `gwt new`, sparse-profile mutations or pin changes invalidate all
+releases. Storage guards also invalidate release when an older client resumes
+and restores an identical proof. Claims never expire.
+
+The wrapper parks only its own shell before release. It cannot move the parent
+Codex process. An alive parent outside the checkout/admin paths may remain
+alive; any actual CWD, FD, thread CWD, fileport or mapped reference inside those
+domains blocks removal. The pending consumer revisits departure and merges:
 
 ```sh
 gwt finish-status --all
-gwt finish-check --all
+gwt finish-check --all                   # Refresh proof only
+# Only after explicit host activation:
+gwt finish-check --all --apply --policy /absolute/private/policy.json
 ```
 
-An explicitly supplied `--policy <path>` is valid only with
-`gwt finish-check --all`. The owner-only policy uses schema
-`gwt-finish-policy.v1`, mode `report-only`, the stable host identity and one to
-eight exact canonical owner/root/common-directory identities. It filters which
-enrolled rows the report worker may inspect. It grants no apply, release or
-removal authority.
+The evaluator removes one exact checkout at a time with native non-force
+`git worktree remove`. It preserves local branches, siblings and external
+dependency targets. It never runs GC, prunes, or selects unenrolled worktrees.
+Ignored content is not assumed disposable: the initial supported exception is
+an exact root `node_modules` symlink to an unchanged owned external directory.
+Unknown files, real ignored directories, unresolved Git recovery data, changed
+bytes/index/modes, pins or locks retain the checkout.
+Checkout and admin files, directories and links receive no-follow xattr-name
+checks, including Darwin compression names. Only the OS-created
+`com.apple.provenance` tracking attribute is disposable; resource forks,
+quarantine and user attributes retain. Attribute values are never read.
 
-A successful check reports `completion-confirmed-checkout-retained`. Open,
-closed-unmerged, retargeted or rebased PRs remain visible blockers. Local head,
-registration, identity, Git-operation, dirty-worktree and recovery-pin changes
-also fail closed.
+Full checkouts and the default OpenClaw non-cone sparse profile are supported.
+The full v2/v3 index supplies omitted-file facts; present skipped files still
+receive byte and mode checks. Generated sparse/full admin configuration is bound
+at release. Unknown admin keys, conflict/intent-to-add/assume-valid entries,
+split or compressed sparse indexes and Git conversion filters retain.
+Normal rebases preserve old tips through the existing common branch reflog,
+whose bytes and identity must survive removal. Missing or expired recovery
+coverage retains. `AUTO_MERGE` is disposable only when it names the final HEAD
+tree. Editor-generated `COMMIT_EDITMSG` comments use Git's own cleanup and must
+reduce to the committed message; divergent drafts, unsupported cleanup modes
+and verbose/scissors residue retain.
+Reads are bounded to 8MiB per leaf, 512MiB of working bytes per pass and 131072
+filesystem entries including directories. Apply uses one release inventory and
+two admission inventories; it does not expand sparse checkouts or install tools.
 
-The shipped helper has no holder backend and no apply mode. `gwt release` and
-`gwt finish-check --apply` fail with an explicit retained-checkout result.
-Completion tracking never invokes `git worktree remove`, deletes branches,
-prunes metadata, reads agent transcripts, kills processes or changes the
-separate cleanup policy. Manual `gwt rm` keeps its existing independent
-contract; completion state grants it no authority.
+Before unlocking its unique native lock, the owner durably commits a removal
+intent. It then repeats admission and observes checkout, admin, registration,
+branch and sibling outcomes independently. Git can delete admin metadata even
+when checkout deletion fails. A crash, timeout, partial result or failed
+readback therefore remains `unknown`/`incomplete`, never an automatic retry.
+Updated manual removal, prune, cleaner and quarantine consumers respect the
+ledger hold even after registration disappears. Inspect and reconcile that
+exact intent read-only before proposing recovery.
+
+### Activation and proof limits
+
+Installing source does not activate deletion. Version-1 `report-only` policies
+and existing enrollments retain their contract. A version-2 policy has schema
+`gwt-finish-policy.v2`, mode `explicit-release`, the stable host identity and
+one to eight exact owner/root/common-directory identities. Its `qualification`
+binds the exact platform, native Git 2.55.0 path/hash/version, installed lifecycle
+source hashes, known process identities and a private activation receipt.
+
+The first native backend is Darwin arm64. An installed-platform positive
+control and reviewed consumer inventory must precede activation; Linux, WSL
+and Windows have no deletion qualification in this change. The private
+`scripts/install-gwt-finish.py` owner must gain a reviewed v2 activation route
+before use; its existing report-only scheduler must not be relabelled as ready.
+Reuse that scheduler for the bounded pending consumer, not another daemon.
+
+Activation must qualify every configured automatic cleanup route and actually
+running cleanup job, including loaded callbacks that can run without a new
+manual command. Updated consumers must protect pending intents. Unknown or old
+configured/running consumers block activation. Arbitrary historical scripts,
+raw Git/rm, privileged actors and noncooperative later writers remain outside
+this cooperative contract; unrelated idle interactive shells are not automatic
+cleanup consumers.
+
+The native observer covers every process whose real or effective UID matches
+the owner, plus explicitly known controllers/borrowers. Both checkout and admin
+need verified private access boundaries before unrelated foreign-UID processes
+can be excluded. Selected-process errors, churn, truncation or unknown coverage
+retain. Neither stock lsof output nor a successful own-PID fixture establishes
+global holder absence.
+Empty or deny-only ancestry ACLs preserve that boundary; allow/unknown ACLs
+retain. Normal macOS deny-delete home ACLs do not require a permission change.
+
+`holder-qualification` describes this contract without scanning processes and
+reports unqualified until activation evidence is supplied. `finish-status`
+never grants fresh removal authority: `automatic_removal_supported` identifies
+a new-format record, while `removal_available` remains false in the report.
+Always report the recorded `retained`, verified `removed`, or `unknown` checkout
+outcome and its reason.

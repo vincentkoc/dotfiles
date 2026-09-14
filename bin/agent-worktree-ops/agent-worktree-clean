@@ -2001,7 +2001,22 @@ def simplify_branch_label(worktree: Worktree) -> str:
     return "unknown"
 
 
+def finish_lifecycle_holds(path: str) -> bool:
+    # A durable intent survives native unlock and stale maintainer PID locks.
+    # This owner must never trim or remove any enrolled checkout independently.
+    helper = Path(__file__).resolve().with_name("agent-worktree-finish")
+    try:
+        result = subprocess.run([str(helper), "guard", "--worktree", path],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=10)
+        return result.returncode != 0
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+
+
 def trim_worktree_artifacts(worktree_path: str, shared_node_modules_source: str) -> bool:
+    if finish_lifecycle_holds(worktree_path):
+        return False
     node_modules_path = os.path.join(worktree_path, "node_modules")
     dist_path = os.path.join(worktree_path, "dist")
     dist_runtime_path = os.path.join(worktree_path, "dist-runtime")
@@ -2146,6 +2161,8 @@ def revalidate_candidate(
     session_limit: int,
     scan_limit: int,
 ) -> Optional[str]:
+    if finish_lifecycle_holds(expected.path):
+        return "finish-lifecycle-hold"
     inventory = build_inventory(repo_root, codex_home)
     current = next(
         (worktree for worktree in inventory.worktrees if worktree.path == expected.path),

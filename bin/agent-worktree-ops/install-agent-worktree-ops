@@ -50,6 +50,7 @@ install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-maintain" "$
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-purge" "$RUNTIME_DIR/agent-worktree-purge"
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/retire-agent-worktree-scheduler" "$RUNTIME_DIR/retire-agent-worktree-scheduler"
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/worktree-storage-guard" "$RUNTIME_DIR/worktree-storage-guard"
+install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/gwt_finish_safety.py" "$RUNTIME_DIR/gwt_finish_safety.py"
 install_atomic "$DOTFILES_DIR/bin/agent-worktree-ops/agent-worktree-finish" "$RUNTIME_DIR/agent-worktree-finish"
 
 printf 'agent-worktree-ops runtime installed; scheduler state unchanged\n'
