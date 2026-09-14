@@ -56,3 +56,7 @@ if [ -d "/opt/homebrew/opt/openblas" ]; then
   export PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
   export CMAKE_PREFIX_PATH="/opt/homebrew/opt/openblas${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 fi
+
+if [ -d "$HOME/.lmstudio/bin" ]; then
+  export PATH="$PATH:$HOME/.lmstudio/bin"
+fi
