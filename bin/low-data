@@ -1,0 +1,103 @@
+#!/bin/bash
+set -u
+
+mode_file="${XDG_CONFIG_HOME:-$HOME/.config}/low-data/mode"
+detector="$HOME/.local/libexec/low-data/network-cost"
+mode=auto
+reason=
+
+read_mode() {
+  local extra=""
+  if [[ -e "$mode_file" || -L "$mode_file" ]]; then
+    if [[ ! -f "$mode_file" || ! -r "$mode_file" ]]; then
+      mode=invalid
+    else
+      {
+        IFS= read -r mode || [[ -n "$mode" ]] || mode=invalid
+        if IFS= read -r extra || [[ -n "$extra" ]]; then mode=invalid; fi
+      } < "$mode_file"
+    fi
+  fi
+}
+
+is_active() {
+  # Publishing the bin directory must not enroll another machine. Either local
+  # enrollment path, including a dangling link, retains the fail-closed policy.
+  if [[ ! -e "$mode_file" && ! -L "$mode_file" &&
+        ! -e "$detector" && ! -L "$detector" ]]; then
+    reason="not enrolled"
+    return 1
+  fi
+  read_mode || mode=invalid
+  if [[ "${LOW_DATA_ALLOW_NETWORK:-}" == 1 ]]; then
+    reason="explicit per-command override"
+    return 1
+  fi
+  case "$mode" in
+    on) reason="forced on"; return 0 ;;
+    off) reason="explicitly disabled"; return 1 ;;
+    auto)
+      if [[ -x "$detector" ]]; then
+        reason="$("$detector" 2>/dev/null)" || {
+          reason="network status unavailable"
+          return 0
+        }
+        if [[ "$reason" == unmetered ]]; then
+          return 1
+        fi
+        reason="${reason:-network status unavailable}"
+      else
+        reason="native detector unavailable"
+      fi
+      return 0
+      ;;
+    *) reason="invalid mode; protected"; return 0 ;;
+  esac
+}
+
+case "${1:-status}" in
+  on|off|auto)
+    [[ $# == 1 ]] || exit 2
+    mkdir -p "${mode_file%/*}" || exit 1
+    (umask 077; printf '%s\n' "$1" > "$mode_file") || exit 1
+    exec "$0" status
+    ;;
+  active)
+    [[ $# == 1 ]] || exit 2
+    is_active
+    ;;
+  github-check)
+    shift
+    if is_active; then
+      script="${BASH_SOURCE[0]}"
+      for ((links = 0; links < 40; links++)); do
+        [[ -L "$script" ]] || break
+        directory="$(cd -P -- "$(dirname -- "$script")" && pwd)" || exit 126
+        link="$(readlink "$script")" || exit 126
+        case "$link" in /*) script="$link" ;; *) script="$directory/$link" ;; esac
+      done
+      [[ ! -L "$script" ]] || { printf 'low-data: entrypoint symlink loop\n' >&2; exit 126; }
+      script_dir="$(cd -P -- "$(dirname -- "$script")" && pwd)" || exit 126
+      [[ -r "$script_dir/low-data-support/github-guard.sh" ]] || {
+        printf 'low-data: enrolled guard support is unavailable\n' >&2
+        exit 126
+      }
+      # shellcheck source=bin/low-data-support/github-guard.sh
+      source "$script_dir/low-data-support/github-guard.sh"
+      low_data_github_check "$@"
+    fi
+    ;;
+  status)
+    [[ $# -le 1 ]] || exit 2
+    if is_active; then
+      printf 'low-data: protected (mode=%s; %s)\n' "$mode" "$reason"
+    else
+      printf 'low-data: unprotected (mode=%s; %s)\n' "$mode" "$reason"
+    fi
+    ;;
+  *)
+    printf 'usage: low-data {on|auto|off|status|active}\n' >&2
+    printf 'one explicitly approved command: LOW_DATA_ALLOW_NETWORK=1 command ...\n' >&2
+    exit 2
+    ;;
+esac
