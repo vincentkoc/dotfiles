@@ -36,6 +36,10 @@ function New-ProfileFixture(
     $originalSha256 = $null
     if ($Existed) {
         Write-TestFile $backupPath $Original
+        # A distinct protected ACL proves rollback restores metadata, not just bytes.
+        $backupAcl = Get-Acl -LiteralPath $backupPath
+        $backupAcl.SetAccessRuleProtection($true, $true)
+        Set-Acl -LiteralPath $backupPath -AclObject $backupAcl
         $originalSha256 = Get-Sha256 $backupPath
     }
     Write-TestFile $profilePath $Applied
@@ -74,7 +78,13 @@ function Invoke-ExpectedRollbackFailure([string]$Pattern) {
 
 function Test-IsAdministrator { $true }
 function Resolve-ReceiptPath { $script:testReceiptPath }
+$script:realPackageVersion = ${function:Get-WingetPackageVersion}
+$script:useRealPackageVersion = $false
+$script:wingetQueryResult = $null
 function Get-WingetPackageVersion([string]$Id) {
+    if ($script:useRealPackageVersion) {
+        return & $script:realPackageVersion $Id
+    }
     $script:packageQueries.Add($Id) | Out-Null
     if ($script:packageVersions.ContainsKey($Id)) {
         return $script:packageVersions[$Id]
@@ -91,6 +101,9 @@ function Copy-Item([string]$LiteralPath, [string]$Destination, [switch]$Force) {
     }
 }
 function Invoke-Winget([string[]]$Arguments) {
+    if ($Arguments[0] -eq 'list') {
+        return $script:wingetQueryResult
+    }
     $script:wingetMutations.Add(($Arguments -join ' ')) | Out-Null
     if ($Arguments[0] -eq 'uninstall') {
         $id = $Arguments[[Array]::IndexOf($Arguments, '--id') + 1]
@@ -203,6 +216,75 @@ try {
     Assert-Equal '2.0' $script:packageVersions['Fixture.Package'] 'Concurrent package upgrade was not retained'
     Assert-Equal 0 $script:wingetMutations.Count 'Package changed after preflight reached Winget'
     Assert-True (!(Test-Path -LiteralPath (Join-Path $caseRoot 'rollback.json'))) 'Partial rollback wrote a success receipt'
+
+    foreach ($linked in @('profile', 'backup')) {
+        $caseRoot = Join-Path $testRoot "linked-$linked"
+        $existing = New-ProfileFixture $caseRoot 'existing' $true 'original' 'applied'
+        $script:testReceiptPath = New-TestReceipt $caseRoot @($existing)
+        $path = if ($linked -eq 'profile') { $existing.Path } else { $existing.BackupPath }
+        $foreignPath = Join-Path $caseRoot 'foreign.ps1'
+        Move-Item -LiteralPath $path -Destination $foreignPath
+        New-Item -ItemType SymbolicLink -Path $path -Target $foreignPath | Out-Null
+        $foreignHash = Get-Sha256 $foreignPath
+        Invoke-ExpectedRollbackFailure '*Refusing linked or non-file profile input*'
+        Assert-Equal $foreignHash (Get-Sha256 $foreignPath) 'Linked rollback target was overwritten'
+        Assert-True ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) 'Rollback removed a link'
+        if ($linked -eq 'profile') {
+            try {
+                Install-ManagedProfile $path 'fixture-source'
+                throw 'Apply unexpectedly accepted linked profile'
+            } catch {
+                if ($_.Exception.Message -notlike '*Refusing linked or non-file profile input*') { throw }
+            }
+        }
+    }
+
+    $script:useRealPackageVersion = $true
+    foreach ($query in @(
+        [pscustomobject]@{ ExitCode = 1; Output = @('source unavailable'); Pattern = '*Winget list failed*' },
+        [pscustomobject]@{ ExitCode = 0; Output = @('unrecognized table'); Pattern = '*did not report one installed version*' },
+        [pscustomobject]@{ ExitCode = 0; Output = @('Fixture Fixture.Package 1.0', 'Fixture Fixture.Package 2.0'); Pattern = '*did not report one installed version*' }
+    )) {
+        $caseRoot = Join-Path $testRoot ('query-failure-' + [guid]::NewGuid().ToString('N'))
+        $existing = New-ProfileFixture $caseRoot 'existing' $true 'original' 'applied'
+        $script:testReceiptPath = New-TestReceipt $caseRoot @($existing) @(
+            [pscustomobject]@{ Id = 'Fixture.Package'; BeforeVersion = $null; TargetVersion = '1.0' }
+        )
+        $script:wingetQueryResult = $query
+        $script:wingetMutations.Clear()
+        Invoke-ExpectedRollbackFailure $query.Pattern
+        Assert-Equal 'applied' ([IO.File]::ReadAllText($existing.Path)) 'Unknown package state mutated a profile'
+        Assert-Equal 0 $script:wingetMutations.Count 'Unknown package state reached mutation'
+    }
+    $script:wingetQueryResult = [pscustomobject]@{ ExitCode = -1978335212; Output = @('No installed package found') }
+    Assert-Equal $null (Get-WingetPackageVersion 'Fixture.Package') 'Explicit absence was not recognized'
+    $result = Invoke-Rollback
+    Assert-Equal 0 $script:wingetMutations.Count 'An already absent package was changed'
+    Assert-True (Test-Path -LiteralPath $result.Receipt) 'Confirmed package absence did not finish rollback'
+    $script:wingetQueryResult = [pscustomobject]@{ ExitCode = 0; Output = @('Name Id Version', 'Fixture Fixture.Package 1.0 winget') }
+    Assert-Equal '1.0' (Get-WingetPackageVersion 'Fixture.Package') 'Installed package table did not parse'
+    $script:useRealPackageVersion = $false
+
+    $caseRoot = Join-Path $testRoot 'already-restored-package'
+    $existing = New-ProfileFixture $caseRoot 'existing' $true 'original' 'applied'
+    $script:testReceiptPath = New-TestReceipt $caseRoot @($existing) @(
+        [pscustomobject]@{ Id = 'Fixture.Package'; BeforeVersion = '0.9'; TargetVersion = '1.0' }
+    )
+    $script:packageVersions = @{ 'Fixture.Package' = '0.9' }
+    $script:wingetMutations.Clear()
+    Invoke-Rollback | Out-Null
+    Assert-Equal 0 $script:wingetMutations.Count 'Original package version was unnecessarily changed'
+
+    $caseRoot = Join-Path $testRoot 'restore-package'
+    $existing = New-ProfileFixture $caseRoot 'existing' $true 'original' 'applied'
+    $script:testReceiptPath = New-TestReceipt $caseRoot @($existing) @(
+        [pscustomobject]@{ Id = 'Fixture.Package'; BeforeVersion = '0.9'; TargetVersion = '1.0' }
+    )
+    $script:packageVersions = @{ 'Fixture.Package' = '1.0' }
+    $script:wingetMutations.Clear()
+    Invoke-Rollback | Out-Null
+    Assert-Equal 1 $script:wingetMutations.Count 'Applied package version was not restored'
+    Assert-True ($script:wingetMutations[0] -like 'install --id Fixture.Package --exact --version 0.9*') 'Unexpected package restore command'
 
     $caseRoot = Join-Path $testRoot 'success'
     $existing = New-ProfileFixture $caseRoot 'existing' $true 'original' 'applied'

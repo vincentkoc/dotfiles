@@ -57,15 +57,25 @@ function Get-WingetPackageVersion([string]$Id) {
         'list', '--id', $Id, '--exact', '--source', 'winget',
         '--accept-source-agreements', '--disable-interactivity'
     )
-    if ($result.ExitCode -ne 0) {
+    # WinGet's List workflow reports absence with this specific HRESULT only.
+    # APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND = 0x8A150014.
+    if ($result.ExitCode -eq -1978335212) {
         return $null
     }
-    foreach ($line in $result.Output) {
-        if ($line -match ('\s' + [regex]::Escape($Id) + '\s+(\S+)')) {
-            return $Matches[1]
-        }
+    if ($result.ExitCode -ne 0) {
+        throw "Winget list failed for ${Id}: exit $($result.ExitCode)"
     }
-    $null
+    $versions = @(
+        foreach ($line in $result.Output) {
+            if ($line -match ('\s' + [regex]::Escape($Id) + '\s+(\S+)')) {
+                $Matches[1]
+            }
+        }
+    )
+    if ($versions.Count -ne 1) {
+        throw "Winget list did not report one installed version for $Id"
+    }
+    $versions[0]
 }
 
 function Test-WingetArm64Manifest($Package) {
@@ -115,6 +125,13 @@ $markerEnd
     $block + "`r`n"
 }
 
+function Assert-PlainProfileFile([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing linked or non-file profile input: $Path"
+    }
+}
+
 function Save-ProfileState([string]$Path, [string]$BackupRoot) {
     $exists = Test-Path -LiteralPath $Path -PathType Leaf
     $safeName = ($Path -replace '[:\\]', '_').TrimStart('_')
@@ -128,6 +145,7 @@ function Save-ProfileState([string]$Path, [string]$BackupRoot) {
         AppliedSha256 = $null
     }
     if ($exists) {
+        Assert-PlainProfileFile $Path
         Copy-Item -LiteralPath $Path -Destination $backupPath -Force
         $state.BackupPath = $backupPath
         $state.Sha256 = Get-Sha256 $Path
@@ -140,6 +158,7 @@ function Install-ManagedProfile([string]$Path, [string]$Source) {
     $directory = Split-Path -Parent $Path
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $current = if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        Assert-PlainProfileFile $Path
         [IO.File]::ReadAllText($Path)
     } else {
         ''
@@ -433,6 +452,7 @@ function Test-RollbackProfiles($Profiles) {
         if (!(Test-Path -LiteralPath $profile.Path -PathType Leaf)) {
             throw "Refusing to rollback missing profile: $($profile.Path)"
         }
+        Assert-PlainProfileFile $profile.Path
         if (!$profile.AppliedSha256 -or (Get-Sha256 $profile.Path) -ne $profile.AppliedSha256) {
             throw "Refusing to rollback changed profile: $($profile.Path)"
         }
@@ -440,6 +460,7 @@ function Test-RollbackProfiles($Profiles) {
             if (!$profile.BackupPath -or !(Test-Path -LiteralPath $profile.BackupPath -PathType Leaf)) {
                 throw "Profile backup missing: $($profile.Path)"
             }
+            Assert-PlainProfileFile $profile.BackupPath
             if (!$profile.Sha256 -or (Get-Sha256 $profile.BackupPath) -ne $profile.Sha256) {
                 throw "Profile backup changed: $($profile.Path)"
             }

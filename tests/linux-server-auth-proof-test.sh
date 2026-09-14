@@ -187,28 +187,28 @@ if [[ -n "$sshd_test_bin" ]]; then
   render_auth_proof_dropin "$admin_user" "$temporary/sshd-effective.conf"
   printf 'ExposeAuthInfo no\n' >>"$temporary/sshd-effective.conf"
   [[ "$(
-    "$sshd_test_bin" -T -f "$temporary/sshd-effective.conf" \
+    "$sshd_test_bin" -T -h "$temporary/designated-key" -f "$temporary/sshd-effective.conf" \
       -C "user=$admin_user,host=localhost,addr=127.0.0.1" |
       awk '$1=="exposeauthinfo"{print $2}'
   )" == yes ]]
   [[ "$(
-    "$sshd_test_bin" -T -f "$temporary/sshd-effective.conf" \
+    "$sshd_test_bin" -T -h "$temporary/designated-key" -f "$temporary/sshd-effective.conf" \
       -C "user=other,host=localhost,addr=127.0.0.1" |
       awk '$1=="exposeauthinfo"{print $2}'
   )" == no ]]
   printf 'ExposeAuthInfo no\n' >"$temporary/sshd-final.conf"
   [[ "$(
-    "$sshd_test_bin" -T -f "$temporary/sshd-final.conf" \
+    "$sshd_test_bin" -T -h "$temporary/designated-key" -f "$temporary/sshd-final.conf" \
       -C "user=$admin_user,host=localhost,addr=127.0.0.1" |
       awk '$1=="exposeauthinfo"{print $2}'
   )" == no ]]
   render_lockdown_dropin "$temporary/sshd-lockdown.conf"
   real_admin_config="$(
-    "$sshd_test_bin" -T -f "$temporary/sshd-lockdown.conf" \
+    "$sshd_test_bin" -T -h "$temporary/designated-key" -f "$temporary/sshd-lockdown.conf" \
       -C "user=$admin_user,host=localhost,addr=127.0.0.1"
   )"
   real_root_config="$(
-    "$sshd_test_bin" -T -f "$temporary/sshd-lockdown.conf" \
+    "$sshd_test_bin" -T -h "$temporary/designated-key" -f "$temporary/sshd-lockdown.conf" \
       -C "user=root,host=localhost,addr=127.0.0.1"
   )"
   for real_config in "$real_admin_config" "$real_root_config"; do
