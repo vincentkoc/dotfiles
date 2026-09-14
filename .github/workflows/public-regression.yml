@@ -8,9 +8,13 @@ on:
       - ".exports"
       - "bin/linux-server-bootstrap"
       - "bin/agent-worktree-ops/**"
+      - "bin/gwt-storage"
       - "bin/tt"
       - "bin/tt-codex-snapshot-writer"
       - "functions/system/deepclean.zsh"
+      - "functions/gwt/**"
+      - "tests/gwt-storage-test.py"
+      - "tests/gwt-bootstrap-test.zsh"
       - "tests/deepclean-test.sh"
       - "tests/deepclean-test.zsh"
       - "tests/install-foundations-test.sh"
@@ -45,6 +49,8 @@ jobs:
         run: |
           bash tests/install-foundations-test.sh
           bash tests/agent-worktree-maintain-test.sh
+          python3 tests/gwt-storage-test.py
+          zsh tests/gwt-bootstrap-test.zsh
           bash tests/deepclean-test.sh
           bash tests/linux-server-auth-proof-test.sh
           python3 tests/tt-safety-test.py

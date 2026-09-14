@@ -400,10 +400,11 @@ def wanted_lock_dependency_document(path):
         if not lock_document_has_content(raw):
             raise ValueError("checkout lockfile has no dependency document")
         return raw
+    # pnpm requires LF on both sides of the separator; splitlines also splits bare CR.
     if (
         len(markers) != 2
         or markers[0] != (0, b"---\n")
-        or markers[1][1] != b"---\n"
+        or raw[markers[1][0] - 1:markers[1][0] + 4] != b"\n---\n"
     ):
         raise ValueError("checkout lockfile has an invalid document envelope")
     second = markers[1][0]

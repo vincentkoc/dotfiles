@@ -264,6 +264,8 @@ Dependency compatibility:
   lock byte-for-byte with the normalized dependency document. The complete
   wanted lock, including its environment document, remains hashed into the
   receipt and must also match the consumer checkout.
+  Document markers must match pnpm's exact LF-delimited format after
+  normalization; malformed or extra documents are refused.
 - Consumer manifests, workspace configuration, patches and lockfile must match.
   Missing sparse inputs, absent receipts, changed metadata or unknown layouts
   leave new worktrees code-only. An explicit source fails and retains the new
