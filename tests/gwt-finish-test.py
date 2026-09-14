@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import contextlib
+import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import io
@@ -461,7 +462,8 @@ class WrapperTests(unittest.TestCase):
             "schema": FINISH.HOLDER_SCHEMA,
             "backend": "darwin-libproc-cooperative.v1",
             "qualified": False,
-            "reason": "installed-platform-control-and-activation-receipt-required",
+            "reason": "holder-mapping-coverage-unqualified",
+            "mapping_coverage": "unqualified",
             "platform": FINISH.safety().platform_key(),
         })
         ledger.assert_not_called()
@@ -578,7 +580,9 @@ class ReleaseTests(unittest.TestCase):
         (self.home / ".codex").mkdir(mode=0o700)
         self.native = mock.patch.object(FINISH.safety(), "Darwin")
         self.observer = self.native.start().return_value
-        self.observer.observe.return_value = {"holders": [], "processes": 1}
+        # Complete coverage is synthetic lifecycle proof, never native qualification.
+        self.observer.observe.return_value = {
+            "holders": [], "processes": 1, "mapping_coverage": "complete"}
         self.boundary = mock.patch.object(FINISH.safety(), "access_boundary", return_value=[])
         self.boundary.start()
         self.policy = mock.patch.object(FINISH, "qualified_policy", return_value={
@@ -620,11 +624,75 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.call("check", "--apply")[1][0]["checkout"], "removed")
 
     def test_actual_parent_holder_blocks_but_alive_outside_parent_need_not_exit(self):
-        self.observer.observe.return_value = {"holders": [{"kind": "cwd"}], "processes": 2}
+        self.observer.observe.return_value = {
+            "holders": [{"kind": "cwd"}], "processes": 2, "mapping_coverage": "unqualified"}
         self.assertEqual(self.finish("--release")[1][0]["reason"], "pending-departure")
         self.assertTrue(self.wt.exists())
-        self.observer.observe.return_value = {"holders": [], "processes": 2}
+        self.observer.observe.return_value = {
+            "holders": [], "processes": 2, "mapping_coverage": "complete"}
         self.assertEqual(self.call("check", "--apply")[1][0]["checkout"], "removed")
+
+    def test_external_qualification_cannot_override_incomplete_mapping_observation(self):
+        sources = {name: hashlib.sha256((TOOL.parent / name).read_bytes()).hexdigest()
+                   for name in ("agent-worktree-finish", "gwt_finish_safety.py", "agent-worktree-clean",
+                                "agent-worktree-maintain", "agent-worktree-purge", "worktree-storage-guard")}
+        native = str(Path(shutil.which("git")).resolve())
+        platform = FINISH.safety().platform_key()
+        receipt = self.base / "synthetic-activation.json"
+        # This deliberately asserts external completeness. It is fixture data,
+        # not a native control; only the reader can attest actual coverage.
+        receipt.write_text(json.dumps({
+            "schema": "gwt-finish-activation.v2", "host": "fixture-host",
+            "sources": sources, "platform": platform, "configured_consumers_reviewed": True,
+            "old_loaded_consumers": [], "native_control_passed": True, "mapping_coverage": "complete"}))
+        receipt.chmod(0o600)
+        qualification = {
+            "platform": platform, "sources": sources, "known_processes": [],
+            "git": {"path": native, "sha256": hashlib.sha256(Path(native).read_bytes()).hexdigest(),
+                    "version": "git version 2.55.0"},
+            "activation_receipt": {"path": str(receipt), "sha256": hashlib.sha256(receipt.read_bytes()).hexdigest()}}
+        recorded = json.loads(self.row()["identity"])
+        policy = self.base / "synthetic-policy.json"
+        policy.write_text(json.dumps({
+            "schema": FINISH.APPLY_POLICY_SCHEMA, "host": "fixture-host", "mode": "explicit-release",
+            "repositories": [{key: recorded[key] for key in ("owner", "root", "common_id")}],
+            "qualification": qualification}))
+        policy.chmod(0o600)
+        real_run, real_supervise = FINISH.run, FINISH.safety().supervise
+        def qualified_version(command, **kwargs):
+            if command == [native, "--version"]:
+                return subprocess.CompletedProcess(command, 0, b"git version 2.55.0\n", b"")
+            return real_run(command, **kwargs)
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and "remove" in command,
+                             "incomplete native coverage reached removal")
+            return real_supervise(command, **kwargs)
+        self.policy.stop()
+        try:
+            with mock.patch.object(FINISH, "host_key", return_value="fixture-host"), \
+                    mock.patch.object(FINISH, "run", side_effect=qualified_version), \
+                    mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+                args = FINISH.parser().parse_args(["finish", "--policy", str(policy)])
+                self.assertEqual(FINISH.qualified_policy(args, self.row()), qualification)
+                for observation, reason in (
+                        ({"holders": []}, "holder-mapping-coverage-unqualified"),
+                        ({"holders": [], "mapping_coverage": "unqualified"}, "holder-mapping-coverage-unqualified"),
+                        ({"holders": [], "mapping_coverage": True}, "holder-mapping-coverage-unqualified"),
+                        ({"holders": [{"kind": "fd"}], "mapping_coverage": "unqualified"}, "pending-departure")):
+                    with self.subTest(observation=observation):
+                        self.observer.observe.return_value = observation
+                        result = self.finish("--release", "--policy", str(policy))[1][0]
+                        self.assertEqual(result["reason"], reason, result)
+                        self.assertEqual(result["checkout"], "retained")
+                        self.assertTrue(self.wt.exists())
+                        self.assertTrue((self.admin / "locked").exists())
+                        with FINISH.ledger(self.state) as db:
+                            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                            self.assertEqual(item["state"], "enrolled")
+                            self.assertIsNone(item["intent"])
+                            self.assertIsNone(item["result"])
+        finally:
+            self.policy.start()
 
     def test_every_owner_release_and_creator_claim_are_preserved(self):
         self.call("resume", "--owner", "owner-2")
@@ -782,7 +850,7 @@ class ReleaseTests(unittest.TestCase):
             count += 1
             if count == 1:
                 (self.wt / "late-recovery").write_text("retain")
-            return {"holders": []}
+            return {"holders": [], "mapping_coverage": "complete"}
         self.observer.observe.side_effect = observe
         result = self.finish("--release")[1][0]
         self.assertEqual(result["checkout"], "unknown")

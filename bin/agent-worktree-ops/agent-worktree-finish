@@ -809,6 +809,9 @@ def deletion_admission(row, item, qualification, until):
         [snap["path"], snap["gitdir"]], inodes, qualification["known_processes"])
     if observed["holders"]:
         raise Retain("pending-departure")
+    # Qualification files cannot supply missing evidence from the native reader.
+    if observed.get("mapping_coverage") != "complete":
+        raise Retain("holder-mapping-coverage-unqualified")
     return {"snapshot": snap, "boundaries": boundaries, "contents": contents,
             "admin": admin, "holders": observed, "branch_reflog": reflog}
 
@@ -1077,7 +1080,8 @@ def main(argv=None):
             "schema": HOLDER_SCHEMA,
             "backend": "darwin-libproc-cooperative.v1",
             "qualified": False,
-            "reason": "installed-platform-control-and-activation-receipt-required",
+            "reason": "holder-mapping-coverage-unqualified",
+            "mapping_coverage": "unqualified",
             "platform": safety().platform_key(),
         }, sort_keys=True))
         return 0

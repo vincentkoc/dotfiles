@@ -13,8 +13,10 @@ Bins in this folder:
     consumer revisits merges and departure only after host-specific activation
   - new private, natively locked enrollments use durable generation/release/
     removal-intent records; old report-only entries cannot be adopted
-  - `gwt_finish_safety.py` owns bounded byte/index admission, qualified Darwin
+  - `gwt_finish_safety.py` owns bounded byte/index admission, observed Darwin
     process references and supervised native non-force Git removal
+  - automatic Mac deletion remains blocked by unqualified mapping coverage;
+    an external policy or activation receipt cannot override that native hold
   - never expires claims, adopts old worktrees, deletes branches or prunes
     metadata; unknown or partial removal requires read-only reconciliation
   - see [the completion guide](../../functions/gwt/README.md)

@@ -411,9 +411,12 @@ one to eight exact owner/root/common-directory identities. Its `qualification`
 binds the exact platform, native Git 2.55.0 path/hash/version, installed lifecycle
 source hashes, known process identities and a private activation receipt.
 
-The first native backend is Darwin arm64. An installed-platform positive
-control and reviewed consumer inventory must precede activation; Linux, WSL
-and Windows have no deletion qualification in this change. The private
+The current Darwin arm64 backend reports `mapping_coverage: unqualified`.
+Public libproc APIs omit submap vnode details and can hide vnode acquisition
+failures. Automatic Mac deletion therefore remains blocked, even with a valid
+external qualification or activation receipt. Completion and explicit release
+still record their facts.
+Linux, WSL and Windows have no deletion qualification in this change. The private
 `scripts/install-gwt-finish.py` owner must gain a reviewed v2 activation route
 before use; its existing report-only scheduler must not be relabelled as ready.
 Reuse that scheduler for the bounded pending consumer, not another daemon.
@@ -435,8 +438,8 @@ global holder absence.
 Empty or deny-only ancestry ACLs preserve that boundary; allow/unknown ACLs
 retain. Normal macOS deny-delete home ACLs do not require a permission change.
 
-`holder-qualification` describes this contract without scanning processes and
-reports unqualified until activation evidence is supplied. `finish-status`
+`holder-qualification` describes this mapping-coverage hold without scanning
+processes. External policy cannot override the native observation. `finish-status`
 never grants fresh removal authority: `automatic_removal_supported` identifies
 a new-format record, while `removal_available` remains false in the report.
 Always report the recorded `retained`, verified `removed`, or `unknown` checkout

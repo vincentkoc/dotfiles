@@ -216,11 +216,12 @@ class ObserverTests(unittest.TestCase):
         result.references = mock.Mock(return_value=[])
         return result
 
-    def test_outside_alive_process_can_clear_without_exit(self):
+    def test_outside_alive_process_observed_without_exit_but_mapping_unqualified(self):
         observer = self.observer()
         proof = observer.observe(["/fixture/task", "/fixture/admin"], {(1, 2)})
         self.assertEqual(proof["holders"], [])
         self.assertEqual(proof["processes"], 1)
+        self.assertEqual(proof["mapping_coverage"], "unqualified")
 
     def test_checkout_and_admin_references_block_by_path_or_inode(self):
         for kind, path, inode in (("cwd", b"/fixture/task", (3, 4)),
@@ -233,8 +234,9 @@ class ObserverTests(unittest.TestCase):
                 vnode.path = path
                 vnode.stat.dev, vnode.stat.ino = inode
                 observer.references.return_value = [(kind, vnode)]
-                self.assertEqual(observer.observe(["/fixture/task", "/fixture/admin"], {(1, 2)})[
-                    "holders"][0]["kind"], kind)
+                proof = observer.observe(["/fixture/task", "/fixture/admin"], {(1, 2)})
+                self.assertEqual(proof["holders"][0]["kind"], kind)
+                self.assertEqual(proof["mapping_coverage"], "unqualified")
 
     def test_selected_visibility_error_never_becomes_absence(self):
         observer = self.observer()
@@ -263,6 +265,124 @@ class ObserverTests(unittest.TestCase):
         observer.call.return_value = (3 * ctypes.sizeof(NATIVE.FD), 0)
         with self.assertRaisesRegex(NATIVE.Retain, "list-unknown"):
             observer.array(123, 1, NATIVE.FD, 2)
+
+
+class RegionCursorTests(unittest.TestCase):
+    def references(self, regions):
+        observer = object.__new__(NATIVE.Darwin)
+        observer.lib = mock.Mock()
+        observer.array = mock.Mock(return_value=[])
+        rows = iter(regions)
+        def info(pid, flavor, kind, address=0, *, end=False):
+            if flavor == 9:
+                return NATIVE.CWD()
+            self.assertEqual((pid, flavor, kind, end), (123, 8, NATIVE.Region, True))
+            return next(rows)
+        observer.info = mock.Mock(side_effect=info)
+        return observer, NATIVE.Darwin.references(observer, 123, NATIVE.BSD())
+
+    def region(self, address, size, flags=0):
+        value = NATIVE.Region()
+        value.address, value.size, value.flags = address, size, flags
+        return value
+
+    def empty_guard(self, address):
+        value = self.region(address, 0)
+        value.inheritance = 2
+        value.counters[2], value.counters[9] = 31, 3
+        return value
+
+    def test_forward_empty_guard_requeries_exact_address_and_observes_mapping(self):
+        mapped = self.region(0x5000, 0x1000)
+        mapped.vnode.path = b"/fixture/task/mapped"
+        mapped.vnode.stat.dev, mapped.vnode.stat.ino = 7, 42
+        observer, references = self.references([
+            self.region(0x1000, 0x1000), self.empty_guard(0x5000), mapped, None])
+        observed = list(references)
+        self.assertEqual([call.args[3] for call in observer.info.call_args_list if call.args[1] == 8],
+                         [0, 0x2000, 0x5000, 0x6000])
+        self.assertEqual([(kind, vnode.stat.dev, vnode.stat.ino, bytes(vnode.path))
+                          for kind, vnode in observed if vnode.stat.ino],
+                         [("mapping", 7, 42, b"/fixture/task/mapped")])
+
+    def test_repeated_or_nonforward_empty_guard_retains_without_another_query(self):
+        for regions in ([self.empty_guard(0)],
+                        [self.region(0x1000, 0x2000), self.empty_guard(0x2000)],
+                        [self.empty_guard(0x5000), self.empty_guard(0x5000)]):
+            with self.subTest(addresses=[value.address for value in regions]):
+                observer, references = self.references(regions)
+                with self.assertRaisesRegex(NATIVE.Retain, "holder-region-iteration-invalid"):
+                    list(references)
+                self.assertEqual(sum(call.args[1] == 8 for call in observer.info.call_args_list),
+                                 len(regions))
+
+    def test_zero_sized_guard_requires_complete_empty_envelope(self):
+        cases = [(field, None) for field in
+                 ("protection", "max_protection", "inheritance", "flags", "offset")]
+        cases += [("counters", index) for index in range(14)]
+        cases += [("vnode", index) for index in (0, ctypes.sizeof(NATIVE.VPath) - 1)]
+        for field, index in cases:
+            with self.subTest(field=field, index=index):
+                guard = self.empty_guard(0x5000)
+                if field == "counters":
+                    guard.counters[index] += 1
+                elif field == "vnode":
+                    data = (ctypes.c_ubyte * ctypes.sizeof(NATIVE.VPath)).from_buffer(guard.vnode)
+                    data[index] = 1
+                else:
+                    setattr(guard, field, getattr(guard, field) + 1)
+                observer, references = self.references([guard])
+                with self.assertRaisesRegex(NATIVE.Retain, "holder-region-iteration-invalid"):
+                    list(references)
+                self.assertEqual(sum(call.args[1] == 8 for call in observer.info.call_args_list), 1)
+
+    def test_cursor_uses_returned_end_and_preserves_gaps(self):
+        observer, references = self.references([
+            self.region(0x1000, 0x2000), self.region(0x5000, 0x1000), None])
+        self.assertEqual([kind for kind, _ in references], ["cwd", "root", "mapping", "mapping"])
+        self.assertEqual([call.args[3] for call in observer.info.call_args_list if call.args[1] == 8],
+                         [0, 0x3000, 0x6000])
+
+    def test_invalid_cursor_reports_exact_native_fields_without_advancing(self):
+        for regions, cursor, address, size, flags in (
+                ([self.region(0x1000, 0, 1)], 0, 0x1000, 0, 1),
+                ([self.region(0x1000, 0x1000), self.region(0x1000, 0x1000, 2)],
+                 0x2000, 0x1000, 0x1000, 2),
+                ([self.region(2**64 - 2, 2, 3)], 0, 2**64 - 2, 2, 3)):
+            with self.subTest(cursor=cursor, address=address, size=size):
+                observer, references = self.references(regions)
+                with self.assertRaises(NATIVE.Retain) as raised:
+                    list(references)
+                self.assertEqual(str(raised.exception),
+                                 f"holder-region-iteration-invalid:pid=123:cursor={cursor}:"
+                                 f"address={address}:size={size}:flags={flags}:"
+                                 "offset=0:user_tag=0:share_mode=0:depth=0")
+                self.assertEqual(sum(call.args[1] == 8 for call in observer.info.call_args_list),
+                                 len(regions))
+
+    def test_final_footprint_fields_are_preserved_without_special_case(self):
+        footprint = self.region(0x2000, 0x1000)
+        footprint.offset = footprint.address
+        footprint.counters[2], footprint.counters[9] = 2**32 - 1, 2
+        observer, references = self.references([footprint, None])
+        self.assertEqual([kind for kind, _ in references], ["cwd", "root", "mapping"])
+        self.assertEqual(observer.info.call_args.args[3], 0x3000)
+        footprint.size = 0
+        _, references = self.references([footprint])
+        with self.assertRaisesRegex(NATIVE.Retain, "offset=8192:user_tag=4294967295:share_mode=2:depth=0"):
+            list(references)
+
+    def test_only_canonical_end_errno_is_end_of_regions(self):
+        observer = object.__new__(NATIVE.Darwin)
+        observer.lib = mock.Mock()
+        observer.call = mock.Mock(return_value=(0, errno.EINVAL))
+        self.assertIsNone(observer.info(123, 8, NATIVE.Region, 0x1000, end=True))
+        for result in ((0, errno.ESRCH), (0, errno.EPERM), (0, 0),
+                       (ctypes.sizeof(NATIVE.Region) - 1, 0)):
+            with self.subTest(result=result):
+                observer.call.return_value = result
+                with self.assertRaisesRegex(NATIVE.Retain, "holder-visibility-unknown"):
+                    observer.info(123, 8, NATIVE.Region, 0x1000, end=True)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Darwin ACL fixture")

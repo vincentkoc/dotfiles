@@ -491,8 +491,18 @@ class Darwin:
                 break
             yield "mapping", region.vnode
             next_address = region.address + region.size
-            if not region.size or next_address <= address or next_address >= 2**64:
-                raise Retain("holder-region-iteration-invalid")
+            # XNU vm_map_region_synthesize_guard_object_hole can return an empty
+            # guard at the next real entry. Requery that exact address, not past it.
+            empty_guard = (region.size == 0 and region.address > address
+                           and (region.protection, region.max_protection, region.inheritance,
+                                region.flags, region.offset) == (0, 0, 2, 0, 0)  # VM_INHERIT_NONE
+                           and list(region.counters) == [0, 0, 31, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0]
+                           and not any(bytes(region.vnode)))  # VM_MEMORY_GUARD, SM_EMPTY; no vnode
+            if (not region.size and not empty_guard) or next_address <= address or next_address >= 2**64:
+                raise Retain(f"holder-region-iteration-invalid:pid={pid}:cursor={address}:"
+                             f"address={region.address}:size={region.size}:flags={region.flags}:"
+                             f"offset={region.offset}:user_tag={region.counters[2]}:"
+                             f"share_mode={region.counters[9]}:depth={region.counters[13]}")
             address = next_address
         else:
             raise Retain("holder-region-limit")
@@ -523,8 +533,11 @@ class Darwin:
         for pid, birth in births.items():
             if self.birth(self.info(pid, 3, BSD)) != birth:
                 raise Retain("holder-process-changed")
+        # libproc skips submap vnodes and can suppress vnode acquisition errors.
+        # Observed references remain useful; empty output cannot clear mappings.
         return {"scope": "real-or-effective-uid-and-known-processes", "processes": len(births),
-                "holders": holders, "native_calls": self.calls, "platform": platform_key()}
+                "holders": holders, "mapping_coverage": "unqualified",
+                "native_calls": self.calls, "platform": platform_key()}
 
 
 def non_granting_acl(path, until):

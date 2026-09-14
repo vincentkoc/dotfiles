@@ -278,6 +278,8 @@ Recovery mode rules:
   activated and natively qualified host. The same reviewed
   `finish-check --all --apply --policy <path>` consumer revisits pending merges
   and holders. Existing report-only enrollments and v1 policies remain so.
+  Current Mac mapping coverage is unqualified, so automatic deletion remains
+  blocked even with an activation receipt. Do not treat release as removal.
 - Release does not move a parent Codex process. The wrapper parks only its own
   shell; any checkout/admin CWD, FD or mapped holder blocks removal. Stop stays
   attention-only and never completes or releases an owner.
