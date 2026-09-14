@@ -285,10 +285,14 @@ def inventory(snap, git, until):
         before = directory.lstat()
         if before.st_dev != snap["path_id"][0]:
             raise Retain("nested-mount")
+        children = []
         with os.scandir(directory) as scan:
-            children = sorted(scan, key=lambda e: e.name)
-        if len(rows) + len(children) > ENTRY_LIMIT:
-            raise Retain("inventory-entry-limit")
+            for child in scan:
+                tick(until)
+                if len(rows) + len(children) >= ENTRY_LIMIT:
+                    raise Retain("inventory-entry-limit")
+                children.append(child)
+        children.sort(key=lambda entry: entry.name)
         for child in children:
             tick(until)
             path = Path(child.path)
@@ -613,8 +617,13 @@ def admin_inventory(snap, git, until):
         directory = stack.pop()
         tick(until)
         before = directory.lstat()
+        entries = []
         with os.scandir(directory) as scan:
-            entries = list(scan)
+            for entry in scan:
+                tick(until)
+                if len(rows) + len(entries) >= 1024:
+                    raise Retain("admin-lock-or-population-unsupported")
+                entries.append(entry)
         for entry in entries:
             path = Path(entry.path)
             s = path.lstat()

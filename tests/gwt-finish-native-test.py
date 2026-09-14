@@ -2,6 +2,7 @@
 """Disposable reader/supervisor fixtures; no live process census or activation."""
 
 import ctypes
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -93,6 +95,38 @@ class ReaderTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "Darwin listxattr contract")
     def test_native_xattr_reader_requests_nofollow_and_compression_names(self):
         self.assertEqual(NATIVE.xattr_reader()[1], (0x21,))
+
+    def test_working_and_admin_enumeration_stop_at_first_over_cap_entry(self):
+        snap = {"path": str(self.root), "gitdir": str(self.root),
+                "path_id": [self.root.stat().st_dev, self.root.stat().st_ino]}
+        for admin, cap in ((False, 4), (True, 1024)):
+            with self.subTest(admin=admin):
+                consumed = []
+                def population():
+                    for n in range(cap + 1):
+                        consumed.append(n)
+                        self.assertLessEqual(len(consumed), cap)
+                        yield types.SimpleNamespace(name=str(n), path=str(self.root / str(n)))
+                with mock.patch.object(NATIVE.os, "scandir", return_value=contextlib.nullcontext(population())), \
+                        mock.patch.object(NATIVE, "read_file", return_value=(b"", (1,))), \
+                        mock.patch.object(NATIVE, "index_entries", return_value={}), \
+                        mock.patch.object(NATIVE, "disposable_metadata", return_value=[]), \
+                        mock.patch.object(NATIVE, "ENTRY_LIMIT", 4):
+                    call = NATIVE.admin_inventory if admin else NATIVE.inventory
+                    with self.assertRaisesRegex(NATIVE.Retain, "entry-limit|population"):
+                        call(snap, mock.Mock(return_value=""), time.monotonic() + 2)
+                self.assertEqual(len(consumed), cap)
+
+    def test_real_working_directory_cap_is_checked_before_leaf_classification(self):
+        for name in ("one", "two", "three"):
+            (self.root / name).touch()
+        snap = {"path": str(self.root), "gitdir": str(self.root),
+                "path_id": [self.root.stat().st_dev, self.root.stat().st_ino]}
+        with mock.patch.object(NATIVE, "read_file", return_value=(b"", (1,))), \
+                mock.patch.object(NATIVE, "index_entries", return_value={}), \
+                mock.patch.object(NATIVE, "ENTRY_LIMIT", 3):
+            with self.assertRaisesRegex(NATIVE.Retain, "inventory-entry-limit"):
+                NATIVE.inventory(snap, mock.Mock(return_value=""), time.monotonic() + 2)
 
 
 class SupervisorTests(unittest.TestCase):
