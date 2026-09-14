@@ -7,6 +7,7 @@ Top-level wrappers:
 - `agent-worktree-clean`
 - `agent-worktree-maintain`
 - `agent-worktree-purge`
+- `claude-managed-settings` - keep local Claude settings and safely apply the statistics-off policy
 - `codex` - launch the installed CLI, preserving inherited GitHub credentials and filling missing token variables from native `gh` when available; supports opt-in constrained-network and heavy-work admission controls
 - `codex-github-mcp` - start GitHub MCP over stdio with inherited credentials or native `gh` authentication; forwards extra server arguments
 - `codex-hooks` - render the effective hooks file from stable integration fragments while preserving unknown user hooks and concurrent-edit safety
@@ -27,6 +28,18 @@ Tool folders:
   - bash completion scripts
 - `zsh-completion/`
   - zsh completion scripts
+
+## Claude managed settings
+
+`claude-managed-settings --tokenjuice-stats-off` changes only
+`env.TOKENJUICE_STATS` in the settings JSON. Replacing an existing file preserves
+POSIX mode/group and opaque macOS provenance. Other xattrs, ACLs, macOS file
+flags, or unavailable metadata inspection stop the update. Metadata is checked
+before staging and through publication and cleanup, including inherited stage
+ACLs. A blocked or interrupted transaction retains its recovery files for
+inspection; do not delete those files or strip metadata to bypass a refusal.
+Without the option, or when statistics are already off, existing settings are
+not rewritten.
 
 ## Codex MCP
 
