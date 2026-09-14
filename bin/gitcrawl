@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# gitcrawl-shim: backend discovery rejects copies of this wrapper.
+
+wrapper="${BASH_SOURCE[0]}"
+if [[ "$wrapper" != */* ]]; then
+    wrapper="$(command -v "$wrapper")" || exit 127
+fi
+
+load_defaults() {
+    local crawl_env="${OPENCLAW_CRAWL_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/openclaw-crawl/remote.env}"
+    local name index
+    local inherited_names=() inherited_values=()
+    [[ -f "$crawl_env" ]] || return 0
+
+    # Config can select any token variable. Keep every inherited export, even an
+    # empty value, without reading auth config or persisting environment values.
+    while IFS= read -r name; do
+        [[ "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ && ${!name+x} ]] || continue
+        inherited_names+=("$name")
+        inherited_values+=("${!name}")
+    done < <(compgen -e)
+    # shellcheck disable=SC1090
+    source "$crawl_env" >/dev/null 2>&1 || return 1
+    for ((index = 0; index < ${#inherited_names[@]}; index++)); do
+        name="${inherited_names[index]}"
+        if [[ ! ${!name+x} || "${!name}" != "${inherited_values[index]}" ]]; then
+            export "$name=${inherited_values[index]}" || return 1
+        else
+            export "${name?}" || return 1
+        fi
+    done
+}
+if ! load_defaults >/dev/null 2>&1; then
+    printf '%s\n' 'gitcrawl: failed to load remote environment defaults' >&2
+    exit 1
+fi
+
+is_backend() {
+    local candidate="$1" first="" second=""
+    [[ -f "$candidate" && -x "$candidate" && ! "$candidate" -ef "$wrapper" ]] || return 1
+    {
+        IFS= read -r -n 512 first || true
+        IFS= read -r -n 512 second || true
+    } <"$candidate"
+    [[ "$first" != '#!'* || "$second" != '# gitcrawl-shim:'* ]]
+}
+
+run_backend() {
+    local candidate="$1"
+    shift
+    if is_backend "$candidate"; then
+        exec "$candidate" "$@"
+    fi
+}
+
+run_backend "$HOME/.local/bin/gitcrawl" "$@"
+if [[ "$(uname -s)" == Darwin ]]; then
+    run_backend /opt/homebrew/bin/gitcrawl "$@"
+    run_backend /usr/local/bin/gitcrawl "$@"
+fi
+
+remaining="${PATH:-}"
+while :; do
+    case "$remaining" in
+        *:*) entry="${remaining%%:*}"; remaining="${remaining#*:}"; last=0 ;;
+        *) entry="$remaining"; last=1 ;;
+    esac
+    run_backend "${entry:-.}/gitcrawl" "$@"
+    [[ "$last" == 0 ]] || break
+done
+printf '%s\n' 'gitcrawl: no usable backend found' >&2
+exit 127
