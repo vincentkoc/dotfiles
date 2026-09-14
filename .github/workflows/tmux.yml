@@ -1,0 +1,49 @@
+name: tmux
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Require a hosted runner
+        shell: bash
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bash python3 tmux
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install bash tmux
+      - name: Run isolated fixtures
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) TMUX_CI_BASH=/bin/bash ;;
+            macOS) TMUX_CI_BASH="$(brew --prefix bash)/bin/bash" ;;
+            *) exit 1 ;;
+          esac
+          export TMUX_CI_BASH
+          python3 -B tests/tmux-ci-runner.py

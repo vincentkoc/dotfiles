@@ -5,7 +5,8 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_tt="$repo/bin/tt"
 source_writer="$repo/bin/tt-codex-snapshot-writer"
 tmux_bin="${TT_TEST_REAL_TMUX_BIN:-$(command -v tmux || true)}"
-temporary="$(mktemp -d)"
+# Darwin's implicit -t route prefers its long user-temp path over TMPDIR.
+temporary="$(mktemp -d "${TMPDIR:-/tmp}/tt-autosave.XXXXXX")"
 case_sockets=()
 case_socket_paths=()
 case_process_identities=()
@@ -413,7 +414,7 @@ autosave_residue_absent() {
 timer_reuse_race_checks() (
   # Load functions without contacting tmux. Only external collection/identity
   # probes are stubbed; activation, TSV IO, comparison and control locks are real.
-  export TT_TMUX_BIN=/bin/false
+  export TT_TMUX_BIN=/usr/bin/false
   source "$source_tt" ls
   autosave_snapshot_cycle() { return 0; }
   codex_snapshot_timer_state_available() { return 0; }
