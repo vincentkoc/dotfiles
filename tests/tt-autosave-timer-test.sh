@@ -5,7 +5,8 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_tt="$repo/bin/tt"
 source_writer="$repo/bin/tt-codex-snapshot-writer"
 tmux_bin="${TT_TEST_REAL_TMUX_BIN:-$(command -v tmux || true)}"
-temporary="$(mktemp -d)"
+# Darwin's implicit -t route prefers its long user-temp path over TMPDIR.
+temporary="$(mktemp -d "${TMPDIR:-/tmp}/tt-autosave.XXXXXX")"
 case_sockets=()
 case_socket_paths=()
 case_process_identities=()
