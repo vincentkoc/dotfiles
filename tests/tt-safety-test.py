@@ -46,7 +46,7 @@ class Fixture(unittest.TestCase):
             "PATH": "/usr/bin:/bin", "HOME": str(self.root / "home"),
             "XDG_STATE_HOME": str(self.state), "XDG_CONFIG_HOME": str(self.root / "config"),
             "CODEX_HOME": str(self.root / "codex"), "TT_LOGIN_SHELL": "/bin/sh",
-            "TT_TMUX_BIN": "/bin/false", "LC_ALL": "C.UTF-8",
+            "TT_TMUX_BIN": "/usr/bin/false", "LC_ALL": "C.UTF-8",
         }
         pathlib.Path(self.env["HOME"]).mkdir()
         self.patch("STATE_HOME", self.state)

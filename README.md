@@ -172,9 +172,11 @@ noninteractive helper functions; login shells avoid loading the profile twice,
 and inherited private cockpit scratch paths avoid another tmux query.
 
 Snapshots include owner state and exit status; recovery still reads legacy
-eight-column files. Exited session IDs are retained only with matching saved
-server, pane and process-start evidence. Reaped owners without that evidence
-remain unresolved in the new snapshot; prior recovery history is preserved.
+eight-column files. They keep the task title set by `tt title`, falling back to
+the terminal title when no task title is set. Exited session IDs are retained
+only with matching saved server, pane and process-start evidence. Reaped owners
+without that evidence remain unresolved in the new snapshot; prior recovery
+history is preserved.
 Cold recovery checks every selected session's topology authorization before
 creating the first session, including direct snapshot-helper invocation.
 
