@@ -33,7 +33,7 @@ chmod +x "$runtime/agent-worktree-clean" "$runtime/agent-worktree-maintain" \
   "$runtime/worktree-storage-guard"
 
 mode_of() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 default_codex_home="$temporary/default-codex"
