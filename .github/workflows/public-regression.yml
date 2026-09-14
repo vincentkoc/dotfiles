@@ -8,6 +8,9 @@ on:
       - ".exports"
       - "bin/linux-server-bootstrap"
       - "bin/agent-worktree-ops/**"
+      - "functions/system/deepclean.zsh"
+      - "tests/deepclean-test.sh"
+      - "tests/deepclean-test.zsh"
       - "tests/install-foundations-test.sh"
       - "tests/linux-server-auth-proof-test.sh"
       - "tests/agent-worktree-maintain-test.sh"
@@ -27,7 +30,7 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends openssh-server
+          sudo apt-get install --yes --no-install-recommends openssh-server zsh
       - name: Run focused regressions
         shell: bash
         env:
@@ -38,4 +41,5 @@ jobs:
         run: |
           bash tests/install-foundations-test.sh
           bash tests/agent-worktree-maintain-test.sh
+          bash tests/deepclean-test.sh
           bash tests/linux-server-auth-proof-test.sh
