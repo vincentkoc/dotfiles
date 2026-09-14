@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -122,6 +124,39 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(result["release_available"])
         self.assertFalse(result["removal_available"])
         self.assertEqual(self.check_reason(), "completion-confirmed-checkout-retained")
+        self.assertTrue(self.wt.exists())
+
+    def test_legacy_owner_schema_migrates_before_new_enrollment(self):
+        database = self.state / "lifecycle.sqlite"
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            db.executescript("""
+                ALTER TABLE owners RENAME TO owners_current;
+                CREATE TABLE owners (
+                    worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+                    owner TEXT NOT NULL,
+                    released INTEGER NOT NULL DEFAULT 0,
+                    recovery_reviewed INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (worktree_id, owner));
+                INSERT INTO owners(worktree_id, owner, released, recovery_reviewed)
+                    SELECT worktree_id, owner, 1, 1 FROM owners_current;
+                DROP TABLE owners_current;
+            """)
+        prior = self.wt
+        self.wt = self.root / "second"
+        git(self.repo, "worktree", "add", "-b", "second", str(self.wt))
+        self.call("enroll", "--owner", "owner-2")
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            columns = [row[1] for row in db.execute("PRAGMA table_info(owners)")]
+            rows = db.execute(
+                "SELECT owner, released, recovery_reviewed, completed "
+                "FROM owners ORDER BY owner"
+            ).fetchall()
+        self.assertIn("completed", columns)
+        self.assertEqual(rows, [
+            ("owner-1", 1, 1, 0),
+            ("owner-2", 0, 0, 0),
+        ])
+        self.assertTrue(prior.exists())
         self.assertTrue(self.wt.exists())
 
     def test_resume_invalidates_prior_completion(self):
@@ -295,6 +330,62 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.check_reason(), "registration-missing-or-locked")
         self.assertTrue((moved / "file").exists())
 
+    def test_report_policy_filters_check_all_without_apply_authority(self):
+        self.finish()
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            recorded = json.loads(row["identity"])
+        policy = self.base / "policy.json"
+
+        def write_policy(repository, mode="report-only"):
+            policy.write_text(json.dumps({
+                "schema": FINISH.POLICY_SCHEMA,
+                "host": "fixture-host",
+                "mode": mode,
+                "repositories": [repository],
+            }))
+            policy.chmod(0o600)
+
+        matching = {
+            "owner": recorded["owner"],
+            "root": recorded["root"],
+            "common_id": recorded["common_id"],
+        }
+        output = io.StringIO()
+        from contextlib import redirect_stdout
+        with mock.patch.object(FINISH, "host_key", return_value="fixture-host"):
+            write_policy(matching)
+            with redirect_stdout(output):
+                self.assertEqual(FINISH.main([
+                    "check", "--all",
+                    "--state-dir", str(self.state),
+                    "--policy", str(policy),
+                ]), 0)
+            self.assertEqual(
+                json.loads(output.getvalue())[0]["reason"],
+                "completion-confirmed-checkout-retained",
+            )
+
+            output = io.StringIO()
+            write_policy({**matching, "owner": str(self.base / "other-repo")})
+            with redirect_stdout(output):
+                self.assertEqual(FINISH.main([
+                    "check", "--all",
+                    "--state-dir", str(self.state),
+                    "--policy", str(policy),
+                ]), 0)
+            self.assertEqual(json.loads(output.getvalue()), [])
+
+            write_policy(matching, mode="apply")
+            with mock.patch.object(FINISH, "check") as check:
+                with self.assertRaisesRegex(FINISH.Retain, "invalid-report-policy"):
+                    FINISH.main([
+                        "check", "--all",
+                        "--state-dir", str(self.state),
+                        "--policy", str(policy),
+                    ])
+                check.assert_not_called()
+
 
 class WrapperTests(unittest.TestCase):
     def test_unavailable_release_remove_and_apply_need_no_state(self):
@@ -313,6 +404,18 @@ class WrapperTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(reason, result.stderr)
                 self.assertFalse(state.exists())
+            result = subprocess.run(
+                [
+                    str(TOOL), "check",
+                    "--policy", str(Path(temp) / "policy.json"),
+                    "--state-dir", str(state),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("report-policy-requires-check-all", result.stderr)
+            self.assertFalse(state.exists())
 
     def test_holder_qualification_is_explicitly_unavailable_and_probe_free(self):
         from contextlib import redirect_stdout

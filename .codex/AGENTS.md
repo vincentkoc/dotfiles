@@ -235,7 +235,8 @@ Recovery mode rules:
   Outside Codex, use a stable task-specific `GWT_OWNER_ID`.
 - Use `gwt finish-pin` and `gwt finish-unpin` for recovery evidence or dependent
   work. Use `gwt finish-status` and report-only `gwt finish-check` to inspect
-  the result.
+  the result. `gwt finish-check --all --policy <path>` may filter that report
+  to reviewed repository identities; the policy grants no mutation authority.
 - Managed owner release and checkout removal are unavailable. Completion
   tracking never invokes `git worktree remove`, never deletes branches and
   never treats an unqualified holder scan as authority. Report the checkout as

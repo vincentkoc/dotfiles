@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -18,6 +19,7 @@ import uuid
 
 
 HOLDER_SCHEMA = "gwt-finish-holder-qualification.v1"
+POLICY_SCHEMA = "gwt-finish-policy.v1"
 PR_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/([1-9][0-9]*)/?\Z")
 SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 
@@ -198,6 +200,93 @@ def private_file(path):
     if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid()
             or details.st_nlink != 1 or details.st_mode & 0o077):
         raise Retain("private-file-permissions-required")
+
+
+def host_key():
+    if sys.platform != "darwin":
+        return socket.gethostname()
+    value = run(["scutil", "--get", "LocalHostName"]).stdout.decode().strip()
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,63}", value):
+        raise Retain("stable-host-identity-unavailable")
+    return value
+
+
+def report_policy(path):
+    path = Path(path)
+    if not path.is_absolute() or path.resolve(strict=True) != path:
+        raise Retain("report-policy-path-must-be-absolute-and-canonical")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size > 1024 * 1024):
+            raise Retain("private-report-policy-required")
+        chunks = []
+        remaining = 1024 * 1024 + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = path.lstat()
+
+    def file_identity(details):
+        return (
+            details.st_dev,
+            details.st_ino,
+            details.st_mode,
+            details.st_uid,
+            details.st_gid,
+            details.st_nlink,
+            details.st_size,
+            details.st_mtime_ns,
+            details.st_ctime_ns,
+        )
+
+    if (remaining == 0 or file_identity(before) != file_identity(after)
+            or file_identity(after) != file_identity(final)):
+        raise Retain("report-policy-changed-while-reading")
+    value = json.loads(b"".join(chunks))
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", "host", "mode", "repositories"}
+            or value.get("schema") != POLICY_SCHEMA
+            or value.get("host") != host_key()
+            or value.get("mode") != "report-only"
+            or not isinstance(value.get("repositories"), list)
+            or not 1 <= len(value["repositories"]) <= 8):
+        raise Retain("invalid-report-policy")
+    allowed = set()
+    for item in value["repositories"]:
+        if (not isinstance(item, dict)
+                or set(item) != {"owner", "root", "common_id"}
+                or not isinstance(item.get("owner"), str)
+                or not isinstance(item.get("root"), str)
+                or not isinstance(item.get("common_id"), list)
+                or len(item["common_id"]) != 2
+                or any(type(part) is not int or part < 0 for part in item["common_id"])):
+            raise Retain("invalid-report-policy")
+        allowed.add((
+            item["owner"],
+            item["root"],
+            tuple(item["common_id"]),
+        ))
+    if len(allowed) != len(value["repositories"]):
+        raise Retain("invalid-report-policy")
+    return allowed
+
+
+def policy_allows(row, allowed):
+    recorded = json.loads(row["identity"])
+    return (
+        recorded.get("owner"),
+        recorded.get("root"),
+        tuple(recorded.get("common_id", [])),
+    ) in allowed
 
 
 @contextlib.contextmanager
@@ -568,6 +657,7 @@ def parser():
     result.add_argument("--target")
     result.add_argument("--wait-for", action="append", default=[])
     result.add_argument("--reason")
+    result.add_argument("--policy")
     result.add_argument("--if-enrolled", action="store_true")
     result.add_argument("--all", action="store_true")
     result.add_argument("--apply", action="store_true")
@@ -615,6 +705,8 @@ def main(argv=None):
         raise Retain("release-unavailable-checkout-retained")
     if args.command == "remove" or args.apply:
         raise Retain("removal-unavailable-checkout-retained")
+    if args.policy and (args.command != "check" or not args.all):
+        raise Retain("report-policy-requires-check-all")
     if args.all and args.command not in ("status", "check"):
         raise Retain("all-is-only-valid-for-status-or-check")
     if args.command == "finish" and (not args.pr or len(args.wait_for) > 16):
@@ -628,6 +720,7 @@ def main(argv=None):
         }, sort_keys=True))
         return 0
 
+    allowed = report_policy(args.policy) if args.policy else None
     if args.all:
         with ledger(args.state_dir) as db:
             if db is None:
@@ -639,13 +732,13 @@ def main(argv=None):
                     for row in db.execute("SELECT * FROM worktrees ORDER BY path")
                 ], sort_keys=True))
                 return 0
+            rows = db.execute(
+                "SELECT * FROM worktrees ORDER BY COALESCE(checked_at, 0), path"
+            )
             paths = [
-                row[0]
-                for row in db.execute(
-                    "SELECT path FROM worktrees ORDER BY COALESCE(checked_at, 0), path "
-                    "LIMIT 16"
-                )
-            ]
+                row["path"] for row in rows
+                if allowed is None or policy_allows(row, allowed)
+            ][:16]
         output = []
         for path in paths:
             with ledger(args.state_dir) as db:
@@ -664,6 +757,7 @@ def main(argv=None):
                 raise Retain("already-enrolled-or-path-reused")
             worktree_id = str(uuid.uuid4())
             who = owner_id(args)
+            ensure_owner_schema(db)
             with db:
                 db.execute(
                     "INSERT INTO worktrees(id, path, identity, created_at, state, reason) "

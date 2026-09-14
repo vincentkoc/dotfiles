@@ -136,6 +136,13 @@ gwt finish-status --all
 gwt finish-check --all
 ```
 
+An explicitly supplied `--policy <path>` is valid only with
+`gwt finish-check --all`. The owner-only policy uses schema
+`gwt-finish-policy.v1`, mode `report-only`, the stable host identity and one to
+eight exact canonical owner/root/common-directory identities. It filters which
+enrolled rows the report worker may inspect. It grants no apply, release or
+removal authority.
+
 A successful check reports `completion-confirmed-checkout-retained`. Open,
 closed-unmerged, retargeted or rebased PRs remain visible blockers. Local head,
 registration, identity, Git-operation, dirty-worktree and recovery-pin changes

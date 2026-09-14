@@ -9,6 +9,8 @@ Bins in this folder:
     recovery pins, exact PR heads and stack dependencies in a private ledger
   - `status` and `check` are report-only; output always identifies the checkout
     as retained and release/removal as unavailable
+  - `check --all --policy <path>` filters reports to exact reviewed repository
+    identities; the policy cannot enable apply, release or removal
   - never scans for old worktrees, expires claims, releases owners, removes
     worktrees, deletes branches or prunes metadata
   - see [the completion guide](../../functions/gwt/README.md)

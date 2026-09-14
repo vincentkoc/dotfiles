@@ -1039,7 +1039,8 @@ Commands:
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all]         Show local completion state
-  gwt finish-check [--all]          Refresh completion proof; report only
+  gwt finish-check [--all] [--policy <path>]
+                                    Refresh filtered completion proof; report only
                                     Managed release/removal is unavailable
   gwt prune                         Prune stale worktree metadata
   gwt sparse status                 Show sparse-checkout state for the current worktree
