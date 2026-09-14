@@ -49,6 +49,8 @@ class SparseTest(unittest.TestCase):
         self.source = self.fixture / "functions/gwt/gwt.zsh"
         self.source.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "functions/gwt/gwt.zsh", self.source)
+        (self.fixture / "bin").mkdir()
+        shutil.copyfile(ROOT / "bin/gwt-storage", self.fixture / "bin/gwt-storage")
         shutil.copytree(ROOT / "git-sparse", self.fixture / "git-sparse")
         self.profiles = self.fixture / "git-sparse/openclaw-openclaw"
         (self.profiles / "cone.paths").write_text("src\nui\n")

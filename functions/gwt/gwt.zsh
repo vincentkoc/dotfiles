@@ -39,6 +39,10 @@ _gwt_git_probe() {
     GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 command git "$@"
 }
 
+_gwt_storage() {
+    python3 "$DOTFILES_GWT_CHECKOUT_ROOT/bin/gwt-storage" "$@"
+}
+
 _gwt_path_is_clouddocs() {
     case "$1" in
         *"/Library/Mobile Documents/com~apple~CloudDocs"|*"/Library/Mobile Documents/com~apple~CloudDocs/"*)
@@ -155,18 +159,10 @@ _gwt_worktree_source_checkout_risk() {
     printf '%s\n' "${(j: :)reasons}"
 }
 
-_gwt_cleanup_failed_worktree() {
+_gwt_preserve_failed_worktree() {
     local worktree_path="$1"
-    local repo_root=""
-
-    [[ -n "$worktree_path" ]] || return 0
-    repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null || true)
-    if [[ -n "$repo_root" && "$worktree_path" == "$repo_root" ]]; then
-        echo "gwt: refusing to clean up the main worktree ($worktree_path)" >&2
-        return 1
-    fi
-
-    git worktree remove --force "$worktree_path" >/dev/null 2>&1 || rm -rf "$worktree_path"
+    echo "gwt: setup failed; preserved worktree and registration at $worktree_path" >&2
+    echo "gwt: inspect the path before retrying setup or explicitly removing it" >&2
 }
 
 _gwt_sparse_profile_file() {
@@ -593,7 +589,6 @@ _gwt_require_worktree_storage() {
 
 _gwt_finish_tool() {
     local finish_tool
-
     finish_tool=$(_gwt_tool_path agent-worktree-finish) || {
         echo "gwt: agent-worktree-finish not found" >&2
         return 127
@@ -602,6 +597,7 @@ _gwt_finish_tool() {
 }
 
 _gwt_claim_if_enrolled() {
+    # Resume before entering so prior completion cannot survive gwt cd/new.
     [[ -e "${DOTFILES_GWT_FINISH_STATE:-$HOME/.local/state/gwt-finish}/lifecycle.sqlite" ]] || return 0
     _gwt_finish_tool resume --if-enrolled --worktree "$1"
 }
@@ -826,6 +822,19 @@ _gwt_fzf_table() {
     return 0
 }
 
+_gwt_refresh_remote_ref() {
+    local remote="$1" branch="$2"
+    _gwt_git_probe config --get "remote.$remote.url" >/dev/null 2>&1 || return 1
+    _gwt_git_probe check-ref-format "refs/heads/$branch" || return 1
+    git -c maintenance.auto=false -c gc.auto=0 fetch --no-tags --no-prune \
+        --no-prune-tags --no-write-fetch-head --recurse-submodules=no \
+        --no-auto-maintenance --refmap= -- "$remote" \
+        "+refs/heads/${branch}:refs/remotes/${remote}/${branch}" || {
+        echo "gwt: ref refresh failed; pass a verified local commit explicitly to work offline" >&2
+        return 1
+    }
+}
+
 _gwt_default_start_point() {
     local requested="$1"
     if [[ -n "$requested" ]]; then
@@ -836,7 +845,7 @@ _gwt_default_start_point() {
     local remote="origin"
     local remote_head=""
     if remote_head=$(_gwt_git_probe symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null); then
-        git fetch --quiet "$remote" "${remote_head#${remote}/}" >/dev/null 2>&1 || true
+        _gwt_refresh_remote_ref "$remote" "${remote_head#${remote}/}" || return 1
         if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$remote_head"; then
             printf '%s\n' "$remote_head"
             return 0
@@ -844,7 +853,7 @@ _gwt_default_start_point() {
     fi
 
     if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$remote/main"; then
-        git fetch --quiet "$remote" main >/dev/null 2>&1 || true
+        _gwt_refresh_remote_ref "$remote" main || return 1
         printf '%s\n' "$remote/main"
         return 0
     fi
@@ -853,7 +862,7 @@ _gwt_default_start_point() {
     if upstream=$(_gwt_git_probe rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null); then
         local up_remote="${upstream%%/*}"
         local up_branch="${upstream#*/}"
-        git fetch --quiet "$up_remote" "$up_branch" >/dev/null 2>&1 || true
+        _gwt_refresh_remote_ref "$up_remote" "$up_branch" || return 1
         if _gwt_git_probe show-ref --verify --quiet "refs/remotes/$upstream"; then
             printf '%s\n' "$upstream"
             return 0
@@ -897,11 +906,12 @@ _gwt_resolve_start_point() {
         fi
         seen="${seen}${candidate}|"
 
-        if [[ "$candidate" == */* && "$candidate" != refs/* ]]; then
-            remote="${candidate%%/*}"
-            remote_branch="${candidate#*/}"
-            if [[ -n "$remote" && -n "$remote_branch" && "$remote" != "$candidate" ]]; then
-                git fetch --quiet "$remote" "$remote_branch" >/dev/null 2>&1 || true
+        local remote_candidate="${candidate#refs/remotes/}"
+        if [[ "$remote_candidate" == */* && "$remote_candidate" != refs/* ]]; then
+            remote="${remote_candidate%%/*}"
+            remote_branch="${remote_candidate#*/}"
+            if _gwt_git_probe config --get "remote.$remote.url" >/dev/null 2>&1; then
+                _gwt_refresh_remote_ref "$remote" "$remote_branch" || return 1
             fi
         fi
 
@@ -949,6 +959,7 @@ _gwt_shared_install_source() {
 
 _gwt_find_workspace_node_modules() {
     local repo_root="$1"
+    local worktrees_root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
 
     if [[ -d "$repo_root/node_modules" ]]; then
         printf '%s\n' "$repo_root/node_modules"
@@ -959,27 +970,177 @@ _gwt_find_workspace_node_modules() {
     find "$repo_root" \
         \( \
             -path "$repo_root/.git" -o \
-            -path "$repo_root/.git/*" -o \
             -path "$repo_root/node_modules" -o \
-            -path "$repo_root/node_modules/*" \
+            \( -type d ! -path "$repo_root" \
+                \( -name .git -o -name .worktrees -o \
+                    -path "$worktrees_root" -o -path "$HOME/GIT/_Worktrees" -o \
+                    -path '*/.codex/worktrees' -o -path '*/.claude/worktrees' -o \
+                    -exec test -e '{}/.git' \; -o -exec test -L '{}/.git' \; \
+                \) \
+            \) \
         \) -prune -o \
         -type d -name node_modules -print -prune
+}
+
+# The explicit selector carries identities across Git checkout/profile work. The
+# final symlink uses an open consumer directory and never treats a raced-in
+# directory as an ln destination.
+_gwt_explicit_dependency() {
+    python3 - "$@" <<'PY'
+import json
+import os
+import stat
+import subprocess
+import sys
+
+mode, source, owner, target = sys.argv[1:5]
+
+def fail(message):
+    raise ValueError(message)
+
+def directory(path):
+    resolved = os.path.realpath(path)
+    details = os.stat(path)
+    if not stat.S_ISDIR(details.st_mode):
+        fail("dependency path is not a directory: " + path)
+    return [resolved, details.st_dev, details.st_ino]
+
+def within(path, root):
+    return os.path.commonpath([path, root]) == root
+
+def owner_dependencies():
+    path = os.path.join(owner, "node_modules")
+    try:
+        details = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return [details.st_mode, details.st_dev, details.st_ino,
+            os.readlink(path) if stat.S_ISLNK(details.st_mode) else None]
+
+def owner_common():
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1")
+    result = subprocess.run(["git", "-C", owner, "rev-parse", "--path-format=absolute",
+                             "--git-common-dir"], env=env, capture_output=True, text=True)
+    if result.returncode:
+        fail("cannot resolve dependency owner common directory: " + result.stderr.strip())
+    return directory(result.stdout.strip())
+
+def snapshot():
+    if not os.path.isabs(source):
+        fail("dependency source must be an absolute install root")
+    donor = directory(source)
+    modules = directory(os.path.join(source, "node_modules"))
+    source_owner = directory(owner)
+    destination = os.path.abspath(target)
+    if target != destination:
+        fail("dependency target is not a normalized managed path")
+    parent = os.path.dirname(destination)
+    if os.path.realpath(parent) != parent:
+        fail("dependency target parent escapes its managed path")
+    for supplied in (donor[0], modules[0]):
+        if within(supplied, destination) or within(destination, supplied):
+            fail("dependency source overlaps the worktree")
+    anchor = parent
+    while not os.path.lexists(anchor):
+        anchor = os.path.dirname(anchor)
+    return {"source": donor, "modules": modules, "owner": source_owner,
+            "common": owner_common(), "owner_dependencies": owner_dependencies(),
+            "target": destination, "anchor": directory(anchor)}
+
+def verify(saved):
+    for key, path in (("source", source), ("modules", source + "/node_modules"),
+                      ("owner", owner), ("anchor", saved["anchor"][0])):
+        if directory(path) != saved[key]:
+            fail("dependency " + key + " identity changed")
+    if owner_common() != saved["common"] or owner_dependencies() != saved["owner_dependencies"]:
+        fail("dependency owner common directory or node_modules entry changed")
+    if os.path.abspath(target) != saved["target"]:
+        fail("dependency target changed")
+    if os.path.realpath(os.path.dirname(target)) != os.path.dirname(target):
+        fail("dependency target parent escaped")
+
+try:
+    if mode == "snapshot":
+        print(json.dumps(snapshot(), separators=(",", ":")))
+    else:
+        saved = json.loads(sys.argv[5])
+        verify(saved)
+        consumer = directory(target)
+        if os.path.islink(target) or consumer[0] != saved["target"]:
+            fail("dependency consumer is not the managed directory")
+        if mode == "inspect":
+            print(json.dumps(consumer, separators=(",", ":")))
+        else:
+            if consumer != json.loads(sys.argv[6]):
+                fail("dependency consumer identity changed")
+            fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                opened = os.fstat(fd)
+                if [consumer[0], opened.st_dev, opened.st_ino] != consumer:
+                    fail("dependency consumer changed while opening")
+                verify(saved)
+                if directory(target) != consumer:
+                    fail("dependency consumer changed before binding")
+                if mode == "validate":
+                    entry = os.stat("node_modules", dir_fd=fd, follow_symlinks=False)
+                    if not stat.S_ISLNK(entry.st_mode):
+                        fail("explicit reuse requires a node_modules symlink")
+                    if directory(target + "/node_modules") != saved["modules"]:
+                        fail("dependency link does not resolve to selected source")
+                elif mode == "link":
+                    # symlinkat fails for every existing entry, including directories.
+                    os.symlink(source + "/node_modules", "node_modules", dir_fd=fd)
+                    print("gwt: created explicit node_modules link from absent target")
+                else:
+                    fail("unknown dependency operation")
+                verify(saved)
+                if directory(target) != consumer:
+                    fail("dependency consumer changed after binding")
+                if directory(target + "/node_modules") != saved["modules"]:
+                    fail("dependency link changed after binding")
+            finally:
+                os.close(fd)
+except (OSError, ValueError, KeyError) as error:
+    print("gwt: explicit dependency binding refused: " + str(error), file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 _gwt_link_shared_node_modules() {
     local source_root="$1"
     local target_root="$2"
+    local mode="${3:-link}"
+    local binding_state="${4:-}" consumer_state="${5:-}" owner="${6:-}"
+
+    if [[ -n "$binding_state" ]]; then
+        _gwt_explicit_dependency "$mode" "$source_root" "$owner" "$target_root" "$binding_state" "$consumer_state"
+        return $?
+    fi
+    local discovered target_parent
     local source_path relative_path target_path
 
+    discovered=$(_gwt_find_workspace_node_modules "$source_root") || return 1
     while IFS= read -r source_path; do
         [[ -n "$source_path" ]] || continue
 
         relative_path="${source_path#$source_root/}"
         target_path="$target_root/$relative_path"
+        target_parent="${target_path:h:A}"
+        if [[ "$target_parent" != "${target_root:A}" && "$target_parent" != "${target_root:A}/"* ]]; then
+            echo "gwt: refusing dependency path outside worktree: $target_path" >&2
+            return 1
+        fi
 
         if [[ -L "$target_path" ]]; then
+            if [[ ! -d "$source_path" || ! -d "$target_path" || "${target_path:A}" != "${source_path:A}" ]]; then
+                echo "gwt: dependency link does not resolve to $source_path: $target_path" >&2
+                return 1
+            fi
             continue
         fi
+
+        # Reuse checks existing shared links only; it never repairs or replaces dependencies.
+        [[ "$mode" == "validate" ]] && continue
 
         if [[ -e "$target_path" ]]; then
             echo "gwt: refusing to replace existing path $target_path" >&2
@@ -987,19 +1148,66 @@ _gwt_link_shared_node_modules() {
         fi
 
         mkdir -p "$(dirname "$target_path")" || return 1
-        ln -s "$source_path" "$target_path" || return 1
-    done < <(_gwt_find_workspace_node_modules "$source_root")
+        python3 - "$source_path" "$target_path" <<'PYLINK' || return 1
+import os, sys
+os.symlink(sys.argv[1], sys.argv[2])
+PYLINK
+    done <<< "$discovered"
+}
+
+_gwt_dependency_compatible() {
+    if [[ "${DOTFILES_GWT_LINK_DEEP_NODE_MODULES:-0}" == 1 ]]; then
+        echo "gwt: deep dependency sharing requires separate install qualification; leaving paths unchanged" >&2
+        return 1
+    fi
+    _gwt_storage dependencies check --source "$1" --target "$2"
 }
 
 _gwt_bootstrap_worktree() {
     local worktree_path="$1"
-    local install_source=""
+    local mode="${2:-link}"
+    local install_source="${3:-}" binding_state="${4:-}" owner="${5:-}"
+    local branch="${6:-}" expected_head="${7:-}"
+
+    if [[ -n "$install_source" ]]; then
+        local consumer_state registered actual_head
+        _gwt_is_pnpm_repo "$worktree_path" || {
+            echo "gwt: explicit dependency source requires a pnpm worktree" >&2
+            return 1
+        }
+        _gwt_dependency_compatible "$install_source" "$worktree_path" || return 1
+        consumer_state=$(_gwt_explicit_dependency inspect "$install_source" "$owner" "$worktree_path" "$binding_state") || return 1
+        registered=$(_gwt_registered_worktree_path "$owner" "$worktree_path") || return 1
+        [[ "$registered" == "${worktree_path:A}" && "$(_gwt_worktree_branch_label "$registered")" == "$branch" ]] || {
+            echo "gwt: explicit dependency consumer registration changed" >&2
+            return 1
+        }
+        actual_head=$(_gwt_git_probe -C "$worktree_path" rev-parse HEAD) || return 1
+        [[ -z "$expected_head" || "$actual_head" == "$expected_head" ]] || {
+            echo "gwt: explicit dependency consumer HEAD changed" >&2
+            return 1
+        }
+        echo "gwt: explicit dependency $mode for $registered (identity $consumer_state; HEAD $actual_head) from $install_source"
+        _gwt_link_shared_node_modules "$install_source" "$worktree_path" "$mode" "$binding_state" "$consumer_state" "$owner"
+        return $?
+    fi
 
     _gwt_is_pnpm_repo "$worktree_path" || return 0
 
+    if [[ "$mode" == "validate" && ! -L "$worktree_path/node_modules" ]]; then
+        if [[ ! -d "$worktree_path/node_modules" ]]; then
+            echo "gwt: reusing code-only worktree without local dependencies; use remote validation or prepare dependencies explicitly"
+        fi
+        return 0
+    fi
+
     if ! install_source=$(_gwt_shared_install_source "$worktree_path"); then
+        if [[ "$mode" == "validate" ]]; then
+            echo "gwt: cannot validate shared dependency link without a canonical install: $worktree_path/node_modules" >&2
+            return 1
+        fi
         echo "gwt: pnpm repo detected, but no canonical node_modules tree exists yet" >&2
-        echo "gwt: run pnpm install once in the main checkout, then create worktrees from there" >&2
+        echo "gwt: created a code-only worktree; use remote validation or prepare dependencies explicitly" >&2
         return 0
     fi
 
@@ -1007,11 +1215,17 @@ _gwt_bootstrap_worktree() {
         return 0
     fi
 
-    echo "gwt: linking shared pnpm install from $install_source"
-    if [[ "${DOTFILES_GWT_LINK_DEEP_NODE_MODULES:-0}" != "1" ]]; then
-        echo "gwt: linking root node_modules only (set DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1 for deep workspace links)"
+    local consumer_state
+    owner="${owner:-$install_source}"
+    binding_state=$(_gwt_explicit_dependency snapshot "$install_source" "$owner" "$worktree_path") || return 1
+    consumer_state=$(_gwt_explicit_dependency inspect "$install_source" "$owner" "$worktree_path" "$binding_state") || return 1
+    if ! _gwt_dependency_compatible "$install_source" "$worktree_path"; then
+        [[ "$mode" == "validate" ]] && return 1
+        echo "gwt: created a code-only worktree; qualify a compatible install before sharing" >&2
+        return 0
     fi
-    _gwt_link_shared_node_modules "$install_source" "$worktree_path" || return 1
+    echo "gwt: validating shared pnpm install from $install_source"
+    _gwt_link_shared_node_modules "$install_source" "$worktree_path" "$mode" "$binding_state" "$consumer_state" "$owner" || return 1
 }
 
 _gwt_tmux_sync_context() {
@@ -1025,9 +1239,11 @@ _gwt_print_help() {
 Usage: gwt <command> [args]
 
 Commands:
-  gwt clone <repo> [dest] [--profile <name>|--full]
+  gwt clone <repo> [dest] [--checkout <profile>|--full] [--history full|blobless]
   gwt new <branch> [start-point]   Create/add worktree under ~/.codex/worktrees
   gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]
+  gwt new|add <branch> [start-point] --dependency-source <absolute-install-root>
+  gwt new <branch> [start-point] --cow-from <immutable-seed>  Experimental APFS sharing
   gwt ls [--raw|--plain|--color|--no-color]
   gwt audit [agent-worktree-clean args...]
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
@@ -1049,9 +1265,14 @@ Commands:
   gwt sparse add <path...>          Expand the current sparse checkout with extra paths
   gwt sparse full                   Disable sparse checkout for the current worktree
   gwt root                          Print configured worktree root
+  gwt owner [--repo <path>]          Validate the preferred owner for new work
+  gwt dependencies check --source <install-root> --target <worktree>
+  gwt dependencies record --source <install-root> --after-frozen-install
+  gwt snapshot --task <id> --purpose <text> [--source <owner>] [--ref <commit>]
+                                    Create one-commit history in ~/GIT/_Synthetic
 
 Env:
-  DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1  Also link nested workspace node_modules trees
+  DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1  Legacy discovery; unqualified deep sharing stays code-only
   GWT_OWNER_ID=<stable task id>       Required outside Codex for enrolled worktrees
 EOF
 }
@@ -1083,6 +1304,10 @@ gwt() {
     done
 
     case "$subcommand" in
+        owner|snapshot|dependencies)
+            _gwt_storage "$subcommand" "$@"
+            return $?
+            ;;
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             ;;
@@ -1103,7 +1328,7 @@ gwt() {
             return $?
             ;;
         clone)
-            local repo_url="" dest="" profile=""
+            local repo_url="" dest="" profile="" history=""
             local clone_slug="" clone_filter=""
             local clone_profile_dir=""
             local use_sparse=true
@@ -1111,14 +1336,23 @@ gwt() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --profile)
+                    --profile|--checkout)
+                        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { echo "gwt: missing checkout profile" >&2; return 1; }
+                        [[ -z "$profile" || "$profile" == "$2" ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="$2"
                         shift 2
                         ;;
                     --full|--no-sparse)
+                        [[ -z "$profile" || "$profile" == full ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="full"
                         use_sparse=false
                         shift
+                        ;;
+                    --history)
+                        [[ $# -ge 2 && ( "$2" == full || "$2" == blobless ) ]] || { echo "gwt: history must be full or blobless" >&2; return 1; }
+                        [[ -z "$history" || "$history" == "$2" ]] || { echo "gwt: conflicting history options" >&2; return 1; }
+                        history="$2"
+                        shift 2
                         ;;
                     -*)
                         echo "Usage: gwt clone <repo> [dest] [--profile <name>|--full]"
@@ -1152,6 +1386,8 @@ gwt() {
 
             clone_args=(clone)
             clone_filter=$(_gwt_sparse_clone_filter "$clone_slug" 2>/dev/null || true)
+            [[ "$history" == full ]] && clone_filter=""
+            [[ "$history" == blobless ]] && clone_filter="blob:none"
             clone_profile_dir=$(_gwt_sparse_repo_dir_from_slug "$clone_slug")
             if [[ -n "$clone_filter" ]]; then
                 clone_args+=("--filter=$clone_filter")
@@ -1159,11 +1395,11 @@ gwt() {
 
             if [[ -n "$profile" && "$profile" != "full" ]]; then
                 clone_args+=(--sparse)
-            elif [[ "$use_sparse" == true && -d "$clone_profile_dir" ]]; then
+            elif [[ -z "$profile" && "$use_sparse" == true && -d "$clone_profile_dir" ]]; then
                 clone_args+=(--sparse)
             fi
 
-            git "${clone_args[@]}" "$repo_url" "$dest" || return 1
+            git "${clone_args[@]}" -- "$repo_url" "$dest" || return 1
             dest=$(cd "$dest" && pwd) || return 1
 
             if [[ -n "$profile" ]]; then
@@ -1277,11 +1513,13 @@ gwt() {
             local branch=""
             local start_point=""
             local profile=""
+            local cow_source=""
             local root repo_slug branch_slug worktree_parent worktree_path repo_root
             local use_sparse=false
             local checkout_risk=""
             local created_worktree=false
             local finish_managed=false
+            local dependency_source="" binding_state="" expected_head=""
 
             _gwt_require_worktree_storage || return
 
@@ -1291,13 +1529,33 @@ gwt() {
                         finish_managed=true
                         shift
                         ;;
-                    --profile)
+                    --dependency-source)
+                        [[ -z "$dependency_source" && $# -ge 2 && "$2" == /* ]] || {
+                            echo "gwt: --dependency-source requires one absolute install root" >&2
+                            return 1
+                        }
+                        dependency_source="$2"
+                        shift 2
+                        ;;
+                    --cow-from)
+                        [[ $# -ge 2 && -d "$2" ]] || { echo "gwt: missing CoW seed directory" >&2; return 1; }
+                        cow_source=$(builtin cd -- "$2" && pwd -P) || return 1
+                        shift 2
+                        ;;
+                    --profile|--checkout)
+                        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { echo "gwt: missing checkout profile" >&2; return 1; }
+                        [[ -z "$profile" || "$profile" == "$2" ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="$2"
                         shift 2
                         ;;
                     --full|--no-sparse)
+                        [[ -z "$profile" || "$profile" == full ]] || { echo "gwt: conflicting checkout options" >&2; return 1; }
                         profile="full"
                         shift
+                        ;;
+                    -*)
+                        echo "gwt: unknown new option '$1'" >&2
+                        return 1
                         ;;
                     *)
                         if [[ -z "$branch" ]]; then
@@ -1305,7 +1563,7 @@ gwt() {
                         elif [[ -z "$start_point" ]]; then
                             start_point="$1"
                         else
-                            echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]"
+                            echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full]"
                             return 1
                         fi
                         shift
@@ -1314,7 +1572,16 @@ gwt() {
             done
 
             if [[ -z "$branch" ]]; then
-                echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]"
+                echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full]"
+                return 1
+            fi
+
+            if [[ -n "$dependency_source" && "$finish_managed" == true ]]; then
+                echo "gwt: explicit dependency donors are not supported by managed finish; use a code-only managed checkout" >&2
+                return 1
+            fi
+            if [[ -n "$dependency_source" && "${DOTFILES_GWT_LINK_DEEP_NODE_MODULES:-0}" == 1 ]]; then
+                echo "gwt: --dependency-source supports root node_modules only" >&2
                 return 1
             fi
 
@@ -1347,9 +1614,35 @@ gwt() {
                     echo "gwt: existing worktree branch '$existing_branch' does not match '$branch'" >&2
                     return 1
                 fi
+                if [[ -n "$dependency_source" ]]; then
+                    binding_state=$(_gwt_explicit_dependency snapshot "$dependency_source" "$repo_root" "$existing_path") || return 1
+                fi
+                _gwt_bootstrap_worktree "$existing_path" validate "$dependency_source" "$binding_state" "$repo_root" "$branch" || return 1
                 _gwt_claim_if_enrolled "$existing_path" || return
                 echo "gwt: worktree already exists at $existing_path"
                 cd "$existing_path" || return 1
+                _gwt_tmux_sync_context
+                return 0
+            fi
+
+            # Existing paths keep their current owner. Only new work may route.
+            local selected_output selected_owner
+            local -a selection
+            selected_output=$(_gwt_storage owner --repo "$repo_root" --branch "$branch" --start "$start_point") || return 1
+            selection=("${(@f)selected_output}")
+            selected_owner="${selection[1]}"
+            if [[ "$selected_owner/.git" != "$(_gwt_common_dir "$repo_root")" ]]; then
+                local -a routed_args
+                routed_args=(new "$branch")
+                [[ -n "${selection[2]:-}" ]] && routed_args+=("${selection[2]}")
+                [[ -n "$profile" ]] && routed_args+=(--profile "$profile")
+                [[ -n "$cow_source" ]] && routed_args+=(--cow-from "$cow_source")
+                [[ "$finish_managed" == true ]] && routed_args+=(--finish-managed)
+                [[ -n "$dependency_source" ]] && routed_args+=(--dependency-source "$dependency_source")
+                (builtin cd -- "$selected_owner" && gwt "${routed_args[@]}") || return 1
+                repo_slug=$(_gwt_repo_slug "$selected_owner") || return 1
+                worktree_path="$root/$repo_slug/$branch_slug"
+                cd "$worktree_path" || return 1
                 _gwt_tmux_sync_context
                 return 0
             fi
@@ -1369,7 +1662,11 @@ gwt() {
                 fi
             fi
 
+            if [[ -n "$dependency_source" ]]; then
+                binding_state=$(_gwt_explicit_dependency snapshot "$dependency_source" "$repo_root" "$worktree_path") || return 1
+            fi
             if _gwt_git_probe show-ref --verify --quiet "refs/heads/$branch"; then
+                expected_head=$(_gwt_git_probe rev-parse --verify "refs/heads/$branch") || return 1
                 if [[ "$use_sparse" == true ]]; then
                     git worktree add --no-checkout "$worktree_path" "$branch" || return 1
                 else
@@ -1378,6 +1675,7 @@ gwt() {
             else
                 local resolved_start_point
                 resolved_start_point=$(_gwt_resolve_start_point "$start_point") || return 1
+                expected_head=$(_gwt_git_probe rev-parse --verify "$resolved_start_point^{commit}") || return 1
                 if [[ "$use_sparse" == true ]]; then
                     git worktree add --no-checkout -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
                 else
@@ -1387,17 +1685,23 @@ gwt() {
             created_worktree=true
 
             _gwt_sparse_apply_default_profile "$worktree_path" "$profile" || {
-                [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                 return 1
             }
             if [[ "$use_sparse" == true ]]; then
                 git -C "$worktree_path" checkout -f >/dev/null 2>&1 || git -C "$worktree_path" read-tree -mu HEAD || {
-                    [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+                    [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                     return 1
                 }
             fi
-            _gwt_bootstrap_worktree "$worktree_path" || {
-                [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
+            if [[ -n "$cow_source" ]]; then
+                GWT_NEW_WORKTREE="$worktree_path" _gwt_storage cow --source "$cow_source" --target "$worktree_path" || {
+                    echo "gwt: CoW failed; new checkout retained at $worktree_path" >&2
+                    return 1
+                }
+            fi
+            _gwt_bootstrap_worktree "$worktree_path" link "$dependency_source" "$binding_state" "$repo_root" "$branch" "$expected_head" || {
+                [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                 return 1
             }
             if [[ "$finish_managed" == true ]]; then
@@ -1440,7 +1744,7 @@ gwt() {
         rm|remove)
             local target=""
             local force_remove=false
-            local arg target_path main_worktree repo_root current_path
+            local arg target_path main_worktree repo_root current_path worktree_status
 
             _gwt_require_worktree_storage || return
 
@@ -1479,9 +1783,15 @@ gwt() {
                 return 1
             fi
 
-            if ! $force_remove && [[ -n "$(_gwt_git_probe -C "$target_path" status --porcelain 2>/dev/null)" ]]; then
-                echo "gwt: worktree has uncommitted changes. Re-run with --force to remove."
-                return 1
+            if ! $force_remove; then
+                worktree_status=$(_gwt_git_probe -C "$target_path" status --porcelain=v1 --untracked-files=all --ignore-submodules=none) || {
+                    echo "gwt: cannot verify worktree status; retained $target_path" >&2
+                    return 1
+                }
+                if [[ -n "$worktree_status" ]]; then
+                    echo "gwt: worktree has uncommitted changes. Re-run with --force to remove."
+                    return 1
+                fi
             fi
 
             if $force_remove; then

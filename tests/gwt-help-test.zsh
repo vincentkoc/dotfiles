@@ -94,6 +94,11 @@ cases=(
   'clean|clean -h'
   'new|new help-branch --help'
   'add-alias|add help-branch -h'
+  'new-selector|new help-branch --dependency-source /fixture/install --help'
+  'add-selector|add help-branch --dependency-source /fixture/install -h'
+  'missing-selector|new help-branch --dependency-source --help'
+  'duplicate-selector|add help-branch --dependency-source relative --dependency-source --help'
+  'malformed-selector|new help-branch --dependency-source=relative --help'
   'cd|cd remove-me --help'
   'rm|rm remove-me -h'
   'remove-alias|remove remove-me --help'
@@ -130,6 +135,7 @@ for test_case in "${cases[@]}"; do
   ' zsh "$gwt_source" "$repo" "$invocation" >"$output"
 
   grep -Fq 'Usage: gwt <command> [args]' "$output"
+  grep -Fq -- '--dependency-source <absolute-install-root>' "$output"
   if [[ -e "$reference_output" ]]; then
     cmp -s "$reference_output" "$output"
   else

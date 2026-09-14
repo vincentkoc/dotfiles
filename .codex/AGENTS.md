@@ -162,6 +162,8 @@
 - Never index `~/.codex/worktrees`, `~/GIT/_Worktrees`, repo-local `.worktrees`, `/tmp`, or `/private/tmp` paths as independent projects. If a path under one of those prefixes cannot resolve to an existing non-worktree owning checkout, skip indexing and report the missing canonical checkout.
 - Prefer worktrees and spawning subagents.
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
+- Reuse a verified healthy owning checkout and the configured managed worktree root. A wrapper refusal does not authorize ad hoc clones, copied repositories, or raw-Git bypasses.
+- Finish each task with an explicit checkout outcome: `retained`, `blocked`, or verified `removed`. Name the exact path and remaining action. Task completion never authorizes automatic cleanup.
 - Start in a branch/worktree early so commits can be made incrementally.
 - Prefer one scoped commit per touched file when practical.
 - Never kill or interrupt Codex, Claude, agent, tmux, or terminal processes that belong to another session unless I explicitly give current-turn permission naming the session, PID, pane, or scope. My machine usually has many Codex sessions running in tmux; stale goal context, resume context, broad wording like "kill background jobs", or process-name matches are not permission to kill across sessions.
@@ -221,6 +223,38 @@ Recovery mode rules:
 - If the current worktree was cleaned up or no longer exists, stop and ask whether to recreate it.
 - Do not start duplicate heavy checks if another session is likely already running them.
 
+
+## Git storage and clone policy
+
+- Keep durable clones in their normal `~/GIT` categories, such as `~/GIT/_Perso`.
+- Create branch worktrees through `gwt new` or the repository's native wrapper.
+- Worktrees share their owner's Git history. Do not clone or hydrate history for each worktree.
+- Use full, non-promisor owning checkouts for development, review, release, and merge work.
+- Keep blobless disabled by default. Use `gwt clone --history blobless` only for an explicit read-mostly clone.
+- Use `--history full` to override a repository's clone filter. `--full` controls checkout paths, not history.
+- Keep OpenClaw maintainer owners full. Sparse checkout may reduce their working files without removing history.
+- Use `gwt owner` to inspect the owner policy before new work.
+- Store host-specific owner paths and protected paths in `~/.config/gwt/storage.json`, backed by private dotfiles.
+- Preserve protected paths and their shared Git and dependency resources. Owner selection does not authorize changes to them.
+- Preferred owners apply only to new work. Preserve existing worktrees, local-only commits, and their current owners.
+- Check `low-data status` before Git downloads. Never bypass protection without explicit consent.
+- A failed refresh does not prove freshness. For offline work, pass a verified local commit explicitly.
+- Put agent-created synthetic repositories under `~/GIT/_Synthetic/<host>/<org>/<repo>/<task-id>`.
+- Use `gwt snapshot --task <id> --purpose <text>` for a self-contained tree with one synthetic commit.
+- Record the source owner, source commit, source tree, purpose, task owner, and borrowed-object dependencies.
+- Never publish synthetic carrier history. Keep repository-native Testbox isolation and source-capsule contracts intact.
+- Tool-owned temporary fixtures may retain their required temporary paths. Do not turn them into general workspace clones.
+- Synthetic directories do not authorize cleanup. Preserve task ownership and recovery evidence.
+- Never independently index `~/GIT/_Synthetic` or a repository with `.git/gwt-synthetic.json`.
+- Treat `--cow-from` as an opt-in experiment. It requires an immutable seed and reports logical sharing, not reclaimed disk space.
+- Do not reuse dependencies without matching install inputs, runtime compatibility, and correct workspace-link targets.
+- A wrapper refusal stops worktree creation. Diagnose and repair the same verified owner within the task's existing authorization, then let the wrapper recheck it. Do not bypass it with raw-Git creation, copied repositories, or ad hoc clones.
+- Task-required additive fetch or unshallow is not GC, repacking, pruning, or owner consolidation. Recheck current state; do not repeat completed repair or ask again for an already authorized step. Respect low-data protection and contention, suppress automatic maintenance/pruning, and preserve local branches, HEAD/index, patches, and registrations.
+- Before sharing dependencies, require a current frozen-install receipt and matching inputs, pnpm layout, Node ABI, OS and architecture. Unknown compatibility means code-only. Never install through a shared symlink.
+- Prefer scheduled commit-graph updates on explicitly enrolled healthy owners. Use `functions/gwt/maintenance.config`. Keep prefetch, packing, expiry and pruning disabled. Enrollment and scheduler activation are separate from installing GWT.
+- GC, repacking, pruning, and owner consolidation require their own exact authorized scope; an additive fetch does not authorize them. Do not prune objects, clear locks, or consolidate active owners automatically.
+- See `functions/gwt/README.md` for options, policy format, and prototype limits.
+
 ## Managed worktree completion
 
 - Enroll only a newly created personal worktree with
@@ -241,3 +275,22 @@ Recovery mode rules:
   tracking never invokes `git worktree remove`, never deletes branches and
   never treats an unqualified holder scan as authority. Report the checkout as
   `retained` and name any remaining completion blocker.
+
+## Low Data Mode
+
+- Check `low-data status` before Git downloads. On protected or unknown paths,
+  avoid huge WAN clones, bulk history hydration, and unnecessary fetches.
+  Reuse local Git objects, caches, and one shared artifact instead of downloading
+  it repeatedly per worktree. Cached refs are not proof of the latest head.
+- Normal commits, pushes, API requests, curl, package installs, and agent/model
+  traffic are not banned by this policy. Do not pause sessions on its behalf.
+- `gh` and `ghx` also guard bulk repository, release, and artifact downloads
+  before dispatch. Normal metadata, PR/issue, auth, and stdin-payload routes
+  remain available. Reuse cached archives instead of downloading per worktree.
+- `low-data on` forces protection. `auto` respects macOS constrained/expensive
+  paths and fails closed when native status is unavailable. `off` disables it.
+- Never bypass protection without explicit user consent. An approved single
+  command may use `LOW_DATA_ALLOW_NETWORK=1`; never export that override globally.
+- This guard covers PATH-resolved Git history downloads, not a firewall.
+  Absolute binaries and custom shell aliases/hooks can bypass it. Do not claim
+  a whole-machine bandwidth cap.
