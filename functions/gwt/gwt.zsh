@@ -591,6 +591,21 @@ _gwt_require_worktree_storage() {
     "$guard_path"
 }
 
+_gwt_finish_tool() {
+    local finish_tool
+
+    finish_tool=$(_gwt_tool_path agent-worktree-finish) || {
+        echo "gwt: agent-worktree-finish not found" >&2
+        return 127
+    }
+    "$finish_tool" "$@"
+}
+
+_gwt_claim_if_enrolled() {
+    [[ -e "${DOTFILES_GWT_FINISH_STATE:-$HOME/.local/state/gwt-finish}/lifecycle.sqlite" ]] || return 0
+    _gwt_finish_tool resume --if-enrolled --worktree "$1"
+}
+
 _gwt_validate_cleanup_args() {
     local command_name="$1"
     shift
@@ -1012,12 +1027,21 @@ Usage: gwt <command> [args]
 Commands:
   gwt clone <repo> [dest] [--profile <name>|--full]
   gwt new <branch> [start-point]   Create/add worktree under ~/.codex/worktrees
-  gwt new <branch> [start-point] [--profile <name>|--full]
+  gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]
   gwt ls [--raw|--plain|--color|--no-color]
   gwt audit [agent-worktree-clean args...]
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
+  gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...]
+                                    Record explicit completion; retain checkout
+  gwt resume [--worktree <path>]    Resume an enrolled worktree
+  gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
+  gwt finish-unpin --reason <text>  Clear this owner's exact pin
+  gwt finish-status [--all]         Show local completion state
+  gwt finish-check [--all] [--policy <path>]
+                                    Refresh filtered completion proof; report only
+                                    Managed release/removal is unavailable
   gwt prune                         Prune stale worktree metadata
   gwt sparse status                 Show sparse-checkout state for the current worktree
   gwt sparse list                   List available sparse profiles for the current repo
@@ -1028,6 +1052,7 @@ Commands:
 
 Env:
   DOTFILES_GWT_LINK_DEEP_NODE_MODULES=1  Also link nested workspace node_modules trees
+  GWT_OWNER_ID=<stable task id>       Required outside Codex for enrolled worktrees
 EOF
 }
 
@@ -1060,6 +1085,22 @@ gwt() {
     case "$subcommand" in
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+            ;;
+        release)
+            echo "gwt: managed release/removal is unavailable; checkout retained" >&2
+            return 1
+            ;;
+        finish-status|finish-check)
+            for help_arg in "$@"; do
+                case "$help_arg" in
+                    --apply|--apply=*)
+                        echo "gwt: managed release/removal is unavailable; checkout retained" >&2
+                        return 1
+                        ;;
+                esac
+            done
+            _gwt_finish_tool "${subcommand#finish-}" "$@"
+            return $?
             ;;
         clone)
             local repo_url="" dest="" profile=""
@@ -1144,6 +1185,13 @@ gwt() {
 
     case "$subcommand" in
         ""|help|-h|--help|root|clone)
+            ;;
+        finish|resume|finish-pin|finish-unpin)
+            local lifecycle_command="${subcommand#finish-}"
+            _gwt_finish_tool "$lifecycle_command" "$@" || return
+            if [[ "$subcommand" == "finish" ]]; then
+                echo "gwt: completion recorded; managed release/removal is unavailable; checkout retained"
+            fi
             ;;
         ls|list)
             local repo_root list_table color_mode="auto"
@@ -1233,11 +1281,16 @@ gwt() {
             local use_sparse=false
             local checkout_risk=""
             local created_worktree=false
+            local finish_managed=false
 
             _gwt_require_worktree_storage || return
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
+                    --finish-managed)
+                        finish_managed=true
+                        shift
+                        ;;
                     --profile)
                         profile="$2"
                         shift 2
@@ -1252,7 +1305,7 @@ gwt() {
                         elif [[ -z "$start_point" ]]; then
                             start_point="$1"
                         else
-                            echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full]"
+                            echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]"
                             return 1
                         fi
                         shift
@@ -1261,7 +1314,7 @@ gwt() {
             done
 
             if [[ -z "$branch" ]]; then
-                echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full]"
+                echo "Usage: gwt new <branch> [start-point] [--profile <name>|--full] [--finish-managed]"
                 return 1
             fi
 
@@ -1277,6 +1330,10 @@ gwt() {
 
             if [[ -e "$worktree_path" || -L "$worktree_path" ]]; then
                 local existing_path existing_branch
+                if [[ "$finish_managed" == true ]]; then
+                    echo "gwt: --finish-managed only enrolls a newly created worktree; existing path retained" >&2
+                    return 1
+                fi
                 if [[ ! -d "$worktree_path" ]]; then
                     echo "gwt: existing worktree path is not a directory: $worktree_path" >&2
                     return 1
@@ -1290,6 +1347,7 @@ gwt() {
                     echo "gwt: existing worktree branch '$existing_branch' does not match '$branch'" >&2
                     return 1
                 fi
+                _gwt_claim_if_enrolled "$existing_path" || return
                 echo "gwt: worktree already exists at $existing_path"
                 cd "$existing_path" || return 1
                 _gwt_tmux_sync_context
@@ -1342,6 +1400,12 @@ gwt() {
                 [[ "$created_worktree" == true ]] && _gwt_cleanup_failed_worktree "$worktree_path"
                 return 1
             }
+            if [[ "$finish_managed" == true ]]; then
+                _gwt_finish_tool enroll --worktree "$worktree_path" --managed-root "$root" || {
+                    echo "gwt: enrollment failed; new worktree retained at $worktree_path" >&2
+                    return 1
+                }
+            fi
             cd "$worktree_path" || return 1
             _gwt_tmux_sync_context
             ;;
@@ -1369,6 +1433,7 @@ gwt() {
                 return 1
             fi
 
+            _gwt_claim_if_enrolled "$target_path" || return
             cd "$target_path" || return 1
             _gwt_tmux_sync_context
             ;;
