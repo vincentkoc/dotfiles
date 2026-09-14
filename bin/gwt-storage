@@ -367,6 +367,62 @@ def dependency_inputs(repo):
     return {"files": inputs, "package_manager": manager}
 
 
+def normalized_lock_bytes(path):
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    return raw.replace(b"\r\n", b"\n")
+
+
+def lock_document_has_content(document):
+    return any(
+        stripped and not stripped.startswith(b"#")
+        for line in document.splitlines()
+        if (stripped := line.strip(b" \t\r"))
+    )
+
+
+def top_level_lock_markers(raw):
+    markers = []
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        body = line[:-1] if line.endswith((b"\n", b"\r")) else line
+        if re.fullmatch(rb"(?:---|\.\.\.)(?:[ \t].*)?", body):
+            markers.append((offset, line))
+        offset += len(line)
+    return markers
+
+
+def wanted_lock_dependency_document(path):
+    raw = normalized_lock_bytes(path)
+    markers = top_level_lock_markers(raw)
+    if not markers:
+        if not lock_document_has_content(raw):
+            raise ValueError("checkout lockfile has no dependency document")
+        return raw
+    if (
+        len(markers) != 2
+        or markers[0] != (0, b"---\n")
+        or markers[1][1] != b"---\n"
+    ):
+        raise ValueError("checkout lockfile has an invalid document envelope")
+    second = markers[1][0]
+    environment = raw[4:second]
+    dependency = raw[second + 4:]
+    if not lock_document_has_content(environment) or not lock_document_has_content(dependency):
+        raise ValueError("checkout lockfile has an empty document")
+    return dependency
+
+
+def installed_lock_document(path):
+    raw = normalized_lock_bytes(path)
+    if top_level_lock_markers(raw):
+        raise ValueError("installed lockfile must contain one unmarked document")
+    if not lock_document_has_content(raw):
+        raise ValueError("installed lockfile has no dependency document")
+    return raw
+
+
 def dependency_install(source):
     source = direct(source)
     data = policy()
@@ -391,7 +447,7 @@ def dependency_install(source):
         raise ValueError("dependency sharing requires an internal pnpm virtual store")
     direct(modules / ".pnpm")
     installed_lock = modules / ".pnpm/lock.yaml"
-    if installed_lock.read_bytes() != (source / "pnpm-lock.yaml").read_bytes():
+    if installed_lock_document(installed_lock) != wanted_lock_dependency_document(source / "pnpm-lock.yaml"):
         raise ValueError("installed lockfile differs from checkout lockfile")
     runtime = subprocess.run(["node", "-p", "JSON.stringify({node:process.versions.node,abi:process.versions.modules,platform:process.platform,arch:process.arch})"], capture_output=True, text=True, check=True)
     # Workspace links back into donor source would execute the wrong checkout.

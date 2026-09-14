@@ -260,6 +260,10 @@ Dependency compatibility:
   The receipt lives under `${XDG_STATE_HOME:-~/.local/state}/gwt/dependencies`.
   It binds the physical install directory, input hashes, exact pnpm version,
   installed lockfile, pnpm layout, Node version/ABI, OS and architecture.
+- For pnpm 12's two-document wanted lock, qualification compares the installed
+  lock byte-for-byte with the normalized dependency document. The complete
+  wanted lock, including its environment document, remains hashed into the
+  receipt and must also match the consumer checkout.
 - Consumer manifests, workspace configuration, patches and lockfile must match.
   Missing sparse inputs, absent receipts, changed metadata or unknown layouts
   leave new worktrees code-only. An explicit source fails and retains the new
