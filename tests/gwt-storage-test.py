@@ -107,6 +107,16 @@ class StorageTest(unittest.TestCase):
         (modules / ".pnpm/lock.yaml").write_bytes((self.repo / "pnpm-lock.yaml").read_bytes())
         return modules
 
+    def prepare_pnpm12_dependencies(self, wanted, installed=None):
+        modules = self.prepare_dependencies()
+        (self.repo / "package.json").write_text('{"packageManager":"pnpm@12.3.4"}\n')
+        (self.repo / "pnpm-lock.yaml").write_bytes(wanted)
+        (modules / ".modules.yaml").write_text(
+            "packageManager: pnpm@12.3.4\nnodeLinker: isolated\nvirtualStoreDir: .pnpm\n"
+        )
+        (modules / ".pnpm/lock.yaml").write_bytes(installed if installed is not None else wanted)
+        return modules
+
     def test_dependency_receipt_gates_new_sharing_and_input_drift(self):
         modules = self.prepare_dependencies()
         self.gwt("new", "unknown-deps", "HEAD", "--full")
@@ -122,6 +132,120 @@ class StorageTest(unittest.TestCase):
         self.assertEqual((target / "node_modules").resolve(), modules)
         (modules / ".modules.yaml").write_text("packageManager: pnpm@9.0.0\n")
         self.helper("dependencies", "check", "--source", self.repo, "--target", target, ok=False)
+
+    def test_dependency_receipt_accepts_pnpm12_environment_document(self):
+        dependency_lock = b"lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n"
+        self.prepare_pnpm12_dependencies(
+            b"---\npackageManager: pnpm@12.3.4\n---\n" + dependency_lock,
+            dependency_lock,
+        )
+
+        self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install")
+
+    def test_dependency_lock_normalizes_bom_crlf_and_ignores_indented_markers(self):
+        dependency_lock = (
+            b"lockfileVersion: '9.0'\r\n"
+            b"notes: |\r\n"
+            b"  ---\r\n"
+            b"  ...\r\n"
+        )
+        self.prepare_pnpm12_dependencies(
+            b"\xef\xbb\xbf---\r\npackageManager: pnpm@12.3.4\r\n---\r\n" + dependency_lock,
+            b"\xef\xbb\xbf" + dependency_lock,
+        )
+
+        self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install")
+
+    def test_dependency_lock_rejects_dependency_and_environment_drift(self):
+        dependency_lock = b"lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n"
+        modules = self.prepare_pnpm12_dependencies(
+            b"---\npackageManager: pnpm@12.3.4\nchannel: stable\n---\n" + dependency_lock,
+            dependency_lock,
+        )
+        self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install")
+
+        (modules / ".pnpm/lock.yaml").write_bytes(
+            dependency_lock.replace(b"autoInstallPeers: true", b"autoInstallPeers: false")
+        )
+        result = self.helper(
+            "dependencies", "record", "--source", self.repo, "--after-frozen-install", ok=False
+        )
+        self.assertIn("installed lockfile differs", result.stderr)
+
+        (modules / ".pnpm/lock.yaml").write_bytes(dependency_lock.rstrip(b"\n"))
+        result = self.helper(
+            "dependencies", "record", "--source", self.repo, "--after-frozen-install", ok=False
+        )
+        self.assertIn("installed lockfile differs", result.stderr)
+
+        (modules / ".pnpm/lock.yaml").write_bytes(dependency_lock)
+        (self.repo / "pnpm-lock.yaml").write_bytes(
+            b"---\npackageManager: pnpm@12.3.4\nchannel: next\n---\n" + dependency_lock
+        )
+        result = self.helper(
+            "dependencies", "record", "--source", self.repo, "--after-frozen-install", ok=False
+        )
+        self.assertIn("existing receipt differs", result.stderr)
+
+    def test_dependency_lock_strips_exactly_one_bom(self):
+        dependency_lock = b"lockfileVersion: '9.0'\n"
+        self.prepare_pnpm12_dependencies(
+            b"\xef\xbb\xbf\xef\xbb\xbf---\npackageManager: pnpm@12.3.4\n---\n"
+            + dependency_lock,
+            dependency_lock,
+        )
+
+        result = self.helper(
+            "dependencies", "record", "--source", self.repo, "--after-frozen-install", ok=False
+        )
+        self.assertIn("checkout lockfile has an invalid document envelope", result.stderr)
+
+    def test_dependency_lock_rejects_invalid_wanted_document_envelopes(self):
+        dependency_lock = b"lockfileVersion: '9.0'\n"
+        modules = self.prepare_pnpm12_dependencies(dependency_lock, dependency_lock)
+        invalid = {
+            "missing separator": b"---\npackageManager: pnpm@12.3.4\n" + dependency_lock,
+            "empty environment": b"---\n# comment only\n---\n" + dependency_lock,
+            "empty dependency": b"---\npackageManager: pnpm@12.3.4\n---\n# comment only\n",
+            "stray separator": dependency_lock + b"---\n",
+            "decorated start": b"--- # environment\npackageManager: pnpm@12.3.4\n---\n" + dependency_lock,
+            "decorated separator": b"---\npackageManager: pnpm@12.3.4\n--- # dependency\n" + dependency_lock,
+            "end marker": dependency_lock + b"...\n",
+            "bare carriage return": b"---\rpackageManager: pnpm@12.3.4\r---\r" + dependency_lock,
+            "third document": (
+                b"---\npackageManager: pnpm@12.3.4\n---\n"
+                + dependency_lock
+                + b"---\nextra: document\n"
+            ),
+        }
+        for name, wanted in invalid.items():
+            with self.subTest(name=name):
+                (self.repo / "pnpm-lock.yaml").write_bytes(wanted)
+                (modules / ".pnpm/lock.yaml").write_bytes(dependency_lock)
+                result = self.helper(
+                    "dependencies", "record", "--source", self.repo,
+                    "--after-frozen-install", ok=False,
+                )
+                self.assertIn("checkout lockfile", result.stderr)
+
+    def test_dependency_lock_rejects_marked_installed_documents(self):
+        dependency_lock = b"lockfileVersion: '9.0'\n"
+        wanted = b"---\npackageManager: pnpm@12.3.4\n---\n" + dependency_lock
+        modules = self.prepare_pnpm12_dependencies(wanted, dependency_lock)
+        invalid = {
+            "multiple documents": b"---\nfirst: document\n---\n" + dependency_lock,
+            "decorated marker": b"--- # dependency\n" + dependency_lock,
+            "end marker": dependency_lock + b"...\n",
+            "bare carriage return": b"---\r" + dependency_lock,
+        }
+        for name, installed in invalid.items():
+            with self.subTest(name=name):
+                (modules / ".pnpm/lock.yaml").write_bytes(installed)
+                result = self.helper(
+                    "dependencies", "record", "--source", self.repo,
+                    "--after-frozen-install", ok=False,
+                )
+                self.assertIn("installed lockfile must contain one unmarked document", result.stderr)
 
     def test_dependency_selector_survives_owner_routing(self):
         self.prepare_dependencies()
