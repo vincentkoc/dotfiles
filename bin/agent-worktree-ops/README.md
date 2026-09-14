@@ -7,12 +7,18 @@ Bins in this folder:
 - `agent-worktree-finish`
   - explicitly enrolls new managed worktrees and tracks owner completion,
     recovery pins, exact PR heads and stack dependencies in a private ledger
-  - `status` and `check` are report-only; output always identifies the checkout
-    as retained and release/removal as unavailable
-  - `check --all --policy <path>` filters reports to exact reviewed repository
-    identities; the policy cannot enable apply, release or removal
-  - never scans for old worktrees, expires claims, releases owners, removes
-    worktrees, deletes branches or prunes metadata
+  - plain `finish` records completion; explicit `finish --release` relinquishes
+    that owner's future checkout use and immediately checks eligible removal
+  - `status` and `check` retain; the same `check --all --apply --policy <path>`
+    consumer revisits merges and departure only after host-specific activation
+  - new private, natively locked enrollments use durable generation/release/
+    removal-intent records; old report-only entries cannot be adopted
+  - `gwt_finish_safety.py` owns bounded byte/index admission, observed Darwin
+    process references and supervised native non-force Git removal
+  - automatic Mac deletion remains blocked by unqualified mapping coverage;
+    an external policy or activation receipt cannot override that native hold
+  - never expires claims, adopts old worktrees, deletes branches or prunes
+    metadata; unknown or partial removal requires read-only reconciliation
   - see [the completion guide](../../functions/gwt/README.md)
 - `worktree-storage-guard`
   - reads the private system policy
@@ -99,6 +105,7 @@ Bins in this folder:
   - validates required external storage before creating locks, logs, or state
 - `agent-worktree-purge`
   - background purge of entries left in the legacy quarantine directory
+  - refuses targets overlapping any finish-enrolled checkout or Git admin path
 - `install-agent-worktree-ops`
   - atomically installs runtime copies, including the storage guard, only
   - never creates, loads, unloads, enables, disables, or removes a LaunchAgent

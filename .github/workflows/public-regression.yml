@@ -14,6 +14,9 @@ on:
       - "functions/system/deepclean.zsh"
       - "functions/gwt/**"
       - "tests/gwt-storage-test.py"
+      - "tests/gwt-finish-test.py"
+      - "tests/gwt-finish-native-test.py"
+      - "tests/gwt-remove-test.zsh"
       - "tests/gwt-bootstrap-test.zsh"
       - "tests/deepclean-test.sh"
       - "tests/deepclean-test.zsh"
@@ -50,7 +53,10 @@ jobs:
           bash tests/install-foundations-test.sh
           bash tests/agent-worktree-maintain-test.sh
           python3 tests/gwt-storage-test.py
+          python3 tests/gwt-finish-test.py
+          python3 tests/gwt-finish-native-test.py
           zsh tests/gwt-bootstrap-test.zsh
+          zsh tests/gwt-remove-test.zsh
           bash tests/deepclean-test.sh
           bash tests/linux-server-auth-proof-test.sh
           python3 tests/tt-safety-test.py

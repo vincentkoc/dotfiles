@@ -598,7 +598,8 @@ _gwt_finish_tool() {
 
 _gwt_claim_if_enrolled() {
     # Resume before entering so prior completion cannot survive gwt cd/new.
-    [[ -e "${DOTFILES_GWT_FINISH_STATE:-$HOME/.local/state/gwt-finish}/lifecycle.sqlite" ]] || return 0
+    local state="${DOTFILES_GWT_FINISH_STATE:-$HOME/.local/state/gwt-finish}"
+    [[ -e "$state" || -L "$state" ]] || return 0
     _gwt_finish_tool resume --if-enrolled --worktree "$1"
 }
 
@@ -1249,15 +1250,15 @@ Commands:
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
-  gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...]
-                                    Record explicit completion; retain checkout
+  gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...] [--release]
+                                    Complete; --release explicitly signs off checkout use
+  gwt release [--worktree <path>]   Release this already-completed owner
   gwt resume [--worktree <path>]    Resume an enrolled worktree
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all]         Show local completion state
-  gwt finish-check [--all] [--policy <path>]
-                                    Refresh filtered completion proof; report only
-                                    Managed release/removal is unavailable
+  gwt finish-check [--all] [--policy <path>] [--apply]
+                                    Report; --apply requires qualified host activation
   gwt prune                         Prune stale worktree metadata
   gwt sparse status                 Show sparse-checkout state for the current worktree
   gwt sparse list                   List available sparse profiles for the current repo
@@ -1311,21 +1312,12 @@ gwt() {
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             ;;
-        release)
-            echo "gwt: managed release/removal is unavailable; checkout retained" >&2
-            return 1
-            ;;
         finish-status|finish-check)
-            for help_arg in "$@"; do
-                case "$help_arg" in
-                    --apply|--apply=*)
-                        echo "gwt: managed release/removal is unavailable; checkout retained" >&2
-                        return 1
-                        ;;
-                esac
-            done
             _gwt_finish_tool "${subcommand#finish-}" "$@"
             return $?
+            ;;
+        finish|release|resume|finish-pin|finish-unpin)
+            # Explicit --worktree is also valid from outside a checkout.
             ;;
         clone)
             local repo_url="" dest="" profile="" history=""
@@ -1422,12 +1414,33 @@ gwt() {
     case "$subcommand" in
         ""|help|-h|--help|root|clone)
             ;;
-        finish|resume|finish-pin|finish-unpin)
+        finish|release|resume|finish-pin|finish-unpin)
             local lifecycle_command="${subcommand#finish-}"
-            _gwt_finish_tool "$lifecycle_command" "$@" || return
-            if [[ "$subcommand" == "finish" ]]; then
-                echo "gwt: completion recorded; managed release/removal is unavailable; checkout retained"
+            local lifecycle_target="$PWD" lifecycle_release=false
+            local -a lifecycle_args
+            lifecycle_args=("$@")
+            [[ "$subcommand" == release ]] && lifecycle_release=true
+            local lifecycle_i
+            for (( lifecycle_i=1; lifecycle_i <= ${#lifecycle_args}; lifecycle_i++ )); do
+                [[ "${lifecycle_args[$lifecycle_i]}" == --release ]] && lifecycle_release=true
+                if [[ "${lifecycle_args[$lifecycle_i]}" == --worktree ]]; then
+                    lifecycle_target="${lifecycle_args[$((lifecycle_i + 1))]}"
+                elif [[ "${lifecycle_args[$lifecycle_i]}" == --worktree=* ]]; then
+                    lifecycle_target="${lifecycle_args[$lifecycle_i]#--worktree=}"
+                fi
+            done
+            if [[ "$lifecycle_release" == true ]]; then
+                lifecycle_target="${lifecycle_target:a}"
+                local lifecycle_owner
+                lifecycle_owner=$(_gwt_git_probe -C "$lifecycle_target" worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}') || return
+                [[ -n "$lifecycle_owner" ]] || return 1
+                # This parks only this shell. A Codex parent holding the target
+                # remains visible to native admission and blocks removal.
+                builtin cd -- "$lifecycle_owner" || return
+                _gwt_tmux_sync_context
+                lifecycle_args+=(--worktree "$lifecycle_target")
             fi
+            _gwt_finish_tool "$lifecycle_command" "${lifecycle_args[@]}" || return
             ;;
         ls|list)
             local repo_root list_table color_mode="auto"
@@ -1519,6 +1532,8 @@ gwt() {
             local checkout_risk=""
             local created_worktree=false
             local finish_managed=false
+            local finish_token=""
+            local -a finish_add_args
             local dependency_source="" binding_state="" expected_head=""
 
             _gwt_require_worktree_storage || return
@@ -1665,21 +1680,29 @@ gwt() {
             if [[ -n "$dependency_source" ]]; then
                 binding_state=$(_gwt_explicit_dependency snapshot "$dependency_source" "$repo_root" "$worktree_path") || return 1
             fi
+            if [[ "$finish_managed" == true ]]; then
+                finish_token=$(_gwt_finish_tool creation-token) || return
+                [[ "$finish_token" =~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ]] || {
+                    echo "gwt: invalid lifecycle creation token" >&2
+                    return 1
+                }
+                finish_add_args=(--lock --reason "gwt-finish.v2:$finish_token")
+            fi
             if _gwt_git_probe show-ref --verify --quiet "refs/heads/$branch"; then
                 expected_head=$(_gwt_git_probe rev-parse --verify "refs/heads/$branch") || return 1
                 if [[ "$use_sparse" == true ]]; then
-                    git worktree add --no-checkout "$worktree_path" "$branch" || return 1
+                    ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" --no-checkout "$worktree_path" "$branch" ) || return 1
                 else
-                    git worktree add "$worktree_path" "$branch" || return 1
+                    ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" "$worktree_path" "$branch" ) || return 1
                 fi
             else
                 local resolved_start_point
                 resolved_start_point=$(_gwt_resolve_start_point "$start_point") || return 1
                 expected_head=$(_gwt_git_probe rev-parse --verify "$resolved_start_point^{commit}") || return 1
                 if [[ "$use_sparse" == true ]]; then
-                    git worktree add --no-checkout -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
+                    ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" --no-checkout -b "$branch" "$worktree_path" "$resolved_start_point" ) || return 1
                 else
-                    git worktree add -b "$branch" "$worktree_path" "$resolved_start_point" || return 1
+                    ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" -b "$branch" "$worktree_path" "$resolved_start_point" ) || return 1
                 fi
             fi
             created_worktree=true
@@ -1705,7 +1728,7 @@ gwt() {
                 return 1
             }
             if [[ "$finish_managed" == true ]]; then
-                _gwt_finish_tool enroll --worktree "$worktree_path" --managed-root "$root" || {
+                _gwt_finish_tool enroll --worktree "$worktree_path" --managed-root "$root" --new-token "$finish_token" || {
                     echo "gwt: enrollment failed; new worktree retained at $worktree_path" >&2
                     return 1
                 }
@@ -1770,6 +1793,7 @@ gwt() {
                 echo "gwt: refusing path not registered to this repository: $target_path" >&2
                 return 1
             }
+            _gwt_finish_tool guard --worktree "$target_path" || return
             main_worktree=$(_gwt_git_probe worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
             main_worktree=$(cd "$main_worktree" 2>/dev/null && pwd -P) || return 1
             if [[ "$target_path" == "$main_worktree" ]]; then
@@ -1804,6 +1828,13 @@ gwt() {
             ;;
         prune)
             _gwt_require_worktree_storage || return
+            # Native registration may already be missing after partial removal.
+            # The durable owner ledger, rather than that list, owns the hold.
+            local prune_records prune_owner
+            prune_records=$(_gwt_git_probe worktree list --porcelain) || return
+            prune_owner="${${(@f)prune_records}[1]}"
+            [[ "$prune_owner" == 'worktree '* ]] || return 1
+            _gwt_finish_tool guard --all --worktree "${prune_owner#worktree }" || return
             git worktree prune
             _gwt_tmux_sync_context
             ;;
@@ -1824,16 +1855,19 @@ gwt() {
                         echo "Usage: gwt sparse set <profile>"
                         return 1
                     }
+                    _gwt_claim_if_enrolled "$(_gwt_git_probe rev-parse --show-toplevel)" || return
                     _gwt_sparse_apply_profile "$(_gwt_git_probe rev-parse --show-toplevel)" "$1" || return 1
                     _gwt_sparse_sync_shell_env
                     _gwt_tmux_sync_context
                     ;;
                 add|expand)
+                    _gwt_claim_if_enrolled "$(_gwt_git_probe rev-parse --show-toplevel)" || return
                     _gwt_sparse_add_paths "$(_gwt_git_probe rev-parse --show-toplevel)" "$@" || return 1
                     _gwt_sparse_sync_shell_env
                     _gwt_tmux_sync_context
                     ;;
                 full|disable)
+                    _gwt_claim_if_enrolled "$(_gwt_git_probe rev-parse --show-toplevel)" || return
                     _gwt_sparse_apply_profile "$(_gwt_git_probe rev-parse --show-toplevel)" "full" || return 1
                     _gwt_sparse_sync_shell_env
                     _gwt_tmux_sync_context

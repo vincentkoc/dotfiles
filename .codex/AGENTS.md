@@ -260,21 +260,33 @@ Recovery mode rules:
 - Enroll only a newly created personal worktree with
   `gwt new <branch> <base> --finish-managed`. Never adopt existing, shared or
   repository-native worktrees automatically.
-- `gwt finish --pr <full URL>` records explicit owner completion against the
-  exact PR head. Repeat `--wait-for <full URL>` for stack dependencies.
-  Pushed commits, green CI, auto-merge, closed-unmerged PRs, age and session
-  completion are not merge proof.
-- `gwt resume`, `gwt cd` and reuse through `gwt new` reactivate an enrolled
-  checkout and invalidate its prior completion proof. Claims do not expire.
+- `gwt finish --pr <full URL>` records completion against the exact PR head.
+  Add `--release` only when this owner relinquishes future checkout use: this
+  is explicit local job sign-off. Plain finish grants no release.
+- For a finished fix/feature, use `finish --release` when the checkout is no
+  longer needed. For a stack, name the final target and repeat `--wait-for`
+  for every dependent PR; keep a pin while upper work still uses the checkout.
+  Open or closed-unmerged PRs, rebase/retarget changes and incomplete owners
+  retain it. Pushed commits, CI, age and generic session Stop are not proof.
+- `gwt resume`, `gwt cd`, sparse changes and reuse through `gwt new` reactivate an enrolled
+  checkout and invalidate prior completion and every release. Claims do not expire.
   Outside Codex, use a stable task-specific `GWT_OWNER_ID`.
-- Use `gwt finish-pin` and `gwt finish-unpin` for recovery evidence or dependent
-  work. Use `gwt finish-status` and report-only `gwt finish-check` to inspect
-  the result. `gwt finish-check --all --policy <path>` may filter that report
-  to reviewed repository identities; the policy grants no mutation authority.
-- Managed owner release and checkout removal are unavailable. Completion
-  tracking never invokes `git worktree remove`, never deletes branches and
-  never treats an unqualified holder scan as authority. Report the checkout as
-  `retained` and name any remaining completion blocker.
+- Use `gwt finish-pin`/`finish-unpin` for exact owner-scoped recovery pins.
+  `finish-status` reads the result; `finish-check` refreshes proof only.
+  Newly created release-capable entries can be removed immediately after all
+  owners release and all PRs merge, with no age delay, only on an explicitly
+  activated and natively qualified host. The same reviewed
+  `finish-check --all --apply --policy <path>` consumer revisits pending merges
+  and holders. Existing report-only enrollments and v1 policies remain so.
+  Current Mac mapping coverage is unqualified, so automatic deletion remains
+  blocked even with an activation receipt. Do not treat release as removal.
+- Release does not move a parent Codex process. The wrapper parks only its own
+  shell; any checkout/admin CWD, FD or mapped holder blocks removal. Stop stays
+  attention-only and never completes or releases an owner.
+- Native non-force removal preserves branches. Unknown visibility, ignored
+  recovery content, changed state or an incomplete removal intent holds the
+  checkout; never retry an uncertain removal automatically. Report the actual
+  `retained`, `removed` or `unknown` result and its remaining blocker.
 
 ## Low Data Mode
 
