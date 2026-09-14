@@ -27,6 +27,8 @@ Preview or apply safe recurring cleanup:
 
 The default is --dry-run. This command does not kill Codex, Claude, tmux,
 terminal, mosh, SSH, Crabbox, Blacksmith, or Testbox processes.
+Worktree failures stop apply and prevent Mole cleanup. Mole's agent-worktree
+cleanup is disabled; the worktree maintenance step owns it.
 EOF
                 return 0
                 ;;
@@ -73,17 +75,20 @@ EOF
         if [[ ! -d "$repo_root" ]]; then
             echo
             echo "== worktrees: $repo_root =="
-            echo "deepclean: repository disappeared during cleanup; skipping"
+            echo "deepclean: repository disappeared during cleanup: $repo_root" >&2
+            (( apply )) && return 1
+            worktree_failures=$((worktree_failures + 1))
             continue
         fi
         echo
         echo "== worktrees: $repo_root =="
         if (( apply )); then
             if command -v agent-worktree-maintain >/dev/null 2>&1; then
-                if ! agent-worktree-maintain --repo "$repo_root" --force; then
-                    echo "deepclean: worktree maintenance failed; continuing: $repo_root" >&2
-                    worktree_failures=$((worktree_failures + 1))
-                fi
+                agent-worktree-maintain --repo "$repo_root" --force || {
+                    local maintenance_status=$?
+                    echo "deepclean: worktree maintenance failed; stopping: $repo_root" >&2
+                    return "$maintenance_status"
+                }
             else
                 echo "deepclean: agent-worktree-maintain missing" >&2
                 return 127
@@ -104,15 +109,22 @@ EOF
         fi
     done
 
+    if (( worktree_failures != 0 )); then
+        echo "deepclean: worktree audit failed; skipping Mole" >&2
+        return 1
+    fi
+
     if [[ "$OSTYPE" == darwin* && $skip_mole == 0 ]]; then
+        # Worktree ownership stays with the maintenance step, including in preview.
+        local -x MOLE_AGENT_WORKTREES=0
         echo
         echo "== mole =="
         if ! command -v mole >/dev/null 2>&1; then
             echo "deepclean: mole missing; skipping" >&2
         elif (( apply )); then
             mole clean || return
-            mole purge
-            local purge_status=$?
+            local purge_status=0
+            mole purge || purge_status=$?
             if (( purge_status != 0 && purge_status != 2 )); then
                 return "$purge_status"
             fi
@@ -125,5 +137,4 @@ EOF
     echo
     echo "worktree_failures=$worktree_failures"
     echo "deepclean complete"
-    (( worktree_failures == 0 ))
 }
