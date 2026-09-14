@@ -212,6 +212,9 @@ class StorageTest(unittest.TestCase):
             "decorated separator": b"---\npackageManager: pnpm@12.3.4\n--- # dependency\n" + dependency_lock,
             "end marker": dependency_lock + b"...\n",
             "bare carriage return": b"---\rpackageManager: pnpm@12.3.4\r---\r" + dependency_lock,
+            "bare carriage return before separator": (
+                b"---\npackageManager: pnpm@12.3.4\r---\n" + dependency_lock
+            ),
             "third document": (
                 b"---\npackageManager: pnpm@12.3.4\n---\n"
                 + dependency_lock
