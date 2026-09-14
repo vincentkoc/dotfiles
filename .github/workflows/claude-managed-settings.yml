@@ -1,0 +1,44 @@
+name: Claude managed settings
+
+on:
+  pull_request:
+    paths:
+      - bin/claude-managed-settings
+      - install.sh
+      - tests/claude-managed-settings-test.sh
+      - tests/test_claude_managed_settings.py
+      - .github/workflows/claude-managed-settings.yml
+  push:
+    branches: [master]
+    paths:
+      - bin/claude-managed-settings
+      - install.sh
+      - tests/claude-managed-settings-test.sh
+      - tests/test_claude_managed_settings.py
+      - .github/workflows/claude-managed-settings.yml
+
+permissions:
+  contents: read
+
+jobs:
+  settings:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux ACL fixture tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y acl
+      - name: Test metadata and transaction races
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 tests/test_claude_managed_settings.py -v
+      - name: Test CLI, interruptions, and setup integration
+        run: /bin/bash tests/claude-managed-settings-test.sh

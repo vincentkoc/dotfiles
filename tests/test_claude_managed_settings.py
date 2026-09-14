@@ -4,7 +4,11 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -108,17 +112,58 @@ class StatsUpdateTests(unittest.TestCase):
             self.apply()
         self.assertEqual(raised.exception.reason, reason)
 
+    def decorate(self, target, kind, inherit=False):
+        if sys.platform == "darwin":
+            command = (
+                ["/usr/bin/xattr", "-w", "user.claude-test", "benign fixture", str(target)]
+                if kind == "xattr" else
+                [
+                    "/bin/chmod", "+a",
+                    "everyone allow read" + (",file_inherit" if inherit else ""), str(target),
+                ]
+            )
+        elif sys.platform.startswith("linux"):
+            if kind == "xattr":
+                os.setxattr(target, "user.claude-test", b"benign fixture")
+                return
+            if not shutil.which("setfacl") or not shutil.which("getfacl"):
+                self.skipTest("Linux ACL fixtures require setfacl and getfacl (acl package)")
+            command = ["setfacl", "-m", ("d:" if inherit else "") + "u:65534:r--", str(target)]
+        else:
+            self.skipTest("metadata fixtures support macOS and Linux only")
+        subprocess.run(command, check=True, capture_output=True)
+
+    def metadata_snapshot(self, target):
+        if sys.platform == "darwin":
+            attributes = subprocess.check_output(["/usr/bin/xattr", "-lx", str(target)])
+            acl = subprocess.check_output(["/bin/ls", "-lde", str(target)]).splitlines()[1:]
+        else:
+            attributes = {name: os.getxattr(target, name) for name in os.listxattr(target)}
+            acl = attributes.get("system.posix_acl_access")
+        info = target.stat()
+        return info.st_mode, info.st_uid, info.st_gid, attributes, acl
+
+    def snapshot(self, target):
+        link = self.claude / "settings.json"
+        return (
+            target.read_bytes(), target.stat().st_ino, self.metadata_snapshot(target),
+            link.lstat().st_ino, link.readlink() if link.is_symlink() else None,
+            set(self.claude.iterdir()),
+        )
+
     def test_regular_and_managed_preserve_other_fields_and_mode(self):
         for managed in (False, True):
             with self.subTest(managed=managed):
                 target = self.target(managed)
                 inode = target.stat().st_ino
+                metadata = self.metadata_snapshot(target)
                 expected_files = set(self.claude.iterdir())
                 self.assertEqual(self.apply(), "managed" if managed else "regular")
                 expected = json.loads(json.dumps(self.original))
                 expected["env"]["TOKENJUICE_STATS"] = "off"
                 self.assertEqual(json.loads(target.read_bytes()), expected)
                 self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+                self.assertEqual(self.metadata_snapshot(target), metadata)
                 self.assertNotEqual(target.stat().st_ino, inode)
                 self.assertEqual(set(self.claude.iterdir()), expected_files)
                 if managed:
@@ -141,6 +186,20 @@ class StatsUpdateTests(unittest.TestCase):
                 if managed:
                     (self.claude / "settings.json").unlink()
                 target.unlink()
+
+    def test_existing_group_is_preserved_when_stage_inherits_another(self):
+        groups = set(os.getgroups()) - {self.claude.stat().st_gid}
+        if not groups:
+            self.skipTest("group preservation fixture requires a second supplementary group")
+        for managed in (False, True):
+            with self.subTest(managed=managed):
+                self.claude = self.root / f"group-{managed}"
+                self.claude.mkdir(mode=0o700)
+                target = self.target(managed)
+                os.chown(target, -1, min(groups))
+                before = self.metadata_snapshot(target)
+                self.apply()
+                self.assertEqual(self.metadata_snapshot(target), before)
 
     def test_already_off_does_not_stage_or_change_inode(self):
         for managed in (False, True):
@@ -311,6 +370,154 @@ class StatsUpdateTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), original)
         self.assertEqual(stage.read_bytes(), b'{"operator":true}\n')
         self.assertTrue(retained.is_file())
+
+    def test_nonplain_metadata_refused_without_changing_original_or_link(self):
+        for kind in ("xattr", "acl"):
+            for managed in (False, True):
+                with self.subTest(kind=kind, managed=managed):
+                    self.claude = self.root / f"nonplain-{kind}-{managed}"
+                    self.claude.mkdir(mode=0o700)
+                    target = self.target(managed)
+                    self.decorate(target, kind)
+                    before = self.snapshot(target)
+                    # The default does not rewrite user settings or inspect metadata.
+                    with patch.object(MODULE, "read_metadata", side_effect=AssertionError):
+                        self.apply(enabled=False)
+                    self.assertEqual(self.snapshot(target), before)
+                    self.assert_blocked("metadata_not_plain")
+                    self.assertEqual(self.snapshot(target), before)
+
+    def test_already_off_with_nonplain_metadata_is_unchanged(self):
+        for kind in ("xattr", "acl"):
+            for managed in (False, True):
+                with self.subTest(kind=kind, managed=managed):
+                    self.claude = self.root / f"noop-{kind}-{managed}"
+                    self.claude.mkdir(mode=0o700)
+                    target = self.target(managed, b'{ "env": { "TOKENJUICE_STATS": "off" } }\n')
+                    self.decorate(target, kind)
+                    before = self.snapshot(target)
+                    with patch.object(MODULE, "read_metadata", side_effect=AssertionError):
+                        self.apply()
+                    self.assertEqual(self.snapshot(target), before)
+
+    def test_unavailable_metadata_inspection_refuses_before_staging(self):
+        for managed in (False, True):
+            with self.subTest(managed=managed):
+                self.claude = self.root / f"unavailable-{managed}"
+                self.claude.mkdir(mode=0o700)
+                target = self.target(managed)
+                before = self.snapshot(target)
+                failure = (
+                    patch.object(MODULE.ctypes, "CDLL", side_effect=AttributeError("unavailable"))
+                    if sys.platform == "darwin" else
+                    patch.object(MODULE.os, "listxattr", side_effect=PermissionError("unavailable"))
+                )
+                with failure:
+                    self.assert_blocked("metadata_unavailable")
+                self.assertEqual(self.snapshot(target), before)
+
+    def test_inherited_stage_acl_does_not_replace_original(self):
+        for managed in (False, True):
+            with self.subTest(managed=managed):
+                self.claude = self.root / f"inherited-{managed}"
+                self.claude.mkdir(mode=0o700)
+                target = self.target(managed)
+                before = self.snapshot(target)
+                self.decorate(self.claude, "acl", inherit=True)
+                self.assert_blocked("metadata_not_plain")
+                stage = self.claude / MODULE.STATS_SIBLING
+                self.assertTrue(stage.is_file())
+                self.assertEqual(stage.read_bytes(), b"")
+                self.assertEqual(self.snapshot(target)[:-1], before[:-1])
+                self.assertEqual(set(self.claude.iterdir()), before[-1] | {stage})
+
+    def test_metadata_preservation_failure_retains_stage_and_original(self):
+        target = self.target(managed=True)
+        before = self.snapshot(target)
+        with patch.object(
+            MODULE, "preserve_metadata",
+            side_effect=MODULE.ManagedSettingsError("metadata_preservation_failed"),
+        ):
+            self.assert_blocked("metadata_preservation_failed")
+        stage = self.claude / MODULE.STATS_SIBLING
+        self.assertEqual(self.snapshot(target)[:-1], before[:-1])
+        self.assertTrue(stage.is_file())
+        self.assert_blocked("recovery_required")
+
+    def test_concurrent_metadata_retains_changed_inode_and_recovery(self):
+        cases = (
+            ("stage_created", "stage"),
+            ("before_stats_publish", "target"),
+            ("before_stats_publish", "stage"),
+            ("exchange", "target"),
+            ("after_stats_publish", "target"),
+            ("after_stats_publish", "stage"),
+            ("before_stats_cleanup", "target"),
+            ("before_stats_cleanup", "stage"),
+        )
+        for kind in ("xattr", "acl"):
+            for managed in (False, True):
+                for point, changed in cases:
+                    with self.subTest(kind=kind, managed=managed, point=point, changed=changed):
+                        self.claude = self.root / f"race-{kind}-{managed}-{point}-{changed}"
+                        self.claude.mkdir(mode=0o700)
+                        target = self.target(managed)
+                        original = target.read_bytes()
+                        link = self.claude / "settings.json"
+                        link_identity = link.lstat().st_ino
+                        stage = self.claude / MODULE.STATS_SIBLING
+                        changed_path = stage if changed == "stage" else target
+                        rename = MODULE.rename_atomic
+                        write = MODULE.write_all
+                        observed = []
+
+                        def mutate():
+                            self.decorate(changed_path, kind)
+                            observed.append((
+                                changed_path.stat().st_ino, self.metadata_snapshot(changed_path),
+                            ))
+
+                        def failpoint(name):
+                            if name == point:
+                                mutate()
+
+                        def exchange(*args):
+                            if point == "exchange":
+                                mutate()
+                            rename(*args)
+
+                        def stage_created(*args):
+                            write(*args)
+                            if point == "stage_created":
+                                mutate()
+
+                        with patch.object(MODULE, "failpoint", side_effect=failpoint), \
+                                patch.object(MODULE, "rename_atomic", side_effect=exchange), \
+                                patch.object(MODULE, "write_all", side_effect=stage_created):
+                            self.assert_blocked("metadata_not_plain")
+                        self.assertEqual(len(observed), 1)
+                        self.assertTrue(stage.is_file())
+                        if point == "exchange":
+                            changed_path = stage  # The exchange retained the edited original.
+                        self.assertEqual(
+                            (changed_path.stat().st_ino, self.metadata_snapshot(changed_path)), observed[0],
+                        )
+                        if point in ("stage_created", "before_stats_publish"):
+                            self.assertEqual(target.read_bytes(), original)
+                        else:
+                            self.assertEqual(stage.read_bytes(), original)
+                            self.assertEqual(
+                                json.loads(target.read_bytes())["env"]["TOKENJUICE_STATS"], "off",
+                            )
+                        if managed:
+                            self.assertEqual(link.lstat().st_ino, link_identity)
+                            self.assertEqual(link.readlink(), pathlib.Path(MODULE.MANAGED_LINK))
+                        # A rerun must not adopt or clean up this transaction's evidence.
+                        retained = self.snapshot(target), stage.read_bytes(), self.metadata_snapshot(stage)
+                        self.assert_blocked("recovery_required")
+                        self.assertEqual(
+                            (self.snapshot(target), stage.read_bytes(), self.metadata_snapshot(stage)), retained,
+                        )
 
 
 if __name__ == "__main__":

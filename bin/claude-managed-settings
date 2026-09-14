@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -88,7 +89,107 @@ def read_descriptor(descriptor: int) -> bytes:
         blocks.append(block)
 
 
-def classify(directory: int, name: str, include_payload: bool = False) -> dict:
+def read_metadata(descriptor: int) -> bytes | None:
+    # Preserve opaque macOS provenance, as in ghx-auth-repair. Other xattrs,
+    # ACLs, and flags need a separate preservation contract. Inspect the opened
+    # file at each checkpoint; unavailable inspection never means absent.
+    try:
+        if getattr(os.fstat(descriptor), "st_flags", 0):
+            raise ManagedSettingsError("metadata_not_plain")
+        if sys.platform.startswith("linux"):
+            # Linux exposes POSIX access ACLs as system.posix_acl_access xattrs.
+            if os.listxattr(descriptor):
+                raise ManagedSettingsError("metadata_not_plain")
+            return None
+        if sys.platform != "darwin":
+            raise ManagedSettingsError("metadata_unavailable")
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        libc.flistxattr.restype = ctypes.c_ssize_t
+        count = libc.flistxattr(descriptor, None, 0, 0)
+        if count < 0:
+            raise ManagedSettingsError("metadata_unavailable")
+        if count > 65536:
+            raise ManagedSettingsError("metadata_not_plain")
+        names = ctypes.create_string_buffer(count)
+        if libc.flistxattr(descriptor, names, count, 0) != count:
+            raise ManagedSettingsError("target_changed")
+        names = set(names.raw.rstrip(b"\0").split(b"\0")) - {b""}
+        if names - {b"com.apple.provenance"}:
+            raise ManagedSettingsError("metadata_not_plain")
+        provenance = None
+        if names:
+            libc.fgetxattr.argtypes = [
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int,
+            ]
+            libc.fgetxattr.restype = ctypes.c_ssize_t
+            size = libc.fgetxattr(descriptor, b"com.apple.provenance", None, 0, 0, 0)
+            if size < 0 or size > 65536:
+                raise ManagedSettingsError("metadata_unavailable")
+            value = ctypes.create_string_buffer(size)
+            if libc.fgetxattr(descriptor, b"com.apple.provenance", value, size, 0, 0) != size:
+                raise ManagedSettingsError("target_changed")
+            provenance = value.raw
+        libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        libc.acl_get_fd_np.restype = ctypes.c_void_p
+        libc.acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)]
+        libc.acl_to_text.restype = ctypes.c_void_p
+        libc.acl_free.argtypes = [ctypes.c_void_p]
+        ctypes.set_errno(0)
+        acl = libc.acl_get_fd_np(descriptor, 0x100)  # ACL_TYPE_EXTENDED, sys/acl.h.
+        if not acl:
+            # Darwin's filesec API reports ENOENT for an absent ACL property.
+            if ctypes.get_errno() == errno.ENOENT:
+                os.fstat(descriptor)
+                return provenance
+            raise ManagedSettingsError("metadata_unavailable")
+        try:
+            length = ctypes.c_ssize_t()
+            text = libc.acl_to_text(acl, ctypes.byref(length))
+            if not text:
+                raise ManagedSettingsError("metadata_unavailable")
+            try:
+                # The empty native ACL has neither entries nor inheritance flags.
+                if length.value != 8 or ctypes.string_at(text, length.value) != b"!#acl 1\n":
+                    raise ManagedSettingsError("metadata_not_plain")
+            finally:
+                libc.acl_free(text)
+        finally:
+            libc.acl_free(acl)
+        return provenance
+    except (OSError, AttributeError) as error:
+        raise ManagedSettingsError("metadata_unavailable") from error
+
+
+def preserve_metadata(descriptor: int, expected: bytes | None) -> None:
+    if read_metadata(descriptor) == expected:
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if expected is None:
+            libc.fremovexattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            result = libc.fremovexattr(descriptor, b"com.apple.provenance", 0)
+        else:
+            libc.fsetxattr.argtypes = [
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int,
+            ]
+            result = libc.fsetxattr(descriptor, b"com.apple.provenance", expected, len(expected), 0, 0)
+    except (OSError, AttributeError) as error:
+        raise ManagedSettingsError("metadata_preservation_failed") from error
+    # Some native attributes may refuse or ignore writes. Verify, never discard.
+    if result != 0 or read_metadata(descriptor) != expected:
+        raise ManagedSettingsError("metadata_preservation_failed")
+
+
+def classify(
+    directory: int,
+    name: str,
+    include_payload: bool = False,
+    *,
+    inspect_metadata: bool = False,
+) -> dict:
     try:
         metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
     except FileNotFoundError:
@@ -99,6 +200,7 @@ def classify(directory: int, name: str, include_payload: bool = False) -> dict:
         "mode": stat.S_IMODE(metadata.st_mode),
         "nlink": metadata.st_nlink,
         "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
     }
     if stat.S_ISLNK(metadata.st_mode):
         return {
@@ -124,8 +226,13 @@ def classify(directory: int, name: str, include_payload: bool = False) -> dict:
             or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
         ):
             raise ManagedSettingsError("target_changed")
+        captured_metadata = read_metadata(descriptor) if inspect_metadata else None
         payload = read_descriptor(descriptor)
+        if inspect_metadata and read_metadata(descriptor) != captured_metadata:
+            raise ManagedSettingsError("target_changed")
         result = {**base, "kind": "file", "size": len(payload), "sha256": sha256(payload)}
+        if inspect_metadata:
+            result["metadata"] = captured_metadata
         if include_payload:
             result["payload"] = payload
         return result
@@ -220,9 +327,13 @@ def rename_atomic(directory: int, source: str, destination: str, flag: int) -> N
     os.fsync(directory)
 
 
-def unlink_exact(parent: dict, name: str, expected: dict) -> None:
+def unlink_exact(
+    parent: dict, name: str, expected: dict, *, inspect_metadata: bool = False,
+) -> None:
     check_directory(parent)
-    if not same(classify(parent["fd"], name), expected):
+    if not same(
+        classify(parent["fd"], name, inspect_metadata=inspect_metadata), expected,
+    ):
         raise ManagedSettingsError("target_changed")
     os.unlink(name, dir_fd=parent["fd"])
     os.fsync(parent["fd"])
@@ -349,6 +460,12 @@ def check_stats_parent(parent: dict) -> None:
 
 def update_stats_off(parent: dict, name: str, original: dict, link: dict) -> None:
     payload = stats_off_payload(original["payload"])
+    changing = payload != original["payload"]
+
+    def inspect(name: str) -> dict:
+        return classify(
+            parent["fd"], name, include_payload=True, inspect_metadata=True,
+        )
 
     def check_target(expected: dict) -> None:
         check_stats_parent(parent)
@@ -357,12 +474,19 @@ def update_stats_off(parent: dict, name: str, original: dict, link: dict) -> Non
             link,
         ):
             raise ManagedSettingsError("target_changed")
-        if not same(classify(parent["fd"], name, include_payload=True), expected):
+        current = classify(
+            parent["fd"], name, include_payload=True, inspect_metadata="metadata" in expected,
+        )
+        if not same(current, expected):
             raise ManagedSettingsError("target_changed")
 
     check_target(original)
-    if payload == original["payload"]:
+    if not changing:
         return
+    captured = inspect(name)
+    if {key: value for key, value in captured.items() if key != "metadata"} != original:
+        raise ManagedSettingsError("target_changed")
+    original = captured
     try:
         descriptor = os.open(
             STATS_SIBLING,
@@ -373,29 +497,39 @@ def update_stats_off(parent: dict, name: str, original: dict, link: dict) -> Non
     except FileExistsError as error:
         raise ManagedSettingsError("recovery_required") from error
     try:
+        read_metadata(descriptor)
         write_all(descriptor, payload)
+        read_metadata(descriptor)
+        if os.fstat(descriptor).st_gid != original["gid"]:
+            try:
+                os.fchown(descriptor, -1, original["gid"])
+            except OSError as error:
+                raise ManagedSettingsError("metadata_preservation_failed") from error
         os.fchmod(descriptor, original["mode"])
+        preserve_metadata(descriptor, original["metadata"])
         os.fsync(descriptor)
         os.fsync(parent["fd"])
-        staged = classify(parent["fd"], STATS_SIBLING, include_payload=True)
+        staged = inspect(STATS_SIBLING)
         opened = os.fstat(descriptor)
         if (
             staged.get("payload") != payload
             or staged.get("uid") != os.getuid()
+            or staged.get("gid") != original["gid"]
+            or staged.get("metadata") != original["metadata"]
             or staged.get("mode") != original["mode"]
             or (staged.get("device"), staged.get("inode")) != (opened.st_dev, opened.st_ino)
         ):
             raise ManagedSettingsError("target_changed")
         failpoint("before_stats_publish")
         check_target(original)
-        if not same(classify(parent["fd"], STATS_SIBLING, include_payload=True), staged):
+        if not same(inspect(STATS_SIBLING), staged):
             raise ManagedSettingsError("target_changed")
-        # Keep the exchanged original until both identities and bytes are verified.
+        # Keep the exchanged original until identities, bytes, and metadata pass.
         # A mismatch or interruption retains recovery evidence, never a blind rollback.
         rename_atomic(parent["fd"], STATS_SIBLING, name, RENAME_SWAP)
         failpoint("after_stats_publish")
         check_target(staged)
-        if not same(classify(parent["fd"], STATS_SIBLING, include_payload=True), original):
+        if not same(inspect(STATS_SIBLING), original):
             raise ManagedSettingsError("target_changed")
         failpoint("before_stats_cleanup")
         check_target(staged)
@@ -403,6 +537,7 @@ def update_stats_off(parent: dict, name: str, original: dict, link: dict) -> Non
             parent,
             STATS_SIBLING,
             {key: value for key, value in original.items() if key != "payload"},
+            inspect_metadata=True,
         )
     finally:
         os.close(descriptor)
