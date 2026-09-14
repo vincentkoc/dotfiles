@@ -13,13 +13,12 @@
 	"enki_theme_tabs_autowidth": true,
 	"enki_theme_tree_headings": false,
 	"overlay_scroll_bars": "enabled",
-	"line_padding_bottom": 0,
-	"line_padding_top": 0,
+	"line_padding_bottom": 1,
+	"line_padding_top": 1,
 	"bold_folder_labels": false, // or remove this line if you set it to true for Material Theme
 	"always_show_minimap_viewport": true,
 	"indent_guide_options": ["draw_normal", "draw_active"],
-	"font_face": "Menlo Regular",
-	"font_options": ["no_bold", "gray_antialias", "no_round"],
+	"font_options": ["gray_antialias"],
 	"enki_theme_bold_tab": false, // Bold tab labels
 	"enki_theme_compact_panel": true, // Compact panel
 	"enki_theme_compact_sidebar": true, // Compact side bar
@@ -30,7 +29,7 @@
 	"enki_theme_tabs_separator": false, // Add separator in between tabs
 	/*"enki_theme_tree_headings": false,*/ // Show sidebar tree headings
 	/*"bold_folder_labels": false,*/
-	"font_size": 11,
+	"font_size": 13,
 	"tab_size": 3,
 	"sidebar_on_right": true,
 }
