@@ -50,6 +50,12 @@ dotfiles_dir() {
         return
     fi
 
+    # Honor the documented checkout before choosing a platform default.
+    if [[ -d "$HOME/.dotfiles" ]]; then
+        echo "$HOME/.dotfiles"
+        return
+    fi
+
     if [[ "$(uname)" == "Darwin" ]]; then
         echo "$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
     else
@@ -882,19 +888,37 @@ install_zsh_plugins() {
 install_fzf() {
     if command -v fzf &>/dev/null; then
         success "fzf already installed"
-    elif [[ -d "$HOME/.fzf/.git" ]]; then
-        success "fzf already installed in ~/.fzf"
-    elif [[ -d "$HOME/.fzf" ]]; then
-        warn "~/.fzf already exists but is not a git checkout - skipping install"
-    elif command -v brew &>/dev/null; then
-        info "Installing fzf via brew..."
-        brew install fzf
-        success "fzf installed"
-    else
-        info "Installing fzf from git..."
-        git clone --depth 1 https://github.com/junegunn/fzf.git "$HOME/.fzf"
-        success "fzf installed"
+        return
     fi
+    if [[ -x "$HOME/.fzf/bin/fzf" ]]; then
+        success "fzf already installed in ~/.fzf"
+        return
+    fi
+    if [[ ! -d "$HOME/.fzf/.git" ]]; then
+        if [[ -e "$HOME/.fzf" || -L "$HOME/.fzf" ]]; then
+            error "~/.fzf already exists but is not a usable fzf installation"
+            return 1
+        fi
+        if command -v brew &>/dev/null; then
+            info "Installing fzf via brew..."
+            brew install fzf || return
+            success "fzf installed"
+            return
+        fi
+        info "Installing fzf from git..."
+        git clone --depth 1 https://github.com/junegunn/fzf.git "$HOME/.fzf" || return
+    fi
+    # A Git checkout does not include the binary; --bin leaves shell files alone.
+    if [[ ! -x "$HOME/.fzf/install" ]]; then
+        error "fzf checkout is missing an executable installer"
+        return 1
+    fi
+    "$HOME/.fzf/install" --bin || return
+    if [[ ! -x "$HOME/.fzf/bin/fzf" ]]; then
+        error "fzf installer did not create ~/.fzf/bin/fzf"
+        return 1
+    fi
+    success "fzf installed"
 }
 
 # Install Spaceship theme

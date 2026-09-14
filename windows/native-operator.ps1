@@ -428,6 +428,33 @@ function Invoke-Apply {
     }
 }
 
+function Test-RollbackProfiles($Profiles) {
+    foreach ($profile in $Profiles) {
+        if (!(Test-Path -LiteralPath $profile.Path -PathType Leaf)) {
+            throw "Refusing to rollback missing profile: $($profile.Path)"
+        }
+        if (!$profile.AppliedSha256 -or (Get-Sha256 $profile.Path) -ne $profile.AppliedSha256) {
+            throw "Refusing to rollback changed profile: $($profile.Path)"
+        }
+        if ($profile.Existed) {
+            if (!$profile.BackupPath -or !(Test-Path -LiteralPath $profile.BackupPath -PathType Leaf)) {
+                throw "Profile backup missing: $($profile.Path)"
+            }
+            if (!$profile.Sha256 -or (Get-Sha256 $profile.BackupPath) -ne $profile.Sha256) {
+                throw "Profile backup changed: $($profile.Path)"
+            }
+        }
+    }
+}
+
+function Get-RollbackPackageVersion($Package) {
+    $current = Get-WingetPackageVersion $Package.Id
+    if ($current -ne $Package.BeforeVersion -and $current -ne $Package.TargetVersion) {
+        throw "Refusing to rollback changed package: $($Package.Id)"
+    }
+    $current
+}
+
 function Invoke-Rollback {
     if (!(Test-IsAdministrator)) {
         throw 'Native operator Rollback requires an elevated PowerShell session'
@@ -438,7 +465,14 @@ function Invoke-Rollback {
         throw "Receipt is not in applied state: $($state.Status)"
     }
 
+    Test-RollbackProfiles $state.Profiles
+    foreach ($package in $state.Packages) {
+        Get-RollbackPackageVersion $package | Out-Null
+    }
+
     foreach ($profile in $state.Profiles) {
+        # Recheck after earlier restores; whole-set preflight can become stale.
+        Test-RollbackProfiles @($profile)
         if ($profile.Existed) {
             Copy-Item -LiteralPath $profile.BackupPath -Destination $profile.Path -Force
             if ($profile.Sddl) {
@@ -446,16 +480,17 @@ function Invoke-Rollback {
                 $acl.SetSecurityDescriptorSddlForm($profile.Sddl)
                 Set-Acl -LiteralPath $profile.Path -AclObject $acl
             }
-        } elseif (Test-Path -LiteralPath $profile.Path -PathType Leaf) {
-            if ((Get-Sha256 $profile.Path) -ne $profile.AppliedSha256) {
-                throw "Refusing to remove changed profile: $($profile.Path)"
-            }
+        } else {
             Remove-Item -LiteralPath $profile.Path -Force
         }
     }
 
     foreach ($package in @($state.Packages | Sort-Object Id -Descending)) {
-        $current = Get-WingetPackageVersion $package.Id
+        # Recheck before mutation so a concurrent upgrade is retained.
+        $current = Get-RollbackPackageVersion $package
+        if ($current -eq $package.BeforeVersion) {
+            continue
+        }
         if (!$package.BeforeVersion) {
             if ($current -eq $package.TargetVersion) {
                 $result = Invoke-Winget @(
@@ -493,13 +528,15 @@ function Invoke-Rollback {
     }
 }
 
-switch ($Mode) {
-    'Plan' { Invoke-Plan | ConvertTo-Json -Depth 10 }
-    'Apply' { Invoke-Apply | ConvertTo-Json -Depth 10 }
-    'Check' {
-        $check = Get-CheckResult
-        $check | ConvertTo-Json -Depth 10
-        if (!$check.Passed) { exit 1 }
+if ($MyInvocation.InvocationName -ne '.') {
+    switch ($Mode) {
+        'Plan' { Invoke-Plan | ConvertTo-Json -Depth 10 }
+        'Apply' { Invoke-Apply | ConvertTo-Json -Depth 10 }
+        'Check' {
+            $check = Get-CheckResult
+            $check | ConvertTo-Json -Depth 10
+            if (!$check.Passed) { exit 1 }
+        }
+        'Rollback' { Invoke-Rollback | ConvertTo-Json -Depth 10 }
     }
-    'Rollback' { Invoke-Rollback | ConvertTo-Json -Depth 10 }
 }

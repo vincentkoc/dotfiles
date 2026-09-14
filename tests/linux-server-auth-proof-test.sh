@@ -119,6 +119,9 @@ sshd_effective_config() {
 
 reload_ssh_service() {
   printf 'reload:%s\n' "$1" >>"$temporary/ssh-events"
+  if [[ -e "$temporary/fail-reload-always" ]]; then
+    return 1
+  fi
   if [[ -e "$temporary/fail-reload-once" ]]; then
     rm -f "$temporary/fail-reload-once"
     return 1
@@ -133,6 +136,7 @@ reset_activation_fixture() {
     "$temporary/fail-auth-candidate" \
     "$temporary/fail-lockdown-candidate" \
     "$temporary/fail-mv-once" \
+    "$temporary/fail-reload-always" \
     "$temporary/fail-reload-once" \
     "$temporary/fail-validate-once" \
     "$temporary/force-proof-effective-no" \
@@ -283,6 +287,30 @@ fi
 [[ ! -e "$(auth_proof_dropin_path)" ]]
 [[ ! -e "$test_auth_proof_state_file" ]]
 [[ "$(grep -Fc 'reload:ssh' "$temporary/ssh-events")" == 2 ]]
+
+reset_activation_fixture
+touch "$temporary/fail-reload-always"
+if activate_auth_proof_transaction \
+  "$admin_user" \
+  "$designated_fingerprint" \
+  "$authorized_keys_hash"; then
+  printf 'activation with failed rollback reload unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[[ ! -e "$(auth_proof_dropin_path)" ]]
+[[ -f "$test_auth_proof_state_file" ]]
+validate_auth_proof_state
+# An absent drop-in still needs a successful daemon reload before receipt removal.
+if run_cleanup_command; then
+  printf 'recovery accepted a daemon that still could not reload\n' >&2
+  exit 1
+fi
+[[ -f "$test_auth_proof_state_file" ]]
+rm "$temporary/fail-reload-always"
+reload_count="$(grep -Fc 'reload:ssh' "$temporary/ssh-events")"
+run_cleanup_command
+[[ "$(grep -Fc 'reload:ssh' "$temporary/ssh-events")" == "$((reload_count + 1))" ]]
+[[ ! -e "$test_auth_proof_state_file" ]]
 
 reset_activation_fixture
 activate_auth_proof_transaction \

@@ -1,0 +1,25 @@
+name: Windows native operator
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-native-operator.yml"
+      - "tests/windows-native-operator-rollback-test.ps1"
+      - "windows/native-operator.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rollback-fixture:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test rollback preflight
+        shell: ${{ matrix.shell }}
+        run: ./tests/windows-native-operator-rollback-test.ps1

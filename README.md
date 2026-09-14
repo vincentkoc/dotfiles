@@ -10,6 +10,9 @@ git clone https://github.com/vincentkoc/dotfiles.git ~/.dotfiles
 ```
 
 The installer bootstraps dependencies and links core shell dotfiles.
+It prefers the canonical checkout, then an existing `~/.dotfiles`, before the
+platform default. A Git-based fzf install downloads and verifies the executable;
+shared shell exports add its binary directory without replacing fzf shell files.
 
 Git uses the dedicated SSH signing-only key at
 `~/.ssh/git_signing_vincentkoc_ieee`. Keep a local `.ssh/allowed_signers` file
@@ -77,6 +80,10 @@ native. It adds argument-safe WSL bridges for `tt`, explicit-path
 `wdeepclean`. Set `DOTFILES_WSL_DISTRO` if the distro is not named `Ubuntu`.
 Apply receipts and profile backups live under
 `%LOCALAPPDATA%\vincent-dotfiles\native-operator`.
+Rollback checks every profile, backup, and package version before changing any
+of them, then checks each target again before its restore. Drift stops the run
+and preserves the remaining backups and apply receipt for recovery. These checks
+do not make concurrent filesystem or package-manager writes atomic.
 
 ## Headless Linux servers
 
@@ -196,6 +203,10 @@ DOTFILES_SERVER_ADMIN_USER="$(id -un)" \
 DOTFILES_SERVER_EXPECTED_KEY_SHA256='SHA256:replace-with-designated-key-fingerprint' \
   ~/.dotfiles/bin/linux-server-bootstrap enable-auth-proof
 ```
+
+Failed activation rollback keeps its recovery state until SSH configuration and
+daemon reload both succeed. `cleanup-auth-proof` retries that reload even when
+the temporary drop-in was already removed.
 
 The activation is bound to the current boot and expires after 15 minutes. If
 the proof session is abandoned, remove the temporary exposure explicitly:
