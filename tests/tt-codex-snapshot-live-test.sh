@@ -3,7 +3,6 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tt="$repo/bin/tt"
-temporary="$(mktemp -d)"
 tmux_bin="${TT_TEST_REAL_TMUX_BIN:-$(command -v tmux || true)}"
 
 if [[ -z "$tmux_bin" ]]; then
@@ -11,6 +10,8 @@ if [[ -z "$tmux_bin" ]]; then
   exit 0
 fi
 
+# macOS TMPDIR can exceed the Unix socket path limit once tmux adds its suffix.
+temporary="$(mktemp -d /tmp/tt-snapshot.XXXXXX)"
 socket="tt-codex-snapshot-test-$$"
 wrapper="$temporary/tmux"
 snapshot="$temporary/codex-cockpit.tsv"
@@ -43,6 +44,8 @@ chmod +x "$wrapper"
 "$tmux_bin" -L "$socket" -f /dev/null new-session -d -s snapshot-test \
   /bin/sh -c 'while [ ! -f "$1" ]; do sleep 0.1; done' sh "$stop"
 target="$("$tmux_bin" -L "$socket" list-panes -t snapshot-test -F '#{session_name}:#{window_index}.#{pane_index}')"
+"$tmux_bin" -L "$socket" set-option -pt "$target" @tt_base_title 'release validation'
+"$tmux_bin" -L "$socket" select-pane -t "$target" -T 'agent working'
 
 HOME="$temporary/home" \
   XDG_STATE_HOME="$temporary/state" \
@@ -53,7 +56,18 @@ HOME="$temporary/home" \
 "$tmux_bin" -L "$socket" has-session -t snapshot-test
 grep -Fq "$target"$'\tshell' "$snapshot"
 awk -F '\t' '!/^#/ && NF {
-  if (NF != 10 || $9 != "shell" || $10 != "") exit 1
+  if (NF != 10 || $4 != "release validation" || $9 != "shell" || $10 != "") exit 1
+  n++
+} END { if (!n) exit 1 }' "$snapshot"
+
+"$tmux_bin" -L "$socket" set-option -pu -t "$target" @tt_base_title
+HOME="$temporary/home" \
+  XDG_STATE_HOME="$temporary/state" \
+  TT_LOGIN_SHELL=/bin/sh \
+  TT_TMUX_BIN="$wrapper" \
+  "$tt" codex-snapshot "$snapshot" --quiet
+awk -F '\t' '!/^#/ && NF {
+  if (NF != 10 || $4 != "agent working") exit 1
   n++
 } END { if (!n) exit 1 }' "$snapshot"
 
