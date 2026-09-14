@@ -5,12 +5,15 @@ Agent worktree cleanup and maintenance tools.
 Bins in this folder:
 
 - `agent-worktree-finish`
-  - explicit opt-in enrollment, owner completion/release, recovery pins and
-    fresh merged-PR checks; separate SQLite ledger, no Codex transcript reads
-  - report-only `status`/`check` by default; private policy can authorize
-    immediate non-force cleanup only after explicit per-job sign-off and release
-  - no age-based authority, old-worktree adoption, branch deletion or pruning
-  - see [the lifecycle and stacked-PR guide](../../functions/gwt/README.md)
+  - explicitly enrolls new managed worktrees and tracks owner completion,
+    recovery pins, exact PR heads and stack dependencies in a private ledger
+  - `status` and `check` are report-only; output always identifies the checkout
+    as retained and release/removal as unavailable
+  - `check --all --policy <path>` filters reports to exact reviewed repository
+    identities; the policy cannot enable apply, release or removal
+  - never scans for old worktrees, expires claims, releases owners, removes
+    worktrees, deletes branches or prunes metadata
+  - see [the completion guide](../../functions/gwt/README.md)
 - `worktree-storage-guard`
   - reads the private system policy
     `external-worktree-storage.v2`; schema v1 is rejected
