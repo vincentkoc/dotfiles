@@ -248,10 +248,11 @@ Recovery mode rules:
 - Never independently index `~/GIT/_Synthetic` or a repository with `.git/gwt-synthetic.json`.
 - Treat `--cow-from` as an opt-in experiment. It requires an immutable seed and reports logical sharing, not reclaimed disk space.
 - Do not reuse dependencies without matching install inputs, runtime compatibility, and correct workspace-link targets.
-- A wrapper refusal does not authorize raw-Git clones, copied repositories, or automatic history hydration.
+- A wrapper refusal stops worktree creation. Diagnose and repair the same verified owner within the task's existing authorization, then let the wrapper recheck it. Do not bypass it with raw-Git creation, copied repositories, or ad hoc clones.
+- Task-required additive fetch or unshallow is not GC, repacking, pruning, or owner consolidation. Recheck current state; do not repeat completed repair or ask again for an already authorized step. Respect low-data protection and contention, suppress automatic maintenance/pruning, and preserve local branches, HEAD/index, patches, and registrations.
 - Before sharing dependencies, require a current frozen-install receipt and matching inputs, pnpm layout, Node ABI, OS and architecture. Unknown compatibility means code-only. Never install through a shared symlink.
 - Prefer scheduled commit-graph updates on explicitly enrolled healthy owners. Use `functions/gwt/maintenance.config`. Keep prefetch, packing, expiry and pruning disabled. Enrollment and scheduler activation are separate from installing GWT.
-- Git maintenance requires separate, exact authorization. Do not prune objects, clear locks, or consolidate active owners automatically.
+- GC, repacking, pruning, and owner consolidation require their own exact authorized scope; an additive fetch does not authorize them. Do not prune objects, clear locks, or consolidate active owners automatically.
 - See `functions/gwt/README.md` for options, policy format, and prototype limits.
 
 ## Managed worktree finish
