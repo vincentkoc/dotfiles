@@ -57,15 +57,25 @@ function Get-WingetPackageVersion([string]$Id) {
         'list', '--id', $Id, '--exact', '--source', 'winget',
         '--accept-source-agreements', '--disable-interactivity'
     )
-    if ($result.ExitCode -ne 0) {
+    # WinGet's List workflow reports absence with this specific HRESULT only.
+    # APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND = 0x8A150014.
+    if ($result.ExitCode -eq -1978335212) {
         return $null
     }
-    foreach ($line in $result.Output) {
-        if ($line -match ('\s' + [regex]::Escape($Id) + '\s+(\S+)')) {
-            return $Matches[1]
-        }
+    if ($result.ExitCode -ne 0) {
+        throw "Winget list failed for ${Id}: exit $($result.ExitCode)"
     }
-    $null
+    $versions = @(
+        foreach ($line in $result.Output) {
+            if ($line -match ('\s' + [regex]::Escape($Id) + '\s+(\S+)')) {
+                $Matches[1]
+            }
+        }
+    )
+    if ($versions.Count -ne 1) {
+        throw "Winget list did not report one installed version for $Id"
+    }
+    $versions[0]
 }
 
 function Test-WingetArm64Manifest($Package) {
@@ -115,6 +125,13 @@ $markerEnd
     $block + "`r`n"
 }
 
+function Assert-PlainProfileFile([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing linked or non-file profile input: $Path"
+    }
+}
+
 function Save-ProfileState([string]$Path, [string]$BackupRoot) {
     $exists = Test-Path -LiteralPath $Path -PathType Leaf
     $safeName = ($Path -replace '[:\\]', '_').TrimStart('_')
@@ -128,6 +145,7 @@ function Save-ProfileState([string]$Path, [string]$BackupRoot) {
         AppliedSha256 = $null
     }
     if ($exists) {
+        Assert-PlainProfileFile $Path
         Copy-Item -LiteralPath $Path -Destination $backupPath -Force
         $state.BackupPath = $backupPath
         $state.Sha256 = Get-Sha256 $Path
@@ -140,6 +158,7 @@ function Install-ManagedProfile([string]$Path, [string]$Source) {
     $directory = Split-Path -Parent $Path
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $current = if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        Assert-PlainProfileFile $Path
         [IO.File]::ReadAllText($Path)
     } else {
         ''
@@ -428,6 +447,35 @@ function Invoke-Apply {
     }
 }
 
+function Test-RollbackProfiles($Profiles) {
+    foreach ($profile in $Profiles) {
+        if (!(Test-Path -LiteralPath $profile.Path -PathType Leaf)) {
+            throw "Refusing to rollback missing profile: $($profile.Path)"
+        }
+        Assert-PlainProfileFile $profile.Path
+        if (!$profile.AppliedSha256 -or (Get-Sha256 $profile.Path) -ne $profile.AppliedSha256) {
+            throw "Refusing to rollback changed profile: $($profile.Path)"
+        }
+        if ($profile.Existed) {
+            if (!$profile.BackupPath -or !(Test-Path -LiteralPath $profile.BackupPath -PathType Leaf)) {
+                throw "Profile backup missing: $($profile.Path)"
+            }
+            Assert-PlainProfileFile $profile.BackupPath
+            if (!$profile.Sha256 -or (Get-Sha256 $profile.BackupPath) -ne $profile.Sha256) {
+                throw "Profile backup changed: $($profile.Path)"
+            }
+        }
+    }
+}
+
+function Get-RollbackPackageVersion($Package) {
+    $current = Get-WingetPackageVersion $Package.Id
+    if ($current -ne $Package.BeforeVersion -and $current -ne $Package.TargetVersion) {
+        throw "Refusing to rollback changed package: $($Package.Id)"
+    }
+    $current
+}
+
 function Invoke-Rollback {
     if (!(Test-IsAdministrator)) {
         throw 'Native operator Rollback requires an elevated PowerShell session'
@@ -438,7 +486,14 @@ function Invoke-Rollback {
         throw "Receipt is not in applied state: $($state.Status)"
     }
 
+    Test-RollbackProfiles $state.Profiles
+    foreach ($package in $state.Packages) {
+        Get-RollbackPackageVersion $package | Out-Null
+    }
+
     foreach ($profile in $state.Profiles) {
+        # Recheck after earlier restores; whole-set preflight can become stale.
+        Test-RollbackProfiles @($profile)
         if ($profile.Existed) {
             Copy-Item -LiteralPath $profile.BackupPath -Destination $profile.Path -Force
             if ($profile.Sddl) {
@@ -446,16 +501,17 @@ function Invoke-Rollback {
                 $acl.SetSecurityDescriptorSddlForm($profile.Sddl)
                 Set-Acl -LiteralPath $profile.Path -AclObject $acl
             }
-        } elseif (Test-Path -LiteralPath $profile.Path -PathType Leaf) {
-            if ((Get-Sha256 $profile.Path) -ne $profile.AppliedSha256) {
-                throw "Refusing to remove changed profile: $($profile.Path)"
-            }
+        } else {
             Remove-Item -LiteralPath $profile.Path -Force
         }
     }
 
     foreach ($package in @($state.Packages | Sort-Object Id -Descending)) {
-        $current = Get-WingetPackageVersion $package.Id
+        # Recheck before mutation so a concurrent upgrade is retained.
+        $current = Get-RollbackPackageVersion $package
+        if ($current -eq $package.BeforeVersion) {
+            continue
+        }
         if (!$package.BeforeVersion) {
             if ($current -eq $package.TargetVersion) {
                 $result = Invoke-Winget @(
@@ -493,13 +549,15 @@ function Invoke-Rollback {
     }
 }
 
-switch ($Mode) {
-    'Plan' { Invoke-Plan | ConvertTo-Json -Depth 10 }
-    'Apply' { Invoke-Apply | ConvertTo-Json -Depth 10 }
-    'Check' {
-        $check = Get-CheckResult
-        $check | ConvertTo-Json -Depth 10
-        if (!$check.Passed) { exit 1 }
+if ($MyInvocation.InvocationName -ne '.') {
+    switch ($Mode) {
+        'Plan' { Invoke-Plan | ConvertTo-Json -Depth 10 }
+        'Apply' { Invoke-Apply | ConvertTo-Json -Depth 10 }
+        'Check' {
+            $check = Get-CheckResult
+            $check | ConvertTo-Json -Depth 10
+            if (!$check.Passed) { exit 1 }
+        }
+        'Rollback' { Invoke-Rollback | ConvertTo-Json -Depth 10 }
     }
-    'Rollback' { Invoke-Rollback | ConvertTo-Json -Depth 10 }
 }

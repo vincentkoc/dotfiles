@@ -91,7 +91,8 @@ Bins in this folder:
     state directory adds a second private lock acquired after it
   - explicit state directories must already exist, be owned by the current user,
     use private permissions, and not be symlinks
-  - verified same-user lock contention is a successful skip; malformed or
+  - verified same-user lock contention exits with status 75 so callers can
+    distinguish a busy maintainer from completed maintenance; malformed or
     untrusted lock state exits with status 73
   - pass `--skip-legacy-purge` to forward the cleaner's purge opt-out
   - pass `--no-log` to emit output for ephemeral capture without creating a log

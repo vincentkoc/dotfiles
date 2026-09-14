@@ -36,6 +36,7 @@ no_log=0
 owned_lock_dirs=()
 contention_pid=""
 LOCK_STATE_ERROR=73
+LOCK_BUSY=75
 
 path_owner_uid() {
   local value
@@ -556,7 +557,7 @@ else
     else
       echo "$contention_message" >>"$log_file"
     fi
-    exit 0
+    exit "$LOCK_BUSY"
   fi
   exit "$lock_status"
 fi
@@ -573,7 +574,7 @@ if (( separate_private_lock == 1 )); then
       else
         echo "$contention_message" >>"$log_file"
       fi
-      exit 0
+      exit "$LOCK_BUSY"
     fi
     exit "$lock_status"
   fi

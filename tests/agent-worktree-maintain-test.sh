@@ -33,7 +33,7 @@ chmod +x "$runtime/agent-worktree-clean" "$runtime/agent-worktree-maintain" \
   "$runtime/worktree-storage-guard"
 
 mode_of() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 default_codex_home="$temporary/default-codex"
@@ -103,6 +103,7 @@ mkdir -m 755 "$legacy_codex_home" "$legacy_codex_home/locks" "$legacy_lock_dir"
 mkdir -m 700 "$legacy_state_dir"
 printf '%s\n' "$$" >"$legacy_lock_dir/pid"
 chmod 644 "$legacy_lock_dir/pid"
+set +e
 TEST_REGISTERED="$registered" \
 TEST_CLEANER_ARGS="$temporary/legacy-cleaner.args" \
 CODEX_HOME="$legacy_codex_home" \
@@ -112,6 +113,9 @@ CODEX_HOME="$legacy_codex_home" \
   --state-dir "$legacy_state_dir" \
   --force \
   --no-log >"$temporary/legacy-contention.out"
+status=$?
+set -e
+[[ "$status" == "75" ]]
 grep -q "already running (pid=$$)" "$temporary/legacy-contention.out"
 [[ "$(mode_of "$legacy_lock_dir")" == "755" ]]
 [[ "$(mode_of "$legacy_lock_dir/pid")" == "644" ]]
@@ -252,7 +256,11 @@ lock_dir="$state_dir/locks/agent-worktree-maintain.lock"
 mkdir -m 700 "$lock_dir"
 printf '%s\n' "$$" >"$lock_dir/pid"
 chmod 600 "$lock_dir/pid"
+set +e
 run_maintainer
+status=$?
+set -e
+[[ "$status" == "75" ]]
 grep -q "already running (pid=$$)" "$log_file"
 [[ -d "$lock_dir" ]]
 [[ ! -e "$codex_home/locks/agent-worktree-maintain.lock" ]]

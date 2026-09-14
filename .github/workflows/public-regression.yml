@@ -1,0 +1,45 @@
+name: Public bootstrap regression tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/public-regression.yml"
+      - "install.sh"
+      - ".exports"
+      - "bin/linux-server-bootstrap"
+      - "bin/agent-worktree-ops/**"
+      - "functions/system/deepclean.zsh"
+      - "tests/deepclean-test.sh"
+      - "tests/deepclean-test.zsh"
+      - "tests/install-foundations-test.sh"
+      - "tests/linux-server-auth-proof-test.sh"
+      - "tests/agent-worktree-maintain-test.sh"
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends openssh-server zsh
+      - name: Run focused regressions
+        shell: bash
+        env:
+          GIT_CONFIG_NOSYSTEM: "1"
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_TERMINAL_PROMPT: "0"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          bash tests/install-foundations-test.sh
+          bash tests/agent-worktree-maintain-test.sh
+          bash tests/deepclean-test.sh
+          bash tests/linux-server-auth-proof-test.sh

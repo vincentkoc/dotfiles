@@ -535,7 +535,10 @@ rollback_auth_proof_activation() {
   assert_auth_proof_effective "$admin_user" no || rollback_status=1
   reload_ssh_service "$service" || rollback_status=1
   assert_auth_proof_effective "$admin_user" no || rollback_status=1
-  rm -f "$auth_proof_state_file"
+  # Keep the activation receipt until the running daemon is restored too.
+  if ((rollback_status == 0)); then
+    rm -f "$auth_proof_state_file" || rollback_status=1
+  fi
   return "$rollback_status"
 }
 
@@ -1888,7 +1891,11 @@ cleanup_auth_proof_exposure() {
   backup="$dropin.cleanup-backup.$$"
   service="$(ssh_service_name)"
   if ! run_root test -e "$dropin" && ! run_root test -L "$dropin"; then
-    assert_auth_proof_effective "$admin_user" no
+    # Failed activation rollback can remove the file while leaving sshd unreloaded.
+    sshd_config_valid &&
+      assert_auth_proof_effective "$admin_user" no &&
+      reload_ssh_service "$service" &&
+      assert_auth_proof_effective "$admin_user" no
     return
   fi
   validate_auth_proof_state || {
@@ -1954,7 +1961,7 @@ cleanup_auth_proof() {
     exit 1
   }
   admin_user="$(state_value "$auth_proof_state_file" admin_user)"
-  cleanup_auth_proof_exposure "$admin_user"
+  cleanup_auth_proof_exposure "$admin_user" || return
   rm -f "$auth_proof_state_file" "$proof_file"
   log "temporary auth-proof exposure removed"
 }

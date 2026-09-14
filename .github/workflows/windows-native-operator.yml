@@ -1,0 +1,25 @@
+name: Windows native operator
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-native-operator.yml"
+      - "tests/windows-native-operator-rollback-test.ps1"
+      - "windows/native-operator.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rollback-fixture:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test rollback with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/windows-native-operator-rollback-test.ps1
+      - name: Test rollback with PowerShell 7
+        shell: pwsh
+        run: ./tests/windows-native-operator-rollback-test.ps1
