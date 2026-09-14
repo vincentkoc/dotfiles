@@ -85,6 +85,11 @@ Codex cockpit snapshots retain an exited owner's exact recovery identity and
 record its exit status separately. `tt status` reports exited and failed owners;
 it does not rename, close, or relaunch their panes.
 
+`tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
+through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
+show a bucket only when the snapshot header declares it, so current owner and
+exit fields are never mistaken for old bucket columns.
+
 In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
 and **New At End** create a 3x2 grid with pane titles, starting in the source
 pane's directory. Other sessions get a single pane. These bindings call
