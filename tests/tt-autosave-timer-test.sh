@@ -413,7 +413,7 @@ autosave_residue_absent() {
 timer_reuse_race_checks() (
   # Load functions without contacting tmux. Only external collection/identity
   # probes are stubbed; activation, TSV IO, comparison and control locks are real.
-  export TT_TMUX_BIN=/bin/false
+  export TT_TMUX_BIN=/usr/bin/false
   source "$source_tt" ls
   autosave_snapshot_cycle() { return 0; }
   codex_snapshot_timer_state_available() { return 0; }

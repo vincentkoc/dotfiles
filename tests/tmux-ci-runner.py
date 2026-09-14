@@ -41,7 +41,8 @@ def environment(root, python, bash):
         "TMUX_TMPDIR": str(root / "s"),
         "SHELL": str(bash),
         "TT_LOGIN_SHELL": "/bin/sh",
-        "LC_ALL": "C",
+        # tmux sanitizes TSV separators for non-UTF-8 clients outside TMUX.
+        "LC_ALL": "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8",
         "TERM": "xterm-256color",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -116,8 +117,9 @@ def dependencies(python, bash, env, cwd):
     if not tmux or not fixture_python:
         raise RuntimeError("tmux and fixture PATH=/usr/bin:/bin python3 are required")
     python_probe = (
-        "import sys; print(sys.executable, sys.version); "
-        "sys.exit(0 if sys.version_info >= (3, 9) else 1)"
+        "import locale, sys; print(sys.executable, sys.version, locale.nl_langinfo(locale.CODESET)); "
+        "sys.exit(0 if sys.version_info >= (3, 9) and "
+        "locale.nl_langinfo(locale.CODESET).upper().replace('-', '') == 'UTF8' else 1)"
     )
     probes = [
         ([python, "-B", "-c", python_probe], env),
@@ -127,7 +129,7 @@ def dependencies(python, bash, env, cwd):
         ([fixture_python, "-B", "-c", python_probe], dict(env, PATH="/usr/bin:/bin")),
         # These two fixture calls deliberately retain the system shell and fake tmux.
         (["/bin/bash", "--noprofile", "--norc", "-c",
-          'echo "fixture bash $BASH_VERSION"; test -x /bin/false'],
+          'echo "fixture bash $BASH_VERSION"; test -x /usr/bin/false'],
          dict(env, PATH="/usr/bin:/bin")),
     ]
     for argv, probe_env in probes:
@@ -202,6 +204,20 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(main(), 1)
                 popen.assert_not_called()
                 temporary.assert_not_called()
+
+    def test_platform_locale_preserves_tmux_tsv_and_checks_native_dependencies(self):
+        for platform, expected in (("linux", "C.UTF-8"), ("darwin", "en_US.UTF-8")):
+            with self.subTest(platform=platform), mock.patch.object(sys, "platform", platform):
+                env = environment(Path("/fixture"), Path("/tools/python3"), Path("/tools/bash"))
+            self.assertEqual(env["LC_ALL"], expected)
+            with mock.patch("os.access", return_value=True), \
+                    mock.patch("shutil.which", return_value="/usr/bin/tool"), \
+                    mock.patch(__name__ + ".run_test", return_value=0) as run:
+                dependencies(Path("/tools/python3"), Path("/tools/bash"), env, Path("/fixture"))
+            self.assertEqual(run.call_args_list[0].args[1], 10)
+            self.assertIn("locale.nl_langinfo(locale.CODESET)", run.call_args_list[0].args[0][-1])
+            self.assertIn("test -x /usr/bin/false", run.call_args_list[-1].args[0][-1])
+            self.assertTrue(all(call.args[2]["LC_ALL"] == expected for call in run.call_args_list))
 
     def test_dependency_absence_and_version_failure(self):
         for found, result in ((None, 0), ("/usr/bin/tool", 1)):
