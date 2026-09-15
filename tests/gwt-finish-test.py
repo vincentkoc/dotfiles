@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import contextlib
+import errno
 import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import uuid
 from unittest import mock
@@ -1068,6 +1070,158 @@ class ReleaseTests(unittest.TestCase):
                 finally:
                     subprocess.run(["/usr/bin/xattr", "-d", "com.example.finish-fixture", str(path)], check=True)
         self.assertTrue(self.wt.exists())
+
+
+class FailureDiagnosticTests(unittest.TestCase):
+    def call_cli(self, error=None, action=None):
+        output, errors = io.StringIO(), io.StringIO()
+        def invoke(argv):
+            if error is not None:
+                raise error
+            return action(argv) if action else 0
+        with mock.patch.object(FINISH, "main", side_effect=invoke), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            status = FINISH.cli(["finish"])
+        return status, output.getvalue(), errors.getvalue()
+
+    def test_os_errors_keep_category_and_errno_without_private_text(self):
+        for code in (errno.ENOSPC, errno.EACCES):
+            with self.subTest(code=code):
+                status, output, errors = self.call_cli(OSError(code, "private-secret", "/private/secret-file"))
+                self.assertEqual(status, 1)
+                self.assertEqual(output, "")
+                self.assertIn('"category": "os-error"', errors)
+                self.assertIn('"errno": ' + str(code), errors)
+                self.assertIn("(state-or-proof-unavailable)", errors)
+                self.assertNotIn("private-secret", errors)
+                self.assertNotIn("/private/", errors)
+
+    def test_malformed_github_proof_keeps_owner_phase_without_body(self):
+        def invoke(_):
+            with mock.patch.object(FINISH, "run", return_value=types.SimpleNamespace(stdout=b"private-secret")):
+                return FINISH.pr("https://github.com/example/repo/pull/1")
+        status, output, errors = self.call_cli(action=invoke)
+        self.assertEqual((status, output), (1, ""))
+        self.assertIn('"category": "value-error"', errors)
+        self.assertIn('"phase": "github-pr-proof"', errors)
+        self.assertNotIn("private-secret", errors)
+        self.assertNotIn("example/repo", errors)
+
+    def test_completion_transaction_failure_reports_sqlite_code_and_rolls_back(self):
+        with contextlib.closing(sqlite3.connect(":memory:")) as db:
+            db.row_factory = sqlite3.Row
+            db.executescript("""
+                CREATE TABLE worktrees(id TEXT PRIMARY KEY, finish_head TEXT, primary_pr TEXT,
+                    target TEXT, dependencies TEXT, state TEXT, reason TEXT);
+                CREATE TABLE owners(worktree_id TEXT, owner TEXT, completed INTEGER);
+                INSERT INTO worktrees VALUES('fixture',NULL,NULL,NULL,NULL,'active','owner-active');
+                INSERT INTO owners VALUES('fixture','owner-1',0);
+            """)
+            row = db.execute("SELECT * FROM worktrees").fetchone()
+            before = dict(row)
+            caught = []
+            db.set_authorizer(lambda op, table, _column, _database, _trigger:
+                sqlite3.SQLITE_DENY if op == sqlite3.SQLITE_UPDATE and table == "worktrees" else sqlite3.SQLITE_OK)
+            def invoke(_):
+                args = types.SimpleNamespace(pr="fixture-pr", target="main", wait_for=[])
+                with mock.patch.object(FINISH, "revalidate", return_value={"repo":"example/repo","head":"a"*40}), \
+                        mock.patch.object(FINISH, "owner_id", return_value="owner-1"), \
+                        mock.patch.object(FINISH, "pr", return_value={"repo":"example/repo","head":"a"*40,"url":"fixture-pr","target":"main"}):
+                    try:
+                        return FINISH.finish(db, row, args)
+                    except sqlite3.Error as error:
+                        caught.append(error)
+                        raise
+            status, output, errors = self.call_cli(action=invoke)
+            db.set_authorizer(lambda *args: sqlite3.SQLITE_OK)
+            self.assertEqual((status, output), (1, ""))
+            self.assertIn('"category": "sqlite-error"', errors)
+            self.assertEqual(len(caught), 1)
+            code = getattr(caught[0], "sqlite_errorcode", None)
+            if type(code) is int:
+                self.assertIn('"sqlite_errorcode": ' + str(code), errors)
+            else:
+                self.assertNotIn('"sqlite_errorcode"', errors)
+            self.assertIn('"phase": "completion"', errors)
+            self.assertEqual(dict(db.execute("SELECT * FROM worktrees").fetchone()), before)
+            self.assertEqual(db.execute("SELECT completed FROM owners").fetchone()[0], 0)
+
+    def test_value_error_hides_its_message(self):
+        status, output, errors = self.call_cli(ValueError("private-secret"))
+        self.assertEqual((status, output), (1, ""))
+        self.assertIn('"category": "value-error"', errors)
+        self.assertNotIn("private-secret", errors)
+
+    def test_custom_exception_metadata_is_not_printed(self):
+        class PrivateSecretError(OSError):
+            pass
+        error = PrivateSecretError("private-secret")
+        error.errno = "private-secret"
+        error.sqlite_errorcode = True
+        status, output, errors = self.call_cli(error)
+        self.assertEqual((status, output), (1, ""))
+        self.assertIn('"category": "os-error"', errors)
+        self.assertNotIn("PrivateSecret", errors)
+        self.assertNotIn("private-secret", errors)
+        self.assertNotIn('"errno"', errors)
+        self.assertNotIn('"sqlite_errorcode"', errors)
+
+    def test_sqlite_error_without_extended_attributes_is_supported(self):
+        status, output, errors = self.call_cli(sqlite3.OperationalError("private-secret"))
+        self.assertEqual((status, output), (1, ""))
+        self.assertIn('"category": "sqlite-error"', errors)
+        self.assertNotIn("sqlite_errorcode", errors)
+        self.assertNotIn("private-secret", errors)
+
+    def test_explicit_inner_phase_survives_outer_phase(self):
+        def invoke(_):
+            with FINISH.diagnostic_phase("dispatch"), FINISH.diagnostic_phase("state-session"):
+                raise OSError(errno.ENOSPC, "private-secret")
+        status, output, errors = self.call_cli(action=invoke)
+        self.assertEqual((status, output), (1, ""))
+        self.assertIn('"phase": "state-session"', errors)
+
+    def test_undecorated_body_failure_is_a_state_session_not_ledger_failure(self):
+        original_main = FINISH.main
+        db = mock.Mock()
+        db.execute.return_value = [{}]
+        @contextlib.contextmanager
+        def session(*args, **kwargs):
+            yield db
+        def invoke(_):
+            with mock.patch.object(FINISH, "safety", return_value=types.SimpleNamespace()), \
+                    mock.patch.object(FINISH, "ledger", side_effect=session), \
+                    mock.patch.object(FINISH, "summary", side_effect=ValueError("private-secret")):
+                return original_main(["status", "--all"])
+        status, output, errors = self.call_cli(action=invoke)
+        self.assertEqual((status, output), (1, ""))
+        self.assertIn('"phase": "state-session"', errors)
+        self.assertNotIn("state-ledger", errors)
+        self.assertNotIn("private-secret", errors)
+
+    def test_unapproved_phase_is_not_rendered(self):
+        for phase in ("private-secret", ["private-secret"]):
+            with self.subTest(phase=phase):
+                error = ValueError("private-secret")
+                error._gwt_failure_phase = phase
+                status, output, errors = self.call_cli(error)
+                self.assertEqual((status, output), (1, ""))
+                self.assertIn('"phase": "dispatch"', errors)
+                self.assertNotIn("private-secret", errors)
+
+    def test_retain_reason_and_exit_remain_exact(self):
+        status, output, errors = self.call_cli(FINISH.Retain("lifecycle-busy"))
+        self.assertEqual((status, output), (1, ""))
+        self.assertEqual(errors, "gwt finish: stopped; inspect finish-status for checkout outcome (lifecycle-busy)\n")
+
+    def test_success_output_and_exit_remain_exact(self):
+        def invoke(_):
+            print('[{"checkout": "retained"}]')
+            return 0
+        self.assertEqual(self.call_cli(action=invoke), (0, '[{"checkout": "retained"}]\n', ""))
+
+    def test_unhandled_exception_still_propagates(self):
+        with self.assertRaisesRegex(RuntimeError, "unexpected"):
+            self.call_cli(RuntimeError("unexpected"))
 
 
 if __name__ == "__main__":
