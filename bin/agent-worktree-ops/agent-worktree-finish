@@ -32,6 +32,44 @@ class Retain(RuntimeError):
     pass
 
 
+# State sessions span ledger setup, command execution, and teardown.
+FAILURE_PHASES = frozenset({
+    "dispatch", "state-session", "owner-schema", "retirement-schema",
+    "worktree-identity", "github-pr-proof", "github-target-proof", "completion",
+})
+
+
+@contextlib.contextmanager
+def diagnostic_phase(phase):
+    try:
+        yield
+    except (OSError, sqlite3.Error, ValueError) as error:
+        current = getattr(error, "_gwt_failure_phase", None)
+        if not isinstance(current, str) or current not in FAILURE_PHASES:
+            error._gwt_failure_phase = phase
+        raise
+
+
+def failure_diagnostic(error):
+    # Never render exception text, class names, paths, SQL or traceback data.
+    # Optional numeric attributes also work on Python versions before 3.11.
+    if isinstance(error, OSError):
+        category, attributes = "os-error", ("errno", "winerror")
+    elif isinstance(error, sqlite3.Error):
+        category, attributes = "sqlite-error", ("sqlite_errorcode",)
+    else:
+        category, attributes = "value-error", ()
+    phase = getattr(error, "_gwt_failure_phase", None)
+    if not isinstance(phase, str) or phase not in FAILURE_PHASES:
+        phase = "dispatch"
+    details = {"category": category, "phase": phase}
+    for attribute in attributes:
+        value = getattr(error, attribute, None)
+        if type(value) is int:
+            details[attribute] = value
+    return json.dumps(details, sort_keys=True)
+
+
 @functools.lru_cache(maxsize=1)
 def safety():
     # The installed sibling is part of this owner, not a PATH-selected backend.
@@ -119,6 +157,7 @@ def repository(origin):
     return match[1].lower()
 
 
+@diagnostic_phase("worktree-identity")
 def snapshot(path, managed_root, lock_reason=None):
     path = physical(path)
     managed_root = physical(managed_root)
@@ -170,6 +209,7 @@ def immutable(snap):
     return {key: value for key, value in snap.items() if key != "head"}
 
 
+@diagnostic_phase("worktree-identity")
 def revalidate(row):
     recorded = json.loads(row["identity"])
     current = snapshot(row["path"], recorded["root"], recorded.get("lock_reason"))
@@ -321,6 +361,7 @@ def ledger(state_dir, *, create=False):
         os.close(fd)
 
 
+@diagnostic_phase("owner-schema")
 def ensure_owner_schema(db):
     columns = {row["name"] for row in db.execute("PRAGMA table_info(owners)")}
     if "completed" not in columns:
@@ -328,6 +369,7 @@ def ensure_owner_schema(db):
             db.execute("ALTER TABLE owners ADD COLUMN completed INTEGER NOT NULL DEFAULT 0")
 
 
+@diagnostic_phase("retirement-schema")
 def ensure_retirement_schema(db):
     db.executescript("""
         CREATE TABLE IF NOT EXISTS retirement (
@@ -438,6 +480,7 @@ def claim(db, row, owner):
         )
 
 
+@diagnostic_phase("github-pr-proof")
 def pr(url):
     match = PR_URL.fullmatch(url)
     if not match:
@@ -470,6 +513,7 @@ def pr(url):
     }
 
 
+@diagnostic_phase("github-target-proof")
 def default_target(repo):
     data = json.loads(run(["ghx", "--no-cache", "api", f"repos/{repo}"]).stdout)
     if (not isinstance(data, dict)
@@ -479,6 +523,7 @@ def default_target(repo):
     return data["default_branch"]
 
 
+@diagnostic_phase("completion")
 def finish(db, row, args):
     snap = revalidate(row)
     who = owner_id(args)
@@ -1053,6 +1098,7 @@ def process_one(db, row, args):
     return summary(db, current)
 
 
+@diagnostic_phase("dispatch")
 def main(argv=None):
     args = parser().parse_args(argv)
     safety().DEADLINE = time.monotonic() + 238
@@ -1093,11 +1139,11 @@ def main(argv=None):
     if args.all and args.apply and not args.policy:
         raise Retain("batch-apply-requires-explicit-release-policy")
     if args.command == "guard":
-        with ledger(args.state_dir) as db:
+        with diagnostic_phase("state-session"), ledger(args.state_dir) as db:
             guard(db, args.worktree, owner=args.all)
         return 0
     if args.all:
-        with ledger(args.state_dir) as db:
+        with diagnostic_phase("state-session"), ledger(args.state_dir) as db:
             if db is None:
                 print("[]")
                 return 0
@@ -1116,7 +1162,7 @@ def main(argv=None):
             ][:16]
         output = []
         for path in paths:
-            with ledger(args.state_dir) as db:
+            with diagnostic_phase("state-session"), ledger(args.state_dir) as db:
                 row = get_row(db, path)
                 result = process_one(db, row, args)
                 output.append(result)
@@ -1125,7 +1171,7 @@ def main(argv=None):
         print(json.dumps(output, sort_keys=True))
         return 0
 
-    with ledger(args.state_dir, create=args.command == "enroll") as db:
+    with diagnostic_phase("state-session"), ledger(args.state_dir, create=args.command == "enroll") as db:
         if args.command == "enroll":
             storage_guard()
             lock_reason = "gwt-finish.v2:" + args.new_token if args.new_token else None
@@ -1172,10 +1218,15 @@ def main(argv=None):
         return 0
 
 
-if __name__ == "__main__":
+def cli(argv=None):
     try:
-        raise SystemExit(main())
+        return main(argv)
     except (Retain, OSError, sqlite3.Error, ValueError) as error:
         reason = str(error) if isinstance(error, Retain) else "state-or-proof-unavailable"
-        print(f"gwt finish: stopped; inspect finish-status for checkout outcome ({reason})", file=sys.stderr)
-        raise SystemExit(1)
+        diagnostic = "" if isinstance(error, Retain) else " " + failure_diagnostic(error)
+        print(f"gwt finish: stopped; inspect finish-status for checkout outcome ({reason}){diagnostic}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
