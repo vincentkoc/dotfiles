@@ -54,7 +54,9 @@ def interrupted(signum, _frame):
     global _pending_interrupt
     if _pending_interrupt is None:
         _pending_interrupt = signum
-    if not _interrupt_deferrals:
+    # An exception handler may not have entered its cleanup context yet.
+    # Record cancellation there without interrupting ownership recovery.
+    if not _interrupt_deferrals and sys.exc_info()[0] is None:
         deliver_interrupt()
 
 
@@ -137,6 +139,7 @@ PANE_FORMAT = (
 
 
 def run(args, *, required=True, total_budget=False, input_text=None):
+    deliver_interrupt()
     remaining = DEADLINE - time.monotonic()
     if remaining <= 0:
         raise SnapshotError("snapshot collection exceeded its total time budget")
@@ -160,21 +163,24 @@ def run(args, *, required=True, total_budget=False, input_text=None):
         stdout, _ = process.communicate(input=input_text, timeout=timeout)
     except BaseException as error:
         if process is None:
-            if isinstance(error, OSError):
-                if required:
-                    raise SnapshotError(f"missing collector {args[0]}") from error
-                return ""
+            if not isinstance(error, OSError):
+                raise
+            if required:
+                raise SnapshotError(f"missing collector {args[0]}") from error
+        else:
+            with defer_interrupts():
+                try:
+                    stop_collector(process)
+                except Exception as cleanup_error:
+                    print(f"tt: collector cleanup incomplete: {cleanup_error}", file=sys.stderr)
+            if isinstance(error, (subprocess.TimeoutExpired, SnapshotError)):
+                raise SnapshotError(f"timed out collecting {' '.join(args[:2])}") from error
+            if isinstance(error, UnicodeError):
+                raise SnapshotError(f"collector returned invalid UTF-8: {args[0]}") from error
             raise
-        with defer_interrupts():
-            try:
-                stop_collector(process)
-            except Exception as cleanup_error:
-                print(f"tt: collector cleanup incomplete: {cleanup_error}", file=sys.stderr)
-        if isinstance(error, (subprocess.TimeoutExpired, SnapshotError)):
-            raise SnapshotError(f"timed out collecting {' '.join(args[:2])}") from error
-        if isinstance(error, UnicodeError):
-            raise SnapshotError(f"collector returned invalid UTF-8: {args[0]}") from error
-        raise
+    deliver_interrupt()
+    if process is None:
+        return ""
     if process.returncode != 0:
         if required:
             raise SnapshotError(f"collector failed: {' '.join(args[:2])}")
@@ -1352,7 +1358,10 @@ def cli():
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
         signal.signal(signum, interrupted)
     try:
-        return dispatch()
+        result = dispatch()
+        if not result:
+            deliver_interrupt()
+        return result
     except CollectorCancelled as error:
         print(f"tt: interrupted by {signal.Signals(error.signum).name}", file=sys.stderr)
         return 128 + error.signum

@@ -905,6 +905,24 @@ class CollectorCancellationTests(Fixture):
             loader.exec_module(writer)
             original = subprocess.Popen
             children = []
+            original_defer = writer.defer_interrupts
+            deferrals = 0
+            def defer():
+                global deferrals
+                deferrals += 1
+                if deferrals == 2 and os.environ.get('FIXTURE_CLEANUP_SIGNAL'):
+                    os.kill(os.getpid(), int(os.environ['FIXTURE_CLEANUP_SIGNAL']))
+                return original_defer()
+            writer.defer_interrupts = defer
+            original_deliver = writer.deliver_interrupt
+            deliveries = 0
+            def deliver():
+                global deliveries
+                deliveries += 1
+                original_deliver()
+                if deliveries == 2 and os.environ.get('FIXTURE_OPTIONAL_MISSING') == 'checkpoint':
+                    os.kill(os.getpid(), signal.SIGTERM)
+            writer.deliver_interrupt = deliver
             def ready():
                 deadline = time.monotonic() + 3
                 while not (root / 'test-admitted').exists():
@@ -912,7 +930,12 @@ class CollectorCancellationTests(Fixture):
                         raise RuntimeError('fixture readiness timed out')
                     time.sleep(.005)
             def launch(*args, **kwargs):
-                process = original(*args, **kwargs)
+                try:
+                    process = original(*args, **kwargs)
+                except OSError:
+                    if os.environ.get('FIXTURE_OPTIONAL_MISSING') == 'pending':
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    raise
                 children.append(process)
                 if os.environ.get('FIXTURE_LAUNCH_SIGNALS'):
                     ready()
@@ -923,6 +946,7 @@ class CollectorCancellationTests(Fixture):
                         ready()
                         errors = {
                             'runtime': RuntimeError('fixture communication failed'),
+                            'timeout': subprocess.TimeoutExpired('fixture', 1),
                             'unicode': UnicodeError('fixture decoder failed'),
                             'keyboard': KeyboardInterrupt(),
                             'system': SystemExit(23),
@@ -931,6 +955,20 @@ class CollectorCancellationTests(Fixture):
                     process.communicate = communicate
                 return process
             subprocess.Popen = launch
+            if os.environ.get('FIXTURE_OPTIONAL_MISSING'):
+                def optional():
+                    writer.run([str(root / 'missing')], required=False)
+                    (root / 'optional-returned').touch()
+                    return 0
+                writer.dispatch = optional
+            if os.environ.get('FIXTURE_SWALLOWED_ERROR'):
+                def swallowed():
+                    try:
+                        raise ValueError('fixture read error')
+                    except ValueError:
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return 0
+                writer.dispatch = swallowed
             try:
                 raise SystemExit(writer.cli())
             finally:
@@ -1023,15 +1061,15 @@ class CollectorCancellationTests(Fixture):
     def assert_finished(self, process, status, diagnostic):
         stdout, stderr = process.communicate(timeout=6)
         self.assertEqual(stdout, '')
-        self.assertEqual(process.returncode, status, stderr)
-        self.assertIn(diagnostic, stderr)
-        for pid in self.fixture_pids:
-            self.wait_for(lambda: not self.running(pid))
         observation = json.loads((self.root / 'wait-result').read_text())
         self.assertEqual(len(observation), 1)
         self.assertEqual(observation[0]['pid'], self.fixture_pids[0])
         self.assertIsNotNone(observation[0]['returncode'], observation)
         self.assertTrue(observation[0]['pipes_closed'], observation)
+        for pid in self.fixture_pids:
+            self.wait_for(lambda: not self.running(pid))
+        self.assertEqual(process.returncode, status, stderr)
+        self.assertIn(diagnostic, stderr)
         self.assertIsNone(self.sentinel.poll())
         self.assert_preserved()
 
@@ -1097,6 +1135,43 @@ class CollectorCancellationTests(Fixture):
     def test_unexpected_communication_exception_cleans_up(self):
         process = self.start_writer(FIXTURE_EXCEPTION='runtime')
         self.assert_finished(process, 1, 'fixture communication failed')
+
+    def test_signal_at_cleanup_entry_preserves_failure_and_reaps(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='runtime',
+                                    FIXTURE_CLEANUP_SIGNAL=str(signal.SIGTERM))
+        self.assert_finished(process, 1, 'fixture communication failed')
+
+    def test_alarm_at_cleanup_entry_preserves_timeout_and_reaps(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='timeout',
+                                    FIXTURE_CLEANUP_SIGNAL=str(signal.SIGALRM))
+        self.assert_finished(process, 1, 'timed out collecting')
+
+    def test_sigint_at_cleanup_entry_preserves_decoder_failure_and_reaps(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='unicode',
+                                    FIXTURE_CLEANUP_SIGNAL=str(signal.SIGINT))
+        self.assert_finished(process, 1, 'collector returned invalid UTF-8')
+
+    def test_optional_launch_error_does_not_swallow_pending_cancellation(self):
+        self.assert_cli_cancellation(FIXTURE_OPTIONAL_MISSING='pending')
+
+    def test_optional_launch_return_is_outside_exception_handler(self):
+        self.assert_cli_cancellation(FIXTURE_OPTIONAL_MISSING='checkpoint')
+
+    def test_successful_dispatch_delivers_cancellation_after_swallowed_error(self):
+        self.assert_cli_cancellation(FIXTURE_SWALLOWED_ERROR='1')
+
+    def assert_cli_cancellation(self, **environment):
+        result = subprocess.run(
+            [sys.executable, '-B', str(self.launcher)],
+            env={**self.env, **environment},
+            capture_output=True, text=True, timeout=3,
+        )
+        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('SIGTERM', result.stderr)
+        self.assertFalse((self.root / 'optional-returned').exists())
+        self.assertEqual(json.loads((self.root / 'wait-result').read_text()), [])
+        self.assert_preserved()
 
     def test_early_decoder_exception_cleans_up(self):
         process = self.start_writer(FIXTURE_EXCEPTION='unicode')
