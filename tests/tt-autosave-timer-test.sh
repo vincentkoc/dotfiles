@@ -301,6 +301,13 @@ timer_success_epoch() {
   awk -F '\t' '$1 == "v1" {print $6}' "$(timer_state_file)"
 }
 
+timer_snapshot_failures() {
+  awk -v pid="$1" '
+    $2 == "cycle-failed" && $3 == ("pid=" pid) && $4 == "reason=snapshot" { count++ }
+    END { print count + 0 }
+  ' "$CASE_STATE/tt/codex-cockpit.timer.log"
+}
+
 timer_max_age() {
   awk -F '\t' '$1 == "v1" {print $7}' "$(timer_state_file)"
 }
@@ -760,10 +767,14 @@ timer_progressed() { (( $(timer_success_epoch) > before_concurrent_epoch )); }
 wait_until 50 timer_progressed
 
 # The loop survives an interrupted sleep and a failed snapshot collection.
-before_failure_epoch="$(timer_success_epoch)"
 touch "$CASE_FAIL"
+failures_before="$(timer_snapshot_failures "$pid")"
+snapshot_failed() { (( $(timer_snapshot_failures "$pid") > failures_before )); }
 kill -HUP "$pid"
-wait_until 100 grep -Fq 'cycle-failed' "$CASE_STATE/tt/codex-cockpit.timer.log"
+wait_until 100 snapshot_failed
+# An in-flight successful cycle may finish after fault injection. Compare only
+# after this timer acknowledges a new failure, when no healthy cycle remains.
+before_failure_epoch="$(timer_success_epoch)"
 kill -0 "$pid"
 wait_until 100 status_has 'autosave: degraded'
 [[ "$(timer_pid)" == "$pid" ]]
