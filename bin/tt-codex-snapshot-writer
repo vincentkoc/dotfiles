@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from shutil import copyfileobj
 
@@ -28,6 +29,73 @@ class SnapshotError(RuntimeError):
 
 class UnresolvedAgentEvidence(SnapshotError):
     """Collected agent rows cannot safely replace the recovery manifest."""
+
+
+class CollectorCancelled(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+_pending_interrupt = None
+_interrupt_delivered = False
+_interrupt_deferrals = 0
+
+
+def deliver_interrupt():
+    global _interrupt_delivered
+    if _pending_interrupt is not None and not _interrupt_delivered:
+        _interrupt_delivered = True
+        if _pending_interrupt == signal.SIGALRM:
+            raise SnapshotError("snapshot collection exceeded its total time budget")
+        raise CollectorCancelled(_pending_interrupt)
+
+
+def interrupted(signum, _frame):
+    global _pending_interrupt
+    if _pending_interrupt is None:
+        _pending_interrupt = signum
+    # An exception handler may not have entered its cleanup context yet.
+    # Record cancellation there without interrupting ownership recovery.
+    if not _interrupt_deferrals and sys.exc_info()[0] is None:
+        deliver_interrupt()
+
+
+@contextmanager
+def defer_interrupts():
+    global _interrupt_deferrals
+    _interrupt_deferrals += 1
+    try:
+        yield
+    finally:
+        _interrupt_deferrals -= 1
+        if not _interrupt_deferrals and sys.exc_info()[0] is None:
+            deliver_interrupt()
+
+
+def stop_collector(process):
+    # Discard error output without another decode/communicate. A completed
+    # communicate has already reaped its leader, so its PGID is no longer ours.
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+    if process.returncode is None:
+        # Keep the leader unreaped until the final group signal: its early exit
+        # must neither hide a live descendant nor allow this PGID to be reused.
+        try:
+            for signum in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(process.pid, signum)
+                except ProcessLookupError:
+                    pass
+                if signum == signal.SIGTERM:
+                    time.sleep(1)
+        finally:
+            # Darwin can return EPERM for a group containing only zombies.
+            # A signal error must not skip reaping the child we still own.
+            process.wait(timeout=1)
 
 
 def positive_env(name, default, minimum=1):
@@ -71,51 +139,48 @@ PANE_FORMAT = (
 
 
 def run(args, *, required=True, total_budget=False, input_text=None):
+    deliver_interrupt()
     remaining = DEADLINE - time.monotonic()
     if remaining <= 0:
         raise SnapshotError("snapshot collection exceeded its total time budget")
 
     timeout = remaining if total_budget else min(COMMAND_TIMEOUT_SECONDS, remaining)
+    process = None
     try:
-        process = subprocess.Popen(
-            args,
-            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
-            start_new_session=True,
-        )
-    except OSError as error:
-        if required:
-            raise SnapshotError(f"missing collector {args[0]}") from error
-        return ""
-    try:
+        # Python signal handlers may run inside Popen, after fork but before it
+        # returns. Publish ownership before delivering the first interruption.
+        with defer_interrupts():
+            process = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="strict",
+                start_new_session=True,
+            )
         stdout, _ = process.communicate(input=input_text, timeout=timeout)
-    except (subprocess.TimeoutExpired, SnapshotError) as error:
-        # Do not let the total deadline interrupt the bounded TERM/KILL cleanup.
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.communicate(timeout=1)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                process.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.stdout.close()
-                if process.stdin:
-                    process.stdin.close()
-        raise SnapshotError(f"timed out collecting {' '.join(args[:2])}") from error
-    except UnicodeError as error:
-        raise SnapshotError(f"collector returned invalid UTF-8: {args[0]}") from error
+    except BaseException as error:
+        if process is None:
+            if not isinstance(error, OSError):
+                raise
+            if required:
+                raise SnapshotError(f"missing collector {args[0]}") from error
+        else:
+            with defer_interrupts():
+                try:
+                    stop_collector(process)
+                except Exception as cleanup_error:
+                    print(f"tt: collector cleanup incomplete: {cleanup_error}", file=sys.stderr)
+            if isinstance(error, (subprocess.TimeoutExpired, SnapshotError)):
+                raise SnapshotError(f"timed out collecting {' '.join(args[:2])}") from error
+            if isinstance(error, UnicodeError):
+                raise SnapshotError(f"collector returned invalid UTF-8: {args[0]}") from error
+            raise
+    deliver_interrupt()
+    if process is None:
+        return ""
     if process.returncode != 0:
         if required:
             raise SnapshotError(f"collector failed: {' '.join(args[:2])}")
@@ -1210,11 +1275,6 @@ def verify_cold_completion(path, field="state"):
 
 def main():
     lock = None
-
-    def deadline_expired(_signal, _frame):
-        raise SnapshotError("snapshot collection exceeded its total time budget")
-
-    signal.signal(signal.SIGALRM, deadline_expired)
     signal.setitimer(signal.ITIMER_REAL, max(0.001, DEADLINE - time.monotonic()))
     try:
         lock = acquire_snapshot_lock()
@@ -1254,7 +1314,7 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
+def dispatch():
     if sys.argv[1:2] in (
         ["--freeze-recovery"], ["--restore-dead"],
         ["--recover-cold"], ["--verify-cold-completion"],
@@ -1289,4 +1349,23 @@ if __name__ == "__main__":
             print(f"tt autosave control unavailable: {error}", file=sys.stderr)
             raise SystemExit(2) from None
     else:
-        raise SystemExit(main())
+        return main()
+
+
+def cli():
+    # Recovery and timer control queries launch collectors too. Give every CLI
+    # mode the same cancellation boundary without changing its deadline policy.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
+        signal.signal(signum, interrupted)
+    try:
+        result = dispatch()
+        if not result:
+            deliver_interrupt()
+        return result
+    except CollectorCancelled as error:
+        print(f"tt: interrupted by {signal.Signals(error.signum).name}", file=sys.stderr)
+        return 128 + error.signum
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

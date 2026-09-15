@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from unittest.mock import patch
@@ -827,8 +828,25 @@ class SnapshotTests(Fixture):
         output.write_text("unchanged\n")
         self.patch("COMMAND_TIMEOUT_SECONDS", 0.05)
         self.patch("DEADLINE", time.monotonic() + 1)
-        with self.assertRaises(writer.SnapshotError):
+        children = []
+        original = subprocess.Popen
+        def launch(*args, **kwargs):
+            child = original(*args, **kwargs)
+            children.append(child)
+            return child
+        diagnostic = io.StringIO()
+        with patch.object(writer.subprocess, "Popen", side_effect=launch), contextlib.redirect_stderr(
+            diagnostic
+        ), self.assertRaisesRegex(writer.SnapshotError, "timed out collecting"):
             writer.run(["/bin/sh", "-c", "sleep 10 & wait"])
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode)
+        self.assertTrue(children[0].stdout.closed)
+        if diagnostic.getvalue():
+            # macOS rejects a final group signal when only zombies remain;
+            # retain that diagnostic, but always reap the direct child.
+            self.assertEqual(sys.platform, "darwin")
+            self.assertIn("collector cleanup incomplete: [Errno 1]", diagnostic.getvalue())
         self.assertEqual(output.read_text(), "unchanged\n")
 
     def test_failed_agent_collection_preserves_published_file(self):
@@ -838,6 +856,360 @@ class SnapshotTests(Fixture):
             with self.assertRaises(writer.SnapshotError):
                 writer.publish_agent_snapshot(output)
         self.assertEqual(output.read_text(), "unchanged\n")
+
+
+class CollectorCancellationTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.staged_writer = self.root / "tt-codex-snapshot-writer"
+        shutil.copy2(REPO / "bin/tt-codex-snapshot-writer", self.staged_writer)
+        self.collector = self.root / "tt"
+        self.collector.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""\
+            import json, os, pathlib, signal, time
+            root = pathlib.Path(__file__).parent
+            def publish(name, value):
+                temporary = root / (name + '.tmp')
+                temporary.write_text(value)
+                temporary.replace(root / name)
+            publish('collector-pid', str(os.getpid()))
+            child = os.fork()
+            if child == 0:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                for fd in (0, 2):
+                    os.close(fd)
+                publish('grandchild-ready', str(os.getpid()))
+                while True:
+                    time.sleep(1)
+            def terminate(signum, frame):
+                publish('term-seen', 'ready')
+                os._exit(0)
+            signal.signal(signal.SIGTERM, terminate)
+            while not (root / 'grandchild-ready').exists():
+                time.sleep(.005)
+            publish('collector-ready', json.dumps([os.getpid(), child]))
+            while True:
+                time.sleep(1)
+            """))
+        self.collector.chmod(0o700)
+        self.launcher = self.root / 'launch-writer.py'
+        self.launcher.write_text(textwrap.dedent("""\
+            import importlib.machinery, importlib.util, json, os, pathlib
+            import signal, subprocess, sys, time
+            root = pathlib.Path(__file__).parent
+            source = root / 'tt-codex-snapshot-writer'
+            sys.argv = [str(source), *sys.argv[1:]]
+            loader = importlib.machinery.SourceFileLoader('fixture_writer', str(source))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            writer = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = writer
+            loader.exec_module(writer)
+            original = subprocess.Popen
+            children = []
+            original_defer = writer.defer_interrupts
+            deferrals = 0
+            def defer():
+                global deferrals
+                deferrals += 1
+                if deferrals == 2 and os.environ.get('FIXTURE_CLEANUP_SIGNAL'):
+                    os.kill(os.getpid(), int(os.environ['FIXTURE_CLEANUP_SIGNAL']))
+                return original_defer()
+            writer.defer_interrupts = defer
+            original_deliver = writer.deliver_interrupt
+            deliveries = 0
+            def deliver():
+                global deliveries
+                deliveries += 1
+                original_deliver()
+                if deliveries == 2 and os.environ.get('FIXTURE_OPTIONAL_MISSING') == 'checkpoint':
+                    os.kill(os.getpid(), signal.SIGTERM)
+            writer.deliver_interrupt = deliver
+            def ready():
+                deadline = time.monotonic() + 3
+                while not (root / 'test-admitted').exists():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('fixture readiness timed out')
+                    time.sleep(.005)
+            def launch(*args, **kwargs):
+                try:
+                    process = original(*args, **kwargs)
+                except OSError:
+                    if os.environ.get('FIXTURE_OPTIONAL_MISSING') == 'pending':
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    raise
+                children.append(process)
+                if os.environ.get('FIXTURE_LAUNCH_SIGNALS'):
+                    ready()
+                    for signum in os.environ['FIXTURE_LAUNCH_SIGNALS'].split(','):
+                        os.kill(os.getpid(), int(signum))
+                if os.environ.get('FIXTURE_EXCEPTION'):
+                    def communicate(*args, **kwargs):
+                        ready()
+                        errors = {
+                            'runtime': RuntimeError('fixture communication failed'),
+                            'timeout': subprocess.TimeoutExpired('fixture', 1),
+                            'unicode': UnicodeError('fixture decoder failed'),
+                            'keyboard': KeyboardInterrupt(),
+                            'system': SystemExit(23),
+                        }
+                        raise errors[os.environ['FIXTURE_EXCEPTION']]
+                    process.communicate = communicate
+                return process
+            subprocess.Popen = launch
+            if os.environ.get('FIXTURE_OPTIONAL_MISSING'):
+                def optional():
+                    writer.run([str(root / 'missing')], required=False)
+                    (root / 'optional-returned').touch()
+                    return 0
+                writer.dispatch = optional
+            if os.environ.get('FIXTURE_SWALLOWED_ERROR'):
+                def swallowed():
+                    try:
+                        raise ValueError('fixture read error')
+                    except ValueError:
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return 0
+                writer.dispatch = swallowed
+            try:
+                raise SystemExit(writer.cli())
+            finally:
+                (root / 'wait-result').write_text(json.dumps([
+                    {'pid': child.pid, 'returncode': child.returncode,
+                     'pipes_closed': all(stream is None or stream.closed for stream in
+                                         (child.stdin, child.stdout, child.stderr))}
+                    for child in children
+                ]))
+            """))
+        self.env['TT_TMUX_BIN'] = str(self.collector)
+        self.source.write_text('previous snapshot\n')
+        self.history = self.state / 'tt/history/agent-cockpit/previous.tsv'
+        self.history.parent.mkdir(parents=True)
+        self.history.write_text('previous history\n')
+        with writer.acquire_snapshot_lock():
+            self.lock_inode = writer.LOCK_PATH.stat().st_ino
+        self.preserved = {p: (p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns)
+                          for p in (self.source, self.history)}
+        self.fixture_pids = []
+        self.addCleanup(self.cleanup_collectors)
+        self.sentinel = subprocess.Popen(
+            [sys.executable, '-c', 'import time; time.sleep(60)'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        def finish_sentinel():
+            if self.sentinel.poll() is None:
+                self.sentinel.terminate()
+            self.sentinel.wait(timeout=3)
+        self.addCleanup(finish_sentinel)
+
+    def wait_for(self, predicate, timeout=4):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(.01)
+        self.fail('owned fixture did not reach its expected state')
+
+    def running(self, pid):
+        result = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'stat='],
+                                capture_output=True, text=True, timeout=1)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        return result.returncode == 0 and not result.stdout.strip().startswith('Z')
+
+    def cleanup_collectors(self):
+        grandchild = self.root / 'grandchild-ready'
+        if grandchild.exists() and int(grandchild.read_text()) not in self.fixture_pids:
+            self.fixture_pids.append(int(grandchild.read_text()))
+        if self.fixture_pids and any(self.running(pid) for pid in self.fixture_pids):
+            try:
+                os.killpg(self.fixture_pids[0], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            for pid in self.fixture_pids:
+                self.wait_for(lambda: not self.running(pid))
+
+    def start_writer(self, arguments=None, **environment):
+        process = subprocess.Popen(
+            [sys.executable, '-B', str(self.launcher),
+             *(arguments or ['--agent-snapshot', str(self.source)])],
+            env={**self.env, **environment}, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        def finish():
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=3)
+        self.addCleanup(finish)
+        leader = self.root / 'collector-pid'
+        self.wait_for(leader.exists)
+        self.fixture_pids = [int(leader.read_text())]
+        ready = self.root / 'collector-ready'
+        self.wait_for(ready.exists)
+        self.fixture_pids = json.loads(ready.read_text())
+        self.assertEqual(os.getpgid(self.fixture_pids[0]), self.fixture_pids[0])
+        self.assertEqual(os.getpgid(self.fixture_pids[1]), self.fixture_pids[0])
+        (self.root / 'test-admitted').write_text('ready')
+        return process
+
+    def assert_preserved(self):
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns)
+                          for p in self.preserved}, self.preserved)
+        self.assertEqual(writer.LOCK_PATH.stat().st_ino, self.lock_inode)
+        with writer.acquire_snapshot_lock():
+            pass
+
+    def assert_finished(self, process, status, diagnostic):
+        stdout, stderr = process.communicate(timeout=6)
+        self.assertEqual(stdout, '')
+        observation = json.loads((self.root / 'wait-result').read_text())
+        self.assertEqual(len(observation), 1)
+        self.assertEqual(observation[0]['pid'], self.fixture_pids[0])
+        self.assertIsNotNone(observation[0]['returncode'], observation)
+        self.assertTrue(observation[0]['pipes_closed'], observation)
+        for pid in self.fixture_pids:
+            self.wait_for(lambda: not self.running(pid))
+        self.assertEqual(process.returncode, status, stderr)
+        self.assertIn(diagnostic, stderr)
+        self.assertIsNone(self.sentinel.poll())
+        self.assert_preserved()
+
+    def test_sigterm_reaps_collector_and_stops_its_grandchild(self):
+        process = self.start_writer()
+        process.send_signal(signal.SIGTERM)
+        self.assert_finished(process, 143, 'SIGTERM')
+
+    def test_sigint_reaps_collector_and_stops_its_grandchild(self):
+        process = self.start_writer()
+        process.send_signal(signal.SIGINT)
+        self.assert_finished(process, 130, 'SIGINT')
+
+    def test_control_query_uses_the_same_cancellation_boundary(self):
+        process = self.start_writer(['--control-query', 'server-pid'])
+        process.send_signal(signal.SIGTERM)
+        self.assert_finished(process, 143, 'SIGTERM')
+
+    def test_recovery_query_uses_the_same_cancellation_boundary(self):
+        proof = self.root / 'completion.json'
+        proof.write_text('{}')
+        process = self.start_writer(['--verify-cold-completion', str(proof)])
+        process.send_signal(signal.SIGINT)
+        self.assert_finished(process, 130, 'SIGINT')
+
+    def test_repeated_signals_during_cleanup_keep_first_status(self):
+        process = self.start_writer()
+        process.send_signal(signal.SIGINT)
+        self.wait_for((self.root / 'term-seen').exists)
+        for signum in (signal.SIGTERM, signal.SIGALRM, signal.SIGINT):
+            process.send_signal(signum)
+        self.assert_finished(process, 130, 'SIGINT')
+
+    def test_sigterm_during_constructor_handoff_waits_for_ownership(self):
+        process = self.start_writer(FIXTURE_LAUNCH_SIGNALS=f'{signal.SIGTERM},{signal.SIGINT}')
+        self.assert_finished(process, 143, 'SIGTERM')
+
+    def test_sigint_during_constructor_handoff_waits_for_ownership(self):
+        process = self.start_writer(FIXTURE_LAUNCH_SIGNALS=str(signal.SIGINT))
+        self.assert_finished(process, 130, 'SIGINT')
+
+    def test_alarm_during_constructor_handoff_waits_for_ownership(self):
+        process = self.start_writer(FIXTURE_LAUNCH_SIGNALS=str(signal.SIGALRM))
+        self.assert_finished(process, 1, 'timed out collecting')
+
+    def test_total_deadline_stops_descendant_after_leader_exits(self):
+        process = self.start_writer(TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS='1')
+        self.assert_finished(process, 1, 'timed out collecting')
+
+    def test_command_timeout_stops_descendant_after_leader_exits(self):
+        process = self.start_writer(['--control-query', 'server-pid'],
+                                    TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS='1')
+        self.assert_finished(process, 2, 'timed out collecting')
+
+    def test_signal_during_timeout_cleanup_keeps_timeout_diagnostic(self):
+        process = self.start_writer(['--control-query', 'server-pid'],
+                                    TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS='1')
+        self.wait_for((self.root / 'term-seen').exists)
+        process.send_signal(signal.SIGTERM)
+        process.send_signal(signal.SIGALRM)
+        self.assert_finished(process, 2, 'timed out collecting')
+
+    def test_unexpected_communication_exception_cleans_up(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='runtime')
+        self.assert_finished(process, 1, 'fixture communication failed')
+
+    def test_signal_at_cleanup_entry_preserves_failure_and_reaps(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='runtime',
+                                    FIXTURE_CLEANUP_SIGNAL=str(signal.SIGTERM))
+        self.assert_finished(process, 1, 'fixture communication failed')
+
+    def test_alarm_at_cleanup_entry_preserves_timeout_and_reaps(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='timeout',
+                                    FIXTURE_CLEANUP_SIGNAL=str(signal.SIGALRM))
+        self.assert_finished(process, 1, 'timed out collecting')
+
+    def test_sigint_at_cleanup_entry_preserves_decoder_failure_and_reaps(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='unicode',
+                                    FIXTURE_CLEANUP_SIGNAL=str(signal.SIGINT))
+        self.assert_finished(process, 1, 'collector returned invalid UTF-8')
+
+    def test_optional_launch_error_does_not_swallow_pending_cancellation(self):
+        self.assert_cli_cancellation(FIXTURE_OPTIONAL_MISSING='pending')
+
+    def test_optional_launch_return_is_outside_exception_handler(self):
+        self.assert_cli_cancellation(FIXTURE_OPTIONAL_MISSING='checkpoint')
+
+    def test_successful_dispatch_delivers_cancellation_after_swallowed_error(self):
+        self.assert_cli_cancellation(FIXTURE_SWALLOWED_ERROR='1')
+
+    def assert_cli_cancellation(self, **environment):
+        result = subprocess.run(
+            [sys.executable, '-B', str(self.launcher)],
+            env={**self.env, **environment},
+            capture_output=True, text=True, timeout=3,
+        )
+        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('SIGTERM', result.stderr)
+        self.assertFalse((self.root / 'optional-returned').exists())
+        self.assertEqual(json.loads((self.root / 'wait-result').read_text()), [])
+        self.assert_preserved()
+
+    def test_early_decoder_exception_cleans_up(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='unicode')
+        self.assert_finished(process, 1, 'collector returned invalid UTF-8')
+
+    def test_system_exit_during_communication_cleans_up(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='system')
+        self.assert_finished(process, 23, '')
+
+    def test_keyboard_interrupt_during_communication_cleans_up(self):
+        process = self.start_writer(FIXTURE_EXCEPTION='keyboard')
+        self.assert_finished(process, -signal.SIGINT, 'KeyboardInterrupt')
+
+    def test_native_utf8_failure_does_not_signal_a_reaped_group(self):
+        children = []
+        original = subprocess.Popen
+        def launch(*args, **kwargs):
+            child = original(*args, **kwargs)
+            children.append(child)
+            return child
+        with patch.object(writer.subprocess, 'Popen', side_effect=launch), patch.object(
+            writer.os, 'killpg', wraps=os.killpg
+        ) as killpg, self.assertRaisesRegex(writer.SnapshotError, 'invalid UTF-8'):
+            writer.run([sys.executable, '-c', "import os; os.write(1, b'\\xff')"])
+        self.assertEqual(children[0].returncode, 0)
+        self.assertTrue(children[0].stdout.closed)
+        killpg.assert_not_called()
+
+    def test_normal_text_and_optional_collector_behavior_is_preserved(self):
+        output = writer.run([sys.executable, '-c',
+                             "import sys; data=sys.stdin.read(); "
+                             "sys.stdout.write(data); sys.stdout.write('a\\r\\nb\\rc\\n')"],
+                            input_text='hello\n')
+        self.assertEqual(output, 'hello\na\nb\nc\n')
+        self.assertEqual(writer.run([str(self.root / 'missing')], required=False), '')
+        self.assertEqual(writer.run(['/usr/bin/false'], required=False), '')
+        with self.assertRaisesRegex(writer.SnapshotError, 'missing collector'):
+            writer.run([str(self.root / 'missing')])
 
 
 class ShellRecordFeedTests(unittest.TestCase):
