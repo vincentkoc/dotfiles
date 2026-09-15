@@ -3,6 +3,7 @@
 
 import contextlib
 import copy
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -10,6 +11,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -836,6 +838,206 @@ class SnapshotTests(Fixture):
             with self.assertRaises(writer.SnapshotError):
                 writer.publish_agent_snapshot(output)
         self.assertEqual(output.read_text(), "unchanged\n")
+
+
+class ShellRecordFeedTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
+        self.manifest = self.root / "manifest.tsv"
+        self.manifest.write_text("")
+        self.source = (REPO / "bin/tt").read_text()
+        self.bash = os.environ.get("TMUX_CI_BASH") or shutil.which("bash") or "/bin/bash"
+
+    def shell(self, names, script, **values):
+        functions = []
+        for name in names:
+            prefix = f"{name}() {{\n"
+            self.assertEqual(self.source.count("\n" + prefix), 1, name)
+            functions.append(prefix + self.source.split("\n" + prefix, 1)[1].split("\n}\n", 1)[0] + "\n}\n")
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "LC_ALL": "C",
+               "MANIFEST": str(self.manifest), **values}
+        code = "set -euo pipefail\n" + "\n".join(functions) + "\n" + script
+        with subprocess.Popen(
+            [self.bash, "--noprofile", "--norc", "-c", code], env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        ) as child:
+            try:
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.communicate(timeout=1)
+                self.fail("synthetic record reader timed out")
+        return subprocess.CompletedProcess([], child.returncode, stdout, stderr)
+
+    def assert_ok(self, result, expected):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, expected)
+        self.assertEqual(result.stderr, "")
+
+    def collector(self, rows):
+        return self.shell(
+            ["tsv_records", "manifest_value_for", "fallback_title_for_path",
+             "collect_agent_cockpit_state"],
+            """
+agent_cockpit_manifest() { printf '%s\\n' "$MANIFEST"; }
+agent_cockpit_state_file() { printf '%s\\n' /fixture/unused; }
+fake_tmux() { [[ "$1" == list-panes ]]; printf '%s' "$PANE_ROWS"; }
+TMUX_BIN=fake_tmux
+collect_agent_cockpit_state
+""", PANE_ROWS=rows,
+        )
+
+    def test_recovery_config_keeps_literal_shell_placeholders(self):
+        result = self.shell(["recovery_server_config"], "recovery_server_config\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(len(result.stdout.encode()), 2546)
+        # This native recovery config must retain every quote and shell placeholder.
+        self.assertEqual(hashlib.sha256(result.stdout.encode()).hexdigest(),
+                         "94438dc50c3e948784a1f00d3bdf9758206eacb07ede1cacf2f74c8274eb2832")
+
+    def test_collector_preserves_large_rows_empty_fields_and_filters(self):
+        title = "worker " + "x" * 4096
+        selected = ["fixture", "studio", "1", "1", "2", "/fixture/work dir",
+                    "never execute; false", "zsh", "live", title]
+        rows = [selected, ["empty", "", "1", "2", "6", "/fixture/empty", "", "sh", "", ""]]
+        for field, value in ((0, "ttm-hidden"), (1, "ops"), (1, "mobile"), (2, "2")):
+            excluded = selected.copy()
+            excluded[field] = value
+            rows.append(excluded)
+        expected = "# session\tpane\tdir\ttitle\tcommand\n"
+        expected += f"fixture\t1\t/fixture/work dir\t{title}\t\nempty\t2\t/fixture/empty\tempty\t\n"
+        self.assert_ok(self.collector("".join("\t".join(row) + "\n" for row in rows)), expected)
+
+    def test_collector_rejects_malformed_late_row_before_emitting_header(self):
+        valid = "fixture\tstudio\t1\t1\t6\t/fixture\t\tsh\t" + "x" * 4096 + "\t\n"
+        for invalid in ("bad\trow\n", "bad\rfield\tstudio\t1\t1\t6\t/fixture\t\tsh\t\t\n",
+                        "bad\x1cfield\tstudio\t1\t1\t6\t/fixture\t\tsh\t\t\n"):
+            with self.subTest(invalid=invalid):
+                result = self.collector(valid + invalid)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("invalid snapshot fields", result.stderr)
+
+    def test_manifest_lookup_keeps_empty_fields_and_early_return(self):
+        title = "seed " + "x" * 4096
+        self.manifest.write_text(f"fixture\t1\t/fixture/work dir\t{title}\t\n" * 8)
+        for field, expected in (("dir", "/fixture/work dir\n"), ("title", title + "\n"), ("command", "\n")):
+            with self.subTest(field=field):
+                result = self.shell(
+                    ["tsv_records", "manifest_value_for"],
+                    'manifest_value_for "$MANIFEST" fixture 1 "$FIELD"\n', FIELD=field,
+                )
+                self.assert_ok(result, expected)
+
+    def test_manifest_metadata_keeps_assignments_in_current_shell(self):
+        rows = [f"fixture\t{i}\t/fixture/work dir\t{'x' * 100}\t" for i in range(1, 41)]
+        self.manifest.write_text("\n".join(rows) + "\n")
+        result = self.shell(["tsv_records", "apply_agent_manifest_metadata"], """
+calls=0
+agent_kind_for_command() { printf '%s\\n' shell; }
+fake_tmux() { calls=$((calls + 1)); }
+set_pane_git_label() { calls=$((calls + 1)); }
+TMUX_BIN=fake_tmux
+apply_agent_manifest_metadata "$MANIFEST"
+printf '%s\\n' "$calls"
+""")
+        self.assert_ok(result, "160\n")
+
+    def test_dry_restore_keeps_match_count_and_never_executes_saved_commands(self):
+        rows = [f"fixture:1.{i}\tcodex\t/fixture\t{'x' * 100}\tsh\tid\texact\tnever execute"
+                for i in range(1, 41)]
+        self.manifest.write_text("\n".join(rows) + "\n")
+        result = self.shell(["tsv_records", "snapshot_records", "codex_restore_matches",
+                             "codex_restore_execute"], 'codex_restore_execute all "" "$MANIFEST"\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 40)
+        self.assertEqual(result.stderr, "dry run; add --execute to respawn matching panes\n")
+
+    def test_recovery_guards_deduplicate_and_stop_on_denial(self):
+        sessions = ["first", "second", "third"]
+        self.manifest.write_text("".join(
+            f"{session}\t{i}\t/fixture\t{'x' * 100}\t\n"
+            for session in sessions for i in range(1, 11)
+        ))
+        for name, dependency in (
+            ("require_recovery_manifest_sessions_absent", "require_recovery_session_absent"),
+            ("require_operator_manifest_scopes", "require_operator_topology_scope"),
+        ):
+            with self.subTest(name=name):
+                result = self.shell(["tsv_records", name], f"""
+{dependency}() {{ local session="${{@: -1}}"; printf '%s\\n' "$session"; [[ "$session" != second ]]; }}
+{name} "$MANIFEST"
+""")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "first\nsecond\n")
+                self.assertEqual(result.stderr, "")
+
+    def test_recovery_completion_feeds_every_verified_window(self):
+        fake_writer = self.root / "tt-codex-snapshot-writer"
+        fake_writer.write_text(
+            "#!/bin/sh\nif [ \"$#\" -eq 2 ]; then printf '1\\n'; else printf '%s' \"$WINDOWS\"; fi\n"
+        )
+        fake_writer.chmod(0o700)
+        windows = "".join(f"@{i}\n" for i in range(1, 161))
+        result = self.shell(["finish_recovery_setup"], """
+TMUX_BIN=unused
+count=0
+apply_recovery_theme() { return 99; }
+install_agent_autosave_hooks() { return 99; }
+apply_studio_pane_titles() { count=$((count + 1)); }
+finish_recovery_setup unused
+printf '%s\\n' "$count"
+""", SCRIPT_DIR=str(self.root), WINDOWS=windows)
+        self.assert_ok(result, "160\n")
+
+    def test_long_scope_list_keeps_exact_match(self):
+        scopes = ",".join(f"recover:fixture-{i}" for i in range(100))
+        result = self.shell(["topology_scope_matches"], """
+topology_scope_matches recover:fixture-99
+if topology_scope_matches recover:fixture; then exit 99; fi
+printf 'matched\\n'
+""", TT_OPERATOR_TMUX_SCOPE=scopes)
+        self.assert_ok(result, "matched\n")
+
+    def test_long_timer_identity_keeps_owner_checks_and_stop_order(self):
+        token = "token-" + "x" * 4096
+        identity = f"1\t2\t42\t{token}\t100\t30"
+        names = [
+            "codex_snapshot_timer_success_fresh", "codex_snapshot_timer_owner_alive",
+            "codex_snapshot_timer_identity_valid", "codex_snapshot_timer_state_available",
+            "stop_codex_snapshot_timer_locked", "codex_snapshot_timer_stop_identity",
+            "codex_snapshot_timer_same_owner",
+        ]
+        result = self.shell(names, """
+stopping=0
+id() { printf '42\\n'; }
+date() { printf '110\\n'; }
+kill() { if [[ "$1" == -TERM ]]; then stopping=1; else (( stopping == 0 )); fi; }
+codex_snapshot_timer_process_uid() { printf '42\\n'; }
+codex_snapshot_timer_process_command() { printf 'bash tt codex-snapshot-loop %s 2 42\\n' "$TOKEN"; }
+codex_snapshot_timer_has_server_ancestor() { [[ "$1 $2" == "1 2" ]]; }
+codex_snapshot_timer_controls_match() { [[ "$1" == 2 && "$2" == "$TOKEN" ]]; }
+codex_snapshot_timer_server_pid() { printf '2\\n'; }
+codex_snapshot_timer_desired_token() { printf '%s\\n' "$TOKEN"; }
+codex_snapshot_timer_read_state() { printf '%s\\n' "$IDENTITY"; }
+codex_snapshot_timer_unset_token_if_matches() { [[ "$1" == "$TOKEN" ]]; }
+codex_snapshot_timer_success_fresh "$IDENTITY"
+[[ "$TT_TIMER_SUCCESS_AGE" == 10 ]]
+codex_snapshot_timer_owner_alive "$IDENTITY"
+codex_snapshot_timer_identity_valid "$IDENTITY"
+codex_snapshot_timer_state_available
+[[ "$(stop_codex_snapshot_timer_locked)" == "$IDENTITY" ]]
+codex_snapshot_timer_same_owner "$IDENTITY" "$IDENTITY"
+if codex_snapshot_timer_same_owner "$IDENTITY" "${IDENTITY/token-/different-}"; then exit 99; fi
+codex_snapshot_timer_stop_identity "$IDENTITY"
+[[ "$stopping" == 1 ]]
+printf 'verified\\n'
+""", IDENTITY=identity, TOKEN=token)
+        self.assert_ok(result, "verified\n")
 
 
 if __name__ == "__main__":
