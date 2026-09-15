@@ -46,7 +46,7 @@ topology_scope_matches() {
   local entry
   local -a entries
 
-  IFS=',' read -r -a entries <<<"${TT_OPERATOR_TMUX_SCOPE:-}"
+  IFS=',' read -r -a entries < <(printf '%s\n' "${TT_OPERATOR_TMUX_SCOPE:-}")
   for entry in "${entries[@]}"; do
     [[ "$entry" == "$expected" ]] && return 0
   done
@@ -1059,8 +1059,7 @@ clean_agent_command() {
 recovery_server_config() {
   # Only native startup settings. The base config's embedded worker is not safe
   # to run during recovery alongside other servers.
-  cat <<'TMUX_CONFIG'
-set -g default-terminal "tmux-256color"
+  printf '%s\n' 'set -g default-terminal "tmux-256color"
 setw -g aggressive-resize off
 set -g window-size latest
 setw -g xterm-keys on
@@ -1100,7 +1099,7 @@ set -g pane-border-status top
 set -g pane-border-format "#{pane_index} #{pane_title}"
 unbind -n C-l
 bind C-c new-session
-bind C-f command-prompt -p find-session 'switch-client -t %%'
+bind C-f command-prompt -p find-session '\''switch-client -t %%'\''
 bind BTab switch-client -l
 bind - split-window -v -c "#{pane_current_path}"
 bind _ split-window -h -c "#{pane_current_path}"
@@ -1131,10 +1130,9 @@ bind -T copy-mode-vi L send -X end-of-line
 bind b list-buffers
 bind p paste-buffer -p
 bind P choose-buffer
-bind r source-file ~/.tmux.conf.local \; display '~/.tmux.conf.local sourced'
-bind e new-window -n "~/.tmux.conf.local" sh -c '${EDITOR:-vim} "$HOME/.tmux.conf.local" && tmux source-file "$HOME/.tmux.conf.local" && tmux display "~/.tmux.conf.local sourced"'
-bind R run-shell -b 'python3 "$HOME/.dotfiles/bin/tmux-pane-repair" request #{pane_id} #{q:client_name}'
-TMUX_CONFIG
+bind r source-file ~/.tmux.conf.local \; display '\''~/.tmux.conf.local sourced'\''
+bind e new-window -n "~/.tmux.conf.local" sh -c '\''${EDITOR:-vim} "$HOME/.tmux.conf.local" && tmux source-file "$HOME/.tmux.conf.local" && tmux display "~/.tmux.conf.local sourced"'\''
+bind R run-shell -b '\''python3 "$HOME/.dotfiles/bin/tmux-pane-repair" request #{pane_id} #{q:client_name}'\'''
 }
 
 apply_recovery_theme() {
@@ -2499,6 +2497,8 @@ manifest_value_for() {
 
   [[ -f "$manifest" ]] || return 0
 
+  # A concurrent producer avoids Bash's pre-read pipe fill, which can deadlock
+  # on macOS when dynamic pipe capacity is smaller than the captured records.
   rows="$(tsv_records 5 "$manifest")" || return
   while IFS=$'\034' read -r session pane dir title command || [[ -n "${session:-}" ]]; do
     [[ -n "${session:-}" && "${session:0:1}" != "#" ]] || continue
@@ -2515,7 +2515,7 @@ manifest_value_for() {
         ;;
     esac
     return 0
-  done <<<"$rows"
+  done < <(printf '%s\n' "$rows")
 }
 
 fallback_title_for_path() {
@@ -2542,7 +2542,7 @@ apply_agent_manifest_metadata() {
     "$TMUX_BIN" set-option -pt "$target" @tt_agent_command "$command" 2>/dev/null || true
     "$TMUX_BIN" set-option -pt "$target" @tt_agent_kind "$kind" 2>/dev/null || true
     set_pane_git_label "$target" "$dir"
-  done <<<"$rows"
+  done < <(printf '%s\n' "$rows")
 }
 
 collect_agent_cockpit_state() {
@@ -2585,7 +2585,7 @@ collect_agent_cockpit_state() {
     # The publisher supplies canonical commands from exact live session metadata.
     command=""
     printf '%s\t%s\t%s\t%s\t%s\n' "$session" "$pane" "$dir" "$title" "$command"
-  done <<<"$panes"
+  done < <(printf '%s\n' "$panes")
 }
 
 write_agent_cockpit_state() {
@@ -2973,7 +2973,7 @@ codex_restore_execute() {
       [[ -n "${target:-}" ]] || continue
       matched=$((matched + 1))
       printf '%s\t%s\t%s\t%s\n' "$target" "$kind" "$status" "$restore"
-    done <<<"$records"
+    done < <(printf '%s\n' "$records")
     if (( matched == 0 )); then
       echo "no matching Codex/Claude panes" >&2
       return 1
@@ -3605,7 +3605,7 @@ codex_snapshot_timer_success_fresh() {
   local identity="$1"
   local pid server_pid uid token success_epoch max_age extra now
   TT_TIMER_SUCCESS_AGE=""
-  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
+  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra < <(printf '%s\n' "$identity")
   [[ "$success_epoch" =~ ^[0-9]+$ && "$max_age" =~ ^[0-9]+$ ]] || return 1
   (( success_epoch > 0 )) || return 1
   now="$(date +%s)"
@@ -3671,7 +3671,7 @@ codex_snapshot_timer_owner_alive() {
   local identity="$1"
   local pid server_pid uid token success_epoch max_age extra command
 
-  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
+  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra < <(printf '%s\n' "$identity")
   [[ "$pid" =~ ^[0-9]+$ && "$server_pid" =~ ^[0-9]+$ && "$uid" =~ ^[0-9]+$ &&
     "$token" =~ ^[A-Za-z0-9._-]+$ && "$success_epoch" =~ ^[0-9]+$ &&
     "$max_age" =~ ^[0-9]+$ && -z "${extra:-}" ]] || return 1
@@ -3687,7 +3687,7 @@ codex_snapshot_timer_identity_valid() {
   local identity="$1"
   local pid server_pid uid token rest
   codex_snapshot_timer_owner_alive "$identity" || return 1
-  IFS=$'\t' read -r pid server_pid uid token rest <<<"$identity"
+  IFS=$'\t' read -r pid server_pid uid token rest < <(printf '%s\n' "$identity")
   codex_snapshot_timer_controls_match "$server_pid" "$token"
 }
 
@@ -3700,7 +3700,7 @@ codex_snapshot_timer_state_available() {
   identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
   [[ -n "$identity" ]] || return 0
   codex_snapshot_timer_owner_alive "$identity" || return 0
-  IFS=$'\t' read -r pid server_pid rest <<<"$identity"
+  IFS=$'\t' read -r pid server_pid rest < <(printf '%s\n' "$identity")
   if [[ "$server_pid" != "$current_server" ]]; then
     echo "tt: autosave state belongs to another live tmux server; leaving it unchanged" >&2
     return 1
@@ -3826,7 +3826,7 @@ stop_codex_snapshot_timer_locked() {
   local identity="" pid server_pid uid token rest
   identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
   if [[ -n "$identity" ]]; then
-    IFS=$'\t' read -r pid server_pid uid token rest <<<"$identity"
+    IFS=$'\t' read -r pid server_pid uid token rest < <(printf '%s\n' "$identity")
     codex_snapshot_timer_unset_token_if_matches "$token" 2>/dev/null || true
   else
     "$TMUX_BIN" set-option -gu @tt_codex_snapshot_timer_token 2>/dev/null || true
@@ -3855,7 +3855,7 @@ codex_snapshot_timer_stop_identity() {
   local identity="$1"
   local pid server_pid uid token success_epoch max_age extra attempt current command
 
-  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra <<<"$identity"
+  IFS=$'\t' read -r pid server_pid uid token success_epoch max_age extra < <(printf '%s\n' "$identity")
   codex_snapshot_timer_owner_alive "$identity" || return 0
   kill -TERM "$pid" 2>/dev/null || return 0
   attempt=0
@@ -3888,8 +3888,8 @@ codex_snapshot_timer_remove_identity_state() {
 codex_snapshot_timer_same_owner() {
   local first="$1" second="$2"
   local fpid fserver fuid ftoken ignored spid sserver suid stoken
-  IFS=$'\t' read -r fpid fserver fuid ftoken ignored <<<"$first"
-  IFS=$'\t' read -r spid sserver suid stoken ignored <<<"$second"
+  IFS=$'\t' read -r fpid fserver fuid ftoken ignored < <(printf '%s\n' "$first")
+  IFS=$'\t' read -r spid sserver suid stoken ignored < <(printf '%s\n' "$second")
   [[ "$fpid" == "$spid" && "$fserver" == "$sserver" && "$fuid" == "$suid" && "$ftoken" == "$stoken" ]]
 }
 
@@ -3978,7 +3978,7 @@ require_recovery_manifest_sessions_absent() {
     [[ "$sessions" == *" $session "* ]] && continue
     sessions="$sessions$session "
     require_recovery_session_absent "$session" || return 1
-  done <<<"$rows"
+  done < <(printf '%s\n' "$rows")
 }
 
 require_operator_manifest_scopes() {
@@ -3992,7 +3992,7 @@ require_operator_manifest_scopes() {
     [[ "$sessions" == *" $session "* ]] && continue
     sessions="$sessions$session "
     require_operator_topology_scope recover "$session" || return $?
-  done <<<"$rows"
+  done < <(printf '%s\n' "$rows")
 }
 
 finish_recovery_setup() {
@@ -4010,7 +4010,7 @@ finish_recovery_setup() {
   while IFS= read -r window; do
     [[ "$window" =~ ^@[0-9]+$ ]] || return 1
     apply_studio_pane_titles "$window"
-  done <<<"$windows"
+  done < <(printf '%s\n' "$windows")
   if [[ "$server_was_running" != "1" ]]; then
     install_agent_autosave_hooks
   fi
