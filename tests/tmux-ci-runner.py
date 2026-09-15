@@ -419,6 +419,177 @@ status_has running
         self.assertLessEqual(len(recent.splitlines()), 80)
 
 
+class AutosaveFailureBoundaryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Load only definitions and this scenario; never start a real tmux server.
+        source = (REPO / "tests/tt-autosave-timer-test.sh").read_text()
+        functions = []
+        for name in ("timer_snapshot_failures", "wait_until"):
+            start = name + "() {\n"
+            if source.count(start) != 1:
+                raise AssertionError(f"expected one fixture function: {name}")
+            offset = source.index(start)
+            end = source.index("\n}\n", offset) + 3
+            functions.append(source[offset:end])
+        cls.counter = functions[0]
+        cls.functions = "\n".join(functions)
+        start = "# The loop survives an interrupted sleep and a failed snapshot collection.\n"
+        end = "# Two timer intervals observe live state changes; history remains capped.\n"
+        cls.scenario = source[source.index(start):source.index(end)]
+        cls.bash = shutil.which("bash")
+        if not cls.bash:
+            raise RuntimeError("bash is required for mocked failure boundaries")
+
+    def run_boundary(self, mode="normal", original=False):
+        scenario = self.scenario
+        if original:
+            boundary = '''touch "$CASE_FAIL"
+failures_before="$(timer_snapshot_failures "$pid")"
+snapshot_failed() { (( $(timer_snapshot_failures "$pid") > failures_before )); }
+kill -HUP "$pid"
+wait_until 100 snapshot_failed
+# An in-flight successful cycle may finish after fault injection. Compare only
+# after this timer acknowledges a new failure, when no healthy cycle remains.
+before_failure_epoch="$(timer_success_epoch)"
+'''
+            self.assertEqual(scenario.count(boundary), 1)
+            scenario = scenario.replace(boundary, '''before_failure_epoch="$(timer_success_epoch)"
+touch "$CASE_FAIL"
+kill -HUP "$pid"
+wait_until 100 grep -Fq 'cycle-failed' "$CASE_STATE/tt/codex-cockpit.timer.log"
+''', 1)
+        script = "set -Eeuo pipefail\n" + self.functions + "\n" + r'''
+trap 'printf "boundary-failed:%s\n" "$BASH_COMMAND" >&2' ERR
+pid=101
+epoch=7
+failures=1
+fault=0
+pending=0
+CASE_FAIL=/fixture/fail-agent
+CASE_STATE=/fixture/state
+touch() {
+  fault=1
+  if [[ "$MODE" == preexisting_failure ]]; then failures=2; fi
+  printf 'fault-injected\n' >&2
+}
+awk() {
+  printf 'count=%s fault=%s\n' "$failures" "$fault" >&2
+  printf '%s\n' "$failures"
+}
+kill() {
+  if [[ "$1" == -HUP ]]; then
+    epoch=8
+    pending=1
+    printf 'late-success=8\n' >&2
+  else
+    printf 'alive\n' >&2
+  fi
+}
+sleep() {
+  if (( pending )) && [[ "$MODE" != missing_ack ]]; then
+    failures=$((failures + 1))
+    pending=0
+    printf 'acknowledged=%s\n' "$failures" >&2
+  fi
+}
+timer_success_epoch() {
+  printf 'epoch-sample=%s\n' "$epoch" >&2
+  printf '%s\n' "$epoch"
+}
+timer_pid() {
+  if [[ "$MODE" == identity_drift ]]; then printf '999\n'; else printf '101\n'; fi
+}
+status_has() {
+  printf 'status=%s\n' "$1" >&2
+  if [[ "$1" == 'autosave: degraded' ]]; then
+    [[ "$fault" == 1 ]]
+    if [[ "$MODE" == post_ack_advance ]]; then epoch=9; fi
+  else
+    [[ "$fault" == 0 ]]
+  fi
+}
+rm() { fault=0; }
+grep() {
+  case "$*" in
+    *cycle-failed*) (( failures > 1 )) ;;
+    *recovered*)
+      [[ "$fault" == 0 ]]
+      if [[ "$MODE" != recovery_stalls ]]; then epoch=9; fi
+      return 0 ;;
+    *) return 2 ;;
+  esac
+}
+''' + scenario + "\nprintf 'complete epoch=%s\\n' \"$epoch\"\n"
+        return subprocess.run(
+            [self.bash, "--noprofile", "--norc", "-c", script],
+            env={"PATH": SYSTEM_PATH, "HOME": "/fixture", "LC_ALL": "C", "MODE": mode},
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+        )
+
+    def test_late_healthy_completion_before_acknowledgement_is_allowed(self):
+        old = self.run_boundary(original=True)
+        self.assertEqual(old.returncode, 1)
+        self.assertIn(b'[[ "$(timer_success_epoch)" == "$before_failure_epoch" ]]', old.stderr)
+        result = self.run_boundary()
+        self.assertEqual((result.returncode, result.stdout), (0, b"complete epoch=9\n"))
+        self.assertIn(b"status=autosave: degraded\n", result.stderr)
+        self.assertIn(b"status=autosave: on\n", result.stderr)
+        self.assertLess(result.stderr.index(b"fault-injected"), result.stderr.index(b"count="))
+        self.assertLess(result.stderr.index(b"late-success=8"), result.stderr.index(b"acknowledged=2"))
+        self.assertLess(result.stderr.index(b"acknowledged=2"), result.stderr.index(b"epoch-sample=8"))
+
+    def test_failure_existing_at_injection_does_not_satisfy_acknowledgement(self):
+        result = self.run_boundary("preexisting_failure")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b"count=2 fault=1\n", result.stderr)
+        self.assertLess(result.stderr.index(b"acknowledged=3"), result.stderr.index(b"epoch-sample=8"))
+
+    def test_post_acknowledgement_heartbeat_advance_is_rejected(self):
+        result = self.run_boundary("post_ack_advance")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b'[[ "$(timer_success_epoch)" == "$before_failure_epoch" ]]', result.stderr)
+        self.assertNotIn(b"status=autosave: on\n", result.stderr)
+
+    def test_missing_acknowledgement_forbids_heartbeat_sampling(self):
+        result = self.run_boundary("missing_ack")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn(b"epoch-sample=", result.stderr)
+        self.assertNotIn(b"status=", result.stderr)
+
+    def test_recovery_must_advance_the_heartbeat(self):
+        result = self.run_boundary("recovery_stalls")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"status=autosave: on\n", result.stderr)
+        self.assertIn(b"$(timer_success_epoch) > before_failure_epoch", result.stderr)
+
+    def test_timer_identity_must_remain_unchanged(self):
+        result = self.run_boundary("identity_drift")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b'[[ "$(timer_pid)" == "$pid" ]]', result.stderr)
+
+    def test_counter_selects_the_same_pid_and_snapshot_reason(self):
+        with tempfile.TemporaryDirectory(prefix="tt-failure-count-") as temporary:
+            state = Path(temporary) / "tt"
+            state.mkdir()
+            (state / "codex-cockpit.timer.log").write_text(
+                "time start pid=101\n"
+                "time cycle-failed pid=101 reason=snapshot\n"
+                "time cycle-failed pid=1010 reason=snapshot\n"
+                "time cycle-failed pid=101 reason=control-unavailable\n"
+                "time cycle-failed pid=202 reason=snapshot\n"
+                "time cycle-failed pid=101 reason=snapshot\n"
+            )
+            result = subprocess.run(
+                [self.bash, "--noprofile", "--norc", "-c",
+                 "set -euo pipefail\n" + self.counter + '\ntimer_snapshot_failures 101\n'],
+                env={"PATH": SYSTEM_PATH, "HOME": "/fixture", "LC_ALL": "C",
+                     "CASE_STATE": temporary},
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+            )
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"2\n", b""))
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         unittest.main(argv=[sys.argv[0]], verbosity=2)
