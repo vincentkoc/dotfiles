@@ -267,6 +267,158 @@ class RunnerTests(unittest.TestCase):
         run.assert_called_once()
 
 
+class StatusDiagnosticsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Extract definitions only: sourcing the fixture would start real tmux servers.
+        source = (REPO / "tests/tt-autosave-timer-test.sh").read_text()
+        functions = []
+        for name in ("status_diagnostics", "failure_diagnostics", "wait_until", "status_has"):
+            start = name + "() {\n"
+            if source.count(start) != 1:
+                raise AssertionError(f"expected one fixture function: {name}")
+            offset = source.index(start)
+            end = source.index("\n}\n", offset) + 3
+            functions.append(source[offset:end])
+        cls.functions = "\n".join(functions)
+        cls.bash = shutil.which("bash")
+        if not cls.bash:
+            raise RuntimeError("bash is required for mocked status diagnostics")
+
+    def run_helpers(self, body, values=None):
+        script = "set -Eeuo pipefail\n" + self.functions + "\n"
+        script += 'trap \'failure_diagnostics "$?" "$LINENO" "$BASH_COMMAND"\' ERR\n'
+        script += body
+        env = {"PATH": SYSTEM_PATH, "HOME": "/fixture", "LC_ALL": "C",
+               "CASE_STATE": "/fixture/state"}
+        env.update(values or {})
+        result = subprocess.run(
+            [self.bash, "--noprofile", "--norc", "-c", script], env=env,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+        )
+        return result, script
+
+    def test_matching_status_is_quiet(self):
+        result, _ = self.run_helpers('case_tt() { printf "timer: running\\n"; }\n'
+                                     'status_has "timer: running"\n')
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+
+    def test_direct_mismatch_retains_actual_and_caller(self):
+        result, script = self.run_helpers('''case_tt() { printf 'timer: degraded\\n'; }
+direct_scenario() {
+  status_has running
+}
+direct_scenario
+''')
+        lines = script.splitlines()
+        callers = (f"direct_scenario:{lines.index('  status_has running') + 1}\\ "
+                   f"main:{lines.index('direct_scenario') + 1}\\ main:0")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(f"rc=0 expected=running callers={callers}\n".encode(), result.stderr)
+        self.assertIn(b"last_status_actual bytes=15 shown=15\ntimer: degraded\n", result.stderr)
+        self.assertEqual(result.stderr.count(b"last_status_observation"), 1)
+
+    def test_command_failure_retains_original_rc_and_combined_output(self):
+        result, _ = self.run_helpers('''case_tt() {
+  printf 'status output\\n'
+  printf 'status error\\n' >&2
+  return 7
+}
+status_has running
+''')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"last_status_observation rc=7 expected=running", result.stderr)
+        self.assertIn(b"status output\nstatus error\n", result.stderr)
+        self.assertNotIn(b"tt status failed unexpectedly", result.stderr)
+        self.assertEqual(result.stderr.count(b"status error"), 1)
+
+    def test_transient_errors_and_mismatches_stay_quiet_when_polling_recovers(self):
+        result, _ = self.run_helpers('''status_attempt=0
+sleep() { status_attempt=$((status_attempt + 1)); }
+case_tt() {
+  case "$status_attempt" in
+    0) printf unavailable; return 7 ;;
+    1) printf degraded ;;
+    *) printf running ;;
+  esac
+}
+wait_until 3 status_has running
+printf 'attempt=%s\\n' "$status_attempt"
+''')
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, b"attempt=2\n", b""))
+
+    def test_polling_exhaustion_retains_last_observation_and_outer_caller(self):
+        result, script = self.run_helpers('''status_attempt=0
+sleep() { status_attempt=$((status_attempt + 1)); }
+case_tt() { printf 'degraded-%s' "$status_attempt"; }
+polling_scenario() {
+  wait_until 3 status_has running
+}
+polling_scenario
+''')
+        lines = script.splitlines()
+        poll_line = lines.index('    if "$@"; then') + 1
+        callers = (f"wait_until:{poll_line}\\ "
+                   f"polling_scenario:{lines.index('  wait_until 3 status_has running') + 1}\\ "
+                   f"main:{lines.index('polling_scenario') + 1}")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(f"rc=0 expected=running callers={callers}\n".encode(), result.stderr)
+        self.assertIn(b"last_status_actual bytes=10 shown=10\ndegraded-2\n", result.stderr)
+        self.assertNotIn(b"degraded-0", result.stderr)
+        self.assertNotIn(b"degraded-1", result.stderr)
+        self.assertEqual(result.stderr.count(b"last_status_observation"), 1)
+
+    def test_diagnostic_fields_are_byte_bounded(self):
+        name = "scenario_" + "s" * 300
+        actual = "\u03b1" * 3000 + "unprinted_actual"
+        result, _ = self.run_helpers(
+            'case_tt() { printf "%s" "$FAKE_STATUS"; }\n'
+            f'{name}() {{ status_has "$FAKE_EXPECTED"; }}\n{name}\n',
+            {"FAKE_STATUS": actual, "FAKE_EXPECTED": "E" * 300 + "unprinted_expected"},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(("expected=" + "E" * 256 + " callers=" + name[:256] + "\n").encode(),
+                      result.stderr)
+        header = f"last_status_actual bytes={len(actual.encode())} shown=4096\n".encode()
+        self.assertEqual(result.stderr.split(header)[1], actual.encode()[:4096] + b"\n")
+        self.assertNotIn(b"unprinted_", result.stderr)
+        self.assertLess(len(result.stderr), 6500)
+
+    def test_status_matching_uses_full_capture_not_printed_prefix(self):
+        result, _ = self.run_helpers('case_tt() { printf "%s" "$FAKE_STATUS"; }\n'
+                                     'status_has final-marker\n',
+                                     {"FAKE_STATUS": "x" * 5000 + "final-marker"})
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+
+    def test_recent_events_and_status_survive_the_hosted_output_tail(self):
+        with tempfile.TemporaryDirectory(prefix="tt-status-test-") as temporary:
+            events = Path(temporary) / "events"
+            events.write_text("oldest-event\n" + "".join(
+                f"event-{index:04d} " + "x" * 80 + "\n" for index in range(1000)
+            ) + "latest-event\n")
+            result, _ = self.run_helpers('''case_tt() { printf degraded; }
+fake_tmux() { printf '%20000s\\n' process-rows; }
+tmux_bin=fake_tmux
+CASE_SOCKET=fixture
+status_has running
+''', {"CASE_EVENTS": str(events)})
+        self.assertEqual(result.returncode, 1)
+        self.assertGreater(len(result.stderr), TAIL_LIMIT)
+        retained = result.stderr[-TAIL_LIMIT:]
+        self.assertIn(b"latest-event\n", retained)
+        self.assertIn(b"last_status_observation rc=0 expected=running", retained)
+        self.assertIn(b"last_status_actual bytes=8 shown=8\ndegraded\n", retained)
+        self.assertNotIn(b"oldest-event", result.stderr)
+        recent = retained.split(b"== recent events (last 8192 bytes, at most 80 lines) ==\n")[1]
+        recent = recent.split(b"last_status_observation")[0]
+        self.assertLessEqual(len(recent), 8192)
+        self.assertLessEqual(len(recent.splitlines()), 80)
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         unittest.main(argv=[sys.argv[0]], verbosity=2)

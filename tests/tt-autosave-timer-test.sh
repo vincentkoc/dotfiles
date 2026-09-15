@@ -95,6 +95,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+status_diagnostics() {
+  [[ "${TT_STATUS_RC+x}" ]] || return 0
+  local LC_ALL=C
+  local actual="${TT_STATUS_ACTUAL:0:4096}"
+  printf 'last_status_observation rc=%s expected=%q callers=%q\n' \
+    "$TT_STATUS_RC" "${TT_STATUS_EXPECTED:0:256}" "${TT_STATUS_CALLERS:0:256}" >&2
+  printf 'last_status_actual bytes=%s shown=%s\n%s\n' \
+    "${#TT_STATUS_ACTUAL}" "${#actual}" "$actual" >&2
+}
+
 failure_diagnostics() {
   local status="$1"
   local line="$2"
@@ -117,7 +127,6 @@ failure_diagnostics() {
     fi
   done
   for file in \
-    "${CASE_EVENTS:-}" \
     "${CASE_STATE:-}/tt/codex-cockpit.timer.pid" \
     "${CASE_STATE:-}/tt/codex-cockpit.timer.log"; do
     if [[ -n "$file" && -f "$file" ]]; then
@@ -134,6 +143,12 @@ failure_diagnostics() {
     "$tmux_bin" -L "$CASE_SOCKET" list-panes -a \
       -F 'p|#{session_id}|#{window_id}|#{pane_id}|#{pane_index}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' >&2
   fi
+  # Keep the recent evidence last so the hosted runner's output tail retains it.
+  if [[ -n "${CASE_EVENTS:-}" && -f "$CASE_EVENTS" ]]; then
+    printf '%s\n' '== recent events (last 8192 bytes, at most 80 lines) ==' >&2
+    tail -c 8192 "$CASE_EVENTS" | tail -n 80 >&2
+  fi
+  status_diagnostics
   exit "$status"
 }
 trap 'failure_diagnostics "$?" "$LINENO" "$BASH_COMMAND"' ERR
@@ -397,11 +412,20 @@ PY
 }
 
 status_has() {
-  local status
-  if ! status="$(case_tt status 2>&1)"; then
-    printf 'tt status failed unexpectedly:\n%s\n' "$status" >&2
-    return 1
+  local status index
+  TT_STATUS_EXPECTED="$1"
+  TT_STATUS_CALLERS=""
+  # ERR is suppressed while wait_until polls; retain the helper and outer caller.
+  for index in 0 1 2; do
+    TT_STATUS_CALLERS+="${TT_STATUS_CALLERS:+ }${FUNCNAME[index + 1]:-main}:${BASH_LINENO[index]:-0}"
+  done
+  if status="$(case_tt status 2>&1)"; then
+    TT_STATUS_RC=0
+  else
+    TT_STATUS_RC=$?
   fi
+  TT_STATUS_ACTUAL="$status"
+  (( TT_STATUS_RC == 0 )) || return 1
   [[ "$status" == *"$1"* ]]
 }
 
