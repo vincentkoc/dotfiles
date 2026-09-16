@@ -57,3 +57,6 @@ fi
 if [ -r "$HOME/.config/codex/shell-env.sh" ]; then
   . "$HOME/.config/codex/shell-env.sh"
 fi
+if [ -r "$HOME/.config/codex/shell-env.zsh" ]; then
+  . "$HOME/.config/codex/shell-env.zsh"
+fi
