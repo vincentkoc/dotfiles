@@ -60,3 +60,8 @@ fi
 if [ -d "$HOME/.lmstudio/bin" ]; then
   export PATH="$PATH:$HOME/.lmstudio/bin"
 fi
+
+# Load the optional Codex environment installed on this machine.
+if [ -r "$HOME/.config/codex/shell-env.sh" ]; then
+  . "$HOME/.config/codex/shell-env.sh"
+fi

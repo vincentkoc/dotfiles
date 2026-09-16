@@ -6,6 +6,9 @@ on:
       - ".github/workflows/public-regression.yml"
       - "install.sh"
       - ".exports"
+      - ".profile"
+      - ".zshenv"
+      - "tests/optional-shell-hooks-test.py"
       - "bin/linux-server-bootstrap"
       - "bin/agent-worktree-ops/**"
       - "bin/gwt-storage"
@@ -50,6 +53,7 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
+          python3 tests/optional-shell-hooks-test.py
           bash tests/install-foundations-test.sh
           bash tests/agent-worktree-maintain-test.sh
           python3 tests/gwt-storage-test.py
