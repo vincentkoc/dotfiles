@@ -20,9 +20,20 @@ class OptionalShellHooksTest(unittest.TestCase):
                     "DOTFILES_EXPORTS_LOADED": "1", "PYTHONDONTWRITEBYTECODE": "1"}
         shutil.copyfile(ROOT / ".zshenv", self.home / ".zshenv")
 
-    def test_codex_helper_absent_and_present_in_shell_modes(self):
-        helper = self.home / ".config/codex/shell-env.sh"
-        probe = 'printf "%s" "${CODEX_HOOK_FIXTURE-unset}"'
+    def configure_codex_helpers(self, state):
+        config = self.home / ".config/codex"
+        config.mkdir(parents=True, exist_ok=True)
+        for suffix in ("sh", "zsh"):
+            helper = config / ("shell-env." + suffix)
+            if helper.exists():
+                helper.unlink()
+            if state in (suffix, "both"):
+                declaration = "export" if suffix == "sh" else "typeset -gx"
+                helper.write_text(f"{declaration} CODEX_{suffix.upper()}_FIXTURE=loaded\n")
+
+    def test_codex_helpers_in_shell_modes(self):
+        probe = ('printf "%s\\n" "${CODEX_SH_FIXTURE-unset}" '
+                 '"${CODEX_ZSH_FIXTURE-unset}"')
         profile = '. "$1"; ' + probe
         commands = [
             ["/bin/sh", "-c", profile, "fixture", str(ROOT / ".profile")],
@@ -31,36 +42,37 @@ class OptionalShellHooksTest(unittest.TestCase):
             ["/bin/zsh", "-d", "-i", "-c", probe],
             ["/bin/zsh", "-d", "-l", "-c", probe],
         ]
-        for present in (False, True):
-            if present:
-                helper.parent.mkdir(parents=True)
-                helper.write_text("export CODEX_HOOK_FIXTURE=loaded\n")
+        for state in ("absent", "sh", "zsh", "both"):
+            self.configure_codex_helpers(state)
             for argv in commands:
-                with self.subTest(present=present, argv=argv):
+                with self.subTest(state=state, argv=argv):
                     result = subprocess.run(argv, env=self.env, cwd=self.home,
                                             capture_output=True, text=True, timeout=5)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, "loaded" if present else "unset")
+                    self.assertEqual(result.stdout.splitlines(), [
+                        "loaded" if state in ("sh", "both") else "unset",
+                        "loaded" if argv[0] == "/bin/zsh" and state in ("zsh", "both") else "unset",
+                    ])
 
     def test_codex_loader_source_status_and_errexit(self):
-        helper = self.home / ".config/codex/shell-env.sh"
-        for present in (False, True):
-            if present:
-                helper.parent.mkdir(parents=True)
-                helper.write_text("export CODEX_HOOK_FIXTURE=loaded\n")
+        for state in ("absent", "sh", "zsh", "both"):
+            self.configure_codex_helpers(state)
             for shell, filename in (("/bin/sh", ".profile"), ("/bin/bash", ".profile"),
                                     ("/bin/zsh", ".zshenv")):
                 for errexit in (False, True):
-                    with self.subTest(present=present, shell=shell, errexit=errexit):
+                    with self.subTest(state=state, shell=shell, errexit=errexit):
                         command = ('set -e; ' if errexit else '') + (
                             '. "$1"; hook_status=$?; '
-                            'printf "%s\\n" "$hook_status" "${CODEX_HOOK_FIXTURE-unset}"')
+                            'printf "%s\\n" "$hook_status" "${CODEX_SH_FIXTURE-unset}" '
+                            '"${CODEX_ZSH_FIXTURE-unset}"')
                         result = subprocess.run(
                             [shell, "-f", "-c", command, "fixture", str(ROOT / filename)],
                             env=self.env, cwd=self.home, capture_output=True, text=True, timeout=5)
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertEqual(result.stdout.splitlines(),
-                                         ["0", "loaded" if present else "unset"])
+                        self.assertEqual(result.stdout.splitlines(), [
+                            "0", "loaded" if state in ("sh", "both") else "unset",
+                            "loaded" if shell == "/bin/zsh" and state in ("zsh", "both") else "unset",
+                        ])
 
     def test_java_helper_and_opt_in_fallback_keep_path_precedence(self):
         exports = (ROOT / ".exports").read_text()
