@@ -372,7 +372,11 @@ path_append "$GOPATH/bin"
 
 # Java
 # `java_home` is surprisingly expensive on macOS; opt in when a shell needs it.
-if [[ "${DOTFILES_SET_JAVA_HOME:-0}" == "1" && -x /usr/libexec/java_home ]]; then
+# A machine helper returns success only when it selects a JDK.
+if [[ -r "$HOME/.config/dotfiles/java-env.sh" ]] &&
+   source "$HOME/.config/dotfiles/java-env.sh"; then
+    :
+elif [[ "${DOTFILES_SET_JAVA_HOME:-0}" == "1" && -x /usr/libexec/java_home ]]; then
     export JAVA_HOME=$(/usr/libexec/java_home 2>/dev/null)
 fi
 export GRADLE_USER_HOME=$HOME/.gradle
