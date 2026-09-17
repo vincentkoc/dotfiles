@@ -1253,6 +1253,8 @@ Commands:
   gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...] [--release]
                                     Complete; --release explicitly signs off checkout use
   gwt release [--worktree <path>]   Release this already-completed owner
+  gwt cancel --reason <text> [--worktree <path>]
+                                    End this owner's work without PR proof or removal
   gwt resume [--worktree <path>]    Resume an enrolled worktree
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
@@ -1316,7 +1318,7 @@ gwt() {
             _gwt_finish_tool "${subcommand#finish-}" "$@"
             return $?
             ;;
-        finish|release|resume|finish-pin|finish-unpin)
+        finish|release|cancel|resume|finish-pin|finish-unpin)
             # Explicit --worktree is also valid from outside a checkout.
             ;;
         clone)
@@ -1414,7 +1416,7 @@ gwt() {
     case "$subcommand" in
         ""|help|-h|--help|root|clone)
             ;;
-        finish|release|resume|finish-pin|finish-unpin)
+        finish|release|cancel|resume|finish-pin|finish-unpin)
             local lifecycle_command="${subcommand#finish-}"
             local lifecycle_target="$PWD" lifecycle_release=false
             local -a lifecycle_args
@@ -1422,7 +1424,7 @@ gwt() {
             [[ "$subcommand" == release ]] && lifecycle_release=true
             local lifecycle_i
             for (( lifecycle_i=1; lifecycle_i <= ${#lifecycle_args}; lifecycle_i++ )); do
-                [[ "${lifecycle_args[$lifecycle_i]}" == --release ]] && lifecycle_release=true
+                [[ "$subcommand" == finish && "${lifecycle_args[$lifecycle_i]}" == --release ]] && lifecycle_release=true
                 if [[ "${lifecycle_args[$lifecycle_i]}" == --worktree ]]; then
                     lifecycle_target="${lifecycle_args[$((lifecycle_i + 1))]}"
                 elif [[ "${lifecycle_args[$lifecycle_i]}" == --worktree=* ]]; then

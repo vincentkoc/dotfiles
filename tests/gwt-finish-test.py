@@ -133,6 +133,83 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.check_reason(), "completion-confirmed-checkout-retained")
         self.assertTrue(self.wt.exists())
 
+    def test_cancel_without_pr_retains_dirty_files_and_pins_without_proof(self):
+        self.call("pin", "--reason", "recovery")
+        (self.wt / "unpublished").write_text("keep me\n")
+        self.storage.reset_mock()
+        with mock.patch.object(FINISH, "pr") as remote, \
+                mock.patch.object(FINISH, "evaluate_release") as removal:
+            result = self.call("cancel", "--reason", "superseded upstream")[1][0]
+            checked = self.call("check")[1][0]
+        remote.assert_not_called()
+        removal.assert_not_called()
+        self.storage.assert_not_called()
+        self.assertEqual(result["state"], "cancelled")
+        self.assertEqual(checked["reason"], "owner-cancelled-checkout-retained")
+        self.assertEqual(result["checkout"], "retained")
+        self.assertIsNone(result["pr"])
+        self.assertFalse(result["release_available"])
+        self.assertEqual(result["pins"], [{"owner": "owner-1", "reason": "recovery"}])
+        self.assertEqual((self.wt / "unpublished").read_text(), "keep me\n")
+
+    def test_cancellation_is_owner_local_and_resume_invalidates_it(self):
+        self.call("resume", "--owner", "owner-2")
+        result = self.call("cancel", "--reason", "no longer needed")[1][0]
+        self.assertEqual(result["state"], "active")
+        self.assertEqual([item["owner"] for item in result["cancelled_owners"]], ["owner-1"])
+        self.call("cancel", "--reason", "done", "--owner", "owner-2")
+        self.assertEqual(self.call("status")[1][0]["state"], "cancelled")
+        result = self.call("resume")[1][0]
+        self.assertEqual(result["state"], "active")
+        self.assertEqual([item["owner"] for item in result["cancelled_owners"]], ["owner-2"])
+
+    def test_changed_head_invalidates_cancellation(self):
+        self.finish()
+        self.call("cancel", "--reason", "superseded")
+        git(self.wt, "commit", "--allow-empty", "-m", "new work")
+        result = self.call("check")[1][0]
+        self.assertNotIn("cancelled_owners", result)
+        self.assertEqual(result["state"], "active")
+
+    def test_cancelled_batch_rotates_past_the_first_sixteen_entries(self):
+        self.call("cancel", "--reason", "superseded")
+        with FINISH.ledger(self.state) as db:
+            original = dict(FINISH.get_row(db, self.wt))
+            with db:
+                for index in range(1, 17):
+                    row = {**original, "id": str(uuid.uuid4()),
+                           "path": str(self.root / f"task-{index:02d}")}
+                    db.execute("INSERT INTO worktrees (" + ",".join(row) + ") VALUES ("
+                               + ",".join("?" for _ in row) + ")", tuple(row.values()))
+                    db.execute("INSERT INTO owners(worktree_id, owner, completed) VALUES (?, ?, 0)",
+                               (row["id"], "owner-1"))
+                    db.execute("INSERT INTO owner_cancellations VALUES (?, ?, ?, ?, ?)",
+                               (row["id"], "owner-1", self.head, "superseded", 0))
+        # Exercise both early-return paths without creating sixteen real clones.
+        def probe(row):
+            if row["path"].endswith("task-01"):
+                raise FINISH.Retain("worktree-identity-changed")
+            return {"head": self.head}
+        with mock.patch.object(FINISH, "revalidate", side_effect=probe):
+            first = self.call("check", "--all")[1]
+            second = self.call("check", "--all")[1]
+        self.assertEqual(len(first), 16)
+        self.assertEqual(second[0]["worktree"], str(self.root / "task-16"))
+
+    def test_unavailable_cancelled_checkout_does_not_abort_batch(self):
+        self.call("cancel", "--reason", "superseded")
+        first = self.wt
+        self.wt = self.root / "task-2"
+        git(self.repo, "worktree", "add", "-b", "feature-2", str(self.wt))
+        self.call("enroll")
+        first.rename(self.root / "moved")
+        result = self.call("check", "--all")[1]
+        self.assertEqual(len(result), 2)
+        unavailable = next(item for item in result if item["worktree"] == str(first))
+        self.assertEqual(unavailable["state"], "cancelled")
+        self.assertNotEqual(unavailable["reason"], "owner-cancelled-checkout-retained")
+        self.assertEqual(unavailable["checkout"], "retained")
+
     def test_legacy_owner_schema_migrates_before_new_enrollment(self):
         database = self.state / "lifecycle.sqlite"
         with contextlib.closing(sqlite3.connect(database)) as db:
@@ -515,6 +592,12 @@ cd "$2"
 gwt new feature main --full --finish-managed || exit
 [[ "$PWD" == "$3" ]] || exit 91
 gwt finish --pr https://github.com/example/repo/pull/1 || exit
+_gwt_finish_tool() { return 1; }
+_gwt_tmux_sync_context() { exit 98; }
+if gwt cancel --release --reason invalid; then exit 97; fi
+[[ "$PWD" == "$3" ]] || exit 99
+_gwt_finish_tool() { "$FAKE_FINISH" "$@"; }
+_gwt_tmux_sync_context() { return 0; }
 gwt release --worktree "$3" || exit 92
 [[ "$PWD" == "$2" ]] || exit 96
 cd "$2"
@@ -617,6 +700,35 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result["reason"], "awaiting-owner-release")
         self.assertTrue(self.wt.exists())
         self.assertEqual(self.call("release")[1][0]["checkout"], "removed")
+
+    def test_cancel_invalidates_old_client_release_and_is_idempotent(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        self.finish("--release")
+        result = self.call("cancel", "--reason", "superseded")[1][0]
+        self.assertEqual(result["released_owners"], [])
+        self.assertFalse(result["owners"][0]["completed"])
+        again = self.call("cancel", "--reason", "superseded")[1][0]
+        self.assertEqual(result, again)
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        self.assertEqual(self.call("check", "--apply")[1][0]["checkout"], "retained")
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            # An old client cannot see cancellations but uses this same SQL.
+            with db:
+                db.execute("UPDATE owners SET completed=0 WHERE worktree_id=?", (row["id"],))
+            self.assertEqual(FINISH.cancellation_rows(db, row["id"]), [])
+
+    def test_cancel_refuses_pending_intent_and_completion_options(self):
+        for arguments in (("--release",), ("--pr", self.url), ("--apply",)):
+            with self.assertRaisesRegex(FINISH.Retain, "completion-or-removal"):
+                self.call("cancel", "--reason", "superseded", *arguments)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            with db:
+                db.execute("UPDATE retirement SET state='incomplete' WHERE worktree_id=?", (row["id"],))
+        with self.assertRaisesRegex(FINISH.Retain, "removal-intent"):
+            self.call("cancel", "--reason", "superseded")
+        self.assertNotIn("cancelled_owners", self.call("status")[1][0])
 
     def test_pending_merge_is_revisited_by_same_consumer_without_age(self):
         self.proofs[self.url].update(merged=False, state="open", merge=None)

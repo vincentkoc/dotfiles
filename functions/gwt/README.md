@@ -59,6 +59,23 @@ Owner selection establishes eligibility, not full object integrity. It does
 not change the behavior of repository-native worktree commands. Run native
 OpenClaw PR commands from the selected owner. Do not relocate active bases.
 
+## Cancelled or superseded work
+
+Use `gwt cancel --reason 'superseded by ...' [--worktree <path>]` when the
+current owner's work has ended without a matching PR. It records a terminal
+owner disposition, preserves the branch, files, pins and other owners, and
+invalidates prior release sign-offs. It does not fetch GitHub proof, scan
+holders, remove the checkout or permit ordinary `gwt rm` to bypass enrollment.
+Existing report-only enrollments remain report-only.
+
+`finish-status` reports the recorded cancellation and HEAD. `finish-check`
+invalidates it if HEAD changed. Resume or changed completion/proof clears it,
+including updates from an older client. An unfinished removal intent refuses
+cancellation. A repeated identical cancellation is a no-op.
+
+Report the checkout as retained and finish the task. Physical retirement is a
+separate, ownership-qualified operation; cancellation never authorizes it.
+
 ## Scheduled Git maintenance
 
 Use daily commit-graph maintenance for explicitly enrolled, healthy owning

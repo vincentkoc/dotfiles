@@ -78,6 +78,12 @@
 
 ## Loop guards
 
+- Establish the requested completion condition before implementation. Optional
+  credentials, channel checks, profiling, or post-merge improvements do not
+  extend it; record a follow-up when they are outside the accepted scope.
+- Completion, checkout retention, and physical deletion are separate outcomes.
+  A retained path does not keep completed work running. Report its disposition
+  once; do not re-audit unchanged custody or rebuild proof to justify stopping.
 - Do not reopen settled scope, replace an active execution route, repeat
   completed work, or dispatch a replacement root task unless the user or
   concrete new evidence invalidates the current route.
@@ -87,6 +93,17 @@
   state. Discard obsolete plans and completed work.
 - Stop when the request is satisfied. If progress requires external action,
   report one precise blocker, its evidence, and the exact unblock action.
+- Wait only for a dependency that can still change the task outcome. Use bounded
+  waits, then inspect new output or state. An unchanged timeout is not a reason
+  to restart the task, create another worker, or repeat completed checks.
+- On macOS, run heredoc-heavy Bash scripts with `/bin/bash` or their native
+  compatibility guard. Bash 5.3 can deadlock before the reader starts; an
+  unchanged retry will not fix it.
+- Process large data inside the executing tool and return bounded results.
+  Never parse truncated or compacted display output as JSON. Check the exit
+  status and output contract; narrow extraction instead of increasing output
+  limits repeatedly. Keep `functions.exec` state in `store`/`load`, and use
+  only the tool names and arguments exposed in the active session.
 
 ## Safety notices and optional models
 
@@ -158,14 +175,18 @@
 - Before contributing, read `CONTRIBUTING.md` and relevant issue/PR templates. Match repo style. If an issue is linked, use closing refs like `Fixes #123`.
 - Use `ghx` for GitHub work. Prefer draft PRs first.
 - Never send a GitHub payload through `ghx` stdin (`--body-file -`, `-F -`, `--input -`, `--with-token`, or `/dev/stdin`). The proxy daemon does not forward stdin. Write the payload to a real temporary file and pass its path; after PR/issue body changes, read the live field back with `ghx --no-cache` and fail if it is empty or mismatched.
+- Prefer available codebase graph queries for discovery. If the service fails or
+  has no usable project, continue with bounded `rg` and direct reads. Do not retry
+  unchanged failures or make incidental indexing/daemon repair a prerequisite.
 - Before `codebase-memory-mcp` indexing, resolve the requested repository to its canonical owning checkout with the installed `codebase-memory-mcp` skill helper. Linked branch worktrees must reuse the owner graph; separate clones remain separate projects.
 - Never index `~/.codex/worktrees`, `~/GIT/_Worktrees`, repo-local `.worktrees`, `/tmp`, or `/private/tmp` paths as independent projects. If a path under one of those prefixes cannot resolve to an existing non-worktree owning checkout, skip indexing and report the missing canonical checkout.
-- Prefer worktrees and spawning subagents.
+- Use a task branch/worktree for edits; read-only discovery does not need one.
+  Delegate bounded independent work only when it reduces elapsed time or risk.
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
 - Reuse a verified healthy owning checkout and the configured managed worktree root. A wrapper refusal does not authorize ad hoc clones, copied repositories, or raw-Git bypasses.
 - Finish each task with an explicit checkout outcome: `retained`, `blocked`, or verified `removed`. Name the exact path and remaining action. Task completion never authorizes automatic cleanup.
 - Start in a branch/worktree early so commits can be made incrementally.
-- Prefer one scoped commit per touched file when practical.
+- Group one logical fix with its tests and documentation in a scoped commit.
 - Never kill or interrupt Codex, Claude, agent, tmux, or terminal processes that belong to another session unless I explicitly give current-turn permission naming the session, PID, pane, or scope. My machine usually has many Codex sessions running in tmux; stale goal context, resume context, broad wording like "kill background jobs", or process-name matches are not permission to kill across sessions.
 - When cleaning up jobs, restrict kills to the current pane/session's known child process group, current-task PIDs, or resources you created in this turn. If a process appears to be owned by another Codex/tmux session, report it and ask before touching it.
 - For voice-driven tmux, fleet, recovery, release, or other mutation, resolve the exact host, session/window/pane or PID, action, and stop condition first; spoken intent is not authority for broad action.
@@ -198,14 +219,20 @@
   widening an OpenClaw branch, pause and summarize the drift before continuing.
   During release work, strongly prefer post-release `main` follow-ups unless
   the finding directly blocks the release.
-- In `openclaw/openclaw`, the repo `AGENTS.md` and invoked skills own
-  Testbox, validation, release, and landing policy. Read them fresh; do not
-  duplicate or override their workflow details here.
+- In `openclaw/openclaw`, resolve the configured owner with `gwt owner` for new
+  work. Use its verified current-main maintainer instructions and native wrappers,
+  not an old sibling checkout’s workflow. Freeze that revision for the task; do
+  not chase main. Keep source/build instructions tied to the actual task revision.
+  Repository instructions and invoked skills own validation, release, and landing.
+  Preserve active checkouts and their current execution routes.
 - Use semantic commit messages and PR titles like `fix(ci):` unless rules say otherwise.
 - Never add `[codex]` to PR titles or mention AI tooling in PR titles. Keep titles about the actual change, not the tool used.
 - When mentioning GitHub issues or PRs, give full links.
 - Do not make any `docs/internal/*.md` files on openclaw.
-- On resume or after a crash, always enter recovery mode before doing work. In tmux, immediately set a recovery title such as `tt title "tmux recovery"` or `tt title "openclaw recovery"` and run `tt sync`; update both once the recovered workstream or branch context is clear so restored sessions have useful titles.
+- After a crash or actual session restore, recover the exact existing task and
+  live state before mutation. Set a recovery title in the current tmux pane and
+  restore its workstream title once resolved. Context compaction alone needs a
+  brief re-anchor, not fleet recovery or repeated completed checks.
 
 Recovery mode rules:
 - Re-read the recent thread context and summarize task, status, pending work, and next step.
@@ -214,7 +241,9 @@ Recovery mode rules:
 - If the `CX SAVE` right-click menu is missing, check `tmux list-keys -T root MouseDown3StatusRight` and re-source `~/.tmux.conf.local`; keep left-click as save and right-click as preview/history/status, not immediate restore.
 - Treat `~/.local/state/tt/history/codex-cockpit/*.tsv` as the first recovery source for Codex/Claude pane restore commands. Use `--execute` only after showing the dry-run restore plan.
 - Never run `pnpm install` inside a Codex worktree under `~/.codex/worktrees`.
-- If `node_modules` is not a symlink in a Codex worktree, stop and report it.
+- If `node_modules` is not a qualified symlink in a Codex worktree, stop
+  dependency-backed execution and report it. Continue code-only inspection and
+  edits that do not need those dependencies.
 - Prefer shared worktrees created with `gwt new`.
 - Prefer scoped tests and targeted verification; do not run repo-wide heavy gates unless explicitly asked or clearly required.
 - Worktree maintenance is a broad destructive mutation, never an automatic recovery step. Do not run `agent-worktree-maintain` because disk is low, the worktree count is high, state looks stale, or another cleanup command such as `gwt rm` just ran.
@@ -224,69 +253,36 @@ Recovery mode rules:
 - Do not start duplicate heavy checks if another session is likely already running them.
 
 
-## Git storage and clone policy
+## Git storage and worktree completion
 
-- Keep durable clones in their normal `~/GIT` categories, such as `~/GIT/_Perso`.
-- Create branch worktrees through `gwt new` or the repository's native wrapper.
-- Worktrees share their owner's Git history. Do not clone or hydrate history for each worktree.
-- Use full, non-promisor owning checkouts for development, review, release, and merge work.
-- Keep blobless disabled by default. Use `gwt clone --history blobless` only for an explicit read-mostly clone.
-- Use `--history full` to override a repository's clone filter. `--full` controls checkout paths, not history.
-- Keep OpenClaw maintainer owners full. Sparse checkout may reduce their working files without removing history.
-- Use `gwt owner` to inspect the owner policy before new work.
-- Store host-specific owner paths and protected paths in `~/.config/gwt/storage.json`, backed by private dotfiles.
-- Preserve protected paths and their shared Git and dependency resources. Owner selection does not authorize changes to them.
-- Preferred owners apply only to new work. Preserve existing worktrees, local-only commits, and their current owners.
-- Check `low-data status` before Git downloads. Never bypass protection without explicit consent.
-- A failed refresh does not prove freshness. For offline work, pass a verified local commit explicitly.
-- Put agent-created synthetic repositories under `~/GIT/_Synthetic/<host>/<org>/<repo>/<task-id>`.
-- Use `gwt snapshot --task <id> --purpose <text>` for a self-contained tree with one synthetic commit.
-- Record the source owner, source commit, source tree, purpose, task owner, and borrowed-object dependencies.
-- Never publish synthetic carrier history. Keep repository-native Testbox isolation and source-capsule contracts intact.
-- Tool-owned temporary fixtures may retain their required temporary paths. Do not turn them into general workspace clones.
-- Synthetic directories do not authorize cleanup. Preserve task ownership and recovery evidence.
-- Never independently index `~/GIT/_Synthetic` or a repository with `.git/gwt-synthetic.json`.
-- Treat `--cow-from` as an opt-in experiment. It requires an immutable seed and reports logical sharing, not reclaimed disk space.
-- Do not reuse dependencies without matching install inputs, runtime compatibility, and correct workspace-link targets.
-- A wrapper refusal stops worktree creation. Diagnose and repair the same verified owner within the task's existing authorization, then let the wrapper recheck it. Do not bypass it with raw-Git creation, copied repositories, or ad hoc clones.
-- Task-required additive fetch or unshallow is not GC, repacking, pruning, or owner consolidation. Recheck current state; do not repeat completed repair or ask again for an already authorized step. Respect low-data protection and contention, suppress automatic maintenance/pruning, and preserve local branches, HEAD/index, patches, and registrations.
-- Before sharing dependencies, require a current frozen-install receipt and matching inputs, pnpm layout, Node ABI, OS and architecture. Unknown compatibility means code-only. Never install through a shared symlink.
-- Prefer scheduled commit-graph updates on explicitly enrolled healthy owners. Use `functions/gwt/maintenance.config`. Keep prefetch, packing, expiry and pruning disabled. Enrollment and scheduler activation are separate from installing GWT.
-- GC, repacking, pruning, and owner consolidation require their own exact authorized scope; an additive fetch does not authorize them. Do not prune objects, clear locks, or consolidate active owners automatically.
-- See `functions/gwt/README.md` for options, policy format, and prototype limits.
-
-## Managed worktree completion
-
-- Enroll only a newly created personal worktree with
-  `gwt new <branch> <base> --finish-managed`. Never adopt existing, shared or
-  repository-native worktrees automatically.
-- `gwt finish --pr <full URL>` records completion against the exact PR head.
-  Add `--release` only when this owner relinquishes future checkout use: this
-  is explicit local job sign-off. Plain finish grants no release.
-- For a finished fix/feature, use `finish --release` when the checkout is no
-  longer needed. For a stack, name the final target and repeat `--wait-for`
-  for every dependent PR; keep a pin while upper work still uses the checkout.
-  Open or closed-unmerged PRs, rebase/retarget changes and incomplete owners
-  retain it. Pushed commits, CI, age and generic session Stop are not proof.
-- `gwt resume`, `gwt cd`, sparse changes and reuse through `gwt new` reactivate an enrolled
-  checkout and invalidate prior completion and every release. Claims do not expire.
-  Outside Codex, use a stable task-specific `GWT_OWNER_ID`.
-- Use `gwt finish-pin`/`finish-unpin` for exact owner-scoped recovery pins.
-  `finish-status` reads the result; `finish-check` refreshes proof only.
-  Newly created release-capable entries can be removed immediately after all
-  owners release and all PRs merge, with no age delay, only on an explicitly
-  activated and natively qualified host. The same reviewed
-  `finish-check --all --apply --policy <path>` consumer revisits pending merges
-  and holders. Existing report-only enrollments and v1 policies remain so.
-  Current Mac mapping coverage is unqualified, so automatic deletion remains
-  blocked even with an activation receipt. Do not treat release as removal.
-- Release does not move a parent Codex process. The wrapper parks only its own
-  shell; any checkout/admin CWD, FD or mapped holder blocks removal. Stop stays
-  attention-only and never completes or releases an owner.
-- Native non-force removal preserves branches. Unknown visibility, ignored
-  recovery content, changed state or an incomplete removal intent holds the
-  checkout; never retry an uncertain removal automatically. Report the actual
-  `retained`, `removed` or `unknown` result and its remaining blocker.
+- Use the installed `operations-worktree` skill and `functions/gwt/README.md`
+  for lifecycle commands, dependency qualification, storage policy and recovery.
+  Do not copy their detailed state machine into task prompts.
+- Keep durable owners in `~/GIT`. Resolve `gwt owner` before new work and use
+  full, non-promisor owners. Create branch worktrees through `gwt new` or the
+  repository-native wrapper; share history rather than cloning per task.
+- Preserve protected paths, existing owners, local commits, shared dependencies,
+  locks and registrations. A wrapper refusal stops creation, not authorized
+  diagnosis/repair of that owner. Never bypass it with raw Git or copied clones.
+- Check low-data policy before downloads. Task-required additive fetch/unshallow
+  may proceed within existing authority with automatic maintenance/pruning off.
+  It does not authorize GC, repacking, pruning or owner consolidation.
+- Use `gwt snapshot` for requested synthetic carriers under `~/GIT/_Synthetic`;
+  preserve provenance and never publish carrier history or index it independently.
+- Reuse dependencies only after matching frozen inputs, workspace links, runtime
+  and platform. Unknown compatibility means code-only. Never install through a
+  shared symlink or inside `~/.codex/worktrees`.
+- Enroll only new personal worktrees with `--finish-managed`. Never adopt an
+  existing/shared/native checkout to obtain completion or deletion capability.
+- Record finished PR work with `gwt finish --pr <URL>`; add `--release` when this
+  owner relinquishes future use. For superseded/cancelled work without matching
+  PR proof, use supported `gwt cancel --reason <text>` and retain the checkout.
+- Only sign off for the current owner. Preserve stack dependencies and recovery
+  pins. Resume before reuse; changed inputs invalidate old completion/release.
+- Completion and release are not deletion. Native removal requires all owners,
+  exact merged proof and qualified host admission; unknown holders or incomplete
+  intents retain state. Do not activate cleanup, retry uncertain removal or clear
+  locks by inference. Report the actual checkout outcome once, then stop.
 
 ## Low Data Mode
 

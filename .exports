@@ -397,6 +397,16 @@ path_prepend "$DOTFILES_BIN_ROOT"
 # AWS
 export AWS_SDK_LOAD_CONFIG=1
 
+# Automated reviewers isolate HOME/CODEX_HOME. Resolve their executable before
+# isolation; leave the interactive wrapper and explicit caller choice intact.
+if [[ -z "${CODEX_BIN:-}" ]]; then
+    _codex_native="${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/bin/codex"
+    if [[ -x "$_codex_native" ]]; then
+        export CODEX_BIN="$_codex_native"
+    fi
+    unset _codex_native
+fi
+
 # Make kubectl faster with nocorrect
 export KUBECTL_EXTERNAL_DIFF="colordiff -N -u"
 

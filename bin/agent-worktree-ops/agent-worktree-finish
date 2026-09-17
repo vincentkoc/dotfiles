@@ -438,6 +438,64 @@ def owner_id(args):
     return value
 
 
+def cancellation_rows(db, worktree_id):
+    if not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_cancellations'").fetchone():
+        return []
+    return [dict(item) for item in db.execute(
+        "SELECT owner, head, reason, recorded_at FROM owner_cancellations "
+        "WHERE worktree_id=? ORDER BY owner", (worktree_id,))]
+
+
+def ensure_cancellation_schema(db):
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS owner_cancellations (
+            worktree_id TEXT NOT NULL, owner TEXT NOT NULL, head TEXT NOT NULL,
+            reason TEXT NOT NULL, recorded_at INTEGER NOT NULL,
+            PRIMARY KEY(worktree_id, owner),
+            FOREIGN KEY(worktree_id, owner) REFERENCES owners(worktree_id, owner)
+                ON DELETE CASCADE);
+        CREATE TRIGGER IF NOT EXISTS cancellation_owner_update
+        AFTER UPDATE ON owners BEGIN
+            DELETE FROM owner_cancellations
+              WHERE worktree_id=OLD.worktree_id AND owner=OLD.owner;
+        END;
+        CREATE TRIGGER IF NOT EXISTS cancellation_proof_update
+        AFTER UPDATE ON worktrees
+        WHEN OLD.identity IS NOT NEW.identity OR OLD.path IS NOT NEW.path
+          OR OLD.finish_head IS NOT NEW.finish_head OR OLD.primary_pr IS NOT NEW.primary_pr
+          OR OLD.target IS NOT NEW.target OR OLD.dependencies IS NOT NEW.dependencies
+        BEGIN
+            DELETE FROM owner_cancellations WHERE worktree_id=OLD.id;
+        END;
+    """)
+
+
+def cancel(db, row, args):
+    snap = revalidate(row)
+    who = owner_id(args)
+    ensure_owner_schema(db)
+    if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=?",
+                      (row["id"], who)).fetchone():
+        raise Retain("known-owner-required-for-cancellation")
+    item = retirement(db, row)
+    if item is not None and item["state"] != "enrolled":
+        raise Retain("removal-intent-requires-read-only-reconciliation")
+    for prior in cancellation_rows(db, row["id"]):
+        if prior["owner"] == who and prior["head"] == snap["head"] and prior["reason"] == args.reason:
+            return
+    ensure_cancellation_schema(db)
+    with db:
+        # Old consumers must also refuse removal. Existing retirement triggers
+        # invalidate release generations before the new terminal record appears.
+        db.execute("UPDATE owners SET completed=0 WHERE worktree_id=? AND owner=?",
+                   (row["id"], who))
+        db.execute("UPDATE worktrees SET state='active', reason='owner-active' WHERE id=?",
+                   (row["id"],))
+        db.execute("INSERT INTO owner_cancellations VALUES (?, ?, ?, ?, ?)",
+                   (row["id"], who, snap["head"], args.reason, int(time.time())))
+
+
 def get_row(db, worktree):
     if db is None:
         raise Retain("not-enrolled")
@@ -974,13 +1032,17 @@ def owner_rows(db, worktree_id):
 def summary(db, row, reason=None):
     item = retirement(db, row)
     outcome = json.loads(item["result"]) if item is not None and item["result"] else None
-    return {
+    owners = owner_rows(db, row["id"])
+    cancellations = cancellation_rows(db, row["id"])
+    cancelled = {entry["owner"] for entry in cancellations}
+    terminal = bool(cancelled) and all(owner["completed"] or owner["owner"] in cancelled for owner in owners)
+    result = {
         "id": row["id"],
         "worktree": row["path"],
-        "state": row["state"],
-        "reason": reason or row["reason"],
+        "state": "cancelled" if terminal else ("active" if cancelled else row["state"]),
+        "reason": reason or ("owner-cancelled-checkout-retained" if terminal else row["reason"]),
         "pr": row["primary_pr"],
-        "owners": owner_rows(db, row["id"]),
+        "owners": owners,
         "pins": [
             dict(item)
             for item in db.execute(
@@ -990,7 +1052,7 @@ def summary(db, row, reason=None):
             )
         ],
         "checkout": outcome["checkout"] if outcome else ("unknown" if item is not None and item["intent"] else "retained"),
-        "release_available": item is not None and item["state"] == "enrolled",
+        "release_available": not cancelled and item is not None and item["state"] == "enrolled",
         # Status does not perform native admission. Capability is separate from
         # a fresh, one-shot removal decision made only by the evaluator.
         "removal_available": False,
@@ -1001,6 +1063,9 @@ def summary(db, row, reason=None):
             "SELECT owner FROM owner_releases WHERE worktree_id=? AND generation=? ORDER BY owner",
             (row["id"], item["generation"]))],
     }
+    if cancellations:
+        result["cancelled_owners"] = cancellations
+    return result
 
 
 def storage_guard():
@@ -1012,6 +1077,7 @@ def parser():
     result.add_argument("command", choices=(
         "enroll",
         "finish",
+        "cancel",
         "release",
         "remove",
         "resume",
@@ -1057,7 +1123,9 @@ def process_one(db, row, args):
         item = retirement(db, row)
         if item is not None and item["state"] != "enrolled":
             raise Retain("removal-intent-requires-read-only-reconciliation")
-    if args.command == "finish":
+    if args.command == "cancel":
+        cancel(db, row, args)
+    elif args.command == "finish":
         finish(db, row, args)
     elif args.command == "resume":
         claim(db, row, owner_id(args))
@@ -1081,6 +1149,23 @@ def process_one(db, row, args):
             if not changed:
                 raise Retain("no-matching-owner-pin")
     elif args.command == "check":
+        if cancellation_rows(db, row["id"]):
+            try:
+                snap = revalidate(row)
+            except (Retain, OSError, ValueError) as error:
+                reason = str(error) if isinstance(error, Retain) else "cancellation-check-unavailable"
+                with db:
+                    db.execute("UPDATE worktrees SET checked_at=? WHERE id=?",
+                               (int(time.time()), row["id"]))
+                return summary(db, row, reason=reason)
+            with db:
+                db.execute("DELETE FROM owner_cancellations WHERE worktree_id=? AND head!=?",
+                           (row["id"], snap["head"]))
+            if cancellation_rows(db, row["id"]):
+                with db:
+                    db.execute("UPDATE worktrees SET checked_at=? WHERE id=?",
+                               (int(time.time()), row["id"]))
+                return summary(db, row)
         if retirement(db, row) is None:
             check(db, row)
     current = db.execute(
@@ -1102,6 +1187,12 @@ def process_one(db, row, args):
 def main(argv=None):
     args = parser().parse_args(argv)
     safety().DEADLINE = time.monotonic() + 238
+    if args.command == "cancel":
+        if (args.pr or args.target or args.wait_for or args.all or args.apply
+                or args.release or args.policy or args.new_token or args.if_enrolled):
+            raise Retain("cancellation-does-not-accept-completion-or-removal-options")
+        if not args.reason or not args.reason.strip() or len(args.reason) > 500:
+            raise Retain("bounded-cancellation-reason-required")
     if args.command == "creation-token":
         print(uuid.uuid4())
         return 0

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Darwin Bash 5.3 can block before exec while writing a heredoc pipe.
+if [[ ${OSTYPE:-} == darwin* && $BASH != /bin/bash ]] && ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 3))); then
+  exec /bin/bash "$0" "$@"
+fi
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,6 +24,7 @@ EOF
 cat >"$backend_dir/gh" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == "auth token" ]]; then
+  [[ -z "${CODEX_TEST_AUTH_LOG:-}" ]] || printf 'auth\n' >>"$CODEX_TEST_AUTH_LOG"
   printf 'native-token\n'
   exit 0
 fi
@@ -39,7 +44,7 @@ if [[ "${GITHUB_PAT_TOKEN:-}" == "native-token" ]]; then
   printf 'token:injected\n'
 else
   printf 'token:missing\n'
-  exit 66
+  [[ "${1:-}" == --version ]] || exit 66
 fi
 EOF
 
@@ -61,9 +66,14 @@ path_entry_count=$((path_entry_count + 3))
 
 output="$(
   env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN -u CODEX_HOME \
+    CODEX_TEST_AUTH_LOG="$temporary/probe-auth.log" \
     PATH="$long_path" "$symlink_dir/codex" --version
 )"
 [[ "$output" == *"version:--version"* ]]
+[[ "$output" == *"token:missing"* ]]
+[[ ! -e "$temporary/probe-auth.log" ]]
+output="$(env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN -u CODEX_HOME \
+  HOME="$temporary/unused-home" PATH="$long_path" "$symlink_dir/codex" exec fixture)"
 [[ "$output" == *"token:injected"* ]]
 
 darwin_home="$temporary/darwin-home"
@@ -73,6 +83,24 @@ cat >"$darwin_home/.codex/packages/standalone/current/bin/codex" <<'EOF'
 printf 'standalone:%s\n' "$*"
 EOF
 chmod +x "$darwin_home/.codex/packages/standalone/current/bin/codex"
+
+# A reviewer retains the selected executable when it isolates runtime homes.
+isolated_home="$temporary/isolated-review"
+mkdir -p "$isolated_home"
+resolved_output="$(
+  env -u CODEX_HOME -u CODEX_BIN HOME="$darwin_home" PATH=/usr/bin:/bin \
+    /bin/bash -c '
+      OSTYPE=linux-gnu
+      source "$1/.exports"
+      [[ "$CODEX_BIN" == "$HOME/.codex/packages/standalone/current/bin/codex" ]]
+      env HOME="$2" CODEX_HOME="$2/.codex" "$CODEX_BIN" --version
+    ' bash "$repo_root" "$isolated_home"
+)"
+[[ "$resolved_output" == "standalone:--version" ]]
+env HOME="$darwin_home" CODEX_BIN=/explicit/reviewer PATH=/usr/bin:/bin \
+  /bin/bash -c 'OSTYPE=linux-gnu; source "$1/.exports"; [[ "$CODEX_BIN" == /explicit/reviewer ]]' \
+  bash "$repo_root"
+
 cat >"$backend_dir/uname" <<'EOF'
 #!/usr/bin/env bash
 printf 'Darwin\n'
@@ -153,8 +181,13 @@ cat >"$catalog_binary" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\0' "$#" "$@" >"$CODEX_TEST_NATIVE_ARGS"
 printf 'native\n' >>"$CODEX_TEST_ORDER_LOG"
-[[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]]
-[[ "$GITHUB_PAT_TOKEN" == native-token ]]
+case "${1:-}" in
+  -V|--version|-h|--help)
+    [[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" && -z "${GITHUB_PAT_TOKEN:-}" ]] || exit 68 ;;
+  *)
+    [[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]] || exit 68
+    [[ "$GITHUB_PAT_TOKEN" == native-token ]] || exit 68 ;;
+esac
 [[ "$CODEX_TEST_SENTINEL" == preserved ]]
 [[ "$TOKENJUICE_STATS" == off ]]
 /bin/bash --noprofile --norc -c '[[ "$TOKENJUICE_STATS" == off ]]' || exit 67
