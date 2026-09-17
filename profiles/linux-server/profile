@@ -20,6 +20,15 @@ export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 export TOKENJUICE_STATS=off
 
+# Reviewers isolate HOME; resolve the native executable in the caller's shell.
+if [[ -z "${CODEX_BIN:-}" ]]; then
+  _codex_native="${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/bin/codex"
+  if [[ -x "$_codex_native" ]]; then
+    export CODEX_BIN="$_codex_native"
+  fi
+  unset _codex_native
+fi
+
 # Keep cockpit scratch on disk without changing other login environments.
 _cockpit_private_tmp() {
   [[ -d "$1" && ! -L "$1" && -O "$1" ]] || return 1

@@ -83,6 +83,19 @@ class StartupTests(unittest.TestCase):
         self.shell("-lc", self.check_command())
         self.assertFalse((self.home / "tmux.log").exists())
 
+    def test_native_reviewer_executable_survives_home_isolation(self):
+        for codex_home in (self.home / ".codex", self.home / "custom-codex"):
+            with self.subTest(codex_home=codex_home):
+                native = codex_home / "packages/standalone/current/bin/codex"
+                native.parent.mkdir(parents=True)
+                native.write_text('#!/bin/sh\nprintf "native\\n"\n')
+                native.chmod(0o700)
+                self.env["CODEX_HOME"] = str(codex_home)
+                self.assertEqual(self.shell("-lc", 'print -r -- "$CODEX_BIN"').strip(), str(native))
+                self.assertEqual(self.shell("-lc", 'HOME=/unavailable CODEX_HOME=/unavailable "$CODEX_BIN"').strip(), "native")
+        self.env["CODEX_BIN"] = "/explicit/reviewer"
+        self.assertEqual(self.shell("-lc", 'print -r -- "$CODEX_BIN"').strip(), "/explicit/reviewer")
+
     def test_stats_policy_overrides_stale_parent_in_every_mode(self):
         self.env["TOKENJUICE_STATS"] = "on"
         self.env["DOTFILES_EXPORTS_LOADED"] = "1"
