@@ -668,6 +668,9 @@ class ReleaseTests(unittest.TestCase):
         # Complete coverage is synthetic lifecycle proof, never native qualification.
         self.observer.observe.return_value = {
             "holders": [], "processes": 1, "mapping_coverage": "complete"}
+        self.capability = mock.patch.object(FINISH, "holder_qualification", return_value={
+            "qualified": True, "mapping_coverage": "complete"})
+        self.capability.start()
         self.boundary = mock.patch.object(FINISH.safety(), "access_boundary", return_value=[])
         self.boundary.start()
         self.policy = mock.patch.object(FINISH, "qualified_policy", return_value={
@@ -675,6 +678,7 @@ class ReleaseTests(unittest.TestCase):
         self.policy.start()
 
     def tearDown(self):
+        self.capability.stop()
         self.policy.stop()
         self.boundary.stop()
         self.native.stop()
@@ -700,6 +704,33 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result["reason"], "awaiting-owner-release")
         self.assertTrue(self.wt.exists())
         self.assertEqual(self.call("release")[1][0]["checkout"], "removed")
+
+    def test_unqualified_apply_preserves_release_without_admission_work(self):
+        self.capability.stop()
+        with mock.patch.object(FINISH.safety(), "maintainer_lock") as lock, \
+                mock.patch.object(FINISH, "completion_checks") as completion, \
+                mock.patch.object(FINISH, "deletion_admission") as admission:
+            for result in (self.finish("--release")[1][0], self.call("check", "--apply")[1][0]):
+                self.assertEqual(result["reason"], "holder-mapping-coverage-unqualified")
+                self.assertEqual(result["checkout"], "retained")
+                self.assertEqual(result["released_owners"], ["owner-1"])
+                self.assertTrue(result["owners"][0]["completed"])
+                self.assertEqual(result["retirement_state"], "enrolled")
+            lock.assert_not_called()
+            completion.assert_not_called()
+            admission.assert_not_called()
+            self.observer.observe.assert_not_called()
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertIsNotNone(item["inventory"])
+            self.assertIsNone(item["intent"])
+            self.assertIsNone(item["result"])
+        with mock.patch.object(FINISH, "completion_checks", wraps=FINISH.completion_checks) as completion:
+            self.assertEqual(self.call("check")[1][0]["reason"],
+                             "released-completion-confirmed-checkout-retained")
+            completion.assert_called_once()
+        self.assertTrue(self.wt.exists())
+        self.assertTrue((self.admin / "locked").exists())
 
     def test_cancel_invalidates_old_client_release_and_is_idempotent(self):
         self.proofs[self.url].update(merged=False, state="open", merge=None)

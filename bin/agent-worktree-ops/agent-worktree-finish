@@ -919,7 +919,21 @@ def deletion_admission(row, item, qualification, until):
             "admin": admin, "holders": observed, "branch_reflog": reflog}
 
 
+def holder_qualification():
+    return {
+        "schema": HOLDER_SCHEMA,
+        "backend": "darwin-libproc-cooperative.v1",
+        "qualified": False,
+        "reason": "holder-mapping-coverage-unqualified",
+        "mapping_coverage": "unqualified",
+        "platform": safety().platform_key(),
+    }
+
+
 def remove_released(db, row, item, qualification, args):
+    capability = holder_qualification()
+    if capability["qualified"] is not True or capability["mapping_coverage"] != "complete":
+        raise Retain("holder-mapping-coverage-unqualified")
     global NATIVE_GIT
     prior_git = NATIVE_GIT
     NATIVE_GIT = qualification["git"]["path"]
@@ -1213,14 +1227,7 @@ def main(argv=None):
     if args.command == "finish" and (not args.pr or len(args.wait_for) > 16):
         raise Retain("finish-requires-primary-pr-and-at-most-16-dependencies")
     if args.command == "holder-qualification":
-        print(json.dumps({
-            "schema": HOLDER_SCHEMA,
-            "backend": "darwin-libproc-cooperative.v1",
-            "qualified": False,
-            "reason": "holder-mapping-coverage-unqualified",
-            "mapping_coverage": "unqualified",
-            "platform": safety().platform_key(),
-        }, sort_keys=True))
+        print(json.dumps(holder_qualification(), sort_keys=True))
         return 0
 
     allowed = None
