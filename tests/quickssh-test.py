@@ -28,7 +28,9 @@ with open(os.environ["CALL_LOG"], "a") as log:
 if name == "tmux" and args[0] == "display-message":
     print("@17" if args[-1] == "#{window_id}" else os.environ["PANE_COUNT"])
 elif name == "fzf":
-    print(sys.stdin.read().splitlines()[0])
+    lines = sys.stdin.read().splitlines()
+    Path(os.environ["PICKER_LOG"]).write_text("\\n".join(lines) + "\\n")
+    print(lines[0])
 elif name in ("ssh", "mosh"):
     sys.exit(int(os.environ.get("TRANSPORT_EXIT", "0")))
 """
@@ -44,6 +46,7 @@ class QuicksshTest(unittest.TestCase):
         self.extras = self.root / "extras"
         self.extras.mkdir()
         self.log = self.root / "calls.jsonl"
+        self.picker_log = self.root / "picker.txt"
         self.tmux_tmpdir = self.root / "tmux-root"
         self.tmux_tmpdir.mkdir()
         self.tmux_tmpdir.chmod(0o700)
@@ -55,6 +58,7 @@ class QuicksshTest(unittest.TestCase):
             "quickssh_hosts=(testbox mobilebox)\n"
             "quickssh_hosts_testbox='tester:node.example.invalid:2222:'\n"
             "quickssh_hosts_mobilebox='tester:mobile.example.invalid:22:'\n"
+            "quickssh_descriptions_testbox='shared infra · test host'\n"
             "quickssh_mosh_hosts=(mobilebox)\n"
         )
         self.env = {
@@ -63,6 +67,7 @@ class QuicksshTest(unittest.TestCase):
             "EXTRASPATH": str(self.extras),
             "PATH": f"{self.bin}:{os.environ['PATH']}",
             "CALL_LOG": str(self.log),
+            "PICKER_LOG": str(self.picker_log),
             "PANE_COUNT": "1",
             "TERM": "xterm-256color",
             "TT_ISOLATED_FIXTURE": "1",
@@ -126,6 +131,13 @@ class QuicksshTest(unittest.TestCase):
         code, output, calls = self.run_quickssh(terminal=True)
         self.assertEqual((code, output), (0, b"\x1b]2;testbox\x07"))
         self.assertEqual(calls[-1][-1], "tester@node.example.invalid")
+        self.assertEqual(
+            self.picker_log.read_text().splitlines(),
+            [
+                "testbox                      shared infra · test host",
+                "mobilebox                    ssh · tester@mobile.example.invalid:22",
+            ],
+        )
 
     def test_dotted_host_bypasses_legacy_variable_lookup(self):
         target = "node.example.invalid"
