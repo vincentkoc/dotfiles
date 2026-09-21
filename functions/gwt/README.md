@@ -31,6 +31,32 @@ Refreshes disable automatic maintenance, tags, pruning, and shared `FETCH_HEAD`
 writes. A failed refresh stops creation. Pass a verified local commit explicitly
 when working offline. Cached refs do not prove freshness.
 
+## Account-specific worktree roots
+
+`DOTFILES_WORKTREES_ROOT` selects the parent for new shell-GWT worktrees;
+`gwt root` reports its effective value. The default remains `~/.codex/worktrees`.
+Keep server-specific paths in the host's private configuration and set the
+variable in the invoking account's environment, not in shared workstation defaults.
+
+When a server profile requires workspaces outside home directories, provision
+an absolute, account-owned root outside the affected accounts' actual homes.
+Verify its physical path, mount, parent permissions and trust-domain separation
+before use. Root selection is placement policy, not a security boundary or
+proof of those permissions. `gwt root` is informational.
+
+This setting does not relocate existing worktrees or change their Git owners,
+registrations, dependency links or completion state. Before a migration, identify
+each tree's producer, native owner and active users. Preserve dirty and untracked
+work, leases and recovery state; changing the destination does not authorize
+cleanup or maintenance activation.
+
+Application-managed sessions and sandbox projections retain their application's
+allocation, relocation and retention lifecycle. A `.git` entry does not make them
+shell-GWT tasks. For example, OpenClaw's native `worktreeRoot` setting is separate
+from this variable; its workspace owner must update persisted references during
+relocation. Do not make an application invoke shell GWT or enroll its existing
+workspaces in personal managed finish to obtain cleanup authority.
+
 ## Preferred owners
 
 Keep host-specific policy in private dotfiles. Install a regular, current-user
