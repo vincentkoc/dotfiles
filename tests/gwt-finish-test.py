@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 import uuid
@@ -1086,9 +1087,14 @@ class ReleaseTests(unittest.TestCase):
         self.proofs[self.url] = self.proof(self.url)
         snap = FINISH.revalidate(self.row())
         import time
-        with mock.patch.object(FINISH.safety(), "PASS_LIMIT", 32 * 1024 * 1024):
+        module = FINISH.safety()
+        self.assertGreater(module.SOURCE_LIMIT, module.PASS_LIMIT)
+        with mock.patch.object(module, "PASS_LIMIT", 32 * 1024 * 1024):
+            contents = module.inventory(snap, FINISH.git, time.monotonic() + 10)
+            self.assertTrue(all(f"bulk-{number}" in contents["entries"] for number in range(5)))
+        with mock.patch.object(module, "SOURCE_LIMIT", 32 * 1024 * 1024):
             with self.assertRaisesRegex(FINISH.Retain, "size"):
-                FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 10)
+                module.inventory(snap, FINISH.git, time.monotonic() + 10)
         self.proofs[self.url].update(merged=False, state="open", merge=None)
         self.assertEqual(self.finish("--release")[1][0]["reason"], "pr-not-merged")
 
@@ -1236,6 +1242,117 @@ class FinalizedRemovalTests(unittest.TestCase):
         (evidence / "proof.json").write_text('{"result":"passed"}\n')
         (evidence / "test.log").write_text("finalized test output\n")
         return evidence
+
+    def inventory(self, *roots, compact=True, until=None):
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        return FINISH.safety().inventory(
+            snap, FINISH.git, time.monotonic() + 120 if until is None else until,
+            discard_ignored=roots, compact_discarded=compact)
+
+    def test_real_dependency_tree_above_source_limit_removes_with_compact_holder_proof(self):
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        modules = self.wt / "node_modules"
+        # Physical pnpm-like packages, not mocked scandir rows or a smaller limit.
+        for package in range(129):
+            directory = modules / ".pnpm" / f"package-{package}" / "node_modules" / "package"
+            directory.mkdir(parents=True)
+            for leaf in range(1024):
+                (directory / f"file-{leaf}.js").write_bytes(b"module.exports = 1;\n")
+        expected = 2 + 129 * (3 + 1024)
+        contents = self.inventory("node_modules")
+        self.assertGreater(expected, FINISH.safety().ENTRY_LIMIT)
+        self.assertEqual(contents["discarded_roots"]["node_modules"]["count"], expected)
+        self.assertEqual(len(contents["discarded_inodes"]), expected)
+        self.assertLess(len(contents["entries"]), 10)
+        self.assertLess(len(json.dumps(contents)), 4 * 1024 * 1024)
+        late_repository = modules / ".pnpm/package-0/node_modules/package/.git"
+        late_repository.mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "repository-or-mount"):
+            self.inventory("node_modules")
+        late_repository.rmdir()
+        with self.assertRaisesRegex(FINISH.Retain, "inventory-entry-limit"):
+            self.inventory("node_modules", compact=False)
+        if shutil.which("lsof"):
+            code, rows = self.call("remove", "--finalized", "--discard-ignored", "node_modules")
+        else:
+            code, rows = self.remove("node_modules")
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertFalse(self.wt.exists())
+
+    def test_discard_ceiling_deadline_and_tracked_overlap_still_refuse(self):
+        self.artifacts()
+        with mock.patch.object(FINISH.safety(), "DISCARDED_ENTRY_LIMIT", 2):
+            with self.assertRaisesRegex(FINISH.Retain, "discarded-inventory-entry-limit"):
+                self.inventory(".crabbox")
+        with self.assertRaisesRegex(FINISH.Retain, "admission-deadline"):
+            self.inventory(".crabbox", until=time.monotonic() - 1)
+        with self.assertRaisesRegex(FINISH.Retain, "overlaps-tracked-source"):
+            self.inventory("file")
+        self.assertTrue(self.wt.exists())
+
+    def test_compact_call_requires_matching_holder_consumer_during_upgrade(self):
+        self.artifacts()
+        legacy = self.inventory(".crabbox", compact=False)
+        self.assertIn(".crabbox/test.log", legacy["entries"])
+        self.assertNotIn("discarded_inodes", legacy)
+        original = FINISH.safety().inventory
+
+        def old_module(snap, git, until, *, discard_ignored=()):
+            return original(snap, git, until, discard_ignored=discard_ignored)
+
+        with mock.patch.object(FINISH.safety(), "inventory", side_effect=old_module):
+            with self.assertRaisesRegex(TypeError, "compact_discarded"):
+                self.remove(".crabbox")
+        self.assertTrue(self.wt.exists())
+        self.assertTrue((self.admin / "locked").exists())
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def test_compact_digest_detects_same_population_rename_and_replacement(self):
+        evidence = self.artifacts()
+        first = self.inventory(".crabbox")
+        (evidence / "test.log").rename(evidence / "renamed.log")
+        renamed = self.inventory(".crabbox")
+        (evidence / "renamed.log").unlink()
+        (evidence / "renamed.log").write_text("different output\n")
+        replaced = self.inventory(".crabbox")
+        summaries = [item["discarded_roots"][".crabbox"] for item in (first, renamed, replaced)]
+        self.assertEqual({item["count"] for item in summaries}, {3})
+        self.assertEqual(len({item["sha256"] for item in summaries}), 3)
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_compact_discard_inode_blocks_external_hardlink_holder(self):
+        evidence = self.artifacts()
+        alias = self.base / "external-alias"
+        os.link(evidence / "test.log", alias)
+        contents = self.inventory(".crabbox")
+        self.assertNotIn(".crabbox/test.log", contents["entries"])
+        with alias.open(), self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+            FINISH.manual_holders({"path": str(self.wt), "gitdir": str(self.admin)},
+                                  contents, {}, time.monotonic() + 30)
+        self.assertTrue(self.wt.exists())
+
+    def test_concurrent_sibling_commit_and_new_registration_do_not_break_closeout(self):
+        real = FINISH.safety().supervise
+        new = self.root / "concurrent-task"
+
+        def remove_with_other_work(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                git(self.legacy, "commit", "--allow-empty", "-m", "other owner progress")
+                git(self.repo, "worktree", "add", "-b", "concurrent", str(new))
+            return real(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=remove_with_other_work):
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertTrue(new.exists())
+        self.assertNotEqual(git(self.legacy, "rev-parse", "HEAD"), self.head)
 
     def test_finalized_evidence_disposal_preserves_branch_and_skips_automatic_policy(self):
         self.artifacts()
@@ -1396,6 +1513,122 @@ class FinalizedRemovalTests(unittest.TestCase):
                 self.remove()
         self.assertEqual(len(attempts), 1)
 
+    def assert_incomplete_locked(self, code, rows):
+        self.assertEqual(code, 1, rows)
+        self.assertEqual(rows[0]["checkout"], "unknown")
+        self.assertEqual(rows[0]["retirement_state"], "incomplete")
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with self.assertRaisesRegex(FINISH.Retain, "intent"):
+            self.remove()
+
+    def test_removal_over_thirty_seconds_outlives_admission_and_preserves_branch(self):
+        real, clock = FINISH.safety().supervise, time.monotonic
+        offset, children = [0], []
+
+        def delayed_removal(command, **kwargs):
+            if "worktree" not in command or "remove" not in command:
+                self.assertNotIn("timeout", kwargs)  # Ordinary queries retain their default.
+                return real(command, **kwargs)
+            self.assertGreater(kwargs["timeout"], 30)
+            self.assertLessEqual(kwargs["timeout"], 180)
+            delayed = [sys.executable, "-c",
+                       "import os,sys,time;time.sleep(31);os.execv(sys.argv[1],sys.argv[1:])",
+                       *command]
+            result = real(delayed, **kwargs)
+            children.append(result)
+            # Expire only admission after the real slow child has joined.
+            offset[0] = 121
+            return result
+
+        with mock.patch.object(time, "monotonic", side_effect=lambda: clock() + offset[0]), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=delayed_removal):
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(len(children), 1)
+        self.assertGreater(children[0].proof["ended_monotonic"] - children[0].proof["started_monotonic"], 30)
+        self.assertTrue(children[0].proof["reaped"])
+        self.assertTrue(children[0].proof["group_absent"])
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertFalse(self.wt.exists())
+
+    def test_removal_budget_clips_to_owner_reap_and_readback_reserve(self):
+        admission, supervise = FINISH.finalized_admission, FINISH.safety().supervise
+        remaining = []
+
+        def limited_owner(*args):
+            result = admission(*args)
+            FINISH.safety().DEADLINE = time.monotonic() + 40
+            return result
+
+        def observe(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                remaining.append(kwargs["timeout"])
+            return supervise(command, **kwargs)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=limited_owner), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(len(remaining), 1)
+        self.assertGreater(remaining[0], 0)
+        self.assertLessEqual(remaining[0], 8)
+
+    def test_exhausted_removal_reserve_does_not_unlock_or_dispatch(self):
+        admission, native = FINISH.finalized_admission, FINISH.git
+        supervise = FINISH.safety().supervise
+
+        def exhausted_owner(*args):
+            result = admission(*args)
+            FINISH.safety().DEADLINE = time.monotonic() + 31
+            return result
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=exhausted_owner), \
+                mock.patch.object(FINISH, "git", wraps=native) as commands, \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-budget-exhausted")
+        self.assertFalse(any(call.args[1:3] == ("worktree", "unlock") for call in commands.call_args_list))
+        self.assertFalse(any("remove" in call.args[0] for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+
+    def test_budget_expiring_after_unlock_restores_lock_without_dispatch(self):
+        native, clock = FINISH.git, time.monotonic
+        offset = [0]
+        supervise = FINISH.safety().supervise
+
+        def expire_after_unlock(path, *args, **kwargs):
+            result = native(path, *args, **kwargs)
+            if args[:2] == ("worktree", "unlock"):
+                offset[0] = 181
+            return result
+
+        with mock.patch.object(time, "monotonic", side_effect=lambda: clock() + offset[0]), \
+                mock.patch.object(FINISH, "git", side_effect=expire_after_unlock), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-budget-exhausted")
+        self.assertFalse(any("remove" in call.args[0] for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+
+    def test_removal_timeout_reaps_child_restores_lock_and_refuses_retry(self):
+        supervise, attempts = FINISH.safety().supervise, []
+
+        def timeout_removal(command, **kwargs):
+            if "worktree" not in command or "remove" not in command:
+                return supervise(command, **kwargs)
+            result = supervise([sys.executable, "-c", "import time;time.sleep(10)"],
+                               **{**kwargs, "timeout": 0.05})
+            attempts.append(result)
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=timeout_removal):
+            self.assert_incomplete_locked(*self.remove())
+        self.assertEqual(len(attempts), 1)
+        self.assertIsNotNone(attempts[0].failure)
+        self.assertTrue(attempts[0].proof["reaped"])
+        self.assertTrue(attempts[0].proof["group_absent"])
+
     def test_superseded_reflog_history_needs_no_archive(self):
         (self.wt / "file").write_text("intermediate\n")
         git(self.wt, "commit", "-am", "intermediate")
@@ -1469,6 +1702,11 @@ class ManualHolderTests(unittest.TestCase):
                 with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
                     self.observe(b"p7\0\n" + record + b"\0\n")
 
+    def test_compact_discard_inode_alias_is_still_a_holder(self):
+        self.contents["discarded_inodes"] = [[9, 25]]
+        with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+            self.observe(b"p7\0\nf3\0D0x9\0i25\0n/external/package-alias\0\n")
+
     def test_warnings_nonzero_timeout_and_output_limit_remain_unknown(self):
         output = b"p7\0\nf3\0n/elsewhere/file\0\n"
         for kwargs in ({"errors": b"lsof: permission denied\n"}, {"code": 1},
@@ -1489,6 +1727,27 @@ class ManualHolderTests(unittest.TestCase):
             with self.subTest(output=output):
                 with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
                     self.observe(output)
+
+
+class SiblingRegistrationTests(unittest.TestCase):
+    def setUp(self):
+        self.before = [{"worktree": "/owner", "HEAD": "a", "branch": "refs/heads/main"},
+                       {"worktree": "/sibling", "HEAD": "b", "branch": "refs/heads/topic",
+                        "locked": "another-owner"}]
+
+    def test_other_heads_new_registrations_and_order_are_independent(self):
+        after = [dict(item, HEAD="new") for item in reversed(self.before)]
+        after.append({"worktree": "/new", "HEAD": "c", "detached": ""})
+        self.assertTrue(FINISH.siblings_preserved(self.before, after))
+
+    def test_loss_retarget_lock_change_prunable_and_duplicate_remain_unknown(self):
+        changes = [{"branch": "refs/heads/other"}, {"locked": "changed"}, {"prunable": "missing"}]
+        cases = [self.before[:1], self.before + [self.before[0]], [{"HEAD": "missing-path"}]]
+        cases.extend([self.before[0], {**self.before[1], **change}] for change in changes)
+        for after in cases:
+            with self.subTest(after=after):
+                self.assertFalse(FINISH.siblings_preserved(self.before, after))
+        self.assertFalse(FINISH.siblings_preserved(self.before + [self.before[0]], self.before))
 
 
 class FailureDiagnosticTests(unittest.TestCase):

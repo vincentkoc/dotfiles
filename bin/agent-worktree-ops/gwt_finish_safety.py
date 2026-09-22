@@ -9,6 +9,7 @@ import ctypes as C
 import errno
 import functools
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -26,7 +27,10 @@ class Retain(RuntimeError):
 
 LEAF_LIMIT = 8 * 1024 * 1024
 PASS_LIMIT = 512 * 1024 * 1024
+# A full source checkout can exceed the subprocess/admin transfer budget.
+SOURCE_LIMIT = 1024 * 1024 * 1024
 ENTRY_LIMIT = 131072
+DISCARDED_ENTRY_LIMIT = 262144
 DEADLINE = float("inf")
 
 
@@ -266,7 +270,7 @@ def tree_entries(raw):
     return result
 
 
-def inventory(snap, git, until, *, discard_ignored=()):
+def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False):
     index, index_id = read_file(Path(snap["gitdir"]) / "index", until)
     entries = index_entries(index)
     head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"))
@@ -280,10 +284,14 @@ def inventory(snap, git, until, *, discard_ignored=()):
     rows = {"": [*file_identity(Path(snap["path"]).lstat()),
                   disposable_metadata(snap["path"], until)]}
     used, dependency = 0, None
-    discarded_links = {}
-    stack = [Path(snap["path"])]
+    discarded_links, discarded_inodes = {}, set()
+    discarded_count = 0
+    discarded_roots = set(discard_ignored)
+    discarded_hashes = {root: hashlib.sha256() for root in discarded_roots}
+    discarded_counts = dict.fromkeys(discarded_roots, 0)
+    stack = [(Path(snap["path"]), None)]
     while stack:
-        directory = stack.pop()
+        directory, discarded_root = stack.pop()
         tick(until)
         before = directory.lstat()
         if before.st_dev != snap["path_id"][0]:
@@ -292,7 +300,10 @@ def inventory(snap, git, until, *, discard_ignored=()):
         with os.scandir(directory) as scan:
             for child in scan:
                 tick(until)
-                if len(rows) + len(children) >= ENTRY_LIMIT:
+                if compact_discarded and discarded_root is not None:
+                    if discarded_count + len(children) >= DISCARDED_ENTRY_LIMIT:
+                        raise Retain("discarded-inventory-entry-limit")
+                elif len(rows) + len(children) >= ENTRY_LIMIT:
                     raise Retain("inventory-entry-limit")
                 children.append(child)
         children.sort(key=lambda entry: entry.name)
@@ -301,15 +312,29 @@ def inventory(snap, git, until, *, discard_ignored=()):
             path = Path(child.path)
             name = str(path.relative_to(snap["path"]))
             details = path.lstat()
-            discarded = any(name == root or name.startswith(root + "/") for root in discard_ignored)
-            rows[name] = [*file_identity(details), [] if discarded else disposable_metadata(path, until)]
-            if discarded:
+            root = discarded_root if discarded_root is not None else (
+                name if name in discarded_roots else None)
+            if root is not None:
+                if compact_discarded:
+                    discarded_count += 1
+                    if discarded_count > DISCARDED_ENTRY_LIMIT:
+                        raise Retain("discarded-inventory-entry-limit")
+                    discarded_counts[root] += 1
+                    discarded_hashes[root].update(json.dumps(
+                        [name, file_identity(details)], separators=(",", ":")
+                    ).encode() + b"\n")
+                    if not stat.S_ISLNK(details.st_mode):
+                        discarded_inodes.add((details.st_dev, details.st_ino))
+                # Older live callers need every holder row during installation.
+                # Only the matching upgraded caller opts into compact evidence.
+                if not compact_discarded or name == root:
+                    rows[name] = [*file_identity(details), []]
                 # Finalized task artifacts are disposable, but their symlink
                 # targets and any nested repository or mount are not ours.
                 if ".git" in Path(name).parts or details.st_dev != snap["path_id"][0]:
                     raise Retain("discarded-artifact-contains-repository-or-mount")
                 if stat.S_ISDIR(details.st_mode):
-                    stack.append(path)
+                    stack.append((path, root))
                 elif stat.S_ISLNK(details.st_mode):
                     destination = str(path.resolve())
                     if not (destination == snap["path"] or destination.startswith(snap["path"] + "/")):
@@ -319,6 +344,7 @@ def inventory(snap, git, until, *, discard_ignored=()):
                 elif not stat.S_ISREG(details.st_mode):
                     raise Retain("discarded-artifact-has-live-or-unknown-file-type")
                 continue
+            rows[name] = [*file_identity(details), disposable_metadata(path, until)]
             if name == ".git":
                 data, _ = read_file(path, until, 4096)
                 if data != ("gitdir: " + snap["gitdir"] + "\n").encode():
@@ -326,7 +352,7 @@ def inventory(snap, git, until, *, discard_ignored=()):
             elif stat.S_ISDIR(details.st_mode):
                 if name not in expected_dirs:
                     raise Retain("unclassified-ignored-directory")
-                stack.append(path)
+                stack.append((path, None))
             elif name not in head:
                 if name != "node_modules" or not stat.S_ISLNK(details.st_mode):
                     raise Retain("unclassified-untracked-or-ignored-content")
@@ -345,11 +371,11 @@ def inventory(snap, git, until, *, discard_ignored=()):
                 elif stat.S_ISREG(details.st_mode) and mode in (0o100644, 0o100755):
                     if bool(details.st_mode & 0o111) != (mode == 0o100755):
                         raise Retain("working-mode-changed")
-                    data, _ = read_file(path, until, min(LEAF_LIMIT, PASS_LIMIT - used))
+                    data, _ = read_file(path, until, min(LEAF_LIMIT, SOURCE_LIMIT - used))
                 else:
                     raise Retain("working-type-changed")
                 used += len(data)
-                if used > PASS_LIMIT or hashlib.sha1(
+                if used > SOURCE_LIMIT or hashlib.sha1(
                         b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
                     raise Retain("working-bytes-changed-or-limit")
         if file_identity(directory.lstat()) != file_identity(before):
@@ -360,6 +386,12 @@ def inventory(snap, git, until, *, discard_ignored=()):
               "entries": rows, "dependency": dependency}
     if discard_ignored:
         result["discarded_links"] = discarded_links
+    if compact_discarded:
+        result["discarded_inodes"] = [list(item) for item in sorted(discarded_inodes)]
+        result["discarded_roots"] = {
+            root: {"count": discarded_counts[root], "sha256": discarded_hashes[root].hexdigest()}
+            for root in sorted(discarded_roots)
+        }
     return result
 
 

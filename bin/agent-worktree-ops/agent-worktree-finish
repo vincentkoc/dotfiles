@@ -944,7 +944,7 @@ def manual_holders(snap, contents, admin, until):
     executable = shutil.which("lsof")
     if executable is None:
         raise Retain("manual-closeout-needs-lsof")
-    paths, inodes = set(), set()
+    paths, inodes = set(), {tuple(item) for item in contents.get("discarded_inodes", ())}
     for key, entries in (("path", contents["entries"]), ("gitdir", admin)):
         for name, entry in entries.items():
             identity = entry if key == "path" else entry[0]
@@ -1021,7 +1021,7 @@ def finalized_admission(db, row, args, until):
     if set(args.discard_ignored) != ignored:
         raise Retain("ignored-content-needs-exact-disposable-roots")
     module = safety()
-    contents = module.inventory(snap, git, until, discard_ignored=ignored)
+    contents = module.inventory(snap, git, until, discard_ignored=ignored, compact_discarded=True)
     admin = module.admin_inventory(snap, git, until)
     manual_holders(snap, contents, admin, until)
     return {"snapshot": snap, "boundaries": [], "contents": contents, "admin": admin,
@@ -1043,7 +1043,7 @@ def remove_finalized(db, row, args):
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
         before = finalized_admission(db, row, args, until)
         return remove_with_intent(
-            db, row, item, before, until,
+            db, row, item, before,
             lambda: finalized_admission(db, row, args, until),
             {"mode": "explicit-finalized-task", "operator": owner_id(args),
              "discard_ignored": sorted(args.discard_ignored)},
@@ -1073,12 +1073,29 @@ def remove_released(db, row, item, qualification, args):
                 merged_checks(row)
                 return deletion_admission(row, item, qualification, until)
 
-            return remove_with_intent(db, row, item, before, until, recheck, qualification)
+            return remove_with_intent(db, row, item, before, recheck, qualification)
     finally:
         NATIVE_GIT = prior_git
 
 
-def remove_with_intent(db, row, item, before, until, recheck, qualification, *, restore_lock=False):
+def siblings_preserved(before, after):
+    def by_path(records):
+        result = {}
+        for record in records:
+            path = record.get("worktree")
+            if not path or path in result:
+                return None
+            result[path] = {key: value for key, value in record.items() if key != "HEAD"}
+        return result
+
+    old, new = by_path(before), by_path(after)
+    # Other sessions may commit or create a checkout while we remove ours.
+    # Existing registration identities must survive; their HEADs need not freeze.
+    return old is not None and new is not None and all(
+        new.get(path) == record for path, record in old.items())
+
+
+def remove_with_intent(db, row, item, before, recheck, qualification, *, restore_lock=False):
     module, snap = safety(), before["snapshot"]
     native_git = NATIVE_GIT or shutil.which("git")
     if native_git is None or any(
@@ -1105,6 +1122,11 @@ def remove_with_intent(db, row, item, before, until, recheck, qualification, *, 
         if any(final[key] != before[key] for key in (
                 "snapshot", "boundaries", "contents", "admin", "branch_reflog")):
             raise Retain("removal-preimage-changed")
+        # Recursive deletion needs its own phase, not admission's remaining time.
+        # Keep two seconds to reap and thirty for readbacks inside the owner clock.
+        removal_until = min(time.monotonic() + 180, module.DEADLINE - 32)
+        if time.monotonic() >= removal_until:
+            raise Retain("removal-budget-exhausted")
         git(snap["owner"], "worktree", "unlock", "--", snap["path"])
         command = [native_git, "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                    "-c", "maintenance.auto=false", "-c", "core.fsmonitor=false",
@@ -1113,16 +1135,18 @@ def remove_with_intent(db, row, item, before, until, recheck, qualification, *, 
         env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
                    GIT_ALLOW_PROTOCOL="", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
                    GIT_TERMINAL_PROMPT="0", LC_ALL="C")
-        result = module.supervise(command, cwd=snap["owner"], env=env,
-                                  timeout=max(0.001, min(30, until - time.monotonic())))
+        remaining = removal_until - time.monotonic()
+        if remaining <= 0:
+            raise Retain("removal-budget-exhausted")
+        result = module.supervise(command, cwd=snap["owner"], env=env, timeout=remaining)
         outcome["child"] = result.proof
         after = records(snap["owner"])
         outcome.update(path_absent=not os.path.lexists(snap["path"]),
                        admin_absent=not os.path.lexists(snap["gitdir"]),
                        registration_absent=not any(r.get("worktree") == snap["path"] for r in after),
-                       siblings_unchanged=after == siblings,
+                       siblings_unchanged=siblings_preserved(siblings, after),
                        branch_preserved=git(snap["owner"], "rev-parse", snap["branch"]) == snap["head"],
-                       branch_reflog_preserved=preserved_branch_reflog(snap, until) == before["branch_reflog"])
+                       branch_reflog_preserved=preserved_branch_reflog(snap, module.DEADLINE) == before["branch_reflog"])
         dependency = before["contents"]["dependency"]
         outcome["dependency_preserved"] = dependency is None or identity(
             dependency["destination"]) == dependency["identity"]

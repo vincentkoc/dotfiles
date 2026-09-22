@@ -382,6 +382,11 @@ replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
 
 Manual closeout filters one bounded native `lsof` scan to checkout/admin paths
 and file identities, with the operator's explicit finalized-task declaration.
+Explicitly discarded trees are fully scanned under a separate 262144-entry
+limit and the same 120-second admission deadline. Compact metadata digests and
+inode sets bind their preimage and detect holders through external hardlinks;
+symlink targets, nested repositories, mounts and live special files remain
+protected. The 131072-entry source/index limit is unchanged.
 It does not claim complete macOS mapping
 coverage or qualify unattended deletion. Automatic finish checks and host
 activation retain their stronger admission requirements below.
@@ -471,13 +476,20 @@ coverage retains. `AUTO_MERGE` is disposable only when it names the final HEAD
 tree. Editor-generated `COMMIT_EDITMSG` comments use Git's own cleanup and must
 reduce to the committed message; divergent drafts, unsupported cleanup modes
 and verbose/scissors residue retain.
-Reads are bounded to 8MiB per leaf, 512MiB of working bytes per pass and 131072
-filesystem entries including directories. Apply uses one release inventory and
+Reads are bounded to 8MiB per leaf, 1GiB of verified working bytes per pass and
+131072 source entries including directories. Subprocess and admin reads keep
+the separate 512MiB bound. Apply uses one release inventory and
 two admission inventories; it does not expand sparse checkouts or install tools.
 
 Before unlocking its unique native lock, the owner durably commits a removal
 intent. It then repeats admission and observes checkout, admin, registration,
-branch and sibling outcomes independently. Git can delete admin metadata even
+branch and sibling outcomes independently. Existing sibling
+registration paths, branches and lock fields must survive; unrelated HEAD
+advances, additional registrations and listing order do not invalidate removal.
+Admission keeps its 120s limit. Recursive deletion has a separate maximum 180s
+phase within the unchanged 238s owner deadline, reserving 2s to reap and 30s for
+postchecks. Ordinary subprocess queries retain their 30s limit.
+Git can delete admin metadata even
 when checkout deletion fails. A crash, timeout, partial result or failed
 readback therefore remains `unknown`/`incomplete`, never an automatic retry.
 Updated manual removal, prune, cleaner and quarantine consumers respect the

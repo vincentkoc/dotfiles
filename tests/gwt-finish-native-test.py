@@ -72,6 +72,12 @@ class ReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(NATIVE.Retain, "raw-index-invalid"):
             NATIVE.index_entries(b"DIRC" + b"\0" * 40)
 
+    def test_raw_index_limit_is_not_the_discarded_tree_limit(self):
+        import struct
+        body = b"DIRC" + struct.pack(">II", 2, NATIVE.ENTRY_LIMIT + 1)
+        with self.assertRaisesRegex(NATIVE.Retain, "raw-index-format-unsupported"):
+            NATIVE.index_entries(body + hashlib.sha1(body).digest())
+
     def test_xattr_names_only_allow_bound_provenance(self):
         def listing(data, error=0):
             def call(path, buffer, size, *options):
