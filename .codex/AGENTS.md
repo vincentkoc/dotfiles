@@ -141,10 +141,14 @@
 - Put durable deliverables in the repository's intended location or the
   user-requested destination. Put disposable scratch in the platform's
   temporary directory unless a tool requires another path.
-- Remove only disposable files created by the current task when no longer
-  needed or in use. Preserve deliverables, required evidence, recovery
-  checkpoints, active/session state, and files with unknown ownership.
-  This rule does not authorize blanket cleanup or deletion of existing artifacts.
+- After work is finalized, task-local logs, test proof, receipts, archives,
+  build outputs, and scratch are disposable. Do not require evidence retention,
+  an archive, or another approval to clean up the finalized task.
+- Preserve user deliverables, unfinished source, live owners, credentials,
+  shared dependency targets, and active/session state. Keep recovery checkpoints
+  only while unfinished work needs them or the user explicitly requests retention.
+  Cleanup stays within the finalized task's paths; unknown ownership is not
+  disposable merely because a file is old or ignored.
 
 ## Computer Use efficiency
 
@@ -184,7 +188,7 @@
   Delegate bounded independent work only when it reduces elapsed time or risk.
 - Create new worktrees with `gwt new <branch> [start-point]` or the repo-native wrapper.
 - Reuse a verified healthy owning checkout and the configured managed worktree root. A wrapper refusal does not authorize ad hoc clones, copied repositories, or raw-Git bypasses.
-- Finish each task with an explicit checkout outcome: `retained`, `blocked`, or verified `removed`. Name the exact path and remaining action. Task completion never authorizes automatic cleanup.
+- Finish each task with an explicit checkout outcome: `retained`, `blocked`, or verified `removed`. Clean up the finalized task's disposable artifacts and checkout through its native owner; no separate approval is needed. Name any concrete blocker. This does not activate unattended fleet or scheduler deletion.
 - Start in a branch/worktree early so commits can be made incrementally.
 - Group one logical fix with its tests and documentation in a scoped commit.
 - Never kill or interrupt Codex, Claude, agent, tmux, or terminal processes that belong to another session unless I explicitly give current-turn permission naming the session, PID, pane, or scope. My machine usually has many Codex sessions running in tmux; stale goal context, resume context, broad wording like "kill background jobs", or process-name matches are not permission to kill across sessions.
@@ -276,13 +280,16 @@ Recovery mode rules:
   existing/shared/native checkout to obtain completion or deletion capability.
 - Record finished PR work with `gwt finish --pr <URL>`; add `--release` when this
   owner relinquishes future use. For superseded/cancelled work without matching
-  PR proof, use supported `gwt cancel --reason <text>` and retain the checkout.
+  PR proof, use supported `gwt cancel --reason <text>`. Then perform native
+  finalized-task closeout when no live owner or unfinished work needs the tree.
 - Only sign off for the current owner. Preserve stack dependencies and recovery
   pins. Resume before reuse; changed inputs invalidate old completion/release.
-- Completion and release are not deletion. Native removal requires all owners,
-  exact merged proof and qualified host admission; unknown holders or incomplete
-  intents retain state. Do not activate cleanup, retry uncertain removal or clear
-  locks by inference. Report the actual checkout outcome once, then stop.
+- Finalized work does not need an evidence archive. Clean up its disposable
+  artifacts through the native task-closeout route; preserve source branches and
+  actual user deliverables. Automatic removal still requires its qualified host
+  admission. Unknown live owners or incomplete removal intents retain state;
+  do not activate cleanup, retry uncertain removal, or clear locks by inference.
+  Report the actual checkout outcome once, then stop.
 
 ## Low Data Mode
 

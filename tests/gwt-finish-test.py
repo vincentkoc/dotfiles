@@ -1215,6 +1215,282 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(self.wt.exists())
 
 
+class FinalizedRemovalTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    setUp = ReleaseTests.setUp
+    tearDown = ReleaseTests.tearDown
+
+    def remove(self, *roots):
+        args = ["--finalized"]
+        for root in roots:
+            args.extend(("--discard-ignored", root))
+        with mock.patch.object(FINISH, "manual_holders"):
+            return self.call("remove", *args)
+
+    def artifacts(self):
+        (self.repo / ".git/info/exclude").write_text(".crabbox\nnode_modules\n.env\n")
+        evidence = self.wt / ".crabbox"
+        evidence.mkdir()
+        (evidence / "proof.json").write_text('{"result":"passed"}\n')
+        (evidence / "test.log").write_text("finalized test output\n")
+        return evidence
+
+    def test_finalized_evidence_disposal_preserves_branch_and_skips_automatic_policy(self):
+        self.artifacts()
+        with mock.patch.object(FINISH, "qualified_policy") as policy, \
+                mock.patch.object(FINISH, "holder_qualification") as qualification:
+            code, rows = self.remove(".crabbox")
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(rows[0]["reason"], "finalized-task-worktree-removed")
+        self.assertFalse(self.wt.exists())
+        self.assertTrue(self.legacy.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        policy.assert_not_called()
+        qualification.assert_not_called()
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertIsNone(row["intent"])
+            self.assertIsNone(row["inventory"])
+            self.assertEqual(row["state"], "removed")
+
+    def test_finalized_device_renumbering_removes_artifacts_without_rebinding_ledger(self):
+        self.artifacts()
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            recorded = json.loads(row["identity"])
+            for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
+                recorded[key][0] += 1
+            encoded = json.dumps(recorded, sort_keys=True)
+            with db:
+                db.execute("UPDATE worktrees SET identity=? WHERE id=?", (encoded, row["id"]))
+            with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+                FINISH.revalidate(FINISH.get_row(db, self.wt))
+        self.assertEqual(self.remove(".crabbox")[0], 0)
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(FINISH.get_row(db, self.wt)["identity"], encoded)
+
+    def test_device_normalization_requires_all_inodes_bindings_and_bijective_mapping(self):
+        with FINISH.ledger(self.state) as db:
+            row = dict(FINISH.get_row(db, self.wt))
+        current = FINISH.revalidate(row)
+        recorded = json.loads(row["identity"])
+        identities = ("path_id", "gitdir_id", "common_id", "owner_id")
+        for key in identities:
+            recorded[key][0] += 1
+        row["identity"] = json.dumps(recorded)
+        changes = [{key: [current[key][0], current[key][1] + 1]} for key in identities]
+        changes += [{key: value + "-changed"} for key, value in current.items()
+                    if key not in (*identities, "head")]
+        changes.append({"gitdir_id": [current["gitdir_id"][0] + 2, current["gitdir_id"][1]]})
+        for change in changes:
+            with self.subTest(change=change), mock.patch.object(FINISH, "snapshot", return_value={**current, **change}):
+                with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+                    FINISH.revalidate(row, allow_device_renumbering=True)
+        recorded["gitdir_id"][0] += 1  # Distinct old devices cannot collapse onto one current device.
+        row["identity"] = json.dumps(recorded)
+        with mock.patch.object(FINISH, "snapshot", return_value=current):
+            with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+                FINISH.revalidate(row, allow_device_renumbering=True)
+        self.assertTrue(self.wt.exists())
+
+    def test_device_changes_during_manual_closeout_remain_strict(self):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            current = FINISH.revalidate(row)
+        changed = {**current, **{key: [current[key][0] + 1, current[key][1]]
+                               for key in ("path_id", "gitdir_id", "common_id", "owner_id")}}
+        with mock.patch.object(FINISH, "snapshot", side_effect=[current, changed]):
+            with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+                self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def test_unlisted_private_ignored_content_and_untracked_deliverables_refuse(self):
+        self.artifacts()
+        secret = self.wt / ".env"
+        secret.write_text("PRIVATE=fixture\n")
+        with self.assertRaisesRegex(FINISH.Retain, "exact-disposable-roots"):
+            self.remove(".crabbox")
+        self.assertTrue(secret.exists())
+        secret.unlink()
+        (self.wt / "deliverable.txt").write_text("keep\n")
+        with self.assertRaisesRegex(FINISH.Retain, "dirty-or-untracked"):
+            self.remove(".crabbox")
+        self.assertTrue(self.wt.exists())
+
+    def test_target_branch_writer_blocks_without_owning_checkout_files(self):
+        lock = self.repo / ".git/refs/heads/released-feature.lock"
+        lock.write_text(self.head + "\n")
+        with self.assertRaisesRegex(FINISH.Retain, "preserved-branch-lock"):
+            self.remove()
+        self.assertTrue(lock.exists())
+        self.assertTrue(self.wt.exists())
+
+    def test_external_and_dangling_symlinks_are_not_traversed(self):
+        self.artifacts()
+        donor = self.base / "donor"
+        donor.mkdir()
+        (donor / "keep").write_text("shared installation\n")
+        (self.wt / "node_modules").symlink_to(donor)
+        (self.wt / ".crabbox/expired-input").symlink_to(self.base / "missing")
+        self.assertEqual(self.remove(".crabbox", "node_modules")[0], 0)
+        self.assertEqual((donor / "keep").read_text(), "shared installation\n")
+
+    def test_live_holder_dirty_source_pin_and_wrong_marker_refuse(self):
+        with mock.patch.object(FINISH, "manual_holders", side_effect=FINISH.Retain("pending-departure")):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                self.call("remove", "--finalized")
+        (self.wt / "file").write_text("unfinished\n")
+        with self.assertRaisesRegex(FINISH.Retain, "dirty-or-untracked"):
+            self.remove()
+        git(self.wt, "restore", "file")
+        self.call("pin", "--reason", "unfinished dependency")
+        with self.assertRaisesRegex(FINISH.Retain, "recovery-pin"):
+            self.remove()
+        self.call("unpin", "--reason", "unfinished dependency")
+        git(self.repo, "worktree", "unlock", str(self.wt))
+        git(self.repo, "worktree", "lock", "--reason", "other owner", str(self.wt))
+        with self.assertRaisesRegex(FINISH.Retain, "registration-missing-or-locked"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+
+    def test_nested_repository_and_live_artifact_types_refuse(self):
+        evidence = self.artifacts()
+        (evidence / ".git").mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "repository-or-mount"):
+            self.remove(".crabbox")
+        (evidence / ".git").rmdir()
+        os.mkfifo(evidence / "live-pipe")
+        with self.assertRaisesRegex(FINISH.Retain, "live-or-unknown-file-type"):
+            self.remove(".crabbox")
+
+    def test_failed_native_removal_restores_ownership_and_cannot_be_replayed(self):
+        real = FINISH.safety().supervise
+        attempts = []
+
+        def fail_removal(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                attempts.append(command)
+                result = subprocess.CompletedProcess(command, 1, b"", b"fixture refusal")
+                result.proof = {"returncode": 1, "reaped": True}
+                result.failure = None
+                return result
+            return real(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=fail_removal):
+            code, rows = self.remove()
+            self.assertEqual(code, 1)
+            self.assertEqual(rows[0]["checkout"], "unknown")
+            self.assertEqual(rows[0]["retirement_state"], "incomplete")
+            self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+            with self.assertRaisesRegex(FINISH.Retain, "intent"):
+                self.remove()
+        self.assertEqual(len(attempts), 1)
+
+    def test_superseded_reflog_history_needs_no_archive(self):
+        (self.wt / "file").write_text("intermediate\n")
+        git(self.wt, "commit", "-am", "intermediate")
+        old = git(self.wt, "rev-parse", "HEAD")
+        (self.wt / "file").write_text("final\n")
+        git(self.wt, "commit", "--amend", "-am", "final")
+        final = git(self.wt, "rev-parse", "HEAD")
+        self.assertEqual(git(self.wt, "rev-list", old, "--not", "--all"), old)
+        self.assertEqual(self.remove()[0], 0)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), final)
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_wrapper_finalized_closeout_runs_native_holder_free_removal(self):
+        self.artifacts()
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = 'source "$1"; cd "$2"; gwt rm "$3" --finalized --discard-ignored .crabbox'
+        command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"),
+                   str(self.repo), str(self.wt)]
+        rejected = subprocess.run(
+            ["zsh", "-c", script + " --force", *command[3:]], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertTrue(self.wt.exists())
+        result = subprocess.run(command, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)[0]["checkout"], "removed")
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertFalse(self.wt.exists())
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_native_holder_scan_detects_an_open_file(self):
+        snap = {"path": str(self.wt), "gitdir": str(self.admin)}
+        entry = list(FINISH.safety().file_identity((self.wt / "file").lstat()))
+        with (self.wt / "file").open():
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                FINISH.manual_holders(snap, {"entries": {"file": entry}}, {}, float("inf"))
+
+
+class ManualHolderTests(unittest.TestCase):
+    def setUp(self):
+        self.snap = {"path": "/fixture/worktree", "gitdir": "/fixture/admin"}
+        self.contents = {"entries": {"file": [9, 22, FINISH.stat.S_IFREG],
+                                     "node_modules": [9, 24, FINISH.stat.S_IFLNK]}}
+        self.admin = {"index": [[9, 23, FINISH.stat.S_IFREG], None]}
+
+    def observe(self, output, *, errors=b"", code=0, failure=None):
+        result = types.SimpleNamespace(stdout=output, stderr=errors, returncode=code, failure=failure)
+        with mock.patch.object(FINISH.shutil, "which", return_value="/usr/sbin/lsof"), \
+                mock.patch.object(FINISH.safety(), "supervise", return_value=result) as child:
+            try:
+                FINISH.manual_holders(self.snap, self.contents, self.admin, float("inf"))
+            finally:
+                self.assertEqual(child.call_count, 1)
+                self.assertEqual(child.call_args.args[0], ["/usr/sbin/lsof", "-nP", "+w", "-F0pfnDi"])
+                self.assertEqual(child.call_args.kwargs["limit"], 32 * 1024 * 1024)
+
+    def test_no_matching_holders_accepts_optional_fields_and_preserves_symlink_targets(self):
+        self.observe(b"p7\0\nf3\0D0x9\0i24\0n/shared/dependencies\0\n"
+                     b"f4\0n/fixture/worktree-other/file\0\nf5\0nTCP localhost:80\0\n"
+                     b"f6\0D0x8\0i22\0n/elsewhere/name\nwith-newline\0\nf7\0n\0\n")
+
+    def test_inode_aliases_checkout_and_admin_cwd_and_fd_names_block(self):
+        for record in (b"f3\0D0x9\0i22\0n/elsewhere/hardlink",
+                       b"f4\0D0x9\0i23\0n/elsewhere/admin-alias",
+                       b"fcwd\0n/fixture/worktree", b"fcwd\0n/fixture/admin",
+                       b"f5\0n/fixture/worktree/file", b"f6\0n/fixture/admin/index",
+                       b"f7\0n/fixture/worktree/nested/name\nwith-newline"):
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                    self.observe(b"p7\0\n" + record + b"\0\n")
+
+    def test_warnings_nonzero_timeout_and_output_limit_remain_unknown(self):
+        output = b"p7\0\nf3\0n/elsewhere/file\0\n"
+        for kwargs in ({"errors": b"lsof: permission denied\n"}, {"code": 1},
+                       {"failure": TimeoutError()},
+                       {"failure": FINISH.Retain("child-output-limit")}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(FINISH.Retain, "unknown|lsof-failed"):
+                    self.observe(output, **kwargs)
+
+    def test_empty_truncated_duplicate_malformed_and_unframed_records_refuse(self):
+        for output in (b"", b"p7\0\n", b"f3\0n/elsewhere\0\n", b"p7\0\nf3\0n/elsewhere",
+                       b"p7\0\nf3\0n/elsewhere\0n/duplicate\0\n",
+                       b"p7\0\nf3\0Dno-device\0i22\0\n",
+                       b"p7\0\nf3\0D0x9\0iinvalid\0\n",
+                       b"p7\0\nn/elsewhere\0f3\0\n", b"p7\0\nf3\0xunexpected\0\n",
+                       b"p7\0\nf3\0p8\0\n", b"pbad\0\nf3\0\n",
+                       b"p7\0\nf3\0n/elsewhere\0\n\n"):
+            with self.subTest(output=output):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(output)
+
+
 class FailureDiagnosticTests(unittest.TestCase):
     def call_cli(self, error=None, action=None):
         output, errors = io.StringIO(), io.StringIO()

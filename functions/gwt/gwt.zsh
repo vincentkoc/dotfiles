@@ -1250,6 +1250,8 @@ Commands:
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
+  gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...]
+                                    Manually close one finalized managed task
   gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...] [--release]
                                     Complete; --release explicitly signs off checkout use
   gwt release [--worktree <path>]   Release this already-completed owner
@@ -1769,16 +1771,38 @@ gwt() {
         rm|remove)
             local target=""
             local force_remove=false
+            local finalized_remove=false
+            local -a discard_args
             local arg target_path main_worktree repo_root current_path worktree_status
 
             _gwt_require_worktree_storage || return
 
-            for arg in "$@"; do
-                case "$arg" in
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
                     --force|-f) force_remove=true ;;
-                    *) target="$arg" ;;
+                    --finalized) finalized_remove=true ;;
+                    --discard-ignored)
+                        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
+                        discard_args+=(--discard-ignored "$2")
+                        shift
+                        ;;
+                    -*) echo "gwt: unknown removal option: $1" >&2; return 1 ;;
+                    *)
+                        [[ -z "$target" ]] || { echo "gwt: remove one worktree at a time" >&2; return 1; }
+                        target="$1"
+                        ;;
                 esac
+                shift
             done
+            if $finalized_remove; then
+                [[ "$force_remove" == false && "$target" == /* ]] || {
+                    echo "gwt: finalized removal needs one absolute path and cannot use --force" >&2
+                    return 1
+                }
+            elif (( ${#discard_args} )); then
+                echo "gwt: --discard-ignored requires --finalized" >&2
+                return 1
+            fi
 
             if [[ -z "$target" ]]; then
                 echo "Usage: gwt rm <branch|name|path> [--force]"
@@ -1795,7 +1819,9 @@ gwt() {
                 echo "gwt: refusing path not registered to this repository: $target_path" >&2
                 return 1
             }
-            _gwt_finish_tool guard --worktree "$target_path" || return
+            if ! $finalized_remove; then
+                _gwt_finish_tool guard --worktree "$target_path" || return
+            fi
             main_worktree=$(_gwt_git_probe worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
             main_worktree=$(cd "$main_worktree" 2>/dev/null && pwd -P) || return 1
             if [[ "$target_path" == "$main_worktree" ]]; then
@@ -1807,6 +1833,12 @@ gwt() {
             if [[ "$current_path/" == "$target_path/"* ]]; then
                 echo "gwt: cannot remove the worktree you are currently in"
                 return 1
+            fi
+
+            if $finalized_remove; then
+                _gwt_finish_tool remove --worktree "$target_path" --finalized "${discard_args[@]}" || return
+                _gwt_tmux_sync_context
+                return 0
             fi
 
             if ! $force_remove; then

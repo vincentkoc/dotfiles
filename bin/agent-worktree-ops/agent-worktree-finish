@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import sqlite3
 import stat
@@ -210,9 +211,18 @@ def immutable(snap):
 
 
 @diagnostic_phase("worktree-identity")
-def revalidate(row):
+def revalidate(row, *, allow_device_renumbering=False):
     recorded = json.loads(row["identity"])
     current = snapshot(row["path"], recorded["root"], recorded.get("lock_reason"))
+    if allow_device_renumbering:
+        devices = {}
+        for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
+            old, new = recorded[key], current[key]
+            if old[1] != new[1] or devices.setdefault(old[0], new[0]) != new[0]:
+                raise Retain("worktree-identity-changed")
+            recorded[key] = new
+        if len(set(devices.values())) != len(devices):
+            raise Retain("worktree-identity-changed")
     if immutable(current) != recorded:
         raise Retain("worktree-identity-changed")
     return current
@@ -930,6 +940,116 @@ def holder_qualification():
     }
 
 
+def manual_holders(snap, contents, admin, until):
+    executable = shutil.which("lsof")
+    if executable is None:
+        raise Retain("manual-closeout-needs-lsof")
+    paths, inodes = set(), set()
+    for key, entries in (("path", contents["entries"]), ("gitdir", admin)):
+        for name, entry in entries.items():
+            identity = entry if key == "path" else entry[0]
+            # Unlinking a symlink does not delete the external target held by
+            # another process. Never traverse it for this checkout's scan.
+            if not stat.S_ISLNK(identity[2]):
+                paths.add(os.fsencode(Path(snap[key]) / name))
+                inodes.add(tuple(identity[:2]))
+    roots = tuple(os.fsencode(snap[key]) for key in ("path", "gitdir"))
+    safety().tick(until)
+    # One native scan avoids repeating libproc's entire process walk for each
+    # filename batch. Inode matching also catches holders through hardlink aliases.
+    observed = run([executable, "-nP", "+w", "-F0pfnDi"], limit=32 * 1024 * 1024)
+    if observed.stderr or not observed.stdout.endswith(b"\0\n"):
+        raise Retain("manual-holder-visibility-unknown")
+    processes = files = 0
+    held = False
+    # lsof -F0 terminates fields with NUL, then each process/file set with LF.
+    # Split sets first so embedded newlines in names remain ordinary filename bytes.
+    for record in observed.stdout[:-2].split(b"\0\n"):
+        safety().tick(until)
+        fields = {}
+        for field in record.split(b"\0"):
+            key, value = field[:1], field[1:]
+            if (key not in (b"p", b"f", b"D", b"i", b"n") or key in fields
+                    or (not value and key != b"n")):
+                raise Retain("manual-holder-visibility-unknown")
+            fields[key] = value
+        if record.startswith(b"p"):
+            if set(fields) != {b"p"} or not re.fullmatch(rb"[1-9][0-9]*", fields[b"p"]):
+                raise Retain("manual-holder-visibility-unknown")
+            processes += 1
+            continue
+        if not processes or not record.startswith(b"f") or b"p" in fields:
+            raise Retain("manual-holder-visibility-unknown")
+        files += 1
+        device, inode, name = fields.get(b"D"), fields.get(b"i"), fields.get(b"n", b"")
+        if ((device is not None and not re.fullmatch(rb"0x[0-9a-fA-F]+", device))
+                or (inode is not None and not re.fullmatch(rb"[0-9]+", inode))):
+            raise Retain("manual-holder-visibility-unknown")
+        # Non-files (sockets, pipes, etc.) may legitimately omit device/inode.
+        held |= (device is not None and inode is not None
+                 and (int(device, 16), int(inode)) in inodes)
+        held |= name in paths or any(name == root or name.startswith(root + b"/") for root in roots)
+    if not processes or not files:
+        raise Retain("manual-holder-visibility-unknown")
+    if held:
+        raise Retain("pending-departure")
+
+
+def finalized_admission(db, row, args, until):
+    snap = revalidate(row)
+    if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
+        raise Retain("recovery-pin-present")
+    if os.path.lexists(Path(snap["common"]) / (snap["branch"] + ".lock")):
+        raise Retain("preserved-branch-lock-present")
+    for key in ("common", "gitdir"):
+        directory = Path(snap[key])
+        if any(directory.glob("*.lock")):
+            raise Retain("git-lock-present")
+        if any((directory / name).exists() for name in (
+                "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG",
+                "rebase-merge", "rebase-apply", "sequencer")):
+            raise Retain("git-operation-in-progress")
+    keys = git(snap["path"], "config", "--includes", "--null", "--name-only", "--list")
+    if any(key.lower().startswith("filter.") for key in keys.split("\0")):
+        raise Retain("git-conversion-filter-unqualified")
+    if git(snap["path"], "status", "--porcelain=v1", "-z",
+           "--untracked-files=all", "--ignore-submodules=none"):
+        raise Retain("dirty-or-untracked-worktree")
+    ignored = {name.rstrip("/") for name in git(
+        snap["path"], "ls-files", "--others", "--ignored", "--exclude-standard",
+        "--directory", "-z").split("\0") if name}
+    if set(args.discard_ignored) != ignored:
+        raise Retain("ignored-content-needs-exact-disposable-roots")
+    module = safety()
+    contents = module.inventory(snap, git, until, discard_ignored=ignored)
+    admin = module.admin_inventory(snap, git, until)
+    manual_holders(snap, contents, admin, until)
+    return {"snapshot": snap, "boundaries": [], "contents": contents, "admin": admin,
+            "branch_reflog": preserved_branch_reflog(snap, until)}
+
+
+def remove_finalized(db, row, args):
+    item = require_open_retirement(db, row)
+    snap = revalidate(row, allow_device_renumbering=True)
+    if "lock_reason" not in snap:
+        raise Retain("manual-closeout-needs-native-enrollment")
+    # Device numbers can change between enrollment and explicit closeout.
+    # Bind every subsequent check to this current identity without rebinding the
+    # durable enrollment or relaxing automatic lifecycle qualification.
+    row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True)}
+    storage_guard()
+    module = safety()
+    until = time.monotonic() + 120
+    with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
+        before = finalized_admission(db, row, args, until)
+        return remove_with_intent(
+            db, row, item, before, until,
+            lambda: finalized_admission(db, row, args, until),
+            {"mode": "explicit-finalized-task", "operator": owner_id(args),
+             "discard_ignored": sorted(args.discard_ignored)},
+            restore_lock=True)
+
+
 def remove_released(db, row, item, qualification, args):
     capability = holder_qualification()
     if capability["qualified"] is not True or capability["mapping_coverage"] != "complete":
@@ -946,72 +1066,100 @@ def remove_released(db, row, item, qualification, args):
             completion_checks(db, row, local=False)
             all_released(db, row, item)
             before = deletion_admission(row, item, qualification, until)
-            snap = before["snapshot"]
-            if any(inside(physical(path), snap["path"]) or inside(physical(path), snap["gitdir"])
-                   for path in (__file__, module.__file__, NATIVE_GIT)):
-                raise Retain("cleanup-executable-inside-deletion-domain")
-            registrations = records(snap["owner"])
-            siblings = [r for r in registrations if r.get("worktree") != snap["path"]]
-            if git(snap["owner"], "rev-parse", snap["branch"]) != row["finish_head"]:
-                raise Retain("preserved-branch-changed")
-            intent = {"id": str(uuid.uuid4()), "generation": item["generation"],
-                      "head": row["finish_head"], "branch": snap["branch"],
-                      "before": before, "siblings": siblings, "qualification": qualification}
-            # Commit before unlock. A crash from this point cannot become an
-            # ordinary eligible row, including when an older client writes SQL.
-            with db:
-                changed = db.execute("UPDATE retirement SET state='intent', intent=? "
-                                     "WHERE worktree_id=? AND generation=? AND state='enrolled'",
-                                     (json.dumps(intent, sort_keys=True), row["id"], item["generation"])).rowcount
-                if changed != 1:
-                    raise Retain("release-generation-changed")
-            outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None}
-            try:
-                # Final checks retain the owned lock. Only this exact marker is
-                # unlocked; native Git then performs one non-force removal.
+
+            def recheck():
                 if qualified_policy(args, row) != qualification:
                     raise Retain("activation-proof-changed")
                 merged_checks(row)
-                final = deletion_admission(row, item, qualification, until)
-                if any(final[key] != before[key] for key in (
-                        "snapshot", "boundaries", "contents", "admin", "branch_reflog")):
-                    raise Retain("removal-preimage-changed")
-                git(snap["owner"], "worktree", "unlock", "--", snap["path"])
-                command = [NATIVE_GIT, "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
-                           "-c", "maintenance.auto=false", "-c", "core.fsmonitor=false",
-                           "-C", snap["owner"], "worktree", "remove", "--", snap["path"]]
-                env = {k: v for k, v in os.environ.items()
-                       if not k.startswith(("GIT_", "DYLD_", "LD_"))}
-                env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
-                           GIT_ALLOW_PROTOCOL="", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
-                           GIT_TERMINAL_PROMPT="0", LC_ALL="C")
-                result = module.supervise(command, cwd=snap["owner"], env=env,
-                                          timeout=max(0.001, min(30, until - time.monotonic())))
-                outcome["child"] = result.proof
-                after = records(snap["owner"])
-                outcome.update(path_absent=not os.path.lexists(snap["path"]),
-                               admin_absent=not os.path.lexists(snap["gitdir"]),
-                               registration_absent=not any(r.get("worktree") == snap["path"] for r in after),
-                               siblings_unchanged=after == siblings,
-                               branch_preserved=git(snap["owner"], "rev-parse", snap["branch"]) == row["finish_head"],
-                               branch_reflog_preserved=preserved_branch_reflog(snap, until) == before["branch_reflog"])
-                dependency = before["contents"]["dependency"]
-                outcome["dependency_preserved"] = dependency is None or identity(
-                    dependency["destination"]) == dependency["identity"]
-                if (not result.failure and result.returncode == 0
-                        and all(outcome[key] for key in ("path_absent", "admin_absent",
-                        "registration_absent", "siblings_unchanged", "branch_preserved",
-                        "branch_reflog_preserved", "dependency_preserved"))):
-                    outcome.update(checkout="removed", reason="released-merged-worktree-removed")
-            except (Retain, OSError, ValueError) as error:
-                outcome["reason"] = str(error) if isinstance(error, Retain) else "removal-readback-unknown"
-            with db:
-                db.execute("UPDATE retirement SET state=?, result=? WHERE worktree_id=?",
-                           ("removed" if outcome["checkout"] == "removed" else "incomplete",
-                            json.dumps(outcome, sort_keys=True), row["id"]))
-            return outcome["reason"]
+                return deletion_admission(row, item, qualification, until)
+
+            return remove_with_intent(db, row, item, before, until, recheck, qualification)
     finally:
         NATIVE_GIT = prior_git
+
+
+def remove_with_intent(db, row, item, before, until, recheck, qualification, *, restore_lock=False):
+    module, snap = safety(), before["snapshot"]
+    native_git = NATIVE_GIT or shutil.which("git")
+    if native_git is None or any(
+            inside(physical(path), snap["path"]) or inside(physical(path), snap["gitdir"])
+            for path in (__file__, module.__file__, native_git)):
+        raise Retain("cleanup-executable-inside-deletion-domain")
+    siblings = [r for r in records(snap["owner"]) if r.get("worktree") != snap["path"]]
+    if git(snap["owner"], "rev-parse", snap["branch"]) != snap["head"]:
+        raise Retain("preserved-branch-changed")
+    intent = {"id": str(uuid.uuid4()), "generation": item["generation"],
+              "head": snap["head"], "branch": snap["branch"], "before": before,
+              "siblings": siblings, "qualification": qualification}
+    # Keep ownership durable before unlocking. A partial native result must
+    # never become a retryable ordinary checkout, even for older consumers.
+    with db:
+        changed = db.execute("UPDATE retirement SET state='intent', intent=? "
+                             "WHERE worktree_id=? AND generation=? AND state='enrolled'",
+                             (json.dumps(intent, sort_keys=True), row["id"], item["generation"])).rowcount
+        if changed != 1:
+            raise Retain("release-generation-changed")
+    outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None}
+    try:
+        final = recheck()
+        if any(final[key] != before[key] for key in (
+                "snapshot", "boundaries", "contents", "admin", "branch_reflog")):
+            raise Retain("removal-preimage-changed")
+        git(snap["owner"], "worktree", "unlock", "--", snap["path"])
+        command = [native_git, "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
+                   "-c", "maintenance.auto=false", "-c", "core.fsmonitor=false",
+                   "-C", snap["owner"], "worktree", "remove", "--", snap["path"]]
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "DYLD_", "LD_"))}
+        env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
+                   GIT_ALLOW_PROTOCOL="", GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
+                   GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+        result = module.supervise(command, cwd=snap["owner"], env=env,
+                                  timeout=max(0.001, min(30, until - time.monotonic())))
+        outcome["child"] = result.proof
+        after = records(snap["owner"])
+        outcome.update(path_absent=not os.path.lexists(snap["path"]),
+                       admin_absent=not os.path.lexists(snap["gitdir"]),
+                       registration_absent=not any(r.get("worktree") == snap["path"] for r in after),
+                       siblings_unchanged=after == siblings,
+                       branch_preserved=git(snap["owner"], "rev-parse", snap["branch"]) == snap["head"],
+                       branch_reflog_preserved=preserved_branch_reflog(snap, until) == before["branch_reflog"])
+        dependency = before["contents"]["dependency"]
+        outcome["dependency_preserved"] = dependency is None or identity(
+            dependency["destination"]) == dependency["identity"]
+        outcome["discarded_link_targets_preserved"] = all(
+            (list(module.file_identity(os.stat(path))[:2]) if os.path.exists(path) else None) == expected
+            for path, expected in before["contents"].get("discarded_links", {}).items())
+        if not result.failure and result.returncode == 0 and all(
+                outcome[key] for key in ("path_absent", "admin_absent", "registration_absent",
+                "siblings_unchanged", "branch_preserved", "branch_reflog_preserved",
+                "dependency_preserved", "discarded_link_targets_preserved")):
+            outcome.update(checkout="removed", reason=("finalized-task-worktree-removed" if restore_lock
+                                                       else "released-merged-worktree-removed"))
+    except (Retain, OSError, ValueError) as error:
+        outcome["reason"] = str(error) if isinstance(error, Retain) else "removal-readback-unknown"
+    if restore_lock and outcome["checkout"] != "removed":
+        try:
+            outcome["native_lock_preserved"] = snapshot(
+                snap["path"], snap["root"], snap["lock_reason"]) == snap
+        except (Retain, OSError, ValueError):
+            outcome["native_lock_preserved"] = False
+            try:
+                current = snapshot(snap["path"], snap["root"])
+                if {**current, "lock_reason": snap["lock_reason"]} == snap:
+                    git(snap["owner"], "worktree", "lock", "--reason", snap["lock_reason"], "--", snap["path"])
+                    outcome["native_lock_preserved"] = snapshot(
+                        snap["path"], snap["root"], snap["lock_reason"]) == snap
+            except (Retain, OSError, ValueError):
+                pass
+    with db:
+        db.execute("UPDATE retirement SET state=?, result=? WHERE worktree_id=?",
+                   ("removed" if outcome["checkout"] == "removed" else "incomplete",
+                    json.dumps(outcome, sort_keys=True), row["id"]))
+        if restore_lock and outcome["checkout"] == "removed":
+            # Once manual closeout is verified, only the terminal tombstone is
+            # needed. Retain detailed admission data solely for incomplete work.
+            db.execute("UPDATE retirement SET intent=NULL, inventory=NULL WHERE worktree_id=?", (row["id"],))
+    return outcome["reason"]
 
 
 def evaluate_release(db, row, args, *, apply):
@@ -1127,10 +1275,15 @@ def parser():
     result.add_argument("--apply", action="store_true")
     result.add_argument("--release", action="store_true")
     result.add_argument("--new-token")
+    result.add_argument("--finalized", action="store_true")
+    result.add_argument("--discard-ignored", action="append", default=[])
     return result
 
 
 def process_one(db, row, args):
+    if args.command == "remove":
+        reason = remove_finalized(db, row, args)
+        return summary(db, row, reason=reason)
     if args.command in ("finish", "release", "resume", "pin", "unpin"):
         storage_guard()
         ensure_owner_schema(db)
@@ -1211,7 +1364,18 @@ def main(argv=None):
         print(uuid.uuid4())
         return 0
     if args.command == "remove":
-        raise Retain("use-explicit-owner-release")
+        if not args.finalized:
+            raise Retain("use-explicit-owner-release")
+        if (args.pr or args.target or args.wait_for or args.all or args.apply
+                or args.release or args.policy or args.new_token or args.if_enrolled):
+            raise Retain("finalized-removal-is-one-explicit-worktree")
+        if len(args.discard_ignored) != len(set(args.discard_ignored)) or any(
+                not value or value.startswith("/") or any(
+                    part in ("", ".", "..", ".git") for part in value.split("/"))
+                for value in args.discard_ignored):
+            raise Retain("discard-ignored-needs-literal-relative-roots")
+    elif args.finalized or args.discard_ignored:
+        raise Retain("finalized-options-require-remove")
     if args.apply and args.command != "check":
         raise Retain("apply-is-only-valid-for-check")
     if args.policy and args.command not in ("finish", "release", "check"):
@@ -1313,7 +1477,7 @@ def main(argv=None):
             raise
         result = process_one(db, row, args)
         print(json.dumps([result], sort_keys=True))
-        return 0
+        return 1 if args.command == "remove" and result["checkout"] != "removed" else 0
 
 
 def cli(argv=None):

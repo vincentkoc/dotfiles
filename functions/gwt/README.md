@@ -99,8 +99,8 @@ invalidates it if HEAD changed. Resume or changed completion/proof clears it,
 including updates from an older client. An unfinished removal intent refuses
 cancellation. A repeated identical cancellation is a no-op.
 
-Report the checkout as retained and finish the task. Physical retirement is a
-separate, ownership-qualified operation; cancellation never authorizes it.
+Once the task is finalized, use the manual closeout route below to retire the
+checkout. Cancellation alone does not run deletion or clear another owner's pin.
 
 ## Scheduled Git maintenance
 
@@ -348,6 +348,45 @@ an active WAL shared memory file, so headless zero-touch audits also require the
 private scheduler's physical-path write-denial sandbox.
 
 ## Managed worktree completion
+
+Finalized tasks do not retain local validation evidence by default. Their logs,
+test proof, receipts, archives, build outputs and scratch are disposable; no
+archive or extra retention approval is required. Preserve user deliverables,
+unfinished source, live owners, credentials and shared dependency targets.
+Recovery checkpoints remain necessary only for unfinished work or an explicit
+retention request. Historical evidence alone must not keep a finalized task's
+checkout alive.
+
+### Manual finalized-task closeout
+
+For a finalized managed task, run the following from its owning checkout:
+
+```sh
+gwt rm /absolute/path/to/task --finalized \
+  --discard-ignored .crabbox --discard-ignored node_modules
+```
+
+Use the task's actual ignored roots; these names are examples. The arguments
+declare those exact ignored roots to be disposable task artifacts. Every other
+ignored root blocks removal, as do dirty or untracked source, submodules, pins,
+in-progress Git operations, unrelated locks and live file/CWD holders. Symlink
+targets are never traversed or removed. This is routine task closeout, with no
+evidence archive or additional permission step.
+
+This route consumes only a matching native managed enrollment. It records a
+removal intent, rechecks the tree, unlocks only its own enrollment marker and
+runs one non-force Git removal. It preserves the branch, shared owner and
+external dependencies. A partial failure holds the intent and restores the
+matching native lock when its original registration still exists; it never
+replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
+
+Manual closeout filters one bounded native `lsof` scan to checkout/admin paths
+and file identities, with the operator's explicit finalized-task declaration.
+It does not claim complete macOS mapping
+coverage or qualify unattended deletion. Automatic finish checks and host
+activation retain their stronger admission requirements below.
+
+### Completion and unattended removal
 
 `gwt finish` records completion. `gwt finish --release` additionally signs off
 this owner's future checkout use. Release is deliberate; generic Codex Stop is

@@ -266,10 +266,12 @@ def tree_entries(raw):
     return result
 
 
-def inventory(snap, git, until):
+def inventory(snap, git, until, *, discard_ignored=()):
     index, index_id = read_file(Path(snap["gitdir"]) / "index", until)
     entries = index_entries(index)
     head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"))
+    if any(name == root or name.startswith(root + "/") for name in head for root in discard_ignored):
+        raise Retain("discarded-artifact-overlaps-tracked-source")
     if {name: entry[:2] for name, entry in entries.items()} != head:
         raise Retain("staged-or-index-only-changes")
     expected_dirs = {""}
@@ -278,6 +280,7 @@ def inventory(snap, git, until):
     rows = {"": [*file_identity(Path(snap["path"]).lstat()),
                   disposable_metadata(snap["path"], until)]}
     used, dependency = 0, None
+    discarded_links = {}
     stack = [Path(snap["path"])]
     while stack:
         directory = stack.pop()
@@ -298,7 +301,24 @@ def inventory(snap, git, until):
             path = Path(child.path)
             name = str(path.relative_to(snap["path"]))
             details = path.lstat()
-            rows[name] = [*file_identity(details), disposable_metadata(path, until)]
+            discarded = any(name == root or name.startswith(root + "/") for root in discard_ignored)
+            rows[name] = [*file_identity(details), [] if discarded else disposable_metadata(path, until)]
+            if discarded:
+                # Finalized task artifacts are disposable, but their symlink
+                # targets and any nested repository or mount are not ours.
+                if ".git" in Path(name).parts or details.st_dev != snap["path_id"][0]:
+                    raise Retain("discarded-artifact-contains-repository-or-mount")
+                if stat.S_ISDIR(details.st_mode):
+                    stack.append(path)
+                elif stat.S_ISLNK(details.st_mode):
+                    destination = str(path.resolve())
+                    if not (destination == snap["path"] or destination.startswith(snap["path"] + "/")):
+                        discarded_links[destination] = (
+                            list(file_identity(os.stat(destination))[:2])
+                            if os.path.exists(destination) else None)
+                elif not stat.S_ISREG(details.st_mode):
+                    raise Retain("discarded-artifact-has-live-or-unknown-file-type")
+                continue
             if name == ".git":
                 data, _ = read_file(path, until, 4096)
                 if data != ("gitdir: " + snap["gitdir"] + "\n").encode():
@@ -336,8 +356,11 @@ def inventory(snap, git, until):
             raise Retain("inventory-directory-changed")
     if not {name for name, entry in entries.items() if not entry[2]}.issubset(rows):
         raise Retain("working-file-missing")
-    return {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest(),
-            "entries": rows, "dependency": dependency}
+    result = {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest(),
+              "entries": rows, "dependency": dependency}
+    if discard_ignored:
+        result["discarded_links"] = discarded_links
+    return result
 
 
 def fields(kind, names):
