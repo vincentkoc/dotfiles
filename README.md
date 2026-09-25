@@ -241,6 +241,16 @@ report the locked values, including `ssh:expose_auth_info=no` and
 `ssh:user_auth_file=absent`. Override the interface or ports with the documented
 `DOTFILES_SERVER_*` environment variables.
 
+## Tmux Menus
+
+Pane and window mouse menus ask for confirmation before kill or respawn.
+Confirmation keeps the original pane/window ID; changing focus cannot redirect
+it, and a removed target is never replaced by the current pane or window.
+Right-click uses the clicked pane, socket and client. SSH/mosh panes still
+receive the mouse event. Alt-right-click keeps the native copy/search menu.
+`tt pane-menu-bind /absolute/socket` installs only the ordinary pane mouse binding
+on an existing server; it does not reload configuration or change CX SAVE bindings.
+
 ## Structure
 
 ```

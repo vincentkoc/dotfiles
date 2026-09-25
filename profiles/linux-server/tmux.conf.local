@@ -76,7 +76,49 @@ unbind -n C-l
 bind + resize-pane -Z
 bind R run-shell -b 'python3 "$HOME/.dotfiles/bin/tmux-pane-repair" request #{pane_id} #{q:client_name}'
 bind N display-popup -t "#{pane_id}" -T "note: #{session_name}:#{window_index}.#{pane_index}" -x "#{pane_left}" -y "#{pane_top}" -w 84 -h 24 -E "\"\$HOME/.local/bin/tt\" note edit #{pane_id}"
-bind -T root MouseDown3Pane if-shell -F "#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}" "select-pane -t = \\; send-keys -M" "run-shell -b '\"\$HOME/.local/bin/tt\" pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{client_name}'"
+bind -T root MouseDown3Pane if-shell -t = -F "#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}" "select-pane -t = \\; send-keys -M" "run-shell -b -t = 'TMUX=#{q:socket_path},0,0 \"\$HOME/.local/bin/tt\" pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{q:client_name}'"
+bind -T root M-MouseDown3Pane display-menu -T "#[align=centre]#{pane_index} (#{pane_id})" -t = -x M -y M \
+    "#{?#{m/r:(copy|view)-mode,#{pane_mode}},Go To Top,}" < { send-keys -X history-top } \
+    "#{?#{m/r:(copy|view)-mode,#{pane_mode}},Go To Bottom,}" > { send-keys -X history-bottom } \
+    "" \
+    "#{?mouse_word,Search For #[underscore]#{=/9/...:mouse_word},}" C-r { if-shell -F "#{?#{m/r:(copy|view)-mode,#{pane_mode}},0,1}" "copy-mode -t=" ; send-keys -X -t = search-backward -- "#{q:mouse_word}" } \
+    "#{?mouse_word,Type #[underscore]#{=/9/...:mouse_word},}" C-y { copy-mode -q ; send-keys -l "#{q:mouse_word}" } \
+    "#{?mouse_word,Copy #[underscore]#{=/9/...:mouse_word},}" c { copy-mode -q ; set-buffer "#{q:mouse_word}" } \
+    "#{?mouse_line,Copy Line,}" l { copy-mode -q ; set-buffer "#{q:mouse_line}" } \
+    "" \
+    "#{?mouse_hyperlink,Type #[underscore]#{=/9/...:mouse_hyperlink},}" C-h { copy-mode -q ; send-keys -l "#{q:mouse_hyperlink}" } \
+    "#{?mouse_hyperlink,Copy #[underscore]#{=/9/...:mouse_hyperlink},}" h { copy-mode -q ; set-buffer "#{q:mouse_hyperlink}" } \
+    "" "Horizontal Split" h { split-window -h } "Vertical Split" v { split-window -v } \
+    "" \
+    "#{?#{>:#{window_panes},1},,-}Swap Up" u { swap-pane -U } \
+    "#{?#{>:#{window_panes},1},,-}Swap Down" d { swap-pane -D } \
+    "#{?pane_marked_set,,-}Swap Marked" s { swap-pane } \
+    "" Kill X "confirm-before -t #{q:client_name} -p 'Kill pane #{pane_id}? (y/n)' 'kill-pane -t #{pane_id}'" \
+    Respawn R "confirm-before -t #{q:client_name} -p 'Respawn pane #{pane_id}? (y/n)' 'respawn-pane -k -t #{pane_id}'" \
+    "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
+    "#{?#{>:#{window_panes},1},,-}#{?window_zoomed_flag,Unzoom,Zoom}" z { resize-pane -Z }
+bind -T root MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{window_name}" -t = -x W -y W \
+    "#{?#{>:#{session_windows},1},,-}Swap Left" l { swap-window -t :-1 } \
+    "#{?#{>:#{session_windows},1},,-}Swap Right" r { swap-window -t :+1 } \
+    "#{?pane_marked_set,,-}Swap Marked" s { swap-window } \
+    "" Kill X "confirm-before -t #{q:client_name} -p 'Kill window #{window_id}? (y/n)' 'kill-window -t #{window_id}'" \
+    Respawn R "confirm-before -t #{q:client_name} -p 'Respawn window #{window_id}? (y/n)' 'respawn-window -k -t #{window_id}'" \
+    "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
+    Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
+    "" \
+    "New After" w { new-window -a } \
+    "New At End" W { new-window }
+bind -T root M-MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{window_name}" -t = -x W -y W \
+    "#{?#{>:#{session_windows},1},,-}Swap Left" l { swap-window -t :-1 } \
+    "#{?#{>:#{session_windows},1},,-}Swap Right" r { swap-window -t :+1 } \
+    "#{?pane_marked_set,,-}Swap Marked" s { swap-window } \
+    "" Kill X "confirm-before -t #{q:client_name} -p 'Kill window #{window_id}? (y/n)' 'kill-window -t #{window_id}'" \
+    Respawn R "confirm-before -t #{q:client_name} -p 'Respawn window #{window_id}? (y/n)' 'respawn-window -k -t #{window_id}'" \
+    "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
+    Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
+    "" \
+    "New After" w { new-window -a } \
+    "New At End" W { new-window }
 bind -T root MouseDown1StatusRight run-shell -b "\"\$HOME/.local/bin/tt\" codex-snapshot --quiet && /usr/bin/tmux display-message 'codex snapshot saved'"
 bind -T root MouseDown3StatusRight display-menu -T "CX SAVE" -x M -y S \
     "Save now" s "run-shell -b '\"\$HOME/.local/bin/tt\" codex-snapshot --quiet && /usr/bin/tmux display-message \"codex snapshot saved\"'" \
