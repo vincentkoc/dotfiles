@@ -388,6 +388,34 @@ retain the checkout as `manual-holder-visibility-unknown`, even with empty
 stderr. Numeric descriptors and fileports can omit identities for non-files
 such as sockets. Unknown visibility never means holder-free; do not exclude an
 unreadable process or suppress warnings to make closeout pass.
+
+On Linux, if the invoking account cannot inspect all holders, manual `--finalized`
+closeout can opt into `--sudo-holder-scan`. Only the read-only holder scan uses
+`sudo -n -u '#0' -- <resolved-lsof> -nP +w -F0pfnDi`. The resolved `sudo` and
+`lsof` executables and their parent directories must be root-owned and not
+group- or world-writable. Root-owned symlinks are checked through their target
+paths. Existing non-interactive sudo authorization for this exact command is
+required; the helper never prompts, refreshes authorization, accepts extra
+arguments or environment settings, or falls back to an unprivileged scan.
+The sudo monitor retains the caller's existing controlling terminal, with
+standard input still connected to `/dev/null`. It creates no terminal and
+does not guarantee that credentials from another terminal or a headless
+context are usable.
+Git, lifecycle state and deletion remain under the original invoking account.
+The flag is rejected outside manual finalized closeout and on non-Linux
+platforms before launch. Without it, the existing unprivileged scan is unchanged.
+
+Warnings, incomplete visibility and actual holders still block removal.
+On interruption, scan timeout or output-limit failure, the helper sends
+`SIGTERM` to its task-owned sudo monitor and waits at most two seconds.
+It does not kill the monitor's group or claim that monitor exit proves
+privileged-child cleanup.
+Termination remains unknown and closeout stops, even if the monitor exits.
+An interruption still propagates after the bounded monitor cleanup.
+Do not retry until the privileged scan's termination has been independently
+resolved. This option does not activate unattended removal.
+The scan also respects the current admission deadline.
+
 Explicitly discarded trees are fully scanned under a separate 262144-entry
 limit and the same 120-second admission deadline. Compact metadata digests and
 inode sets bind their preimage and detect holders through external hardlinks;
