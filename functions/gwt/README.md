@@ -382,6 +382,12 @@ replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
 
 Manual closeout filters one bounded native `lsof` scan to checkout/admin paths
 and file identities, with the operator's explicit finalized-task declaration.
+An exit-zero scan is not sufficient: error or unrecognized descriptors, missing
+device/inode identity for CWD, text or mapping records, and inline access errors
+retain the checkout as `manual-holder-visibility-unknown`, even with empty
+stderr. Numeric descriptors and fileports can omit identities for non-files
+such as sockets. Unknown visibility never means holder-free; do not exclude an
+unreadable process or suppress warnings to make closeout pass.
 Explicitly discarded trees are fully scanned under a separate 262144-entry
 limit and the same 120-second admission deadline. Compact metadata digests and
 inode sets bind their preimage and detect holders through external hardlinks;

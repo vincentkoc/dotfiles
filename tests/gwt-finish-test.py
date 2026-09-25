@@ -1737,6 +1737,38 @@ class FinalizedRemovalTests(unittest.TestCase):
                 self.remove()
         self.assertEqual(len(attempts), 1)
 
+    def test_inline_holder_errors_refuse_before_intent_unlock_or_removal(self):
+        native = FINISH.safety().supervise
+        lookup = shutil.which
+        lock = (self.admin / "locked").read_bytes()
+        for record in (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)",
+                       b"fcwd\0n/proc/7/cwd (readlink: Permission denied)",
+                       b"fmem\0n/proc/7/maps (fopen: Permission denied)"):
+            def observe(command, **kwargs):
+                if command[0] == "/fixture/lsof":
+                    return types.SimpleNamespace(
+                        stdout=b"p7\0\n" + record + b"\0\n", stderr=b"",
+                        returncode=0, failure=None)
+                return native(command, **kwargs)
+
+            with self.subTest(record=record), \
+                    mock.patch.object(FINISH.shutil, "which", side_effect=lambda name:
+                                      "/fixture/lsof" if name == "lsof" else lookup(name)), \
+                    mock.patch.object(FINISH.safety(), "supervise", side_effect=observe) as child:
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.call("remove", "--finalized")
+                self.assertFalse(any("worktree" in call.args[0]
+                                     and ("remove" in call.args[0] or "unlock" in call.args[0])
+                                     for call in child.call_args_list))
+            self.assertEqual((self.admin / "locked").read_bytes(), lock)
+            self.assertEqual((self.wt / "file").read_text(), "original\n")
+            self.assertTrue(self.legacy.exists())
+            self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
+
     def assert_incomplete_locked(self, code, rows):
         self.assertEqual(code, 1, rows)
         self.assertEqual(rows[0]["checkout"], "unknown")
@@ -1916,10 +1948,56 @@ class ManualHolderTests(unittest.TestCase):
                      b"f4\0n/fixture/worktree-other/file\0\nf5\0nTCP localhost:80\0\n"
                      b"f6\0D0x8\0i22\0n/elsewhere/name\nwith-newline\0\nf7\0n\0\n")
 
+    def test_known_descriptors_with_file_identity_and_optional_names_are_accepted(self):
+        for descriptor in (b"0", b"12345", b"*001", b"cwd", b"rtd", b"twd", b"txt", b"ltx",
+                           b"mem", b"mmap", b"DEL", b"ctty", b"jld", b"pd",
+                           b"m86", b"v86", b"fp.", b"L12", b"M1a", b"R12", b"tr"):
+            with self.subTest(descriptor=descriptor):
+                self.observe(b"p7\0\nf" + descriptor + b"\0D0x8\0i22\0\n")
+
+    def test_numeric_and_fileport_non_files_can_omit_identity(self):
+        for descriptor in (b"0", b"*001", b"fp."):
+            with self.subTest(descriptor=descriptor):
+                self.observe(b"p7\0\nf" + descriptor + b"\0n\0\n")
+
+    def test_zero_exit_error_and_unrecognized_descriptors_remain_unknown(self):
+        for descriptor in (b"NOFD", b"err", b"unk", b"unknown", b"arbitrary", b"-1",
+                           b"3u", b"*01", b"fp.3", b"Mxx", b"Rxx"):
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\nf3\0D0x8\0i22\0n/elsewhere\0\n"
+                                 b"f" + descriptor + b"\0D0x8\0i23\0n/elsewhere\0\n")
+
+    def test_zero_exit_inline_visibility_errors_remain_unknown(self):
+        for record in (
+                b"fNOFD\0n/proc/7/fd (opendir: Permission denied)",
+                b"fcwd\0n/proc/7/cwd (readlink: Permission denied)",
+                b"frtd\0n/proc/7/root (readlink: Permission denied)",
+                b"ftxt\0n/proc/7/exe (readlink: Permission denied)",
+                b"fmem\0n/proc/7/maps (fopen: Permission denied)",
+                b"f3\0n/proc/7/fd/3 (readlink: Permission denied)",
+                b"f3\0n/elsewhere (stat: Permission denied)",
+                b"fmem\0D0x8\0i22\0n/elsewhere (stat: Permission denied)"):
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\n" + record + b"\0\n")
+
+    def test_name_only_or_partial_pseudo_descriptor_identity_remains_unknown(self):
+        for descriptor in (b"cwd", b"rtd", b"txt", b"mem", b"DEL", b"M1a", b"tr"):
+            for identity in (b"", b"D0x8\0", b"i22\0"):
+                with self.subTest(descriptor=descriptor, identity=identity):
+                    with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                        self.observe(b"p7\0\nf" + descriptor + b"\0" + identity
+                                     + b"n/elsewhere\0\n")
+
     def test_inode_aliases_checkout_and_admin_cwd_and_fd_names_block(self):
         for record in (b"f3\0D0x9\0i22\0n/elsewhere/hardlink",
                        b"f4\0D0x9\0i23\0n/elsewhere/admin-alias",
-                       b"fcwd\0n/fixture/worktree", b"fcwd\0n/fixture/admin",
+                       b"fcwd\0D0x8\0i22\0n/fixture/worktree",
+                       b"fcwd\0D0x8\0i23\0n/fixture/admin",
+                       b"fmem\0D0x9\0i22\0n/elsewhere/mapping-alias",
+                       b"ftr\0D0x9\0i22\0n/elsewhere/trace-alias",
+                       b"ftxt\0D0x8\0i22\0n/fixture/worktree/file",
                        b"f5\0n/fixture/worktree/file", b"f6\0n/fixture/admin/index",
                        b"f7\0n/fixture/worktree/nested/name\nwith-newline"):
             with self.subTest(record=record):
