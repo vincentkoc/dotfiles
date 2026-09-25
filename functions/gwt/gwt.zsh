@@ -1258,6 +1258,8 @@ Commands:
   gwt cancel --reason <text> [--worktree <path>]
                                     End this owner's work without PR proof or removal
   gwt resume [--worktree <path>]    Resume an enrolled worktree
+  gwt resume --acknowledge-device-renumbering [--worktree <path>]
+                                    Recorded-owner acknowledgment for resume only
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all]         Show local completion state

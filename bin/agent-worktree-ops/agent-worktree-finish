@@ -548,6 +548,20 @@ def claim(db, row, owner):
         )
 
 
+def acknowledged_resume_row(db, row, owner):
+    require_open_retirement(db, row)
+    if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=?",
+                      (row["id"], owner)).fetchone():
+        raise Retain("device-acknowledgement-requires-recorded-owner")
+    if not json.loads(row["identity"]).get("lock_reason", "").startswith("gwt-finish.v2:"):
+        raise Retain("device-acknowledgement-requires-native-enrollment")
+    current = revalidate(row, allow_device_renumbering=True)
+    # Same-owner resume acknowledges device numbering, not volume continuity.
+    # Claim strictly rechecks this transient identity under the lifecycle lock;
+    # durable enrollment and every completion/removal check keep their contract.
+    return {**row, "identity": json.dumps(immutable(current), sort_keys=True)}
+
+
 @diagnostic_phase("github-pr-proof")
 def pr(url):
     match = PR_URL.fullmatch(url)
@@ -1301,6 +1315,7 @@ def parser():
     result.add_argument("--new-token")
     result.add_argument("--finalized", action="store_true")
     result.add_argument("--discard-ignored", action="append", default=[])
+    result.add_argument("--acknowledge-device-renumbering", action="store_true")
     return result
 
 
@@ -1319,7 +1334,9 @@ def process_one(db, row, args):
     elif args.command == "finish":
         finish(db, row, args)
     elif args.command == "resume":
-        claim(db, row, owner_id(args))
+        who = owner_id(args)
+        resumed = acknowledged_resume_row(db, row, who) if args.acknowledge_device_renumbering else row
+        claim(db, resumed, who)
     elif args.command in ("pin", "unpin"):
         if not args.reason or len(args.reason) > 500:
             raise Retain("pin-reason-required")
@@ -1378,6 +1395,12 @@ def process_one(db, row, args):
 def main(argv=None):
     args = parser().parse_args(argv)
     safety().DEADLINE = time.monotonic() + 238
+    if args.acknowledge_device_renumbering and (
+            args.command != "resume" or args.pr is not None or args.target is not None
+            or args.wait_for or args.reason is not None or args.policy is not None
+            or args.if_enrolled or args.all or args.apply or args.release
+            or args.new_token is not None or args.finalized or args.discard_ignored):
+        raise Retain("device-acknowledgement-requires-one-explicit-resume")
     if args.command == "cancel":
         if (args.pr or args.target or args.wait_for or args.all or args.apply
                 or args.release or args.policy or args.new_token or args.if_enrolled):
@@ -1510,6 +1533,10 @@ def cli(argv=None):
     except (Retain, OSError, sqlite3.Error, ValueError) as error:
         reason = str(error) if isinstance(error, Retain) else "state-or-proof-unavailable"
         diagnostic = "" if isinstance(error, Retain) else " " + failure_diagnostic(error)
+        if reason == "worktree-identity-changed":
+            diagnostic += ("; inspect recorded/current identities first; device-only renumbering "
+                           "can be acknowledged by the recorded owner with gwt resume "
+                           "--acknowledge-device-renumbering --worktree <path> (resume only)")
         print(f"gwt finish: stopped; inspect finish-status for checkout outcome ({reason}){diagnostic}", file=sys.stderr)
         return 1
 
