@@ -1354,6 +1354,230 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertTrue(new.exists())
         self.assertNotEqual(git(self.legacy, "rev-parse", "HEAD"), self.head)
 
+    def test_real_sibling_detach_and_branch_checkout_preserve_physical_identity(self):
+        native = FINISH.safety().supervise
+        transitions = []
+
+        def concurrent_checkout(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                git(self.legacy, "checkout", "--detach")
+                transitions.append(FINISH.records(str(self.repo)))
+                git(self.legacy, "checkout", "-b", "sibling-progress")
+                transitions.append(FINISH.records(str(self.repo)))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=concurrent_checkout):
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(len(transitions), 2)
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertTrue(result["siblings_preserved"])
+        self.assertTrue(result["siblings_after"])
+        self.assertTrue(result["sibling_identities_after"])
+        self.assertEqual(result["sibling_comparison"]["changes"][0]["kind"], "operational")
+
+    def test_known_absent_sibling_root_preserves_locked_native_registration(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        git(self.repo, "worktree", "lock", "--reason", "other owner", str(self.legacy))
+        admin_id = FINISH.identity(admin)
+        lock = (admin / "locked").read_bytes()
+        shutil.rmtree(self.legacy)
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        initial = FINISH.sibling_identity(snap, str(self.legacy), time.monotonic() + 30)
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.legacy.exists())
+        self.assertEqual(FINISH.identity(admin), admin_id)
+        self.assertEqual((admin / "locked").read_bytes(), lock)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            final = json.loads(item["result"])["sibling_identities_after"][str(self.legacy)]
+        self.assertEqual(initial, final)
+        self.assertEqual(initial["path_absence"]["errno"], errno.ENOENT)
+        self.assertEqual(initial["pointer_absence"]["errno"], errno.ENOENT)
+
+    def test_known_absent_sibling_pointer_preserves_existing_root_and_admin(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        root_id, admin_id = FINISH.identity(self.legacy), FINISH.identity(admin)
+        (self.legacy / ".git").unlink()
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(FINISH.identity(self.legacy), root_id)
+        self.assertEqual(FINISH.identity(admin), admin_id)
+        self.assertFalse((self.legacy / ".git").exists())
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        saved = result["sibling_identities_after"][str(self.legacy)]
+        self.assertNotIn("path_absence", saved)
+        self.assertEqual(saved["pointer_absence"]["parent_id"], root_id)
+        self.assertTrue(result["siblings_preserved"])
+
+    def test_known_absent_sibling_admin_index_is_shared_once_per_pass(self):
+        second = self.root / "second-absent"
+        git(self.repo, "worktree", "add", "-b", "second", str(second))
+        shutil.rmtree(self.legacy)
+        (second / ".git").unlink()
+        with mock.patch.object(FINISH, "sibling_admin_index", wraps=FINISH.sibling_admin_index) as index:
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(index.call_count, 2)
+
+    def test_known_absent_sibling_appearance_is_not_preservation(self):
+        original = self.base / "absent-source"
+        self.legacy.rename(original)
+        native = FINISH.safety().supervise
+
+        def reappear(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                original.rename(self.legacy)
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=reappear):
+            code, rows = self.remove()
+        self.assertEqual(code, 1, rows)
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertFalse(result["siblings_preserved"])
+        self.assertIn({"path": str(self.legacy), "kind": "identity"}, result["sibling_comparison"]["changes"])
+
+    def test_new_sibling_pointer_loss_is_not_known_prior_absence(self):
+        native = FINISH.safety().supervise
+
+        def lose_pointer(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                (self.legacy / ".git").unlink()
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=lose_pointer):
+            code, rows = self.remove()
+        self.assertEqual(code, 1, rows)
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertFalse(result["siblings_preserved"])
+
+    def test_known_absent_sibling_rejects_ambiguous_admin_and_permission_unknown(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        pointer = self.legacy / ".git"
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        read = FINISH.safety().read_file
+
+        def denied(path, *args):
+            if path == pointer:
+                raise PermissionError(errno.EACCES, "fixture permission")
+            return read(path, *args)
+
+        with mock.patch.object(FINISH.safety(), "read_file", side_effect=denied):
+            with self.assertRaises(PermissionError):
+                FINISH.sibling_identity(snap, str(self.legacy), time.monotonic() + 30)
+        pointer.unlink()
+        shutil.copytree(admin, admin.parent / "ambiguous")
+        with self.assertRaisesRegex(FINISH.Retain, "registration-ambiguous"):
+            self.remove()
+        with FINISH.ledger(self.state) as db:
+            self.assertIsNone(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+        self.assertTrue(self.wt.exists())
+
+    def test_known_absent_sibling_parent_admin_and_backlink_drift_are_not_preserved(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        pointer = self.legacy / ".git"
+        pointer.unlink()
+
+        def capture():
+            return FINISH.sibling_identity(snap, str(self.legacy), time.monotonic() + 30)
+
+        initial = capture()
+        prior = self.base / "prior-admin"
+        admin.rename(prior)
+        shutil.copytree(prior, admin)
+        self.assertNotEqual(capture(), initial)
+        (admin / "commondir").write_text(str(self.base) + "\n")
+        with self.assertRaisesRegex(FINISH.Retain, "backlink-changed"):
+            capture()
+        (admin / "commondir").write_bytes((prior / "commondir").read_bytes())
+        original_root = self.base / "prior-root"
+        self.legacy.rename(original_root)
+        self.legacy.symlink_to(original_root, target_is_directory=True)
+        with self.assertRaises(FINISH.Retain):
+            capture()
+
+    def test_known_absent_sibling_parent_replacement_and_lock_replacement_change_identity(self):
+        parent = self.root / "nested"
+        parent.mkdir()
+        sibling = parent / "absent"
+        git(self.repo, "worktree", "add", "--lock", "--reason", "other owner", "-b", "absent", str(sibling))
+        admin = Path(git(sibling, "rev-parse", "--absolute-git-dir"))
+        shutil.rmtree(sibling)
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+
+        def capture():
+            return FINISH.sibling_identity(snap, str(sibling), time.monotonic() + 30)
+
+        initial = capture()
+        parent.rename(self.base / "prior-parent")
+        parent.mkdir()
+        changed_parent = capture()
+        self.assertNotEqual(changed_parent, initial)
+        lock = admin / "locked"
+        lock.rename(admin / "prior-lock")
+        lock.write_bytes((admin / "prior-lock").read_bytes())
+        self.assertNotEqual(capture(), changed_parent)
+
+    def test_sibling_physical_replacement_retains_unknown_with_actual_delta(self):
+        native = FINISH.safety().supervise
+
+        def replace_sibling(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                prior = self.base / "preserved-sibling"
+                self.legacy.rename(prior)
+                shutil.copytree(prior, self.legacy)
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=replace_sibling):
+            code, rows = self.remove()
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0]["checkout"], "unknown")
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            intent, result = json.loads(item["intent"]), json.loads(item["result"])
+        self.assertFalse(result["siblings_preserved"])
+        self.assertIn({"path": str(self.legacy), "kind": "identity"}, result["sibling_comparison"]["changes"])
+        self.assertNotEqual(intent["sibling_identities"][str(self.legacy)]["path_id"],
+                            result["sibling_identities_after"][str(self.legacy)]["path_id"])
+
+    def test_failed_sibling_readback_keeps_successful_child_and_target_absence_facts(self):
+        capture = FINISH.sibling_identities
+        calls = []
+
+        def unavailable_after(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                raise FINISH.Retain("sibling-readback-unavailable")
+            return capture(*args)
+
+        with mock.patch.object(FINISH, "sibling_identities", side_effect=unavailable_after):
+            code, rows = self.remove()
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0]["checkout"], "unknown")
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertEqual(result["reason"], "sibling-readback-unavailable")
+        self.assertEqual(result["child"]["returncode"], 0)
+        self.assertTrue(all(result[key] for key in ("path_absent", "admin_absent", "registration_absent")))
+        self.assertTrue(result["siblings_after"])
+        self.assertNotIn("sibling_identities_after", result)
+
     def test_finalized_evidence_disposal_preserves_branch_and_skips_automatic_policy(self):
         self.artifacts()
         with mock.patch.object(FINISH, "qualified_policy") as policy, \
@@ -1740,14 +1964,319 @@ class SiblingRegistrationTests(unittest.TestCase):
         after.append({"worktree": "/new", "HEAD": "c", "detached": ""})
         self.assertTrue(FINISH.siblings_preserved(self.before, after))
 
-    def test_loss_retarget_lock_change_prunable_and_duplicate_remain_unknown(self):
-        changes = [{"branch": "refs/heads/other"}, {"locked": "changed"}, {"prunable": "missing"}]
+    def test_branch_and_detached_transitions_are_reported_operationally(self):
+        after = [self.before[0], {"worktree": "/sibling", "HEAD": "new", "detached": "",
+                                  "locked": "another-owner"}]
+        report = FINISH.sibling_comparison(self.before, after)
+        self.assertTrue(report["preserved"])
+        self.assertEqual(report["changes"][0]["kind"], "operational")
+        self.assertEqual(set(report["changes"][0]["fields"]), {"HEAD", "branch", "detached"})
+
+    def test_loss_lock_change_prunable_and_duplicate_remain_unknown(self):
+        changes = [{"locked": "changed"}, {"prunable": "missing"}]
         cases = [self.before[:1], self.before + [self.before[0]], [{"HEAD": "missing-path"}]]
         cases.extend([self.before[0], {**self.before[1], **change}] for change in changes)
         for after in cases:
             with self.subTest(after=after):
                 self.assertFalse(FINISH.siblings_preserved(self.before, after))
         self.assertFalse(FINISH.siblings_preserved(self.before + [self.before[0]], self.before))
+
+    def test_replaced_or_rebound_identity_is_not_an_operational_change(self):
+        identities = {row["worktree"]: {"path_id": [1, number], "gitdir": row["worktree"] + "/.git"}
+                      for number, row in enumerate(self.before)}
+        for changed in ({"path_id": [1, 99]}, {"gitdir": "/different/admin"}):
+            after_ids = {**identities, "/sibling": {**identities["/sibling"], **changed}}
+            report = FINISH.sibling_comparison(self.before, self.before, identities, after_ids)
+            self.assertFalse(report["preserved"])
+            self.assertEqual(report["changes"], [{"path": "/sibling", "kind": "identity"}])
+
+
+class ReconciliationTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    setUp = ReleaseTests.setUp
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+
+    def legacy_removal(self):
+        native = FINISH.safety().supervise
+        comparison = FINISH.sibling_comparison
+
+        def concurrent_checkout(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                git(self.legacy, "checkout", "--detach")
+            return native(command, **kwargs)
+
+        def old_comparator(*args):
+            report = comparison(*args)
+            if report["changes"]:
+                report["preserved"] = False
+            return report
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=concurrent_checkout), \
+                mock.patch.object(FINISH, "sibling_comparison", side_effect=old_comparator):
+            self.assertEqual(self.remove()[1][0]["checkout"], "unknown")
+        # Model the exact older wire format: the native child really ran, but
+        # that producer retained only a Boolean, never after rows or inode proof.
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            item = FINISH.retirement(db, row)
+            intent, result = json.loads(item["intent"]), json.loads(item["result"])
+            intent.pop("sibling_identities")
+            result["siblings_unchanged"] = result.pop("siblings_preserved")
+            for key in ("siblings_after", "sibling_identities_after", "sibling_comparison"):
+                result.pop(key)
+            with db:
+                db.execute("UPDATE retirement SET intent=?, result=? WHERE worktree_id=?",
+                           (json.dumps(intent, sort_keys=True), json.dumps(result, sort_keys=True), row["id"]))
+        self.refresh_binding()
+
+    def refresh_binding(self):
+        with FINISH.ledger(self.state) as db:
+            self.original = dict(FINISH.retirement(db, FINISH.get_row(db, self.wt)))
+        self.arguments = ["--intent-id", json.loads(self.original["intent"])["id"],
+                          "--generation", str(self.original["generation"])]
+        for name in ("intent", "result"):
+            self.arguments += ["--" + name + "-sha256", hashlib.sha256(self.original[name].encode()).hexdigest()]
+
+    def reconcile(self, *extra):
+        with mock.patch.object(FINISH, "manual_holders"):
+            return self.call("reconcile", *self.arguments, *extra)
+
+    def assert_receipts_unchanged(self):
+        with FINISH.ledger(self.state) as db:
+            current = dict(FINISH.retirement(db, FINISH.get_row(db, self.wt)))
+        self.assertEqual(current, self.original)
+
+    def test_reconciles_current_absence_without_rewriting_original_failure_or_retrying(self):
+        self.call("cancel", "--reason", "incorporated preparation")
+        self.legacy_removal()
+        native = FINISH.safety().supervise
+
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and any(a in command for a in ("remove", "unlock", "prune")))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+            code, rows = self.reconcile()
+            again = self.reconcile()[1][0]
+        self.assertEqual(code, 0)
+        result = rows[0]
+        self.assertEqual(result, again)
+        self.assertEqual(result["checkout"], "unknown")
+        self.assertEqual(result["retirement_state"], "incomplete")
+        self.assertEqual(result["current_disposition"], "reconciled-target-removed")
+        fact = result["reconciliation"]
+        self.assertEqual(fact["checkout"], "removed")
+        self.assertEqual(fact["historical_sibling_preservation"], "unresolved")
+        self.assertEqual(fact["historical_sibling_identities"], "unavailable")
+        self.assertEqual(fact["historical_after_snapshot"], "unavailable")
+        self.assertEqual(fact["sibling_comparison"]["changes"][0]["kind"], "operational")
+        self.assert_receipts_unchanged()
+        status = self.call("status")[1][0]
+        self.assertEqual(status["reconciliation"], fact)
+        self.assertEqual(status["current_disposition"], "reconciled-target-removed")
+        self.assertEqual(status["reason"], "target-removal-reconciled-original-proof-retained")
+        with mock.patch.object(FINISH, "remove_with_intent") as remove:
+            for command, options in (("status", ("--all",)), ("check", ()),
+                                     ("check", ("--all",)), ("check", ("--apply",))):
+                with self.subTest(command=command, options=options):
+                    records = self.call(command, *options)[1]
+                    projected = next(record for record in records if record["worktree"] == str(self.wt))
+                    self.assertEqual(projected["current_disposition"], "reconciled-target-removed")
+                    self.assertEqual(projected["reason"], "target-removal-reconciled-original-proof-retained")
+                    if "--all" in options:
+                        self.assertEqual(len(records), 2)  # Historical unknown does not stop the batch.
+            remove.assert_not_called()
+        self.assert_receipts_unchanged()
+        with self.assertRaisesRegex(FINISH.Retain, "intent"):
+            self.call("resume")
+
+    def test_wrong_exact_binding_and_options_refuse(self):
+        self.legacy_removal()
+        for flag, value in (("--intent-id", str(uuid.uuid4())), ("--generation", "99"),
+                            ("--intent-sha256", "0" * 64), ("--result-sha256", "0" * 64),
+                            ("--owner", "other-owner")):
+            with self.subTest(flag=flag), self.assertRaises(FINISH.Retain):
+                self.reconcile(flag, value)
+        for extra in (("--all",), ("--apply",), ("--finalized",), ("--discard-ignored", "node_modules")):
+            with self.subTest(extra=extra), self.assertRaises(FINISH.Retain):
+                self.reconcile(*extra)
+        self.assert_receipts_unchanged()
+
+    def test_recreated_target_and_admin_refuse(self):
+        self.legacy_removal()
+        for path in (self.wt, self.admin):
+            path.mkdir()
+            try:
+                with self.assertRaisesRegex(FINISH.Retain, "target-or-admin-present"):
+                    self.reconcile()
+            finally:
+                path.rmdir()
+        self.assert_receipts_unchanged()
+
+    def test_target_visibility_errors_refuse_in_both_observations_without_recording_a_fact(self):
+        self.legacy_removal()
+        native_lstat, native_supervise = os.lstat, FINISH.safety().supervise
+
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and any(a in command for a in ("remove", "unlock", "prune")))
+            return native_supervise(command, **kwargs)
+
+        for target, path in (("checkout", self.wt), ("admin", self.admin)):
+            for error in (errno.EACCES, errno.EIO):
+                for failure_pass in (1, 2):
+                    with self.subTest(target=target, error=error, observation=failure_pass):
+                        observation, failed_probes = 1, []
+
+                        def unavailable(name, *args, **kwargs):
+                            if Path(name) == path and observation == failure_pass:
+                                failed_probes.append(name)
+                                raise OSError(error, "fixture target visibility unavailable")
+                            return native_lstat(name, *args, **kwargs)
+
+                        def next_observation(*args):
+                            nonlocal observation
+                            observation = 2
+
+                        with mock.patch.object(os, "lstat", side_effect=unavailable), \
+                                mock.patch.object(FINISH, "manual_holders", side_effect=next_observation), \
+                                mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+                            with self.assertRaises(OSError) as caught:
+                                self.call("reconcile", *self.arguments)
+                        self.assertEqual(caught.exception.errno, error)
+                        self.assertEqual(len(failed_probes), 1)
+                        self.assert_receipts_unchanged()
+                        with FINISH.ledger(self.state) as db:
+                            self.assertIsNone(FINISH.reconciliation(db, FINISH.get_row(db, self.wt)))
+
+    def test_failed_or_unjoined_original_child_cannot_be_reconciled(self):
+        self.legacy_removal()
+        original_result = self.original["result"]
+        for change in ({"returncode": 1}, {"reaped": False}, {"group_absent": False}, {"pid": None}):
+            with FINISH.ledger(self.state) as db:
+                row = FINISH.get_row(db, self.wt)
+                result = json.loads(original_result)
+                result["child"].update(change)
+                with db:
+                    db.execute("UPDATE retirement SET result=? WHERE worktree_id=?",
+                               (json.dumps(result, sort_keys=True), row["id"]))
+            self.refresh_binding()
+            with self.assertRaisesRegex(FINISH.Retain, "original-removal-not-qualified"):
+                self.reconcile()
+
+    def test_live_child_holder_and_target_ref_changes_refuse(self):
+        self.legacy_removal()
+        with mock.patch.object(FINISH.os, "kill", return_value=None):
+            with self.assertRaisesRegex(FINISH.Retain, "child-or-group-present"):
+                self.reconcile()
+        with mock.patch.object(FINISH, "manual_holders", side_effect=FINISH.Retain("pending-departure")):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                self.call("reconcile", *self.arguments)
+        lock = self.repo / ".git/refs/heads/released-feature.lock"
+        lock.write_text("writer\n")
+        with self.assertRaisesRegex(FINISH.Retain, "preserved-ref-changed"):
+            self.reconcile()
+        lock.unlink()
+        git(self.repo, "update-ref", "refs/heads/released-feature", "0" * 40)
+        with self.assertRaises(FINISH.Retain):
+            self.reconcile()
+        self.assert_receipts_unchanged()
+
+    def assert_sibling_alert(self, kind):
+        native = FINISH.safety().supervise
+
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and any(a in command for a in ("remove", "unlock", "prune")))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+            code, rows = self.reconcile()
+            self.assertEqual(code, 0)
+            result = rows[0]
+            self.assertEqual(result["current_disposition"], "reconciled-target-removed")
+            self.assertEqual(result["sibling_alert"], "current-sibling-preservation-unresolved")
+            self.assertEqual(result["checkout"], "unknown")
+            self.assertEqual(result["retirement_state"], "incomplete")
+            report = result["reconciliation"]["sibling_comparison"]
+            self.assertFalse(report["preserved"])
+            self.assertTrue(any(change["path"] == str(self.legacy) and change["kind"] == kind
+                                for change in report["changes"]))
+            for command, options in (("status", ()), ("check", ()),
+                                     ("check", ("--all",)), ("check", ("--apply",))):
+                record = next(row for row in self.call(command, *options)[1]
+                              if row["worktree"] == str(self.wt))
+                self.assertEqual(record["sibling_alert"], result["sibling_alert"])
+                self.assertEqual(record["reason"], "target-removal-reconciled-sibling-preservation-unresolved")
+        self.assert_receipts_unchanged()
+
+    def test_later_sibling_closeout_records_missing_observation_without_false_preservation(self):
+        self.legacy_removal()
+        git(self.repo, "worktree", "remove", str(self.legacy))
+        self.assert_sibling_alert("missing")
+
+    def test_later_sibling_lock_change_is_an_explicit_observation(self):
+        self.legacy_removal()
+        git(self.repo, "worktree", "lock", "--reason", "new owner", str(self.legacy))
+        self.assert_sibling_alert("registration")
+
+    def test_rebound_sibling_identity_stays_unresolved(self):
+        self.legacy_removal()
+        pointer = self.legacy / ".git"
+        pointer.write_text("gitdir: " + str(self.repo / ".git") + "\n")
+        self.assert_sibling_alert("identity-unavailable")
+
+    def test_sibling_read_failure_is_observed_but_global_deadline_still_refuses(self):
+        self.legacy_removal()
+        capture = FINISH.sibling_identity
+
+        def unreadable(snap, path, until, admin_index=None):
+            if path == str(self.legacy):
+                raise PermissionError(errno.EACCES, "fixture sibling unavailable")
+            return capture(snap, path, until, admin_index)
+
+        with mock.patch.object(FINISH, "sibling_identity", side_effect=FINISH.Retain("admission-deadline")):
+            with self.assertRaisesRegex(FINISH.Retain, "admission-deadline"):
+                self.reconcile()
+        with mock.patch.object(FINISH, "sibling_identity", side_effect=unreadable):
+            self.assert_sibling_alert("identity-unavailable")
+        with FINISH.ledger(self.state) as db:
+            fact = FINISH.reconciliation(db, FINISH.get_row(db, self.wt))
+        error = next(item for item in fact["sibling_comparison"]["changes"]
+                     if item["kind"] == "identity-unavailable")
+        self.assertEqual(error["errno"], errno.EACCES)
+
+    def test_cross_pass_sibling_replacement_records_alert_without_erasing_target_fact(self):
+        self.legacy_removal()
+
+        def replace_during_holder_check(*args):
+            prior = self.base / "prior-sibling"
+            self.legacy.rename(prior)
+            shutil.copytree(prior, self.legacy)
+
+        with mock.patch.object(FINISH, "manual_holders", side_effect=replace_during_holder_check):
+            code, rows = self.call("reconcile", *self.arguments)
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["current_disposition"], "reconciled-target-removed")
+        self.assertEqual(rows[0]["sibling_alert"], "current-sibling-preservation-unresolved")
+        comparison = rows[0]["reconciliation"]["sibling_comparison"]
+        self.assertFalse(comparison["preserved"])
+        self.assertFalse(comparison["during_observation"]["preserved"])
+        self.assertIn({"path": str(self.legacy), "kind": "identity"}, comparison["during_observation"]["changes"])
+        self.assert_receipts_unchanged()
+
+    def test_repeat_with_new_sibling_gap_retains_first_fact_and_reports_observation_conflict(self):
+        self.legacy_removal()
+        first = self.reconcile()[1][0]["reconciliation"]
+        with mock.patch.object(FINISH, "sibling_identity", side_effect=OSError("fixture unavailable")):
+            with self.assertRaisesRegex(FINISH.Retain, "recorded-sibling-observation-changed"):
+                self.reconcile()
+        git(self.repo, "worktree", "remove", str(self.legacy))
+        with self.assertRaisesRegex(FINISH.Retain, "recorded-sibling-observation-changed"):
+            self.reconcile()
+        self.assertEqual(self.call("status")[1][0]["reconciliation"], first)
+        self.assert_receipts_unchanged()
 
 
 class FailureDiagnosticTests(unittest.TestCase):

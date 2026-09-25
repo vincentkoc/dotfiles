@@ -483,9 +483,19 @@ two admission inventories; it does not expand sparse checkouts or install tools.
 
 Before unlocking its unique native lock, the owner durably commits a removal
 intent. It then repeats admission and observes checkout, admin, registration,
-branch and sibling outcomes independently. Existing sibling
-registration paths, branches and lock fields must survive; unrelated HEAD
-advances, additional registrations and listing order do not invalidate removal.
+branch and sibling outcomes independently. Existing sibling registration paths,
+root/admin inode identities, common-directory backlinks and lock fields must
+survive. Another owner's HEAD advance, branch switch or detached checkout is an
+operational change, recorded separately; it does not invalidate preservation.
+Additional registrations and listing order are also independent. The intent
+stores initial sibling identities; the result retains actual after rows,
+identities and classified deltas, including failed readbacks.
+An already absent sibling root or `.git` pointer is captured as an explicit
+ENOENT state, bound to its canonical existing parent and unique native admin
+backlink. The admin/common identities and lock still have to survive. This
+does not depend on Git marking the registration prunable, and never prunes it.
+New absence, reappearance, replacement, ambiguous backlinks and unknown read
+errors fail preservation; they are not treated as preexisting absence.
 Admission keeps its 120s limit. Recursive deletion has a separate maximum 180s
 phase within the unchanged 238s owner deadline, reserving 2s to reap and 30s for
 postchecks. Ordinary subprocess queries retain their 30s limit.
@@ -493,8 +503,48 @@ Git can delete admin metadata even
 when checkout deletion fails. A crash, timeout, partial result or failed
 readback therefore remains `unknown`/`incomplete`, never an automatic retry.
 Updated manual removal, prune, cleaner and quarantine consumers respect the
-ledger hold even after registration disappears. Inspect and reconcile that
-exact intent read-only before proposing recovery.
+ledger hold even after registration disappears. Never repeat removal to resolve
+an incomplete result.
+
+An older producer could report `siblings_unchanged=false` solely because another
+owner switched branches. If the child exited successfully and every other
+preservation predicate passed, the recorded owner can reconcile that exact
+intent after reviewing its original bytes:
+
+```sh
+gwt finish-reconcile --worktree /absolute/removed/checkout \
+  --intent-id <uuid> --generation <number> \
+  --intent-sha256 <original-intent-hash> --result-sha256 <original-result-hash>
+```
+
+Hashes bind the exact stored UTF-8 intent/result text, without reserialization.
+This command never removes files, unlocks a worktree or retries a child. Under
+the lifecycle lock it verifies the recorded child/group is absent, current
+target/admin/registration absence, preserved refs and external targets, and no
+remaining target holder. Wrong target bindings, recreated targets, changed
+target refs, live children or unknown target visibility refuse. It separately
+observes prior siblings: missing or changed registrations, rebound identities
+and identity-read failures remain explicit unresolved observations. These later
+observations do not erase an independently proven target-removal fact and never
+qualify historical sibling preservation. Prospective removal still refuses
+sibling loss, rebinding or changed lock fields.
+
+Reconciliation appends a separate current `removed` observation. Status reports
+`current_disposition=reconciled-target-removed` and a reconciliation reason while
+retaining original `checkout=unknown` and `retirement_state=incomplete` beside
+the reconciliation result; old consumers continue to hold the record. The original
+intent and failed result remain byte-identical. Legacy records lack historical
+sibling inode identities and an after snapshot: those facts remain explicitly
+unavailable, and historical sibling preservation stays unresolved. A repeated
+exact reconciliation revalidates current state and preserves the first fact.
+A changed sibling observation on repeat is an explicit record conflict; it
+neither overwrites the first observation nor reports that stale observation as
+a fresh success.
+When the sibling observation is incomplete, status and check also expose
+`sibling_alert=current-sibling-preservation-unresolved` with the named deltas in
+the reconciliation fact. This is an operator alert, not a clean preservation
+verdict. GWT does not infer a sibling's deletion actor or time from its absence
+or interpret another repository's closeout receipts.
 
 ### Activation and proof limits
 

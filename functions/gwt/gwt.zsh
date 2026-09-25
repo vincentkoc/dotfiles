@@ -1261,6 +1261,8 @@ Commands:
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all]         Show local completion state
+  gwt finish-reconcile --worktree <path> --intent-id <id> --generation <n>
+      --intent-sha256 <hash> --result-sha256 <hash>  Reconcile removed target; preserve original proof
   gwt finish-check [--all] [--policy <path>] [--apply]
                                     Report; --apply requires qualified host activation
   gwt prune                         Prune stale worktree metadata
@@ -1316,7 +1318,7 @@ gwt() {
         root)
             printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
             ;;
-        finish-status|finish-check)
+        finish-status|finish-check|finish-reconcile)
             _gwt_finish_tool "${subcommand#finish-}" "$@"
             return $?
             ;;
