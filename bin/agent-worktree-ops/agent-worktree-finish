@@ -985,6 +985,16 @@ def manual_holders(snap, contents, admin, until):
         if ((device is not None and not re.fullmatch(rb"0x[0-9a-fA-F]+", device))
                 or (inode is not None and not re.fullmatch(rb"[0-9]+", inode))):
             raise Retain("manual-holder-visibility-unknown")
+        descriptor = fields[b"f"]
+        ordinary = re.fullmatch(rb"[0-9]+|\*[0-9]{3}|fp\.", descriptor)
+        if not ordinary and (
+                not re.fullmatch(rb"cwd|rtd|pd|tr|txt|ltx|mem|DEL|twd|ctty|jld|v86|m86|mmap"
+                                 rb"|L[0-9]+|M[0-9a-fA-F]+|R[0-9]+", descriptor)
+                or device is None or inode is None):
+            raise Retain("manual-holder-visibility-unknown")
+        # lsof can report visibility failures in NAME with exit 0 and no stderr.
+        if re.search(rb"(?:^| )\((?:opendir|readlink|stat|lstat|fstat|fopen):", name):
+            raise Retain("manual-holder-visibility-unknown")
         # Non-files (sockets, pipes, etc.) may legitimately omit device/inode.
         held |= (device is not None and inode is not None
                  and (int(device, 16), int(inode)) in inodes)
