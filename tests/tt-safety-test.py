@@ -555,7 +555,7 @@ class SnapshotTests(Fixture):
     def test_current_nine_field_pane_contract(self):
         line = f"cockpit:1.1\t%1\t100\t/dev/pts/1\tworker\tcodex\t{self.cwd}\t0\t\n"
         with patch.object(writer, "run", return_value=line):
-            self.assertEqual(writer.collect_panes()["%1"][2], "100")
+            self.assertEqual(writer.collect_panes()["cockpit:1.1"][2], "100")
         with patch.object(writer, "run", return_value=f"cockpit:1.1\t100\tworker\tcodex\t{self.cwd}\n"):
             with self.assertRaises(writer.SnapshotError):
                 writer.collect_panes()
@@ -858,6 +858,215 @@ class SnapshotTests(Fixture):
             with self.assertRaises(writer.SnapshotError):
                 writer.publish_agent_snapshot(output)
         self.assertEqual(output.read_text(), "unchanged\n")
+
+
+class LinkedPaneTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.alias = "linked:2.1"
+        self.identity["panes"][self.alias] = dict(
+            self.identity["panes"]["cockpit:1.1"], session="$2")
+        self.rows = [self.row(), self.row(target=self.alias)]
+        self.patch("recovery_environment", lambda: [])
+
+    def test_collector_retains_each_context_of_one_physical_pane(self):
+        first = ["cockpit:1.1", "%3", "200", "/dev/pts/1", "worker",
+                 "codex", str(self.cwd), "0", ""]
+        second = [self.alias, *first[1:]]
+        with patch.object(writer, "run", return_value="\n".join(
+            "\t".join(row) for row in (first, second)
+        ) + "\n"):
+            panes = writer.collect_panes()
+        self.assertEqual(set(panes), {"cockpit:1.1", self.alias})
+        self.assertEqual({pane[1] for pane in panes.values()}, {"%3"})
+
+    def test_collector_rejects_conflicting_record_or_duplicate_context(self):
+        first = ["cockpit:1.1", "%3", "200", "/dev/pts/1", "worker",
+                 "codex", str(self.cwd), "0", ""]
+        for column, value in ((0, first[0]), (2, "201"), (3, "/dev/pts/2"),
+                              (4, "changed"), (5, "claude"), (6, "/elsewhere"),
+                              (7, "1")):
+            second = [self.alias, *first[1:]]
+            second[column] = value
+            with self.subTest(column=column), patch.object(
+                writer, "run", return_value="\t".join(first) + "\n" + "\t".join(second) + "\n"
+            ), self.assertRaises(writer.SnapshotError):
+                writer.collect_panes()
+
+    def test_real_linked_window_is_collected_in_both_sessions(self):
+        tmux = shutil.which("tmux")
+        socket = str(self.root / "socket")
+
+        def command(*args, check=True):
+            return subprocess.run([tmux, "-u", "-S", socket, "-f", "/dev/null", *args],
+                                  env=self.env, check=check, capture_output=True,
+                                  text=True, timeout=5).stdout
+
+        self.addCleanup(lambda: command("-N", "kill-session", "-t", "=linked", check=False))
+        self.addCleanup(lambda: command("-N", "kill-session", "-t", "=cockpit", check=False))
+        command("new-session", "-d", "-s", "cockpit", "sleep 60")
+        command("-N", "new-session", "-d", "-s", "linked", "sleep 60")
+        command("-N", "link-window", "-s", "cockpit:0", "-t", "linked:1")
+        original_run = writer.run
+
+        def isolated_run(args, **kwargs):
+            if args[0] == writer.TMUX:
+                return command("-N", *args[1:])
+            return original_run(args, **kwargs)
+
+        with patch.object(writer, "run", side_effect=isolated_run):
+            panes = writer.collect_panes()
+            identity = writer.restore_identity()
+            # Exercise ps/lstart on Linux too; Darwin does not use /proc.
+            with patch.object(writer.sys, "platform", "darwin"):
+                portable_identity = writer.restore_identity()
+        self.assertEqual(len(panes), 3)
+        self.assertEqual(panes["cockpit:0.0"][1:], panes["linked:1.0"][1:])
+        self.assertTrue(writer.same_physical_pane(
+            identity["panes"]["cockpit:0.0"], identity["panes"]["linked:1.0"]))
+        self.assertTrue(writer.same_physical_pane(
+            portable_identity["panes"]["cockpit:0.0"], portable_identity["panes"]["linked:1.0"]))
+
+    def test_existing_schema_retains_aliases_and_session_selection(self):
+        for suffix in ([], ["running", ""]):
+            text = self.document([row + suffix for row in self.rows])
+            rows = writer.validate_recovery(text, "codex")
+            self.assertEqual(len(rows), 2)
+            self.assertEqual([row[0] for row in rows], ["cockpit:1.1", self.alias])
+            self.assertTrue(all(row[7] == f"codex resume --no-alt-screen {SID}" for row in rows))
+            selected = writer.validate_recovery(text, "codex", "session", "linked", cold=True)
+            self.assertEqual([row[0] for row in selected], [self.alias])
+
+    def test_legacy_duplicate_uuid_is_not_treated_as_a_link(self):
+        with self.assertRaises(writer.SnapshotError):
+            writer.validate_recovery(self.document(self.rows, identity=False), "codex")
+
+    def test_conflicting_uuid_or_record_on_same_physical_pane_is_rejected(self):
+        for field, value in (("sid", OTHER_SID), ("title", "different"),
+                             ("cwd", str(self.root)), ("kind", "claude"),
+                             ("command", "different command")):
+            rows = [self.row(), self.row(target=self.alias, **{field: value})]
+            with self.subTest(field=field), self.assertRaises(writer.SnapshotError):
+                writer.validate_recovery(self.document(rows), "codex")
+
+    def test_conflicting_physical_identity_is_rejected(self):
+        for field, value in (("pane", "%4"), ("window", "@4"), ("pid", 201),
+                             ("process", {"pid": 200, "uid": os.getuid(), "start": "other"}),
+                             ("dead", "0")):
+            with self.subTest(field=field):
+                original = copy.deepcopy(self.identity["panes"][self.alias])
+                self.identity["panes"][self.alias][field] = value
+                with self.assertRaises(writer.SnapshotError):
+                    writer.validate_recovery(self.document(self.rows), "codex")
+                self.identity["panes"][self.alias] = original
+
+    def restore(self, current=None, live=None, final=None):
+        current = current or self.identity
+        with patch.object(writer, "restore_identity", side_effect=[current, final or current]), \
+             patch.object(writer, "build_rows", return_value=live or []), \
+             patch.object(writer, "run", return_value="") as run, \
+             contextlib.redirect_stdout(io.StringIO()):
+            writer.restore_dead(self.source, "all", "")
+        return run
+
+    def test_dead_linked_agent_launches_once(self):
+        self.document(self.rows)
+        run = self.restore()
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1:4], ["respawn-pane", "-t", "%3"])
+        self.assertNotIn("-k", run.call_args.args[0])
+
+    def live_identity(self):
+        identity = copy.deepcopy(self.identity)
+        for pane in identity["panes"].values():
+            pane.update(dead="0", pid=201,
+                        process={"pid": 201, "uid": os.getuid(), "start": "started"})
+        return identity
+
+    def test_live_aliases_skip_only_with_matching_physical_process(self):
+        self.document(self.rows)
+        run = self.restore(current=self.live_identity(), live=self.rows)
+        run.assert_not_called()
+        live = {row[0]: row for row in self.rows}
+        for identity in (None, self.identity):
+            with self.subTest(identity=identity), self.assertRaises(writer.SnapshotError):
+                writer.running_session_target(live, self.rows[0], identity)
+        for field, value in (("window", "@9"), ("pane", "%9"), ("pid", 999),
+                             ("process", {"pid": 201, "uid": os.getuid(), "start": "changed"})):
+            identity = self.live_identity()
+            identity["panes"][self.alias][field] = value
+            with self.subTest(field=field), self.assertRaises(writer.SnapshotError):
+                writer.running_session_target(live, self.rows[0], identity)
+
+    def test_alias_drift_after_preflight_refuses_every_launch(self):
+        self.document(self.rows)
+        changed = copy.deepcopy(self.identity)
+        changed["panes"][self.alias]["pane"] = "%9"
+        with patch.object(writer, "restore_identity", side_effect=[self.identity, changed]), \
+             patch.object(writer, "build_rows", return_value=[]), \
+             patch.object(writer, "run") as run, self.assertRaises(writer.SnapshotError):
+            writer.restore_dead(self.source, "all", "")
+        run.assert_not_called()
+
+    def test_cold_link_within_same_session_refuses_before_creation_or_freeze(self):
+        self.identity["panes"]["cockpit:2.1"] = dict(self.identity["panes"]["cockpit:1.1"])
+        self.document([self.row(), self.row(target="cockpit:2.1")])
+        for operation in (
+            lambda: writer.recover_cold("codex", self.source, "cockpit", "0"),
+            lambda: writer.freeze_recovery("codex", self.source, "cockpit"),
+        ):
+            with patch.object(writer, "run") as run, patch.object(
+                writer, "private_disk_directory"
+            ) as disk, self.assertRaisesRegex(writer.SnapshotError, "cannot reconstruct linked windows"):
+                operation()
+            run.assert_not_called()
+            disk.assert_not_called()
+
+    def test_conflict_preserves_published_snapshot_and_history(self):
+        original = self.document(self.rows)
+        history = self.state / "tt/history/codex-cockpit"
+        history.mkdir(parents=True)
+        previous = history / "previous.tsv"
+        previous.write_text(original)
+        rows = [self.row(), self.row(target=self.alias, sid=OTHER_SID)]
+        with patch.object(writer, "AUTOSAVE", False), patch.object(writer, "AGENT_ONLY", False), \
+             patch.object(writer, "restore_identity", return_value=self.identity), \
+             patch.object(writer, "build_rows", return_value=rows), \
+             patch.object(writer, "write_snapshot") as publish, \
+             patch.object(writer, "record_snapshot_history") as archive, \
+             patch.object(writer.signal, "setitimer"), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(writer.main(), 1)
+        publish.assert_not_called()
+        archive.assert_not_called()
+        self.assertEqual(self.source.read_text(), original)
+        self.assertEqual(previous.read_text(), original)
+
+    def test_linked_snapshot_publishes_all_contexts_and_deduplicates_history(self):
+        history = self.state / "tt/history/codex-cockpit"
+        write_snapshot, record_history = writer.write_snapshot, writer.record_snapshot_history
+        rows = [row + ["exited", ""] for row in self.rows]
+        with patch.object(writer, "AUTOSAVE", False), patch.object(writer, "AGENT_ONLY", False), \
+             patch.object(writer, "restore_identity", return_value=self.identity), \
+             patch.object(writer, "build_rows", return_value=rows), \
+             patch.object(writer, "write_snapshot", side_effect=lambda rows, header:
+                          write_snapshot(rows, self.source, header)), \
+             patch.object(writer, "record_snapshot_history", side_effect=lambda:
+                          record_history(self.source, history)), \
+             patch.object(writer.signal, "setitimer"):
+            self.assertEqual(writer.main(), 0)
+            first = self.source.read_bytes()
+            self.assertEqual(writer.parse_snapshot_rows(first.decode()), rows)
+            self.assertEqual(writer.saved_restore_identity(first.decode()), self.identity)
+            self.assertEqual(len(list(history.glob("*.tsv"))), 1)
+            self.assertEqual(writer.main(), 0)
+            self.assertEqual(self.source.read_bytes(), first)
+            self.assertEqual(len(list(history.glob("*.tsv"))), 1)
+            for row in rows:
+                row[3] = "updated title"
+            self.assertEqual(writer.main(), 0)
+            self.assertEqual(len(list(history.glob("*.tsv"))), 2)
+            self.assertEqual(writer.parse_snapshot_rows(self.source.read_text()), rows)
 
 
 class CollectorCancellationTests(Fixture):
