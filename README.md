@@ -259,6 +259,19 @@ userscripts/                                # UserMonkey userscripts source
 install.sh                                  # Dependency installer
 ```
 
+## Linked Tmux Snapshots
+
+Snapshots retain every session/window context of a linked physical pane.
+An existing-server restore validates all selected contexts and resumes each
+physical agent once. Shared UUIDs alone do not prove a link: conflicting records,
+pane/window/process identities, and legacy duplicate UUIDs are refused.
+Failed collection preserves the last good snapshot and history.
+
+Cold recovery can select one session from a cross-session link. It refuses a
+selection containing multiple contexts of the same physical pane before creating
+anything; rebuilding linked-window topology is not supported. Snapshot columns,
+identity version, content deduplication and history retention are unchanged.
+
 ## Credits
 
 - tmux: [gpakosz/.tmux](https://github.com/gpakosz/.tmux)

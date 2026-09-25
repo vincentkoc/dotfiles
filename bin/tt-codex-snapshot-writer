@@ -301,7 +301,7 @@ def collect_processes():
 
 
 def collect_panes():
-    panes = {}
+    panes, physical = {}, {}
     for line in records(run([TMUX, "list-panes", "-a", "-F", PANE_FORMAT])):
         fields = line.split("\t")
         if (
@@ -322,10 +322,13 @@ def collect_panes():
                 not fields[6].startswith("/")
                 and not (fields[7] == "1" and fields[6] == "")
             )
-            or fields[1] in panes
+            or fields[0] in panes
         ):
             raise SnapshotError("tmux returned an invalid pane record")
-        panes[fields[1]] = fields
+        if fields[1] in physical and physical[fields[1]][1:] != fields[1:]:
+            raise SnapshotError("linked pane records disagree")
+        physical[fields[1]] = fields
+        panes[fields[0]] = fields
     return panes
 
 
@@ -821,7 +824,9 @@ def parse_snapshot_rows(text):
 
 def validate_recovery(text, schema, mode="all", selector="", cold=False):
     rows = parse_tsv(text, (5,)) if schema == "agents" else parse_snapshot_rows(text)
-    validated, targets, ids = [], set(), set()
+    identity = saved_restore_identity(text) if schema != "agents" and "# restore-identity\t" in text else {}
+    physical = validate_linked_rows(rows, identity) if schema != "agents" else {}
+    validated, targets, ids, selected_panes = [], set(), {}, set()
     for row in rows:
         if schema == "agents":
             session, pane, cwd, title, command = row
@@ -847,11 +852,19 @@ def validate_recovery(text, schema, mode="all", selector="", cold=False):
                 row[7] = ""
             else:
                 row[7] = resume_command(kind, session_id, status)
-        if target in targets or (session_id and session_id in ids):
+        pane = physical.get(target)
+        if cold and pane and pane in selected_panes:
+            raise SnapshotError("cold recovery cannot reconstruct linked windows within the selection")
+        if target in targets or (
+            session_id and session_id in ids
+            and (not pane or ids[session_id] != pane)
+        ):
             raise SnapshotError("duplicate recovery target or session UUID")
         targets.add(target)
+        if pane:
+            selected_panes.add(pane)
         if session_id:
-            ids.add(session_id)
+            ids[session_id] = pane
         if not pathlib.Path(cwd).is_absolute() or not pathlib.Path(cwd).is_dir():
             raise SnapshotError(f"recovery cwd is unavailable: {cwd}")
         validated.append(row)
@@ -956,6 +969,58 @@ RESTORE_IDENTITY_FORMAT = (
     "#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}"
 )
 
+def same_physical_pane(first, second):
+    """Require corroborated physical identity, not a coincidentally equal UUID."""
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False
+    for item in (first, second):
+        if (
+            not re.fullmatch(r"\$\d+", str(item.get("session", "")))
+            or not re.fullmatch(r"@\d+", str(item.get("window", "")))
+            or not re.fullmatch(r"%\d+", str(item.get("pane", "")))
+            or type(item.get("pid")) is not int or item["pid"] <= 0
+            or item.get("dead") not in ("0", "1")
+            or "process" not in item
+        ):
+            return False
+        process = item["process"]
+        if process is None:
+            if item["dead"] != "1":
+                return False
+        elif (
+            not isinstance(process, dict) or type(process.get("pid")) is not int
+            or process["pid"] != item["pid"]
+            or type(process.get("uid")) is not int or process["uid"] < 0
+            or not isinstance(process.get("start"), str) or not process["start"]
+        ):
+            return False
+    return all(first[key] == second[key] for key in ("window", "pane", "pid", "dead", "process"))
+
+
+def validate_linked_rows(rows, identity):
+    panes = identity.get("panes", {})
+    if not isinstance(panes, dict):
+        raise SnapshotError("snapshot pane identities are unavailable")
+    physical, seen, uuids = {}, {}, {}
+    for row in rows:
+        target = row[0]
+        proof = panes.get(target)
+        pane = proof.get("pane") if isinstance(proof, dict) else None
+        if pane is not None and not re.fullmatch(r"%\d+", str(pane)):
+            raise SnapshotError("invalid physical pane identity")
+        if pane:
+            if pane in seen:
+                previous = seen[pane]
+                if not same_physical_pane(panes[previous[0]], proof) or previous[1:] != row[1:]:
+                    raise SnapshotError("linked snapshot records disagree")
+            seen[pane] = row
+            physical[target] = pane
+        if row[5]:
+            if row[5] in uuids and (not pane or uuids[row[5]] != pane):
+                raise SnapshotError("duplicate recovery session UUID without linked identity")
+            uuids[row[5]] = pane
+    return physical
+
 
 def restore_identity():
     server = server_identity()
@@ -983,6 +1048,12 @@ def restore_identity():
             "pid": int(pid), "dead": dead,
             "process": process,
         }
+    physical = {}
+    for pane in panes.values():
+        previous = physical.get(pane["pane"])
+        if previous is not None and not same_physical_pane(previous, pane):
+            raise SnapshotError("linked pane restore identities disagree")
+        physical[pane["pane"]] = pane
     if server != server_identity():
         raise SnapshotError("tmux server changed during collection")
     return {"version": 1, "server": server, "panes": panes}
@@ -1009,11 +1080,20 @@ def live_session_evidence():
     return {row[0]: row for row in rows if row[6] == "exact"}
 
 
-def running_session_target(live, row):
+def running_session_target(live, row, identity=None):
     places = [target for target, item in live.items() if item[5] == row[5]]
-    if places and (places != [row[0]] or live[row[0]][1] != row[1]):
-        raise SnapshotError(f"session UUID is already running elsewhere: {row[0]}")
-    return bool(places)
+    if not places:
+        return False
+    if places == [row[0]] and live[row[0]][1] == row[1]:
+        return True
+    panes = identity.get("panes", {}) if identity else {}
+    wanted = panes.get(row[0])
+    if isinstance(wanted, dict) and wanted.get("dead") == "0" and row[0] in places and all(
+        live[target][1] == row[1] and same_physical_pane(wanted, panes.get(target))
+        for target in places
+    ):
+        return True
+    raise SnapshotError(f"session UUID is already running elsewhere: {row[0]}")
 
 
 def restore_dead(source, mode, selector):
@@ -1029,7 +1109,7 @@ def restore_dead(source, mode, selector):
     # Read live UUID evidence without publishing a snapshot. This detects both
     # successful reruns and an exact session already running in another pane.
     live = live_session_evidence()
-    plan = []
+    plan, planned = [], {}
     for row in rows:
         target, kind, cwd, _, _, session_id, _, command = row[:8]
         before, now = saved_panes.get(target), current["panes"].get(target)
@@ -1037,8 +1117,8 @@ def restore_dead(source, mode, selector):
             before.get(key) != now[key] for key in ("session", "window", "pane")
         ):
             raise SnapshotError(f"pane identity changed: {target}")
-        if running_session_target(live, row):
-            plan.append((row, "skip"))
+        if running_session_target(live, row, current):
+            action = "skip"
         elif now["dead"] != "1":
             raise SnapshotError(f"refusing live occupant: {target}")
         elif before.get("pid") != now["pid"]:
@@ -1046,18 +1126,29 @@ def restore_dead(source, mode, selector):
         elif now.get("process") is not None and before.get("process") != now["process"]:
             raise SnapshotError(f"pane process start identity changed: {target}")
         else:
-            plan.append((row, "restore"))
+            action = "restore"
+        if now["pane"] in planned:
+            first_row, first_action, contexts = planned[now["pane"]]
+            if first_action != action or not same_physical_pane(current["panes"][first_row[0]], now):
+                raise SnapshotError(f"linked restore plan disagrees: {target}")
+            contexts.append(target)
+        else:
+            entry = (row, action, [target])
+            plan.append(entry)
+            planned[now["pane"]] = entry
     restored = 0
     try:
-        for row, action in plan:
+        for row, action, contexts in plan:
             target, _, cwd, _, _, _, _, command = row[:8]
             environment = recovery_environment() if action == "restore" else []
             live = live_session_evidence()
-            running = running_session_target(live, row)
+            check = restore_identity()
+            running = running_session_target(live, row, check)
             if running != (action == "skip"):
                 raise SnapshotError(f"live session evidence changed: {target}")
-            check = restore_identity()
-            if check["server"] != current["server"] or check["panes"].get(target) != current["panes"][target]:
+            if check["server"] != current["server"] or any(
+                check["panes"].get(context) != current["panes"][context] for context in contexts
+            ):
                 raise SnapshotError(f"restore plan became stale: {target}")
             if action == "skip":
                 print(f"{target}\talready running exact session; skipped")
@@ -1296,6 +1387,7 @@ def main():
         rows = build_rows(identity=identity)
         if identity != restore_identity():
             raise SnapshotError("restore identities changed during collection")
+        validate_linked_rows(rows, identity)
         header = ("# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\t"
                   "status\trestore\towner_state\texit_status\n")
         header += "# restore-identity\t" + json.dumps(identity, sort_keys=True) + "\n"
