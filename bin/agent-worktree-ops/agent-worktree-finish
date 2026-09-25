@@ -1413,7 +1413,12 @@ def reconcile(db, row, args):
         if (git(snap["owner"], "rev-parse", "--path-format=absolute", "--git-common-dir") != snap["common"]
                 or repository(git(snap["owner"], "remote", "get-url", "origin")) != snap["repo"]):
             raise Retain("reconciliation-owner-binding-changed")
-        if any(os.path.lexists(snap[key]) for key in ("path", "gitdir")):
+        # lexists also hides permission and I/O failures; only ENOENT proves absence.
+        for key in ("path", "gitdir"):
+            try:
+                os.lstat(snap[key])
+            except FileNotFoundError:
+                continue
             raise Retain("reconciliation-target-or-admin-present")
         after = records(snap["owner"])
         if snap["path"] in sibling_rows(after):

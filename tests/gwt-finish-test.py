@@ -2116,6 +2116,41 @@ class ReconciliationTests(unittest.TestCase):
                 path.rmdir()
         self.assert_receipts_unchanged()
 
+    def test_target_visibility_errors_refuse_in_both_observations_without_recording_a_fact(self):
+        self.legacy_removal()
+        native_lstat, native_supervise = os.lstat, FINISH.safety().supervise
+
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and any(a in command for a in ("remove", "unlock", "prune")))
+            return native_supervise(command, **kwargs)
+
+        for target, path in (("checkout", self.wt), ("admin", self.admin)):
+            for error in (errno.EACCES, errno.EIO):
+                for failure_pass in (1, 2):
+                    with self.subTest(target=target, error=error, observation=failure_pass):
+                        observation, failed_probes = 1, []
+
+                        def unavailable(name, *args, **kwargs):
+                            if Path(name) == path and observation == failure_pass:
+                                failed_probes.append(name)
+                                raise OSError(error, "fixture target visibility unavailable")
+                            return native_lstat(name, *args, **kwargs)
+
+                        def next_observation(*args):
+                            nonlocal observation
+                            observation = 2
+
+                        with mock.patch.object(os, "lstat", side_effect=unavailable), \
+                                mock.patch.object(FINISH, "manual_holders", side_effect=next_observation), \
+                                mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+                            with self.assertRaises(OSError) as caught:
+                                self.call("reconcile", *self.arguments)
+                        self.assertEqual(caught.exception.errno, error)
+                        self.assertEqual(len(failed_probes), 1)
+                        self.assert_receipts_unchanged()
+                        with FINISH.ledger(self.state) as db:
+                            self.assertIsNone(FINISH.reconciliation(db, FINISH.get_row(db, self.wt)))
+
     def test_failed_or_unjoined_original_child_cannot_be_reconciled(self):
         self.legacy_removal()
         original_result = self.original["result"]
