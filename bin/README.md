@@ -52,10 +52,17 @@ codex mcp add github -- "$HOME/bin/codex-github-mcp"
 Add `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_PAT_TOKEN"]` to the
 `[mcp_servers.github]` table in `~/.codex/config.toml` so both CLI and desktop
 launches can forward inherited credentials. The helper preserves each nonempty
-value, fills missing values from the canonical token then the legacy token, and
-only queries native `gh auth token` when both are empty. It never uses `ghx` or
-starts an interactive login. Missing authentication fails GitHub MCP clearly but
-does not prevent the general `codex` launcher from starting.
+value and fills missing values from the canonical token then the legacy token.
+Only this explicitly configured MCP launcher queries native `gh auth token
+--hostname github.com` when both are empty. That lookup requires Python 3, has a
+five-second deadline, and never uses `ghx` or starts an interactive login.
+Timeouts report local credential lookup unavailability, not expired credentials.
+Interrupting the helper stops its owned lookup group without starting MCP or
+printing partial credentials; SIGINT/SIGTERM return 130/143 and timeouts return 124.
+The general `codex` launcher only forwards inherited tokens and never retrieves
+credentials, including for ordinary interactive, exec, and resume launches.
+HTTP GitHub MCP configurations must receive their bearer token explicitly from
+the launching environment; use the stdio launcher above for native CLI lookup.
 
 `codex --constrained-network` forwards the natively supported
 `--disable unbounded_connection_retries` flag. It is opt-in and does not promise

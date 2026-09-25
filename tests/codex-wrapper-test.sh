@@ -8,6 +8,7 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
+export CODEX_TEST_AUTH_LOG="$temporary/auth.log"
 
 wrapper_dir="$temporary/wrapper"
 backend_dir="$temporary/backend"
@@ -23,12 +24,9 @@ EOF
 
 cat >"$backend_dir/gh" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "auth token" ]]; then
-  [[ -z "${CODEX_TEST_AUTH_LOG:-}" ]] || printf 'auth\n' >>"$CODEX_TEST_AUTH_LOG"
-  printf 'native-token\n'
-  exit 0
-fi
-exit 64
+printf 'auth\n' >>"$CODEX_TEST_AUTH_LOG"
+printf 'ordinary Codex startup must not invoke gh\n' >&2
+exit 65
 EOF
 
 cat >"$backend_dir/ghx" <<'EOF'
@@ -44,7 +42,6 @@ if [[ "${GITHUB_PAT_TOKEN:-}" == "native-token" ]]; then
   printf 'token:injected\n'
 else
   printf 'token:missing\n'
-  [[ "${1:-}" == --version ]] || exit 66
 fi
 EOF
 
@@ -74,7 +71,7 @@ output="$(
 [[ ! -e "$temporary/probe-auth.log" ]]
 output="$(env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN -u CODEX_HOME \
   HOME="$temporary/unused-home" PATH="$long_path" "$symlink_dir/codex" exec fixture)"
-[[ "$output" == *"token:injected"* ]]
+[[ "$output" == *"token:missing"* ]]
 
 darwin_home="$temporary/darwin-home"
 mkdir -p "$darwin_home/.codex/packages/standalone/current/bin"
@@ -132,7 +129,7 @@ mkdir -p "$linux_home/.codex/packages/standalone/current/bin"
 cat >"$linux_home/.codex/packages/standalone/current/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'standalone:%s\n' "$*"
-[[ "${GITHUB_PAT_TOKEN:-}" == "native-token" ]]
+[[ -z "${GITHUB_PAT_TOKEN:-}" ]]
 EOF
 chmod +x "$linux_home/.codex/packages/standalone/current/bin/codex"
 cat >"$backend_dir/uname" <<'EOF'
@@ -185,8 +182,8 @@ case "${1:-}" in
   -V|--version|-h|--help)
     [[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" && -z "${GITHUB_PAT_TOKEN:-}" ]] || exit 68 ;;
   *)
-    [[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]] || exit 68
-    [[ "$GITHUB_PAT_TOKEN" == native-token ]] || exit 68 ;;
+    [[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]] || exit 68
+    [[ -z "${GITHUB_PAT_TOKEN:-}" ]] || exit 68 ;;
 esac
 [[ "$CODEX_TEST_SENTINEL" == preserved ]]
 [[ "$TOKENJUICE_STATS" == off ]]
@@ -239,8 +236,8 @@ cat >"$catalog_helper" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\0' "$#" "$@" >"$CODEX_TEST_HELPER_ARGS"
 printf 'helper\n' >>"$CODEX_TEST_ORDER_LOG"
-[[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]]
-[[ "$GITHUB_PAT_TOKEN" == native-token ]]
+[[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]]
+[[ -z "${GITHUB_PAT_TOKEN:-}" ]]
 [[ "$CODEX_TEST_SENTINEL" == preserved ]]
 [[ "$TOKENJUICE_STATS" == off ]]
 /bin/bash --noprofile --norc -c '[[ "$TOKENJUICE_STATS" == off ]]' || exit 67
@@ -376,5 +373,6 @@ if grep -Fq 'gh auth token' "$repo_root/.zshrc"; then
   printf '.zshrc must not fetch GitHub credentials during startup\n' >&2
   exit 1
 fi
+[[ ! -e "$CODEX_TEST_AUTH_LOG" ]]
 
 printf 'codex wrapper tests passed\n'
