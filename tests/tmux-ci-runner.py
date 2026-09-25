@@ -20,6 +20,7 @@ SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 OUTPUT_LIMIT = 2 * 1024 * 1024
 TAIL_LIMIT = 16 * 1024
 TESTS = (
+    ("mttc-test.py", 30),
     ("tt-safety-test.py", 60),
     ("tt-topology-gate-test.sh", 60),
     ("tt-codex-snapshot-live-test.sh", 60),
@@ -261,7 +262,8 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(suite(Path("/python"), Path("/bash"), {}, Path("/fixture")), 0)
         self.assertEqual([call.args[0][-1].name for call in run.call_args_list],
                          [name for name, _ in TESTS])
-        self.assertEqual([call.args[1] for call in run.call_args_list], [60, 60, 60, 240])
+        self.assertEqual([call.args[1] for call in run.call_args_list],
+                         [timeout for _, timeout in TESTS])
         with mock.patch(__name__ + ".run_test", return_value=1) as run:
             self.assertEqual(suite(Path("/python"), Path("/bash"), {}, Path("/fixture")), 1)
         run.assert_called_once()

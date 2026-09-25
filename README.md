@@ -95,6 +95,14 @@ prints the resolved ID and dimensions without capturing or sending input.
 Use `--socket /path/to/socket` for an explicit existing server.
 Python 3.9+ with curses and a UTF-8 terminal are required.
 
+`mttc -p mobile -s cockpit:2.1 host` (or `-s %12`) starts the same viewer
+over mosh. Omit `-s` for the pane picker. Bare session names are rejected:
+they do not select one pane. Mobile requires remote `mtt` and fails without it;
+it never falls back to attaching or creating a full tmux window.
+The shell/ai profiles retain their `tt`, tmux and interactive-shell fallbacks.
+QuickSSH aliases retain their configured SSH port; explicit `-P` takes priority,
+including when `MOSH_TMUX_SSH` supplies custom SSH options.
+
 For a full-phone single-pane view, run from plain SSH or a local terminal outside
 tmux. Detach the old mobile tmux client first, without closing any panes. Inside
 an already attached multi-pane cockpit, the outer grid still confines `mtt` to
