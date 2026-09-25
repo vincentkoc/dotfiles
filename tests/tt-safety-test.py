@@ -1473,6 +1473,33 @@ collect_agent_cockpit_state
 """, PANE_ROWS=rows,
         )
 
+    def test_menu_exposes_supported_cyan_and_violet_markers(self):
+        result = self.shell(["show_pane_menu"], """
+tt_self_command() { printf 'tt'; }
+shell_quote() { printf '%s' "$1"; }
+fake_tmux() { printf '%s\\n' "$@"; }
+TMUX_BIN=fake_tmux
+show_pane_menu %7 P P fixture-client
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        menu = result.stdout.splitlines()
+        for color, key in (("cyan", "5"), ("violet", "6")):
+            offset = menu.index("Marker " + color)
+            self.assertEqual(menu[offset + 1], key)
+            self.assertIn("tt marker set #{pane_id} " + color, menu[offset + 2])
+        result = self.shell(
+            ["pane_marker_color", "pane_marker_window_style",
+             "pane_marker_active_style", "apply_pane_marker_style"], """
+fake_tmux() { printf '%s\\n' "$*"; }
+TMUX_BIN=fake_tmux
+apply_pane_marker_style %7 cyan
+apply_pane_marker_style %7 violet
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for marker, color in (("cyan", "#7dcfff"), ("violet", "#bb9af7")):
+            self.assertIn("set-option -pt %7 @tt_marker " + marker, result.stdout)
+            self.assertIn("set-option -pt %7 @tt_marker_color " + color, result.stdout)
+
     def test_recovery_config_keeps_literal_shell_placeholders(self):
         result = self.shell(["recovery_server_config"], "recovery_server_config\n")
         self.assertEqual(result.returncode, 0, result.stderr)
