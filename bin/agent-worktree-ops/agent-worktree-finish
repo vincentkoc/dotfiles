@@ -940,10 +940,67 @@ def holder_qualification():
     }
 
 
-def manual_holders(snap, contents, admin, until):
-    executable = shutil.which("lsof")
-    if executable is None:
-        raise Retain("manual-closeout-needs-lsof")
+def trusted_holder_binary(name):
+    selected = shutil.which(name)
+    if not selected or not os.path.isabs(selected):
+        raise Retain("sudo-holder-scan-needs-trusted-binaries")
+    current, pending, links = Path("/"), list(Path(selected).parts[1:]), 0
+    try:
+        root = current.lstat()
+        if root.st_uid != 0 or not stat.S_ISDIR(root.st_mode) or root.st_mode & 0o022:
+            raise Retain("sudo-holder-scan-untrusted-path")
+        # Check symlinks and their traversal, not only the resolved destination.
+        while pending:
+            part = pending.pop(0)
+            if part == "..":
+                current = current.parent
+                continue
+            candidate = current / part
+            details = candidate.lstat()
+            if details.st_uid != 0:
+                raise Retain("sudo-holder-scan-untrusted-path")
+            if stat.S_ISLNK(details.st_mode):
+                links += 1
+                if links > 40:
+                    raise Retain("sudo-holder-scan-untrusted-path")
+                target = Path(os.readlink(candidate))
+                if target.is_absolute():
+                    current = Path("/")
+                    pending = list(target.parts[1:]) + pending
+                else:
+                    pending = list(target.parts) + pending
+                continue
+            if details.st_mode & 0o022 or (pending and not stat.S_ISDIR(details.st_mode)):
+                raise Retain("sudo-holder-scan-untrusted-path")
+            current = candidate
+        details = current.lstat()
+        if (details.st_uid != 0 or details.st_mode & 0o022
+                or not stat.S_ISREG(details.st_mode) or not details.st_mode & 0o111):
+            raise Retain("sudo-holder-scan-untrusted-path")
+    except OSError as error:
+        raise Retain("sudo-holder-scan-untrusted-path") from error
+    return str(current)
+
+
+def sudo_holder_scan(until):
+    if sys.platform != "linux":
+        raise Retain("sudo-holder-scan-requires-linux")
+    safety().tick(until)
+    command = [trusted_holder_binary("sudo"), "-n", "-u", "#0", "--",
+               trusted_holder_binary("lsof"), "-nP", "+w", "-F0pfnDi"]
+    observed = safety().supervise(
+        command, cwd="/", env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"},
+        limit=32 * 1024 * 1024, sudo_monitor=True, deadline=until)
+    if observed.failure:
+        if observed.proof.get("pid") is not None:
+            raise Retain("sudo-holder-scan-termination-unknown")
+        raise Retain("sudo-holder-scan-failed")
+    if observed.returncode != 0:
+        raise Retain("sudo-holder-scan-failed")
+    return observed
+
+
+def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=False):
     paths, inodes = set(), {tuple(item) for item in contents.get("discarded_inodes", ())}
     for key, entries in (("path", contents["entries"]), ("gitdir", admin)):
         for name, entry in entries.items():
@@ -957,7 +1014,13 @@ def manual_holders(snap, contents, admin, until):
     safety().tick(until)
     # One native scan avoids repeating libproc's entire process walk for each
     # filename batch. Inode matching also catches holders through hardlink aliases.
-    observed = run([executable, "-nP", "+w", "-F0pfnDi"], limit=32 * 1024 * 1024)
+    if sudo_holder_scan_enabled:
+        observed = sudo_holder_scan(until)
+    else:
+        executable = shutil.which("lsof")
+        if executable is None:
+            raise Retain("manual-closeout-needs-lsof")
+        observed = run([executable, "-nP", "+w", "-F0pfnDi"], limit=32 * 1024 * 1024)
     if observed.stderr or not observed.stdout.endswith(b"\0\n"):
         raise Retain("manual-holder-visibility-unknown")
     processes = files = 0
@@ -1033,7 +1096,8 @@ def finalized_admission(db, row, args, until):
     module = safety()
     contents = module.inventory(snap, git, until, discard_ignored=ignored, compact_discarded=True)
     admin = module.admin_inventory(snap, git, until)
-    manual_holders(snap, contents, admin, until)
+    holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
+    manual_holders(snap, contents, admin, until, **holder_options)
     return {"snapshot": snap, "boundaries": [], "contents": contents, "admin": admin,
             "branch_reflog": preserved_branch_reflog(snap, until)}
 
@@ -1607,6 +1671,7 @@ def parser():
     result.add_argument("--release", action="store_true")
     result.add_argument("--new-token")
     result.add_argument("--finalized", action="store_true")
+    result.add_argument("--sudo-holder-scan", action="store_true")
     result.add_argument("--discard-ignored", action="append", default=[])
     result.add_argument("--intent-id")
     result.add_argument("--generation", type=int)
@@ -1692,6 +1757,10 @@ def process_one(db, row, args):
 def main(argv=None):
     args = parser().parse_args(argv)
     safety().DEADLINE = time.monotonic() + 238
+    if args.sudo_holder_scan and not (args.command == "remove" and args.finalized):
+        raise Retain("sudo-holder-scan-requires-manual-finalized-removal")
+    if args.sudo_holder_scan and sys.platform != "linux":
+        raise Retain("sudo-holder-scan-requires-linux")
     reconciliation_options = (args.intent_id, args.generation, args.intent_sha256, args.result_sha256)
     if args.command == "reconcile":
         if (args.pr or args.target or args.wait_for or args.reason or args.policy or args.all or args.apply

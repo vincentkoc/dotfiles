@@ -1250,7 +1250,7 @@ Commands:
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
-  gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...]
+  gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...] [--sudo-holder-scan]
                                     Manually close one finalized managed task
   gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...] [--release]
                                     Complete; --release explicitly signs off checkout use
@@ -1309,6 +1309,15 @@ gwt() {
                 ;;
         esac
     done
+
+    if [[ "$subcommand" != rm && "$subcommand" != remove ]]; then
+        for help_arg in "$@"; do
+            if [[ "$help_arg" == --sudo-holder-scan ]]; then
+                echo "gwt: --sudo-holder-scan requires rm --finalized" >&2
+                return 1
+            fi
+        done
+    fi
 
     case "$subcommand" in
         owner|snapshot|dependencies)
@@ -1774,6 +1783,7 @@ gwt() {
             local target=""
             local force_remove=false
             local finalized_remove=false
+            local sudo_holder_scan=false
             local -a discard_args
             local arg target_path main_worktree repo_root current_path worktree_status
 
@@ -1783,6 +1793,7 @@ gwt() {
                 case "$1" in
                     --force|-f) force_remove=true ;;
                     --finalized) finalized_remove=true ;;
+                    --sudo-holder-scan) sudo_holder_scan=true ;;
                     --discard-ignored)
                         [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
                         discard_args+=(--discard-ignored "$2")
@@ -1803,6 +1814,10 @@ gwt() {
                 }
             elif (( ${#discard_args} )); then
                 echo "gwt: --discard-ignored requires --finalized" >&2
+                return 1
+            fi
+            if $sudo_holder_scan && ! $finalized_remove; then
+                echo "gwt: --sudo-holder-scan requires rm --finalized" >&2
                 return 1
             fi
 
@@ -1838,6 +1853,7 @@ gwt() {
             fi
 
             if $finalized_remove; then
+                $sudo_holder_scan && discard_args+=(--sudo-holder-scan)
                 _gwt_finish_tool remove --worktree "$target_path" --finalized "${discard_args[@]}" || return
                 _gwt_tmux_sync_context
                 return 0

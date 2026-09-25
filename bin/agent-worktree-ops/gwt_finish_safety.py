@@ -104,12 +104,13 @@ def read_file(path, until, limit=LEAF_LIMIT):
         os.close(fd)
 
 
-def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None):
-    """Own one process group; bounded failure cleanup never signals other groups."""
+def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None,
+              sudo_monitor=False, deadline=None):
+    """Bound one child; sudo cleanup signals only its monitor, never a group."""
     child = selector = None
     output = [bytearray(), bytearray()]
     started = time.monotonic()
-    until = min(started + timeout, DEADLINE)
+    until = min(started + timeout, DEADLINE, deadline if deadline is not None else float("inf"))
     proof = {"pid": None, "started_monotonic": started, "reaped": False}
     failure = None
     try:
@@ -119,7 +120,7 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
         child = subprocess.Popen(command, cwd=cwd, env=env,
                                  stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                                  stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, start_new_session=True)
+                                 stderr=subprocess.PIPE, start_new_session=not sudo_monitor)
         proof["pid"] = child.pid
         selector = selectors.DefaultSelector()
         for i, stream in enumerate((child.stdout, child.stderr)):
@@ -155,6 +156,10 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
         child.wait(timeout=max(0.001, until - time.monotonic()))
     except Exception as error:
         failure = error
+    except BaseException as error:
+        if sudo_monitor:
+            failure = error
+        raise
     finally:
         if selector is not None:
             try:
@@ -162,9 +167,18 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
             except Exception as error:
                 failure = failure or error
         if child is not None:
-            # A child may exit while one of its descendants retains the pipes.
-            # The fresh process group belongs to this invocation only.
-            if child.returncode is None:
+            if sudo_monitor and failure is not None:
+                # sudo relays TERM; killing its monitor can strand the root child.
+                # Even a reaped monitor cannot prove privileged-child cleanup.
+                proof["privileged_termination"] = "unknown"
+                try:
+                    child.send_signal(signal.SIGTERM)
+                    proof["monitor_term_requested"] = True
+                except OSError as error:
+                    failure = failure or error
+            elif not sudo_monitor and child.returncode is None:
+                # A descendant can retain the pipes after the child exits.
+                # Only the default mode owns a fresh process group.
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -182,15 +196,20 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
                         stream.close()
                 except OSError as error:
                     failure = failure or error
-            try:
-                os.killpg(child.pid, 0)
-                proof["group_absent"] = False
-                failure = failure or Retain("owned-child-group-survives")
-            except ProcessLookupError:
-                proof["group_absent"] = True
-            except OSError as error:
+            if sudo_monitor:
                 proof["group_absent"] = None
-                failure = failure or error
+                proof["privileged_termination"] = (
+                    "unknown" if failure is not None or child.returncode != 0 else "command-returned")
+            else:
+                try:
+                    os.killpg(child.pid, 0)
+                    proof["group_absent"] = False
+                    failure = failure or Retain("owned-child-group-survives")
+                except ProcessLookupError:
+                    proof["group_absent"] = True
+                except OSError as error:
+                    proof["group_absent"] = None
+                    failure = failure or error
             proof["returncode"] = child.returncode
         proof.update(ended_monotonic=time.monotonic(),
                      stdout_sha256=hashlib.sha256(output[0]).hexdigest(),

@@ -1916,6 +1916,96 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
         self.assertFalse(self.wt.exists())
 
+    def test_wrapper_forwards_sudo_only_to_finalized_helper(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; '
+                  'gwt "$4" "$3" "$5" --sudo-holder-scan')
+        command = ["zsh", "-f", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"),
+                   str(self.repo), str(self.wt)]
+        for action, option in (("rm", ""), ("rm", "--force"), ("finish", "--finalized"),
+                               ("root", "--finalized")):
+            result = subprocess.run([*command, action, option], env=env, capture_output=True,
+                                    text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0, (action, option, result.stdout))
+            self.assertNotIn("remove\n", result.stdout)
+        result = subprocess.run([*command, "rm", "--finalized"], env=env, capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "remove", "--worktree", str(self.wt), "--finalized", "--sudo-holder-scan"])
+        self.assertTrue(self.wt.exists())
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_sudo_scan_does_not_elevate_git_or_lifecycle_and_preserves_admission_guards(self):
+        native = FINISH.safety().supervise
+        commands, scans = [], []
+        uid = os.geteuid()
+
+        def observe(command, **kwargs):
+            self.assertEqual(os.geteuid(), uid)
+            commands.append(command)
+            if command[0] == "/fixture/sudo":
+                scans.append((command, kwargs))
+                return types.SimpleNamespace(
+                    stdout=b"p7\0\nf3\0D0x8\0i22\0n/elsewhere\0\n", stderr=b"",
+                    returncode=0, failure=None, proof={"pid": 123})
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.sys, "platform", "linux"), \
+                mock.patch.object(FINISH, "trusted_holder_binary", side_effect=lambda name: "/fixture/" + name), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+            (self.wt / "file").write_text("unfinished\n")
+            with self.assertRaisesRegex(FINISH.Retain, "dirty-or-untracked"):
+                self.call("remove", "--finalized", "--sudo-holder-scan")
+            self.assertFalse(scans)
+            git(self.wt, "restore", "file")
+            code, rows = self.call("remove", "--finalized", "--sudo-holder-scan")
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(len(scans), 2)
+        for command, kwargs in scans:
+            self.assertEqual(command, [
+                "/fixture/sudo", "-n", "-u", "#0", "--", "/fixture/lsof", "-nP", "+w", "-F0pfnDi"])
+            self.assertTrue(kwargs["sudo_monitor"])
+            self.assertLessEqual(kwargs["deadline"], FINISH.safety().DEADLINE)
+        self.assertTrue(any("worktree" in command and "remove" in command
+                            and command[0] != "/fixture/sudo" for command in commands))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
+    def test_sudo_failure_or_incomplete_visibility_stops_before_intent_or_unlock(self):
+        native = FINISH.safety().supervise
+        for code, failure, stdout, reason in (
+                (1, None, b"", "sudo-holder-scan-failed"),
+                (0, "TimeoutExpired", b"", "sudo-holder-scan-termination-unknown"),
+                (0, None, b"p7\0\nfNOFD\0n/proc/7/fd (opendir: Permission denied)\0\n",
+                 "manual-holder-visibility-unknown")):
+            commands = []
+
+            def observe(command, **kwargs):
+                commands.append(command)
+                if command[0] == "/fixture/sudo":
+                    return types.SimpleNamespace(stdout=stdout, stderr=b"", returncode=code,
+                                                 failure=failure, proof={"pid": 123})
+                return native(command, **kwargs)
+
+            with self.subTest(reason=reason), \
+                    mock.patch.object(FINISH.sys, "platform", "linux"), \
+                    mock.patch.object(FINISH, "trusted_holder_binary",
+                                      side_effect=lambda name: "/fixture/" + name), \
+                    mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.call("remove", "--finalized", "--sudo-holder-scan")
+            self.assertEqual(sum(command[0] == "/fixture/sudo" for command in commands), 1)
+            self.assertFalse(any("worktree" in command and ("unlock" in command or "remove" in command)
+                                 for command in commands))
+            self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
+
     @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
     def test_native_holder_scan_detects_an_open_file(self):
         snap = {"path": str(self.wt), "gitdir": str(self.admin)}
@@ -2029,6 +2119,270 @@ class ManualHolderTests(unittest.TestCase):
             with self.subTest(output=output):
                 with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
                     self.observe(output)
+
+
+class SudoHolderTests(unittest.TestCase):
+    def setUp(self):
+        platform = mock.patch.object(FINISH.sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+
+    def result(self, *, code=0, failure=None, pid=123, output=None, errors=b""):
+        return types.SimpleNamespace(
+            returncode=code, failure=failure, proof={"pid": pid},
+            stdout=b"p7\0\nf3\0D0x8\0i22\0n/elsewhere\0\n" if output is None else output,
+            stderr=errors)
+
+    def test_fixed_argv_minimal_environment_and_scoped_supervision(self):
+        with mock.patch.object(FINISH, "trusted_holder_binary",
+                               side_effect=["/usr/bin/sudo", "/usr/bin/lsof"]) as trust, \
+                mock.patch.object(FINISH.safety(), "supervise", return_value=self.result()) as child, \
+                mock.patch.object(FINISH, "run") as ordinary:
+            FINISH.sudo_holder_scan(float("inf"))
+        self.assertEqual(trust.call_args_list, [mock.call("sudo"), mock.call("lsof")])
+        child.assert_called_once_with(
+            ["/usr/bin/sudo", "-n", "-u", "#0", "--", "/usr/bin/lsof", "-nP", "+w", "-F0pfnDi"],
+            cwd="/", env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"},
+            limit=32 * 1024 * 1024, sudo_monitor=True, deadline=float("inf"))
+        ordinary.assert_not_called()
+
+    def test_auth_failure_spawn_failure_and_uncertain_termination_never_fall_back(self):
+        for result, reason in (
+                (self.result(code=1, errors=b"sudo: a password is required\n"), "scan-failed"),
+                (self.result(code=None, failure="OSError", pid=None), "scan-failed"),
+                (self.result(code=0, failure="TimeoutExpired"), "termination-unknown"),
+                (self.result(code=0, failure="Retain"), "termination-unknown")):
+            with self.subTest(reason=reason, result=result), \
+                    mock.patch.object(FINISH, "trusted_holder_binary", return_value="/usr/bin/tool"), \
+                    mock.patch.object(FINISH.safety(), "supervise", return_value=result) as child, \
+                    mock.patch.object(FINISH, "run") as ordinary:
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    FINISH.sudo_holder_scan(float("inf"))
+                child.assert_called_once()
+                ordinary.assert_not_called()
+
+    def test_trust_failure_precedes_any_process(self):
+        with mock.patch.object(FINISH, "trusted_holder_binary",
+                               side_effect=FINISH.Retain("sudo-holder-scan-untrusted-path")), \
+                mock.patch.object(FINISH.safety(), "supervise") as child:
+            with self.assertRaisesRegex(FINISH.Retain, "untrusted-path"):
+                FINISH.sudo_holder_scan(float("inf"))
+        child.assert_not_called()
+
+    def test_non_linux_rejects_before_trust_ledger_or_process_access(self):
+        for platform in ("darwin", "win32", "freebsd14"):
+            with self.subTest(platform=platform), mock.patch.object(FINISH.sys, "platform", platform), \
+                    mock.patch.object(FINISH, "trusted_holder_binary") as trust, \
+                    mock.patch.object(FINISH, "ledger") as ledger, \
+                    mock.patch.object(FINISH.safety(), "supervise") as child:
+                with self.assertRaisesRegex(FINISH.Retain, "requires-linux"):
+                    FINISH.sudo_holder_scan(float("inf"))
+                with self.assertRaisesRegex(FINISH.Retain, "requires-linux"):
+                    FINISH.main(["remove", "--finalized", "--sudo-holder-scan"])
+                trust.assert_not_called()
+                ledger.assert_not_called()
+                child.assert_not_called()
+
+    def test_flag_misuse_refuses_before_ledger_or_process_access(self):
+        for args in (["remove"], ["finish"], ["release"], ["cancel"], ["check", "--apply"],
+                     ["status"], ["guard"], ["reconcile"], ["enroll"], ["creation-token"],
+                     ["holder-qualification"], ["resume"], ["remove", "--finalized", "--all"]):
+            with self.subTest(args=args), mock.patch.object(FINISH, "ledger") as ledger, \
+                    mock.patch.object(FINISH.safety(), "supervise") as child:
+                with self.assertRaisesRegex(FINISH.Retain, "requires-manual-finalized|one-explicit"):
+                    FINISH.main([*args, "--sudo-holder-scan"])
+                ledger.assert_not_called()
+                child.assert_not_called()
+
+    def test_elevated_scan_keeps_all_visibility_and_holder_rejections(self):
+        snap = {"path": "/fixture/worktree", "gitdir": "/fixture/admin"}
+        contents = {"entries": {"file": [9, 22, FINISH.stat.S_IFREG]}}
+        cases = [
+            (self.result(errors=b"visibility warning\n"), "visibility-unknown"),
+            (self.result(output=b"p7\0\nfNOFD\0n/proc/7/fd (opendir: Permission denied)\0\n"),
+             "visibility-unknown"),
+            (self.result(output=b"p7\0\nfcwd\0n/elsewhere\0\n"), "visibility-unknown"),
+            (self.result(output=b"p7\0\nfmem\0D0x8\0i22\0n/elsewhere (stat: Permission denied)\0\n"),
+             "visibility-unknown"),
+            (self.result(output=b"p7\0\nf3\0D0x9\0i22\0n/external/hardlink\0\n"), "pending-departure"),
+            (self.result(output=b"p7\0\nf3\0n/fixture/admin/index\0\n"), "pending-departure"),
+            (self.result(output=b"p7\0\nf3\0D0x9\0i22"), "visibility-unknown"),
+        ]
+        for result, reason in cases:
+            with self.subTest(reason=reason, output=result.stdout), \
+                    mock.patch.object(FINISH, "sudo_holder_scan", return_value=result) as elevated, \
+                    mock.patch.object(FINISH, "run") as ordinary:
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    FINISH.manual_holders(snap, contents, {}, float("inf"),
+                                          sudo_holder_scan_enabled=True)
+                elevated.assert_called_once()
+                ordinary.assert_not_called()
+        with mock.patch.object(FINISH, "sudo_holder_scan", return_value=self.result()):
+            FINISH.manual_holders(snap, contents, {}, float("inf"), sudo_holder_scan_enabled=True)
+
+    def test_manual_scan_forwards_its_absolute_admission_deadline(self):
+        until = time.monotonic() + 5
+        with mock.patch.object(FINISH, "sudo_holder_scan", return_value=self.result()) as elevated:
+            FINISH.manual_holders({"path": "/fixture/worktree", "gitdir": "/fixture/admin"},
+                                  {"entries": {}}, {}, until, sudo_holder_scan_enabled=True)
+        elevated.assert_called_once_with(until)
+
+    def resolve(self, selected, *, changed=None, links=None):
+        modes = {
+            "/": (0, FINISH.stat.S_IFDIR | 0o755),
+            "/usr": (0, FINISH.stat.S_IFDIR | 0o755),
+            "/usr/bin": (0, FINISH.stat.S_IFDIR | 0o755),
+            "/usr/bin/sudo": (0, FINISH.stat.S_IFREG | 0o4755),
+            "/usr/bin/lsof": (0, FINISH.stat.S_IFREG | 0o755),
+        }
+        links = links or {}
+        for path in links:
+            modes[path] = (0, FINISH.stat.S_IFLNK | 0o777)
+        modes.update(changed or {})
+
+        def details(path):
+            try:
+                uid, mode = modes[str(path)]
+            except KeyError:
+                raise FileNotFoundError(str(path))
+            return types.SimpleNamespace(st_uid=uid, st_mode=mode)
+
+        with mock.patch.object(FINISH.shutil, "which", return_value=selected), \
+                mock.patch.object(Path, "lstat", details), \
+                mock.patch.object(FINISH.os, "readlink", side_effect=lambda path: links[str(path)]):
+            return FINISH.trusted_holder_binary("sudo")
+
+    def test_root_owned_canonical_binaries_and_verified_symlink_chains(self):
+        self.assertEqual(self.resolve("/usr/bin/sudo"), "/usr/bin/sudo")
+        self.assertEqual(self.resolve("/bin/sudo", links={"/bin": "usr/bin"}), "/usr/bin/sudo")
+        self.assertEqual(self.resolve("/bin/sudo", links={
+            "/bin": "/usr/bin", "/usr/bin/sudo": "../bin/actual",
+        }, changed={"/usr/bin/actual": (0, FINISH.stat.S_IFREG | 0o755)}), "/usr/bin/actual")
+
+    def test_untrusted_binary_parent_symlink_and_invalid_resolution_refuse(self):
+        for selected, changed, links in (
+                (None, {}, {}),
+                ("relative/sudo", {}, {}),
+                ("/missing/sudo", {}, {}),
+                ("/usr/bin/sudo", {"/": (0, FINISH.stat.S_IFDIR | 0o777)}, {}),
+                ("/usr/bin/sudo", {"/usr": (1000, FINISH.stat.S_IFDIR | 0o755)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin": (0, FINISH.stat.S_IFDIR | 0o775)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (1000, FINISH.stat.S_IFREG | 0o755)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (0, FINISH.stat.S_IFREG | 0o757)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (0, FINISH.stat.S_IFREG | 0o644)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (0, FINISH.stat.S_IFDIR | 0o755)}, {}),
+                ("/bin/sudo", {"/bin": (1000, FINISH.stat.S_IFLNK | 0o777)}, {"/bin": "/usr/bin"}),
+                ("/bin/sudo", {}, {"/bin": "/missing"}),
+                ("/bin/sudo", {}, {"/bin": "/bin"}),
+                ("/bin/sudo", {"/untrusted": (1000, FINISH.stat.S_IFDIR | 0o755)},
+                 {"/bin": "/untrusted/../usr/bin"})):
+            with self.subTest(selected=selected, changed=changed, links=links):
+                with self.assertRaisesRegex(FINISH.Retain, "trusted-binaries|untrusted-path"):
+                    self.resolve(selected, changed=changed, links=links)
+
+
+class SudoMonitorTests(unittest.TestCase):
+    def supervise(self, *, failure=None, sudo_monitor=True, reaps=True, signal_denied=False,
+                  interrupt=None):
+        module = FINISH.safety()
+        child = mock.Mock(pid=123, returncode=None, stdin=None)
+        child.stdout.fileno.return_value = 10
+        child.stderr.fileno.return_value = 11
+        selector = mock.Mock()
+        selector.get_map.return_value = failure == "output-limit" or interrupt is not None
+        selector.select.return_value = [(types.SimpleNamespace(fd=10, data=0), None)]
+        selector.select.side_effect = interrupt
+        waits = []
+
+        def wait(timeout):
+            waits.append(timeout)
+            if not reaps or (failure == "timeout" and len(waits) == 1):
+                raise subprocess.TimeoutExpired("fixture monitor", timeout)
+            child.returncode = 0
+            return 0
+
+        child.wait.side_effect = wait
+        if signal_denied:
+            child.send_signal.side_effect = PermissionError()
+
+        def signal_group(pid, signal):
+            if signal == 0:
+                raise ProcessLookupError()
+
+        with mock.patch.object(module, "DEADLINE", time.monotonic() + 30), \
+                mock.patch.object(module.subprocess, "Popen", return_value=child) as spawn, \
+                mock.patch.object(module.selectors, "DefaultSelector", return_value=selector), \
+                mock.patch.object(module.os, "set_blocking"), \
+                mock.patch.object(module.os, "read", return_value=b"too much output"), \
+                mock.patch.object(module.os, "killpg", side_effect=signal_group) as group:
+            if interrupt is not None:
+                with self.assertRaises(type(interrupt)) as raised:
+                    module.supervise(["/fixture/sudo"], cwd="/", env={}, limit=1,
+                                     sudo_monitor=sudo_monitor)
+                self.assertIs(raised.exception, interrupt)
+                result = None
+            else:
+                result = module.supervise(["/fixture/sudo"], cwd="/", env={}, limit=1,
+                                          sudo_monitor=sudo_monitor)
+        return result, child, group, spawn
+
+    def test_normal_completion_does_not_signal_or_infer_root_group_absence(self):
+        result, child, group, spawn = self.supervise()
+        self.assertIsNone(result.failure)
+        self.assertTrue(result.proof["reaped"])
+        self.assertEqual(result.proof["privileged_termination"], "command-returned")
+        self.assertIsNone(result.proof["group_absent"])
+        child.send_signal.assert_not_called()
+        group.assert_not_called()
+        self.assertFalse(spawn.call_args.kwargs["start_new_session"])
+        self.assertEqual(spawn.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_timeout_and_output_limit_remain_uncertain_after_monitor_is_reaped(self):
+        for failure in ("timeout", "output-limit"):
+            with self.subTest(failure=failure):
+                result, child, group, _ = self.supervise(failure=failure)
+                self.assertIsNotNone(result.failure)
+                self.assertEqual(result.proof["privileged_termination"], "unknown")
+                self.assertTrue(result.proof["reaped"])
+                self.assertIsNone(result.proof["group_absent"])
+                child.send_signal.assert_called_once_with(FINISH.safety().signal.SIGTERM)
+                self.assertEqual(child.wait.call_args, mock.call(timeout=2))
+                group.assert_not_called()
+
+    def test_unreaped_or_unsignalable_monitor_never_escalates_to_kill(self):
+        result, child, group, _ = self.supervise(failure="timeout", reaps=False, signal_denied=True)
+        self.assertIsNotNone(result.failure)
+        self.assertFalse(result.proof["reaped"])
+        self.assertEqual(result.proof["privileged_termination"], "unknown")
+        child.send_signal.assert_called_once_with(FINISH.safety().signal.SIGTERM)
+        group.assert_not_called()
+
+    def test_keyboard_interrupt_and_system_exit_propagate_after_monitor_term_and_wait(self):
+        for interrupt in (KeyboardInterrupt(), SystemExit(17)):
+            with self.subTest(interrupt=type(interrupt).__name__):
+                _, child, group, _ = self.supervise(interrupt=interrupt)
+                child.send_signal.assert_called_once_with(FINISH.safety().signal.SIGTERM)
+                child.wait.assert_called_once_with(timeout=2)
+                group.assert_not_called()
+
+    def test_default_supervisor_cleanup_is_unchanged(self):
+        result, child, group, spawn = self.supervise(failure="timeout", sudo_monitor=False)
+        child.send_signal.assert_not_called()
+        self.assertEqual(group.call_args_list, [
+            mock.call(123, FINISH.safety().signal.SIGKILL), mock.call(123, 0)])
+        self.assertTrue(result.proof["group_absent"])
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        self.assertNotIn("privileged_termination", result.proof)
+
+    def test_expired_admission_deadline_prevents_monitor_spawn(self):
+        module = FINISH.safety()
+        with mock.patch.object(module, "DEADLINE", time.monotonic() + 238), \
+                mock.patch.object(module.subprocess, "Popen") as spawn:
+            result = module.supervise(["/fixture/sudo"], cwd="/", env={},
+                                      sudo_monitor=True, deadline=time.monotonic() - 1)
+        spawn.assert_not_called()
+        self.assertIsNotNone(result.failure)
+        self.assertIsNone(result.proof["pid"])
 
 
 class SiblingRegistrationTests(unittest.TestCase):
