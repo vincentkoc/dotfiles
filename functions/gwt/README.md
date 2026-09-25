@@ -441,6 +441,26 @@ against the same head and dependency set. A proof change resets completion;
 releases. Storage guards also invalidate release when an older client resumes
 and restores an identical proof. Claims never expire.
 
+If resume reports `worktree-identity-changed`, inspect the recorded and current
+checkout, admin, common-directory and owner identities before continuing. Device
+numbers can change after a remount. An existing recorded owner may explicitly
+acknowledge only that difference for one non-destructive resume:
+
+```sh
+gwt resume --acknowledge-device-renumbering --worktree /absolute/path/to/task
+```
+
+This requires an open native v2 enrollment, its matching lock, unchanged inodes
+and path/repository/branch bindings, and a one-to-one device-number mapping.
+It never adds an owner or adopts an existing checkout. It invalidates prior
+completion and release through normal resume, preserving pins and other owners.
+The identity is rechecked under the lifecycle lock before that mutation.
+The acknowledgment does not prove historical volume continuity or rewrite the
+recorded enrollment identity. Default resume, finish, release, pin and removal
+admission keep their existing checks; a later strict identity check can still
+refuse. Automatic `gwt cd`/`gwt new` reuse never acknowledges this difference.
+The flag cannot combine with other actions, batch mode or `--if-enrolled`.
+
 The wrapper parks only its own shell before release. It cannot move the parent
 Codex process. An alive parent outside the checkout/admin paths may remain
 alive; any actual CWD, FD, thread CWD, fileport or mapped reference inside those

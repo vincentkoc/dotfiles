@@ -593,6 +593,7 @@ cd "$2"
 gwt new feature main --full --finish-managed || exit
 [[ "$PWD" == "$3" ]] || exit 91
 gwt finish --pr https://github.com/example/repo/pull/1 || exit
+gwt resume --acknowledge-device-renumbering --worktree "$3" || exit
 _gwt_finish_tool() { return 1; }
 _gwt_tmux_sync_context() { exit 98; }
 if gwt cancel --release --reason invalid; then exit 97; fi
@@ -634,6 +635,7 @@ if gwt new feature main --full --finish-managed; then exit 93; fi
             recorded = calls.read_text()
             self.assertIn("enroll --worktree", recorded)
             self.assertIn("finish --pr", recorded)
+            self.assertIn("resume --acknowledge-device-renumbering --worktree", recorded)
             self.assertGreaterEqual(recorded.count("resume --if-enrolled"), 2)
             self.assertIn("release --worktree", recorded)
             self.assertTrue(target.exists())
@@ -1900,6 +1902,175 @@ class FailureDiagnosticTests(unittest.TestCase):
     def test_unhandled_exception_still_propagates(self):
         with self.assertRaisesRegex(RuntimeError, "unexpected"):
             self.call_cli(RuntimeError("unexpected"))
+
+
+class ResumeAcknowledgementTests(unittest.TestCase):
+    tearDown = ReleaseTests.tearDown
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    row = ReleaseTests.row
+    flag = "--acknowledge-device-renumbering"
+
+    def ledger_state(self):
+        with FINISH.ledger(self.state) as db:
+            return tuple(db.iterdump())
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        self.current = FINISH.revalidate(self.row())
+        self.changed = {**self.current, **{
+            key: [self.current[key][0] + 7, self.current[key][1]]
+            for key in ("path_id", "gitdir_id", "common_id", "owner_id")}}
+
+    def reject(self, command, *args, reason="worktree-identity-changed"):
+        before = self.ledger_state()
+        with self.assertRaisesRegex(FINISH.Retain, reason):
+            self.call(command, *args)
+        self.assertEqual(self.ledger_state(), before)
+        self.assertTrue(self.wt.exists())
+
+    def test_acknowledgment_preserves_identity_dirty_source_pins_and_other_owners(self):
+        self.call("resume", "--owner", "owner-2")
+        self.call("pin", "--reason", "recovery")
+        (self.wt / "file").write_text("unfinished source\n")
+        row = self.row()
+        lock = (self.admin / "locked").read_bytes()
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed), \
+                mock.patch.object(FINISH, "evaluate_release") as removal:
+            result = self.call("resume", self.flag)[1][0]
+            self.reject("resume")
+            self.reject("pin", "--reason", "new pin")
+            self.reject("finish", "--pr", self.url)
+        removal.assert_not_called()
+        self.assertEqual(result["state"], "active")
+        self.assertEqual(result["reason"], "owner-resumed")
+        self.assertEqual(result["pins"], [{"owner": "owner-1", "reason": "recovery"}])
+        self.assertEqual([item["owner"] for item in result["owners"]], ["owner-1", "owner-2"])
+        self.assertEqual(self.row()["identity"], row["identity"])
+        self.assertEqual((self.admin / "locked").read_bytes(), lock)
+        self.assertEqual((self.wt / "file").read_text(), "unfinished source\n")
+
+    def test_acknowledgment_invalidates_completion_and_every_release(self):
+        self.call("resume", "--owner", "owner-2")
+        self.observer.observe.return_value["holders"] = [{"fixture": "present"}]
+        self.finish("--release")
+        completed = self.finish("--owner", "owner-2", "--release")[1][0]
+        self.assertEqual(completed["released_owners"], ["owner-1", "owner-2"])
+        identity = self.row()["identity"]
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed):
+            result = self.call("resume", self.flag)[1][0]
+        self.assertEqual(result["released_owners"], [])
+        self.assertGreater(result["generation"], completed["generation"])
+        self.assertEqual(result["owners"], [{"owner": "owner-1", "completed": 0},
+                                             {"owner": "owner-2", "completed": 1}])
+        self.assertIsNone(result["pr"])
+        self.assertEqual(self.row()["identity"], identity)
+        for key in ("finish_head", "primary_pr", "target", "dependencies"):
+            self.assertIsNone(self.row()[key])
+
+    def test_real_snapshot_device_change_requires_explicit_acknowledgment(self):
+        original = FINISH.identity
+        def renumber(path):
+            device, inode = original(path)
+            return [device + 7, inode]
+        with mock.patch.object(FINISH, "identity", side_effect=renumber):
+            self.reject("resume")
+            self.assertEqual(self.call("resume", self.flag)[1][0]["state"], "active")
+
+    def test_new_owner_and_conflicting_runtime_owner_cannot_acknowledge(self):
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed):
+            self.reject("resume", self.flag, "--owner", "new-owner", reason="requires-recorded-owner")
+            with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "new-thread"}):
+                self.reject("resume", self.flag, reason="requires-recorded-owner")
+                self.reject("resume", self.flag, "--owner", "owner-1", reason="conflicts-with-live-thread")
+            with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "owner-1", "GWT_OWNER_ID": "stale"}):
+                self.assertEqual(self.call("resume", self.flag)[1][0]["state"], "active")
+
+    def test_legacy_and_unenrolled_targets_are_not_adopted(self):
+        self.wt = self.legacy
+        self.reject("resume", self.flag, reason="legacy-enrollment-report-only")
+        self.wt = self.root / "absent"
+        before = self.ledger_state()
+        with self.assertRaisesRegex(FINISH.Retain, "not-enrolled"):
+            self.call("resume", self.flag)
+        self.assertEqual(self.ledger_state(), before)
+        self.assertFalse(self.wt.exists())
+
+    def test_incomplete_removal_intent_remains_held(self):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            db.execute("UPDATE retirement SET state='incomplete' WHERE worktree_id=?", (row["id"],))
+            db.commit()
+        self.reject("resume", self.flag, reason="removal-intent")
+
+    def test_native_lock_must_still_match(self):
+        (self.admin / "locked").write_text("different lifecycle owner\n")
+        self.reject("resume", self.flag, reason="registration-missing-or-locked")
+
+    def test_busy_lifecycle_lock_refuses_without_mutation(self):
+        before = self.ledger_state()
+        with FINISH.ledger(self.state), self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+            self.call("resume", self.flag)
+        self.assertEqual(self.ledger_state(), before)
+
+    def test_storage_refusal_still_blocks_acknowledgment(self):
+        self.storage.side_effect = FINISH.Retain("storage-guard-refused")
+        self.reject("resume", self.flag, reason="storage-guard-refused")
+
+    def test_inode_path_repository_and_branch_changes_refuse(self):
+        identities = ("path_id", "gitdir_id", "common_id", "owner_id")
+        changes = [{key: [self.changed[key][0], self.changed[key][1] + 1]} for key in identities]
+        changes += [{key: value + "-changed"} for key, value in self.changed.items()
+                    if key not in (*identities, "head")]
+        changes.append({"gitdir_id": [self.changed["gitdir_id"][0] + 1,
+                                      self.changed["gitdir_id"][1]]})
+        for change in changes:
+            with self.subTest(change=change), mock.patch.object(
+                    FINISH, "snapshot", return_value={**self.changed, **change}):
+                self.reject("resume", self.flag)
+
+    def test_distinct_recorded_devices_cannot_collapse(self):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            recorded = json.loads(row["identity"])
+            recorded["gitdir_id"][0] += 1
+            with db:
+                db.execute("UPDATE worktrees SET identity=? WHERE id=?",
+                           (json.dumps(recorded), row["id"]))
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed):
+            self.reject("resume", self.flag)
+
+    def test_identity_change_between_acknowledgment_and_claim_refuses(self):
+        late = {**self.changed, "path_id": [self.changed["path_id"][0] + 1,
+                                            self.changed["path_id"][1]]}
+        with mock.patch.object(FINISH, "snapshot", side_effect=[self.changed, late]) as probe:
+            self.reject("resume", self.flag)
+        self.assertEqual(probe.call_count, 2)
+
+    def test_flag_rejects_other_actions_and_automatic_or_combined_resume(self):
+        commands = ("enroll", "finish", "cancel", "release", "remove", "pin", "unpin",
+                    "status", "check", "holder-qualification", "creation-token", "guard")
+        options = (("--if-enrolled",), ("--all",), ("--apply",), ("--release",),
+                   ("--pr", self.url), ("--target", "main"), ("--wait-for", self.url),
+                   ("--reason", "recovery"), ("--policy", "policy"), ("--new-token", self.token),
+                   ("--finalized",), ("--discard-ignored", "ignored"),
+                   *((option, "") for option in ("--pr", "--target", "--reason", "--policy", "--new-token")))
+        for command, extra in [*((command, ()) for command in commands),
+                               *(("resume", option) for option in options)]:
+            with self.subTest(command=command, extra=extra), mock.patch.object(FINISH, "ledger") as ledger:
+                with self.assertRaisesRegex(FINISH.Retain, "one-explicit-resume"):
+                    self.call(command, self.flag, *extra)
+                ledger.assert_not_called()
+
+    def test_identity_error_explains_the_explicit_resume_route_without_paths(self):
+        errors = io.StringIO()
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed), contextlib.redirect_stderr(errors):
+            code = FINISH.cli(["resume", "--worktree", str(self.wt), "--state-dir", str(self.state)])
+        self.assertEqual(code, 1)
+        self.assertIn("inspect recorded/current identities first", errors.getvalue())
+        self.assertIn("gwt resume " + self.flag, errors.getvalue())
+        self.assertNotIn(str(self.wt), errors.getvalue())
 
 
 if __name__ == "__main__":
