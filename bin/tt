@@ -3304,6 +3304,8 @@ show_pane_menu() {
     "Marker green" 2 "run-shell -b '$self marker set #{pane_id} green && $tmux_cmd display-message \"pane marker green\"'" \
     "Marker blue" 3 "run-shell -b '$self marker set #{pane_id} blue && $tmux_cmd display-message \"pane marker blue\"'" \
     "Dim pane" 4 "run-shell -b '$self marker set #{pane_id} dim && $tmux_cmd display-message \"pane dimmed\"'" \
+    "Marker cyan" 5 "run-shell -b '$self marker set #{pane_id} cyan && $tmux_cmd display-message \"pane marker cyan\"'" \
+    "Marker violet" 6 "run-shell -b '$self marker set #{pane_id} violet && $tmux_cmd display-message \"pane marker violet\"'" \
     "" "" "" \
     "Sync pane" s "run-shell -b '$self note sync #{pane_id} && $tmux_cmd display-message \"pane note synced\"'" \
     "Sync all notes" a "run-shell -b '$self note sync all && $tmux_cmd display-message \"pane notes synced\"'" \
