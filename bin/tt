@@ -3288,12 +3288,12 @@ show_pane_menu() {
   local self tmux_cmd
   local -a client_args=()
 
-  [[ -n "$target" ]] || return 0
+  [[ "$target" =~ ^%[0-9]+$ ]] || { echo "tt pane-menu: exact pane ID required" >&2; return 2; }
   self="$(tt_self_command)"
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
   [[ -n "$client" ]] && client_args=(-c "$client")
 
-  "$TMUX_BIN" display-menu "${client_args[@]}" -T "Pane #{pane_index}" -t "$target" -x "$x" -y "$y" \
+  "$TMUX_BIN" -N display-menu "${client_args[@]}" -T "Pane #{pane_index}" -t "$target" -x "$x" -y "$y" \
     "Edit note" e "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 84 -h 24 -E '$self note edit #{pane_id}'" \
     "Show note" v "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 72 -h 16 -E '$self note show #{pane_id} | LESS= less -SR'" \
     "Replace with quick note" n "display-popup -t '#{pane_id}' -T 'quick note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 64 -h 10 -E '$self note prompt #{pane_id}'" \
@@ -3315,18 +3315,29 @@ show_pane_menu() {
     "#{?pane_marked_set,,-}Swap Marked" S "swap-pane" \
     "#{?pane_marked,Unmark,Mark}" m "select-pane -m" \
     "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
-    "Respawn" R "respawn-pane -k" \
-    "Kill" X "kill-pane" 2>/dev/null || true
+    "Respawn" R "confirm-before -t #{q:client_name} -p 'Respawn pane #{pane_id}? (y/n)' 'respawn-pane -k -t #{pane_id}'" \
+    "Kill" X "confirm-before -t #{q:client_name} -p 'Kill pane #{pane_id}? (y/n)' 'kill-pane -t #{pane_id}'"
+}
+
+install_pane_menu_binding() {
+  local socket="${1:-}" self mouse_passthrough_expr
+  local -a socket_args=()
+  if [[ -n "$socket" ]]; then
+    [[ "$socket" == /* ]] || { echo "tt pane-menu-bind: socket must be an absolute path" >&2; return 2; }
+    socket_args=(-S "$socket")
+  fi
+  self="$(tt_self_command)"
+  mouse_passthrough_expr='#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}'
+  "$TMUX_BIN" -N "${socket_args[@]}" bind-key -T root MouseDown3Pane if-shell -t = -F "$mouse_passthrough_expr" "select-pane -t = \\; send-keys -M" "run-shell -b -t = 'TMUX=#{q:socket_path},0,0 $self pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{q:client_name}'"
 }
 
 install_agent_status_menu() {
-  local self tmux_cmd mouse_passthrough_expr
+  local self tmux_cmd
   self="$(tt_self_command)"
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
-  mouse_passthrough_expr='#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}'
 
   "$TMUX_BIN" bind-key N display-popup -t "#{pane_id}" -T "note: #{session_name}:#{window_index}.#{pane_index}" -x "#{pane_left}" -y "#{pane_top}" -w 84 -h 24 -E "$self note edit #{pane_id}" 2>/dev/null || true
-  "$TMUX_BIN" bind-key -T root MouseDown3Pane if-shell -F "$mouse_passthrough_expr" "select-pane -t = \\; send-keys -M" "run-shell -b '$self pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{client_name}'" 2>/dev/null || true
+  install_pane_menu_binding 2>/dev/null || true
 
   "$TMUX_BIN" bind-key -T root MouseDown1StatusRight run-shell -b "$self codex-snapshot --quiet && $tmux_cmd display-message 'codex snapshot saved'" 2>/dev/null || true
   "$TMUX_BIN" bind-key -T root MouseDown3StatusRight display-menu -T "CX SAVE" -x M -y W \
@@ -4570,6 +4581,10 @@ case "${1:-}" in
   pane-menu)
     show_pane_menu "${2:-${TMUX_PANE:-}}" "${3:-P}" "${4:-P}" "${5:-}"
     ;;
+  pane-menu-bind)
+    [[ $# -le 2 ]] || { echo "usage: tt pane-menu-bind [socket-path]" >&2; exit 2; }
+    install_pane_menu_binding "${2:-}"
+    ;;
   autosave)
     case "${2:-on}" in
       on)
@@ -4697,7 +4712,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|ops [session]|new-window [--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|new-window [--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|pane-menu-bind [socket-path]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;

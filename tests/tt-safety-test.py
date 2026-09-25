@@ -20,6 +20,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from tt_menu_test import MenuTests
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 LOADER = importlib.machinery.SourceFileLoader("tt_snapshot_writer", str(REPO / "bin/tt-codex-snapshot-writer"))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
