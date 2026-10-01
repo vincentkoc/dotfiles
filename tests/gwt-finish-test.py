@@ -1221,6 +1221,187 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(self.wt.exists())
 
 
+class CloseoutGuidanceTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    setUp = ReleaseTests.setUp
+    tearDown = ReleaseTests.tearDown
+
+    def assert_hint(self, hint):
+        self.assertEqual(hint["argv"], ["gwt", "rm", str(self.wt), "--finalized"])
+        self.assertEqual(hint["cwd"], str(self.repo))
+        self.assertEqual(hint["admission"], "not-checked")
+        self.assertIn("finalized task you own", hint["condition"])
+        self.assertIn("ignored disposable roots", hint["condition"])
+        self.assertIn("Native checks still apply", hint["condition"])
+        self.assertIn("no removal authority", hint["condition"])
+
+    def guard_cli(self, path=None, *args):
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = FINISH.cli(["guard", "--worktree", str(path or self.wt),
+                               "--state-dir", str(self.state), *args])
+        self.assertEqual((code, output.getvalue()), (1, ""))
+        lines = errors.getvalue().splitlines()
+        self.assertEqual(lines[-1], "gwt finish: stopped; inspect finish-status for checkout outcome "
+                         "(enrolled-worktree-owned-by-finish-lifecycle)")
+        return lines[:-1]
+
+    def test_finish_release_status_and_cancellation_offer_conditional_route(self):
+        with mock.patch.object(FINISH, "qualified_policy",
+                               side_effect=FINISH.Retain("explicit-release-policy-not-installed")):
+            results = [self.finish()[1][0], self.call("release")[1][0],
+                       self.call("status")[1][0], self.call("cancel", "--reason", "done")[1][0]]
+        self.assertEqual(results[0]["reason"], "awaiting-owner-release")
+        self.assertEqual(results[1]["reason"], "explicit-release-policy-not-installed")
+        self.assertEqual(results[-1]["state"], "cancelled")
+        for result in results:
+            self.assert_hint(result["manual_closeout"])
+            self.assertEqual(result["checkout"], "retained")
+            self.assertFalse(result["removal_available"])
+        self.assertTrue(self.wt.exists())
+
+    def test_finish_with_release_keeps_original_reason_and_exit(self):
+        with mock.patch.object(FINISH, "qualified_policy",
+                               side_effect=FINISH.Retain("explicit-release-policy-not-installed")):
+            code, rows = self.finish("--release")
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["reason"], "explicit-release-policy-not-installed")
+        self.assert_hint(rows[0]["manual_closeout"])
+        self.assertFalse(rows[0]["removal_available"])
+
+    def test_status_is_recorded_discovery_without_probes_or_mutations(self):
+        before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                  for path in self.state.iterdir()}
+        with contextlib.ExitStack() as stack:
+            for name in ("run", "git", "pr", "default_target", "revalidate", "storage_guard",
+                         "qualified_policy", "holder_qualification", "completion_checks",
+                         "finalized_admission", "deletion_admission", "remove_finalized",
+                         "remove_released"):
+                stack.enter_context(mock.patch.object(
+                    FINISH, name, side_effect=AssertionError("status performed " + name)))
+            for name in ("inventory", "admin_inventory", "maintainer_lock", "Darwin"):
+                stack.enter_context(mock.patch.object(
+                    FINISH.safety(), name, side_effect=AssertionError("status performed " + name)))
+            for args in ((), ("--all",)):
+                code, rows = self.call("status", *args)
+                self.assertEqual(code, 0)
+                result = next(row for row in rows if row["worktree"] == str(self.wt))
+                self.assert_hint(result["manual_closeout"])
+                with mock.patch.object(FINISH, "finalized_closeout_hint", return_value=None):
+                    baseline = self.call("status", *args)[1]
+                self.assertEqual([{k: v for k, v in row.items() if k != "manual_closeout"}
+                                  for row in rows], baseline)
+        self.assertEqual(before, {path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                                  for path in self.state.iterdir()})
+
+    def test_guard_hint_is_exact_target_only_and_never_dispatches_removal(self):
+        with mock.patch.object(FINISH, "remove_finalized") as manual, \
+                mock.patch.object(FINISH, "remove_released") as automatic, \
+                mock.patch.object(FINISH, "run") as external:
+            lines = self.guard_cli()
+            self.assertEqual(len(lines), 1)
+            prefix = "gwt finish: manual closeout hint "
+            self.assertTrue(lines[0].startswith(prefix))
+            self.assert_hint(json.loads(lines[0][len(prefix):]))
+            for path, args in ((self.root, ()), (self.wt / "file", ()),
+                               (self.admin, ()), (self.admin / "index", ()),
+                               (self.admin.parent, ()), (self.repo, ()),
+                               (self.repo, ("--all",))):
+                with self.subTest(path=path, args=args):
+                    self.assertEqual(self.guard_cli(path, *args), [])
+            manual.assert_not_called()
+            automatic.assert_not_called()
+            external.assert_not_called()
+        self.assertTrue(self.wt.exists())
+        self.assertTrue(self.admin.exists())
+
+    def test_report_only_unknown_and_retirement_records_have_no_hint(self):
+        self.assertNotIn("manual_closeout", self.call(
+            "status", "--worktree", str(self.legacy))[1][0])
+        self.assertEqual(self.guard_cli(self.legacy), [])
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            for state, intent, outcome in (
+                    ("intent", "{}", None), ("incomplete", "{}", '{"checkout":"unknown"}'),
+                    ("removed", "{}", '{"checkout":"removed"}'), ("unknown", None, None),
+                    ("enrolled", "{}", None), ("enrolled", None, '{"checkout":"retained"}'),
+                    ("enrolled", "", None), ("enrolled", None, "")):
+                with self.subTest(state=state, intent=intent, outcome=outcome):
+                    with db:
+                        db.execute("UPDATE retirement SET state=?, intent=?, result=? WHERE worktree_id=?",
+                                   (state, intent, outcome, row["id"]))
+                    self.assertNotIn("manual_closeout", FINISH.summary(db, row))
+                    errors = io.StringIO()
+                    with contextlib.redirect_stderr(errors), self.assertRaisesRegex(
+                            FINISH.Retain, "^enrolled-worktree-owned-by-finish-lifecycle$"):
+                        FINISH.guard(db, str(self.wt))
+                    self.assertEqual(errors.getvalue(), "")
+            with db:
+                db.execute("UPDATE retirement SET state='enrolled', intent=NULL, result=NULL")
+            self.assertIsNone(FINISH.finalized_closeout_hint(db, {**dict(row), "state": "unknown"}))
+
+    def test_malformed_optional_identity_keeps_original_summary(self):
+        with FINISH.ledger(self.state) as db:
+            row = dict(FINISH.get_row(db, self.wt))
+            snap = json.loads(row["identity"])
+            with mock.patch.object(FINISH, "finalized_closeout_hint", return_value=None):
+                baseline = FINISH.summary(db, row)
+            for identity in ("invalid", "[]", "null", "{}", json.dumps({**snap, "owner": []}),
+                             json.dumps({**snap, "owner": "relative/owner"}),
+                             json.dumps({**snap, "path": str(self.legacy)}),
+                             json.dumps({**snap, "lock_reason": None}),
+                             json.dumps({**snap, "lock_reason": "not-a-native-marker"})):
+                with self.subTest(identity=identity):
+                    self.assertEqual(FINISH.summary(db, {**row, "identity": identity}), baseline)
+
+    def test_optional_guard_lookup_or_output_failure_preserves_refusal(self):
+        with mock.patch.object(FINISH, "retirement", side_effect=sqlite3.OperationalError("fixture")):
+            self.assertEqual(self.guard_cli(), [])
+        with FINISH.ledger(self.state) as db, \
+                mock.patch("builtins.print", side_effect=OSError("fixture output failure")):
+            with self.assertRaisesRegex(FINISH.Retain, "^enrolled-worktree-owned-by-finish-lifecycle$"):
+                FINISH.guard(db, str(self.wt))
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            snap = json.loads(row["identity"])
+            with db:
+                db.execute("UPDATE worktrees SET identity=? WHERE id=?",
+                           (json.dumps({**snap, "owner": None}), row["id"]))
+        self.assertEqual(self.guard_cli(), [])
+
+    def test_shell_wrapper_exposes_hint_without_removing_checkout(self):
+        script = r'''
+source "$1"
+_gwt_require_worktree_storage() { return 0; }
+_gwt_tmux_sync_context() { return 0; }
+git() {
+    if [[ "$*" == *"worktree remove"* ]]; then
+        print -u2 -- "unexpected native removal"
+        return 99
+    fi
+    command git "$@"
+}
+cd "$2"
+gwt rm "$3"
+'''
+        env = dict(os.environ, DOTFILES_GWT_FINISH_STATE=str(self.state),
+                   DOTFILES_WORKTREES_ROOT=str(self.root), DOTFILES_GWT_LOADED="", TMUX="")
+        result = subprocess.run(
+            ["zsh", "-f", "-c", script, "zsh", str(ROOT / "functions/gwt/gwt.zsh"),
+             str(self.repo), str(self.wt)], env=env, capture_output=True, text=True)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("(enrolled-worktree-owned-by-finish-lifecycle)", result.stderr)
+        self.assertNotIn("unexpected native removal", result.stderr)
+        prefix = "gwt finish: manual closeout hint "
+        line = next(line for line in result.stderr.splitlines() if line.startswith(prefix))
+        self.assert_hint(json.loads(line[len(prefix):]))
+        self.assertTrue(self.wt.exists())
+        self.assertTrue(self.admin.exists())
+        self.assertIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+
+
 class FinalizedRemovalTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call

@@ -359,12 +359,27 @@ checkout alive.
 
 ### Manual finalized-task closeout
 
-For a finalized managed task, run the following from its owning checkout:
+For a finalized managed task you own, run the following from its canonical
+owning checkout:
 
 ```sh
 gwt rm /absolute/path/to/task --finalized \
   --discard-ignored .crabbox --discard-ignored node_modules
 ```
+
+Finish, release and status summaries expose optional `manual_closeout` guidance
+for native enrolled records without a removal intent or result. This includes
+finished and cancelled tasks, but does not assert that a task is finalized or
+owned by the caller. An ordinary removal refusal shows the same hint only for
+the exact checkout, never for ancestor, Git administration or owner-wide targets.
+The structured `argv` and `cwd` describe the existing explicit route;
+`admission: not-checked` is command discovery, not permission or readiness.
+Existing reasons and `removal_available: false` remain unchanged.
+
+The hint never supplies `--discard-ignored`. Verify the actual ignored roots
+and add that option only for disposable task artifacts. Legacy report-only,
+unknown, removed and incomplete records do not receive actionable hints.
+Malformed optional guidance is omitted without replacing the original result.
 
 Use the task's actual ignored roots; these names are examples. The arguments
 declare those exact ignored roots to be disposable task artifacts. Every other
