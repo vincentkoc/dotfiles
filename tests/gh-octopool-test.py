@@ -22,17 +22,27 @@ ENV_KEYS = (
     "OCTOPOOL_TOKEN", "OCTOPOOL_ADMIN_TOKEN", "OCTOPOOL_URL", "OCTOPOOL_POOL",
     "OCTOPOOL_GH_PATH", "GHX_GH_PATH", "GH_TOKEN", "GITHUB_TOKEN",
     "OCTOPOOL_FRESH", "OCTOPOOL_NO_FALLBACK", "NO_COLOR", "GH_FORCE_TTY",
+    "GH_REPO", "GH_HOST",
 )
 BACKEND = f"""#!{sys.executable}
 import json, os, pathlib, subprocess, sys
 args = sys.argv[1:]
+if pathlib.Path(sys.argv[0]).name == "octopool" and args == ["version"]:
+    print(os.environ.get("TEST_VERSION", "octopool 0.9.2 (fixture, fixture)"))
+    sys.exit(int(os.environ.get("TEST_VERSION_STATUS", "0")))
 record = {{
     "route": pathlib.Path(sys.argv[0]).name,
     "args": args,
     "env": {{key: os.environ.get(key) for key in {ENV_KEYS!r}}},
     "stdin": sys.stdin.buffer.read().hex(),
 }}
+if "--body-file" in args:
+    path = pathlib.Path(args[args.index("--body-file") + 1])
+    if path.is_file():
+        record["body"] = path.read_bytes().hex()
 pathlib.Path(os.environ["TEST_RECORD"]).write_text(json.dumps(record))
+with open(os.environ["TEST_CHILDREN"], "a") as trace:
+    trace.write(record["route"] + "\\n")
 if os.environ.get("TEST_JQ_OUTPUT") == "1":
     query = None
     for index, arg in enumerate(args):
@@ -62,6 +72,15 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
     shutil.copytree(ROOT / "bin" / "gh-support", wrapper / "gh-support")
     for name in ("gh", "ghx"):
         shutil.copy2(ROOT / "bin" / name, wrapper / name)
+    guard = wrapper / "low-data"
+    guard.write_text(f'''#!{sys.executable}
+import os, sys
+assert sys.argv[1] == "github-check"
+with open(os.environ["TEST_GUARD"], "a") as trace:
+    trace.write("guard\\n")
+sys.exit(int(os.environ.get("TEST_GUARD_STATUS", "0")))
+''')
+    guard.chmod(0o755)
     for name in ("gh", "ghx", "octopool"):
         (backend / name).write_text(BACKEND)
         (backend / name).chmod(0o755)
@@ -80,12 +99,19 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(config),
         "TEST_RECORD": str(root / "record"),
+        "TEST_CHILDREN": str(root / "children"),
+        "TEST_GUARD": str(root / "guard"),
     }
     calls = 0
     configuration = {
         "enabled": True, "octopool_path": str(backend / "octopool"),
         "gh_path": str(backend / "gh"),
     }
+    protected = {"GH_OCTOPOOL_PROTECTED": "1"}
+    body = root / "merge body.txt"
+    body.write_text("fixture summary\n\nFixes #123\n")
+    merge = ["pr", "merge", "123", "--squash", "--auto", "--match-head-commit",
+             "a" * 40, "--subject", "fix: fixture subject", "--body-file", str(body)]
     linked_entrypoints = root / "linked-entrypoints"
     linked_entrypoints.mkdir()
     for name in ("gh", "ghx", "gh-support"):
@@ -101,17 +127,24 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
         calls += 1
         record_path = root / "record"
         record_path.unlink(missing_ok=True)
+        children = root / "children"
+        children.unlink(missing_ok=True)
+        guard_trace = root / "guard"
+        guard_trace.unlink(missing_ok=True)
         result = subprocess.run(
             [str(wrapper / entry), *args], env={**environment, **(env or {})},
             input=payload, capture_output=True, timeout=10,
         )
         assert result.returncode == status, (entry, args, result.stderr, result.returncode)
+        assert guard_trace.read_text().splitlines() == ["guard"], (entry, args)
         if route is None:
             assert not record_path.exists(), (args, record_path.read_text())
+            assert not children.exists(), (args, children.read_text())
             return result, None
         record = json.loads(record_path.read_text())
         assert record["route"] == route, (entry, args, record)
         assert record["stdin"] == payload.hex(), (entry, args, record)
+        assert children.read_text().splitlines() == [route], (entry, args)
         return result, record
 
     accepted = (
@@ -249,17 +282,20 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
         ):
             auth.write_text(json.dumps(data))
             invoke(entry, "api", endpoint)
+            invoke(entry, *merge, env=protected, status=126, route=None)
         auth.write_text("invalid json")
         invoke(entry, "api", endpoint)
         auth.write_text(json.dumps(FIXTURE_AUTH) + "\n" + json.dumps(FIXTURE_AUTH))
         invoke(entry, "api", endpoint)
         auth.unlink()
         invoke(entry, "api", endpoint)
+        invoke(entry, *merge, env=protected, status=126, route=None)
         activate()
         saved_auth = root / "saved-auth"
         auth.rename(saved_auth)
         auth.symlink_to(saved_auth)
         invoke(entry, "api", endpoint)
+        invoke(entry, *merge, env=protected, status=126, route=None)
         auth.unlink()
         saved_auth.rename(auth)
         for data in (
@@ -275,21 +311,25 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
         ):
             activation.write_text(json.dumps(data))
             invoke(entry, "api", endpoint)
+            invoke(entry, *merge, env=protected, status=126, route=None)
         for contents in ("", "1", "https://octopool.dev other",
                          json.dumps(configuration) + "\n{}",
                          "$(touch " + str(root / "must-not-exist") + ")"):
             activation.write_text(contents)
             invoke(entry, "api", endpoint)
+            invoke(entry, *merge, env=protected, status=126, route=None)
         assert not (root / "must-not-exist").exists()
         activation.unlink()
         activation.symlink_to(auth)
         invoke(entry, "api", endpoint)
+        invoke(entry, *merge, env=protected, status=126, route=None)
         activation.unlink()
         activate()
         for path in (backend / "octopool", tools / "jq"):
             disabled = root / "disabled"
             path.rename(disabled)
             invoke(entry, "api", endpoint)
+            invoke(entry, *merge, env=protected, status=126, route=None)
             disabled.rename(path)
         # The activation pin takes priority over a different PATH Octopool/native.
         pinned = root / "pinned"
@@ -330,7 +370,64 @@ with tempfile.TemporaryDirectory(prefix="gh-octopool-test-") as temporary:
         (shims / "gh").unlink()
         (backend / "gh").rename(root / "native-disabled")
         invoke(entry, "api", endpoint, status=127, route=None)
+        invoke(entry, *merge, env=protected, status=127, route=None)
         (root / "native-disabled").rename(backend / "gh")
+        activate()
+        # Protected mode delegates classification and publication guards to Octopool.
+        for prefix, extra in (([], {}), (["--no-cache"], {"OCTOPOOL_FRESH": "0"}),
+                              ([], {"GHX_NO_CACHE": "1", "OCTOPOOL_FRESH": "0"})):
+            _, record = invoke(entry, *prefix, *merge, route="octopool",
+                               env={**overrides, **protected, **extra})
+            assert record["args"] == ["gh", *merge]
+            assert record["body"] == body.read_bytes().hex()
+            assert record["env"]["OCTOPOOL_FRESH"] == "1"
+            assert record["env"]["OCTOPOOL_TOKEN"] is None
+            assert record["env"]["OCTOPOOL_URL"] == "https://octopool.dev"
+            assert record["env"]["OCTOPOOL_GH_PATH"] == str(backend / "gh")
+            assert record["env"]["GH_TOKEN"] == "native-fixture"
+        _, record = invoke(entry, *merge, route="octopool",
+                           env={**protected, "GH_REPO": "openclaw/openclaw",
+                                "GH_HOST": "github.com"})
+        assert record["env"]["GH_REPO"] == "openclaw/openclaw"
+        assert record["env"]["GH_HOST"] == "github.com"
+        for args in (["api", "graphql", "-f", "query=fixture"],
+                     ["pr", "create"], ["unknown", "command"],
+                     ["api", endpoint, "-X", "POST", "-f", "body=fixture"]):
+            invoke(entry, *args, route="octopool", env=protected)
+        for args in (["api", endpoint], ["pr", "view", "123", "-R", "openclaw/openclaw",
+                                          "--json", "number"]):
+            _, record = invoke(entry, "--no-cache", *args, route="octopool", env=protected)
+            assert record["env"]["OCTOPOOL_FRESH"] == "1"
+        for prefix in ([], ["--ttl", "15"]):
+            invoke(entry, *prefix, "pr", "view", "123", "-R", "openclaw/openclaw",
+                   "--json", "number", route="ghx", env=protected)
+        for args in (["--no-cache", "api", endpoint, "--cache", "15s"],
+                     ["--ttl", "15", *merge]):
+            invoke(entry, *args, env=protected, status=2, route=None)
+        invoke(entry, *merge, env={"GH_OCTOPOOL_PROTECTED": "0"})
+        invoke(entry, "api", endpoint, route="octopool",
+               env={"TEST_VERSION": "octopool 0.6.4 (fixture, fixture)"})
+        invoke(entry, "pr", "view", "123", "-R", "openclaw/openclaw", "--json", "number",
+               route="ghx", env={"TEST_VERSION": "octopool 0.6.4 (fixture, fixture)"})
+        for version in ("0.7.1", "0.7.2", "0.8.0", "0.9.2", "1.0.0", "v0.9.2"):
+            invoke(entry, *merge, env={**protected,
+                   "TEST_VERSION": f"octopool {version} (fixture, fixture)"}, route="octopool")
+        for version in ("0.6.4", "0.6.10", "0.7.0", "dev", "0.9.2-rc.1",
+                        "0.07.1", "999999999999.0.0"):
+            invoke(entry, *merge, env={**protected,
+                   "TEST_VERSION": f"octopool {version} (fixture, fixture)"}, status=126, route=None)
+        for extra in ({"TEST_VERSION": "unrecognized"}, {"TEST_VERSION_STATUS": "7"},
+                      {"GH_HOST": "example.invalid"}, {"GH_OCTOPOOL": "0"}):
+            invoke(entry, *merge, env={**protected, **extra}, status=126, route=None)
+        invoke(entry, *merge, env={**protected, "TEST_GUARD_STATUS": "9"}, status=9, route=None)
+        for mode in ("", "true", "false", "2", " 1"):
+            invoke(entry, *merge, env={"GH_OCTOPOOL_PROTECTED": mode}, status=2, route=None)
+        result, _ = invoke(entry, *merge, env={**protected, "TEST_STATUS": "7",
+                           "TEST_ERROR": "protected fixture refusal"}, status=7, route="octopool")
+        assert result.stderr == b"protected fixture refusal"
         activation.unlink()
+        invoke(entry, *merge, env=protected, status=126, route=None)
+        invoke(entry, "auth", "status", env=protected)
+        invoke(entry, "xdaemon", "status", env=protected, route="ghx")
 
 print(f"PASS: {calls} hermetic gh/ghx Octopool routing, auth, isolation, and parity cases")
