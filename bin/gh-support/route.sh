@@ -190,9 +190,13 @@ gh_octopool_config() {
 }
 
 gh_octopool_ready() {
-  local auth
   [[ "${GH_OCTOPOOL:-}" != 0 && -z "${GH_HOST:-}" && -z "${GH_REPO:-}" &&
     -n "$octopool_config_bin" ]] || return 1
+  gh_octopool_auth_ready
+}
+
+gh_octopool_auth_ready() {
+  local auth
   case "$(uname -s)" in
     Darwin) auth="$HOME/Library/Application Support/octopool/auth.json" ;;
     Linux) auth="${XDG_CONFIG_HOME:-$HOME/.config}/octopool/auth.json" ;;
@@ -205,6 +209,17 @@ gh_octopool_ready() {
     and (.token | type == "string" and length > 0 and (test("[[:space:][:cntrl:]]") | not))
     )
   ' "$auth" >/dev/null 2>&1
+}
+
+gh_octopool_protected_ready() {
+  local version pattern='^octopool v?(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3}) \([^[:cntrl:]]+\)$'
+  [[ -n "$octopool_config_bin" && "${GH_OCTOPOOL:-}" != 0 &&
+    ( -z "${GH_HOST:-}" || "$GH_HOST" == github.com ) ]] || return 1
+  gh_octopool_auth_ready || return 1
+  version="$("$octopool_config_bin" version 2>/dev/null)" || return 1
+  [[ "$version" =~ $pattern ]] || return 1
+  (( BASH_REMATCH[1] > 0 || BASH_REMATCH[2] > 7 ||
+    (BASH_REMATCH[2] == 7 && BASH_REMATCH[3] >= 1) ))
 }
 
 gh_native() {
@@ -272,7 +287,12 @@ gh_native() {
 gh_route() {
   local no_cache="${GHX_NO_CACHE:-0}" ttl="" gh_bin ghx_bin="" octopool_bin=""
   local octopool_config_bin="" gh_jq_bin=""
+  local protected="${GH_OCTOPOOL_PROTECTED-0}"
   local controls=()
+  case "$protected" in
+    0 | 1) ;;
+    *) gh_route_error "GH_OCTOPOOL_PROTECTED must be 0 or 1"; return 2 ;;
+  esac
   while (($#)); do
     case "$1" in
       --no-cache) no_cache=1; shift ;;
@@ -309,6 +329,14 @@ gh_route() {
       [[ -z "$ttl" ]] || { gh_route_error "--ttl does not apply to proxy management"; return 2; }
       exec env GHX_GH_PATH="$gh_bin" "$ghx_bin" "$@" ;;
   esac
+  if [[ "$protected" == 1 && "${1:-}" != auth ]]; then
+    gh_octopool_protected_ready || {
+      gh_route_error "protected routing requires valid activation, saved auth, github.com, and Octopool >= 0.7.1; GH_OCTOPOOL=0 conflicts"
+      return 126
+    }
+    octopool_bin="$octopool_config_bin"
+    [[ "$no_cache" != 1 ]] || export OCTOPOOL_FRESH=1
+  fi
   if [[ "$no_cache" != 1 && -z "$ttl" ]] && gh_octopool_read "$@" && gh_octopool_ready; then
     octopool_bin="$octopool_config_bin"
     gh_native "$@"

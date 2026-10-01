@@ -278,7 +278,7 @@ private host-local `~/.config/gh-routing/octopool.json` with exactly these keys:
 
 The file is parsed as JSON, not sourced. Unknown keys, relative paths, wrapper
 pins, missing executables, and symlinked configuration files disable activation.
-A valid configuration pins native `gh` for every route, including writes,
+A valid configuration pins native `gh` for every default route, including writes,
 `--no-cache`, and ghx's backend. This avoids PATH selecting another Octopool
 version or a wrapper. Existing `GHX_GH_PATH` and `OCTOPOOL_GH_PATH` cannot override
 the selected backend.
@@ -321,9 +321,49 @@ the wrapper neither retries failures nor performs login.
 
 Use `GH_OCTOPOOL=0` to disable relay routing immediately while retaining valid
 native pins. Remove the activation file (or set `enabled` to `false`) to restore
-legacy PATH discovery as well. `--no-cache` and `GHX_NO_CACHE=1` always bypass
+legacy PATH discovery as well. By default, `--no-cache` and `GHX_NO_CACHE=1` bypass
 Octopool and ghx. `--ttl` never selects Octopool. `OCTOPOOL_FRESH=1` requests
 relay revalidation but is not the native escape hatch for exact-head decisions.
+
+### Protected Maintainer Commands
+
+For a task that requires Octopool's outbound publication guards, explicitly set
+`GH_OCTOPOOL_PROTECTED=1` on that task's command or shell. Ordinary invocations
+keep the routing above. Do not set the mode globally or install a second PATH
+shim to activate it.
+
+First qualify a released Octopool binary at a stable versioned path and update
+the existing activation file's `octopool_path` pin. Version 0.7.1 or later is
+required for the [protected auto-merge shape](https://github.com/openclaw/octopool/pull/179).
+Verify the release checksum and the exact command shape before authorizing a
+write; the runtime version check alone is not capability or permission proof.
+Keep the existing native `gh_path`, host-local login, and rewrite policy.
+
+```sh
+GH_OCTOPOOL_PROTECTED=1 OPENCLAW_GH_BIN="$HOME/bin/ghx" scripts/pr merge 123
+```
+
+The protected mode routes native command dispatch through the pinned Octopool
+binary. Octopool owns command classification, policy checks, and guarded native
+execution. The wrapper does not retry a refused or failed command through raw
+`gh`. A valid activation, saved caller auth, recognized release version, and
+default GitHub host are required. `GH_HOST=github.com` and `GH_REPO` are supported;
+other hosts, `GH_OCTOPOOL=0`, missing prerequisites, and invalid mode values fail
+closed. Only unset, `0`, and `1` are accepted mode values.
+
+Native `auth` and ghx management commands retain their existing routes. Eligible
+structured reads still use the real ghx cache. For `--no-cache` or
+`GHX_NO_CACHE=1`, protected mode skips ghx and forces `OCTOPOOL_FRESH=1`; this asks
+Octopool to revalidate reads while retaining publication guards. Explicit API
+cache conflicts and `--ttl` restrictions remain unchanged. Low-data checks still
+run once at the entrypoint.
+
+Merge arguments, including numeric PR, `--squash --auto`, exact head,
+`--subject`, and `--body-file`, are passed intact to Octopool. Use a real body
+file. Qualification with an inert native child proves dispatch and policy
+handling, not a live GitHub merge or writer permissions. If the pin or router
+must be rolled back, stop protected work first; restoring the old read-only
+route does not qualify it for maintainer writes.
 
 ## Repo Fetch Policy
 
