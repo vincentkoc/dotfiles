@@ -211,9 +211,11 @@ def immutable(snap):
 
 
 @diagnostic_phase("worktree-identity")
-def revalidate(row, *, allow_device_renumbering=False):
+def revalidate(row, *, allow_device_renumbering=False, allow_branch_change=False):
     recorded = json.loads(row["identity"])
     current = snapshot(row["path"], recorded["root"], recorded.get("lock_reason"))
+    if allow_branch_change:
+        recorded["branch"] = current["branch"]
     if allow_device_renumbering:
         devices = {}
         for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
@@ -866,6 +868,18 @@ def preserved_branch_reflog(snap, until):
             "oids": sorted(oids), "parents": parents}
 
 
+def preserved_refs(snap, branches, until):
+    result = {}
+    for branch in sorted(set(branches)):
+        if os.path.lexists(Path(snap["common"]) / (branch + ".lock")):
+            raise Retain("preserved-branch-lock-present")
+        result[branch] = {
+            "head": git(snap["owner"], "rev-parse", "--verify", branch),
+            "reflog": preserved_branch_reflog({**snap, "branch": branch}, until),
+        }
+    return result
+
+
 def deletion_admission(row, item, qualification, until):
     module = safety()
     snap = revalidate(row)
@@ -1070,6 +1084,8 @@ def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=Fal
 
 def finalized_admission(db, row, args, until):
     snap = revalidate(row)
+    if snap["head"] != row["finish_head"]:
+        raise Retain("finalized-head-changed")
     if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
         raise Retain("recovery-pin-present")
     if os.path.lexists(Path(snap["common"]) / (snap["branch"] + ".lock")):
@@ -1094,27 +1110,37 @@ def finalized_admission(db, row, args, until):
     if set(args.discard_ignored) != ignored:
         raise Retain("ignored-content-needs-exact-disposable-roots")
     module = safety()
-    contents = module.inventory(snap, git, until, discard_ignored=ignored, compact_discarded=True)
+    contents = module.inventory(snap, git, until, discard_ignored=ignored, compact_discarded=True,
+                                allow_empty_gitlinks=True)
     admin = module.admin_inventory(snap, git, until)
     holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
     manual_holders(snap, contents, admin, until, **holder_options)
+    refs = preserved_refs(snap, row["finalized_refs"], until)
+    if refs != row["finalized_refs"]:
+        raise Retain("preserved-refs-changed")
+    # Holder and ref probes can outlive the empty-directory observation.
+    for name, proof in contents.get("gitlinks", {}).items():
+        if module.empty_gitlink(snap, name, until) != proof:
+            raise Retain("gitlink-state-changed")
     return {"snapshot": snap, "boundaries": [], "contents": contents, "admin": admin,
-            "branch_reflog": preserved_branch_reflog(snap, until)}
+            "branch_reflog": refs[snap["branch"]]["reflog"], "preserved_refs": refs}
 
 
 def remove_finalized(db, row, args):
     item = require_open_retirement(db, row)
-    snap = revalidate(row, allow_device_renumbering=True)
+    enrolled_branch = json.loads(row["identity"])["branch"]
+    snap = revalidate(row, allow_device_renumbering=True, allow_branch_change=True)
     if "lock_reason" not in snap:
         raise Retain("manual-closeout-needs-native-enrollment")
-    # Device numbers can change between enrollment and explicit closeout.
-    # Bind every subsequent check to this current identity without rebinding the
-    # durable enrollment or relaxing automatic lifecycle qualification.
-    row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True)}
+    # Explicit closeout binds the current branch, HEAD and device numbers once.
+    # Keep the durable enrollment and automatic lifecycle qualification unchanged.
+    row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True),
+           "finish_head": snap["head"]}
     storage_guard()
     module = safety()
     until = time.monotonic() + 120
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
+        row["finalized_refs"] = preserved_refs(snap, (enrolled_branch, snap["branch"]), until)
         before = finalized_admission(db, row, args, until)
         return remove_with_intent(
             db, row, item, before,
@@ -1379,6 +1405,13 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         outcome.update(siblings_preserved=outcome["sibling_comparison"]["preserved"],
                        branch_preserved=git(snap["owner"], "rev-parse", snap["branch"]) == snap["head"],
                        branch_reflog_preserved=preserved_branch_reflog(snap, module.DEADLINE) == before["branch_reflog"])
+        if "preserved_refs" in before:
+            refs = preserved_refs(snap, before["preserved_refs"], module.DEADLINE)
+            outcome["preserved_refs_after"] = refs
+            outcome["branch_preserved"] &= all(
+                refs[branch]["head"] == proof["head"] for branch, proof in before["preserved_refs"].items())
+            outcome["branch_reflog_preserved"] &= all(
+                refs[branch]["reflog"] == proof["reflog"] for branch, proof in before["preserved_refs"].items())
         dependency = before["contents"]["dependency"]
         outcome["dependency_preserved"] = dependency is None or identity(
             dependency["destination"]) == dependency["identity"]
