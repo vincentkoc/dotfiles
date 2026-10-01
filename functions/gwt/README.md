@@ -368,7 +368,7 @@ gwt rm /absolute/path/to/task --finalized \
 
 Use the task's actual ignored roots; these names are examples. The arguments
 declare those exact ignored roots to be disposable task artifacts. Every other
-ignored root blocks removal, as do dirty or untracked source, submodules, pins,
+ignored root blocks removal, as do dirty or untracked source, populated submodules, pins,
 in-progress Git operations, unrelated locks and live file/CWD holders. Symlink
 targets are never traversed or removed. This is routine task closeout, with no
 evidence archive or additional permission step.
@@ -379,6 +379,25 @@ runs one non-force Git removal. It preserves the branch, shared owner and
 external dependencies. A partial failure holds the intent and restores the
 matching native lock when its original registration still exists; it never
 replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
+
+An explicit finalized closeout can admit a different named local branch from
+the one recorded at enrollment. Checkout, owner, Git administration and native
+enrollment-marker identities must still match. Admission pins the current
+branch and HEAD for that attempt; later drift blocks removal. Both the enrolled
+and current refs must remain present and unchanged, with unchanged reflog
+existence and contents. The durable enrollment and completion proof are not
+rewritten.
+Automatic lifecycle checks do not accept this branch transition.
+
+Manual admission also accepts unpopulated gitlinks when index and HEAD paths,
+modes and commit IDs match exactly. It does not resolve or fetch those commits.
+Each gitlink must be absent or a real empty directory. No-follow descriptor
+checks bind directory identities, emptiness and absence through both admissions;
+existing directories remain part of holder checks. Populated or linked paths,
+mounts, unreadable state and a candidate worktree's `modules` admin entry block
+removal. The normal dirty-tree check still applies: missing non-sparse gitlinks
+reported as deletions by Git are not eligible. Automatic inventories continue
+to reject gitlinks.
 
 Manual closeout filters one bounded native `lsof` scan to checkout/admin paths
 and file identities, with the operator's explicit finalized-task declaration.

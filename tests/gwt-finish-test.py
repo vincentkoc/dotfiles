@@ -1243,12 +1243,199 @@ class FinalizedRemovalTests(unittest.TestCase):
         (evidence / "test.log").write_text("finalized test output\n")
         return evidence
 
-    def inventory(self, *roots, compact=True, until=None):
+    def gitlinks(self):
+        oid = "1" * 40
+        names = ("vendor/empty", "vendor/missing", "absent/leaf")
+        (self.wt / ".gitmodules").write_text("".join(
+            f'[submodule "{name}"]\n\tpath = {name}\n\turl = https://github.com/example/submodule.git\n'
+            for name in names))
+        git(self.wt, "add", ".gitmodules")
+        for name in names:
+            git(self.wt, "update-index", "--add", "--cacheinfo", f"160000,{oid},{name}")
+        git(self.wt, "commit", "-m", "unpopulated gitlinks")
+        (self.wt / "vendor/empty").mkdir(parents=True)
+        git(self.wt, "update-index", "--skip-worktree", "vendor/missing", "absent/leaf")
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.wt, "cat-file", "-e", oid)
+        return oid
+
+    def inventory(self, *roots, compact=True, until=None, allow_empty_gitlinks=False):
         with FINISH.ledger(self.state) as db:
             snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
         return FINISH.safety().inventory(
             snap, FINISH.git, time.monotonic() + 120 if until is None else until,
-            discard_ignored=roots, compact_discarded=compact)
+            discard_ignored=roots, compact_discarded=compact, allow_empty_gitlinks=allow_empty_gitlinks)
+
+    def test_empty_gitlinks_are_manual_only_and_existing_directories_have_holder_proof(self):
+        self.gitlinks()
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.proofs[self.url] = self.proof(self.url)
+        with self.assertRaisesRegex(FINISH.Retain, "raw-index-flags-or-mode-unsupported"):
+            self.finish("--release")
+        contents = self.inventory(allow_empty_gitlinks=True)
+        self.assertEqual({name: proof["state"] for name, proof in contents["gitlinks"].items()},
+                         {"vendor/empty": "empty", "vendor/missing": "absent", "absent/leaf": "absent"})
+        self.assertIn("vendor/empty", contents["entries"])
+        self.assertNotIn("vendor/missing", contents["entries"])
+        device, inode = contents["entries"]["vendor/empty"][:2]
+        observed = types.SimpleNamespace(
+            stdout=f"p7\0\nf3\0D0x{device:x}\0i{inode}\0n/other/alias\0\n".encode(), stderr=b"")
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        with mock.patch.object(FINISH.shutil, "which", return_value="/fixture/lsof"), \
+                mock.patch.object(FINISH, "run", return_value=observed):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                FINISH.manual_holders(snap, contents, {}, time.monotonic() + 10)
+
+    def test_empty_gitlinks_reject_populated_linked_admin_and_mismatched_state(self):
+        oid = self.gitlinks()
+        empty = self.wt / "vendor/empty"
+        donor = self.base / "donor"
+        donor.mkdir()
+        (donor / "keep").write_text("external content\n")
+        cases = ((empty / "source", "file"), (empty / ".git", "file"),
+                 (empty / ".git", "directory"), (empty, "symlink"), (empty, "file"),
+                 (self.admin / "modules", "directory"), (self.admin / "modules", "symlink"))
+        for path, kind in cases:
+            with self.subTest(path=path.name, kind=kind):
+                if path == empty:
+                    empty.rmdir()
+                if kind == "directory":
+                    path.mkdir()
+                elif kind == "symlink":
+                    path.symlink_to(donor)
+                else:
+                    path.write_text("must retain\n")
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "gitlink|submodule-admin"):
+                        self.inventory(allow_empty_gitlinks=True)
+                finally:
+                    path.rmdir() if kind == "directory" else path.unlink()
+                    if path == empty:
+                        empty.mkdir()
+        self.assertEqual((donor / "keep").read_text(), "external content\n")
+        git(self.wt, "update-index", "--cacheinfo", f"160000,{'2' * 40},vendor/empty")
+        with self.assertRaisesRegex(FINISH.Retain, "staged-or-index-only"):
+            self.inventory(allow_empty_gitlinks=True)
+        git(self.wt, "update-index", "--cacheinfo", f"160000,{oid},vendor/empty")
+        (self.wt / "file").unlink()
+        with self.assertRaisesRegex(FINISH.Retain, "working-file-missing"):
+            self.inventory(allow_empty_gitlinks=True)
+        (self.wt / "file").write_text("original\n")
+        empty.chmod(0)
+        try:
+            with self.assertRaises(PermissionError):
+                self.inventory(allow_empty_gitlinks=True)
+        finally:
+            empty.chmod(0o700)
+        with mock.patch.object(FINISH.safety(), "directory_mount_id", side_effect=[1, 1, 1, 2]):
+            with self.assertRaisesRegex(FINISH.Retain, "gitlink-nested-mount|gitlink-directory-changed"):
+                self.inventory(allow_empty_gitlinks=True)
+
+    def test_gitlink_descriptor_scan_rejects_population_and_replacement(self):
+        self.gitlinks()
+        empty = self.wt / "vendor/empty"
+        moved = self.base / "original-gitlink"
+        native = os.scandir
+        for change in ("populate", "replace"):
+            identity = (empty.stat().st_dev, empty.stat().st_ino)
+
+            @contextlib.contextmanager
+            def scan(target):
+                with native(target) as children:
+                    yield children
+                if isinstance(target, int) and tuple(FINISH.safety().file_identity(os.fstat(target))[:2]) == identity:
+                    if change == "populate":
+                        (empty / "late").write_text("must retain\n")
+                    else:
+                        empty.rename(moved)
+                        empty.mkdir()
+
+            with self.subTest(change=change), mock.patch.object(FINISH.safety().os, "scandir", side_effect=scan):
+                with self.assertRaisesRegex(FINISH.Retain, "gitlink-directory-changed"):
+                    self.inventory(allow_empty_gitlinks=True)
+            if change == "populate":
+                (empty / "late").unlink()
+            else:
+                empty.rmdir()
+                moved.rename(empty)
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_gitlink_open_and_absence_checks_reject_races_without_following_links(self):
+        self.gitlinks()
+        empty, missing = self.wt / "vendor/empty", self.wt / "vendor/missing"
+        donor = self.base / "external"
+        donor.mkdir()
+        (donor / "keep").write_text("external content\n")
+        native_open, native_stat = os.open, os.stat
+
+        def replace(part, flags, *args, **kwargs):
+            if part == "empty" and "dir_fd" in kwargs:
+                empty.rmdir()
+                empty.symlink_to(donor)
+            return native_open(part, flags, *args, **kwargs)
+
+        with mock.patch.object(FINISH.safety().os, "open", side_effect=replace):
+            with self.assertRaises(OSError):
+                self.inventory(allow_empty_gitlinks=True)
+        self.assertEqual((donor / "keep").read_text(), "external content\n")
+        empty.unlink()
+        empty.mkdir()
+
+        def appear(part, *args, **kwargs):
+            try:
+                return native_stat(part, *args, **kwargs)
+            except FileNotFoundError:
+                if part == "missing" and "dir_fd" in kwargs:
+                    missing.mkdir()
+                raise
+
+        with mock.patch.object(FINISH.safety().os, "stat", side_effect=appear):
+            with self.assertRaisesRegex(FINISH.Retain, "gitlink-absence-changed"):
+                self.inventory(allow_empty_gitlinks=True)
+        self.assertTrue(missing.is_dir())
+
+    def test_gitlink_replacement_between_admissions_never_dispatches_removal(self):
+        self.gitlinks()
+        empty = self.wt / "vendor/empty"
+        admission, calls = FINISH.finalized_admission, []
+
+        def replace(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                empty.rename(self.base / "original-gitlink")
+                empty.mkdir()
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=replace), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+        self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+
+    def test_gitlink_population_during_second_holder_scan_never_dispatches_removal(self):
+        self.gitlinks()
+        late = self.wt / "vendor/empty/late"
+        scans = []
+
+        def populate(*args):
+            scans.append(args)
+            if len(scans) == 2:
+                late.write_text("must retain\n")
+
+        with mock.patch.object(FINISH, "manual_holders", side_effect=populate), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.call("remove", "--finalized")
+        self.assertEqual(len(scans), 2)
+        self.assertFalse(any("worktree" in call.args[0] and
+                             ("remove" in call.args[0] or "unlock" in call.args[0])
+                             for call in children.call_args_list),
+                         "native removal dispatched after the second holder scan populated a gitlink")
+        self.assertEqual(rows[0]["reason"], "gitlink-directory-not-empty")
+        self.assertEqual(late.read_text(), "must retain\n")
+        self.assert_incomplete_locked(code, rows)
 
     def test_real_dependency_tree_above_source_limit_removes_with_compact_holder_proof(self):
         (self.repo / ".git/info/exclude").write_text("node_modules\n")
@@ -1597,6 +1784,135 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.assertIsNone(row["inventory"])
             self.assertEqual(row["state"], "removed")
 
+    def test_finalized_branch_transition_preserves_both_refs_and_enrollment(self):
+        self.finish()
+        with FINISH.ledger(self.state) as db:
+            enrolled = dict(FINISH.get_row(db, self.wt))
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        self.gitlinks()
+        current_head = git(self.wt, "rev-parse", "HEAD")
+        branches = {"released-feature": self.head, "reviewed-current": current_head}
+        reflogs = {branch: self.repo / ".git/logs/refs/heads" / branch for branch in branches}
+        before = {branch: path.read_bytes() for branch, path in reflogs.items()}
+        with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+            self.call("resume")
+        self.artifacts()
+        with mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove(".crabbox")
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        removals = [call.args[0] for call in children.call_args_list
+                    if "worktree" in call.args[0] and "remove" in call.args[0]]
+        self.assertEqual(len(removals), 1)
+        self.assertFalse({"--force", "-f"} & set(removals[0]))
+        for branch, head in branches.items():
+            self.assertEqual(git(self.repo, "rev-parse", branch), head)
+            self.assertEqual(reflogs[branch].read_bytes(), before[branch])
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            for key in ("identity", "finish_head", "primary_pr", "target", "dependencies"):
+                self.assertEqual(row[key], enrolled[key])
+            result = json.loads(FINISH.retirement(db, row)["result"])
+            self.assertEqual(result["child"]["returncode"], 0)
+            self.assertTrue(result["branch_preserved"])
+            self.assertTrue(result["branch_reflog_preserved"])
+            self.assertEqual({branch: proof["head"] for branch, proof in result["preserved_refs_after"].items()},
+                             {"refs/heads/" + branch: head for branch, head in branches.items()})
+
+    def test_branch_or_head_drift_after_manual_binding_retains_before_intent(self):
+        for change in ("branch", "head"):
+            git(self.wt, "checkout", "-b", "reviewed-" + change)
+
+            def drift():
+                if change == "branch":
+                    git(self.wt, "checkout", "-b", "unexpected-branch")
+                else:
+                    git(self.wt, "commit", "--allow-empty", "-m", "unexpected work")
+
+            with self.subTest(change=change), mock.patch.object(FINISH, "storage_guard", side_effect=drift):
+                with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed|finalized-head-changed"):
+                    self.remove()
+            self.assertTrue(self.wt.exists())
+            self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
+
+    def test_head_drift_after_intent_never_dispatches_removal(self):
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        admission, calls = FINISH.finalized_admission, []
+
+        def drift(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                git(self.wt, "commit", "--allow-empty", "-m", "unexpected work")
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "finalized-head-changed")
+        self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+        with FINISH.ledger(self.state) as db:
+            intent = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+        self.assertEqual(set(intent["before"]["preserved_refs"]),
+                         {"refs/heads/released-feature", "refs/heads/reviewed-current"})
+
+    def test_original_ref_drift_during_admission_retains_before_intent(self):
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        git(self.wt, "commit", "--allow-empty", "-m", "reviewed work")
+        head = git(self.wt, "rev-parse", "HEAD")
+        with mock.patch.object(FINISH, "manual_holders", side_effect=lambda *args:
+                               git(self.repo, "update-ref", "refs/heads/released-feature", head)):
+            with self.assertRaisesRegex(FINISH.Retain, "preserved-refs-changed"):
+                self.call("remove", "--finalized")
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def original_ref_drift_after_removal(self, change):
+        native = FINISH.safety().supervise
+        enrolled_branch = git(self.wt, "symbolic-ref", "HEAD")
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        git(self.wt, "commit", "--allow-empty", "-m", "reviewed work")
+        head = git(self.wt, "rev-parse", "HEAD")
+        reflog = self.repo / ".git/logs" / enrolled_branch
+
+        def drift(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                if change == "ref":
+                    git(self.repo, "update-ref", enrolled_branch, head)
+                else:
+                    with reflog.open("ab") as stream:
+                        stream.write(reflog.read_bytes().splitlines(keepends=True)[-1])
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=drift):
+            code, rows = self.remove()
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0]["checkout"], "unknown")
+        self.assertEqual(rows[0]["retirement_state"], "incomplete")
+        self.assertFalse(self.wt.exists())
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertFalse(result["branch_preserved" if change == "ref" else "branch_reflog_preserved"])
+
+    def test_original_ref_drift_after_removal_is_unknown(self):
+        self.original_ref_drift_after_removal("ref")
+
+    def test_original_reflog_drift_after_removal_is_unknown(self):
+        self.original_ref_drift_after_removal("reflog")
+
     def test_finalized_device_renumbering_removes_artifacts_without_rebinding_ledger(self):
         self.artifacts()
         with FINISH.ledger(self.state) as db:
@@ -1628,10 +1944,14 @@ class FinalizedRemovalTests(unittest.TestCase):
         changes += [{key: value + "-changed"} for key, value in current.items()
                     if key not in (*identities, "head")]
         changes.append({"gitdir_id": [current["gitdir_id"][0] + 2, current["gitdir_id"][1]]})
-        for change in changes:
-            with self.subTest(change=change), mock.patch.object(FINISH, "snapshot", return_value={**current, **change}):
-                with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
-                    FINISH.revalidate(row, allow_device_renumbering=True)
+        for allow_branch_change in (False, True):
+            for change in changes:
+                if allow_branch_change and "branch" in change:
+                    continue
+                with self.subTest(change=change, branch=allow_branch_change), \
+                        mock.patch.object(FINISH, "snapshot", return_value={**current, **change}):
+                    with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+                        FINISH.revalidate(row, allow_device_renumbering=True, allow_branch_change=allow_branch_change)
         recorded["gitdir_id"][0] += 1  # Distinct old devices cannot collapse onto one current device.
         row["identity"] = json.dumps(recorded)
         with mock.patch.object(FINISH, "snapshot", return_value=current):

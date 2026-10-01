@@ -221,7 +221,7 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
     return result
 
 
-def index_entries(data):
+def index_entries(data, *, allow_empty_gitlinks=False):
     """Admit ordinary SHA-1 index v2/v3 before ANY native index consumer."""
     if (len(data) < 32 or data[:4] != b"DIRC"
             or hashlib.sha1(data[:-20]).digest() != data[-20:]):
@@ -240,7 +240,8 @@ def index_entries(data):
         cursor += 62
         # Ordinary non-cone sparse checkout keeps a full v3 index with only
         # SKIP_WORKTREE. Present skipped files still receive full byte checks.
-        if flags & 0xB000 or mode not in (0o100644, 0o100755, 0o120000):
+        if flags & 0xB000 or (mode not in (0o100644, 0o100755, 0o120000)
+                            and not (allow_empty_gitlinks and mode == 0o160000)):
             raise Retain("raw-index-flags-or-mode-unsupported")
         skipped = False
         if flags & 0x4000:
@@ -276,27 +277,109 @@ def index_entries(data):
     return result
 
 
-def tree_entries(raw):
+def tree_entries(raw, *, allow_empty_gitlinks=False):
     result = {}
     for item in raw.split("\0"):
         if not item:
             continue
         metadata, name = item.split("\t", 1)
         mode, kind, oid = metadata.split()
-        if kind != "blob" or int(mode, 8) not in (0o100644, 0o100755, 0o120000):
+        if (not (kind == "blob" and int(mode, 8) in (0o100644, 0o100755, 0o120000))
+                and not (allow_empty_gitlinks and kind == "commit" and int(mode, 8) == 0o160000)):
             raise Retain("tree-mode-unsupported")
         result[name] = (int(mode, 8), oid)
     return result
 
 
-def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False):
+def directory_mount_id(fd, until):
+    if platform.system() != "Linux":
+        return None
+    # st_dev alone cannot distinguish a same-filesystem bind mount.
+    data, _ = read_file(Path("/proc/self/fdinfo") / str(fd), until, 4096)
+    values = [line.split()[1:] for line in data.splitlines() if line.startswith(b"mnt_id:")]
+    if len(values) != 1 or len(values[0]) != 1 or not values[0][0].isdigit():
+        raise Retain("gitlink-mount-identity-unavailable")
+    return int(values[0][0])
+
+
+def empty_gitlink(snap, name, until):
+    """Bind every component without following links, including the absent boundary."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with contextlib.ExitStack() as cleanup:
+        path = Path(snap["path"])
+        named = path.lstat()
+        fd = os.open(path, flags)
+        cleanup.callback(os.close, fd)
+        held = file_identity(os.fstat(fd))
+        if list(held[:2]) != snap["path_id"] or held != file_identity(named):
+            raise Retain("gitlink-root-changed")
+        mount = directory_mount_id(fd, until)
+        chain = [(None, str(path), fd, held)]
+        directories = {"": list(held)}
+        missing = None
+        parts = name.split("/")
+        for index, part in enumerate(parts):
+            tick(until)
+            relative = "/".join(parts[:index + 1])
+            try:
+                named = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                missing = (fd, part)
+                result = {"state": "absent", "missing": relative, "directories": directories}
+                break
+            if not stat.S_ISDIR(named.st_mode):
+                raise Retain("gitlink-not-empty-directory")
+            child = os.open(part, flags, dir_fd=fd)
+            cleanup.callback(os.close, child)
+            held = file_identity(os.fstat(child))
+            if held != file_identity(named):
+                raise Retain("gitlink-directory-changed")
+            path /= part
+            if (held[0] != snap["path_id"][0] or os.path.ismount(path)
+                    or directory_mount_id(child, until) != mount):
+                raise Retain("gitlink-nested-mount")
+            chain.append((fd, part, child, held))
+            directories[relative] = list(held)
+            fd = child
+        else:
+            with os.scandir(fd) as children:
+                if next(children, None) is not None:
+                    raise Retain("gitlink-directory-not-empty")
+            result = {"state": "empty", "directories": directories}
+        if missing is not None:
+            try:
+                os.stat(missing[1], dir_fd=missing[0], follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Retain("gitlink-absence-changed")
+        for parent, part, child, held in reversed(chain):
+            tick(until)
+            if (file_identity(os.fstat(child)) != held
+                    or file_identity(os.stat(part, dir_fd=parent, follow_symlinks=False)) != held
+                    or directory_mount_id(child, until) != mount):
+                raise Retain("gitlink-directory-changed")
+        return result
+
+
+def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False, allow_empty_gitlinks=False):
     index, index_id = read_file(Path(snap["gitdir"]) / "index", until)
-    entries = index_entries(index)
-    head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"))
+    entries = index_entries(index, allow_empty_gitlinks=allow_empty_gitlinks)
+    head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"),
+                        allow_empty_gitlinks=allow_empty_gitlinks)
     if any(name == root or name.startswith(root + "/") for name in head for root in discard_ignored):
         raise Retain("discarded-artifact-overlaps-tracked-source")
     if {name: entry[:2] for name, entry in entries.items()} != head:
         raise Retain("staged-or-index-only-changes")
+    gitlinks = {name for name, entry in head.items() if entry[0] == 0o160000}
+    if gitlinks:
+        try:
+            os.lstat(Path(snap["gitdir"]) / "modules")
+        except FileNotFoundError:
+            pass
+        else:
+            raise Retain("submodule-admin-present")
+    gitlink_proof = {name: empty_gitlink(snap, name, until) for name in sorted(gitlinks)}
     expected_dirs = {""}
     for name in head:
         expected_dirs.update(str(p) for p in Path(name).parents if str(p) != ".")
@@ -368,6 +451,10 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False):
                 data, _ = read_file(path, until, 4096)
                 if data != ("gitdir: " + snap["gitdir"] + "\n").encode():
                     raise Retain("worktree-pointer-changed")
+            elif name in gitlinks:
+                proof = gitlink_proof[name]
+                if proof["state"] != "empty" or list(file_identity(details)) != proof["directories"][name]:
+                    raise Retain("gitlink-directory-changed")
             elif stat.S_ISDIR(details.st_mode):
                 if name not in expected_dirs:
                     raise Retain("unclassified-ignored-directory")
@@ -399,10 +486,14 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False):
                     raise Retain("working-bytes-changed-or-limit")
         if file_identity(directory.lstat()) != file_identity(before):
             raise Retain("inventory-directory-changed")
-    if not {name for name, entry in entries.items() if not entry[2]}.issubset(rows):
+    if not {name for name, entry in entries.items() if not entry[2] and name not in gitlinks}.issubset(rows):
         raise Retain("working-file-missing")
+    if any(empty_gitlink(snap, name, until) != proof for name, proof in gitlink_proof.items()):
+        raise Retain("gitlink-state-changed")
     result = {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest(),
               "entries": rows, "dependency": dependency}
+    if gitlinks:
+        result["gitlinks"] = gitlink_proof
     if discard_ignored:
         result["discarded_links"] = discarded_links
     if compact_discarded:
