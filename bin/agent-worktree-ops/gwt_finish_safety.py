@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import selectors
 import signal
 import stat
@@ -221,7 +222,40 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
     return result
 
 
-def index_entries(data, *, allow_empty_gitlinks=False):
+def resolve_undo_entries(data):
+    result, cursor = {}, 0
+    while cursor < len(data):
+        tick(DEADLINE)
+        if len(result) >= ENTRY_LIMIT:
+            raise Retain("resolve-undo-entry-limit")
+        fields = []
+        for _ in range(4):
+            end = data.find(b"\0", cursor)
+            if end < 0:
+                raise Retain("resolve-undo-invalid")
+            fields.append(data[cursor:end])
+            cursor = end + 1
+        name = os.fsdecode(fields[0])
+        if (not name or name.startswith("/") or name in result
+                or any(part in ("", ".", "..", ".git") for part in name.split("/"))
+                or any(mode not in (b"0", b"100644", b"100755", b"120000") for mode in fields[1:])):
+            raise Retain("resolve-undo-invalid")
+        stages = []
+        for stage, mode in enumerate(fields[1:], 1):
+            if mode == b"0":
+                continue
+            oid = data[cursor:cursor + 20]
+            if len(oid) != 20 or oid == b"\0" * 20:
+                raise Retain("resolve-undo-invalid")
+            stages.append([stage, int(mode, 8), oid.hex()])
+            cursor += 20
+        if not stages:
+            raise Retain("resolve-undo-invalid")
+        result[name] = stages
+    return result
+
+
+def index_entries(data, *, allow_empty_gitlinks=False, allow_resolve_undo=False):
     """Admit ordinary SHA-1 index v2/v3 before ANY native index consumer."""
     if (len(data) < 32 or data[:4] != b"DIRC"
             or hashlib.sha1(data[:-20]).digest() != data[-20:]):
@@ -266,15 +300,62 @@ def index_entries(data, *, allow_empty_gitlinks=False):
             raise Retain("raw-index-padding-invalid")
         result[name] = (mode, oid, skipped)
         previous = raw_name
+    resolve_undo = None
     while cursor < len(data) - 20:
         if cursor + 8 > len(data) - 20:
             raise Retain("raw-index-extension-invalid")
         kind = data[cursor:cursor + 4]
         size = struct.unpack_from(">I", data, cursor + 4)[0]
-        cursor += 8 + size
-        if kind != b"TREE" or cursor > len(data) - 20:
+        start = cursor + 8
+        cursor = start + size
+        if cursor > len(data) - 20:
+            raise Retain("raw-index-extension-invalid")
+        if kind == b"REUC" and allow_resolve_undo:
+            if resolve_undo is not None:
+                raise Retain("resolve-undo-duplicate-extension")
+            resolve_undo = resolve_undo_entries(data[start:cursor])
+        elif kind != b"TREE":
             raise Retain("raw-index-extension-unsupported")
-    return result
+    return result, resolve_undo
+
+
+def preserved_resolve_undo(snap, git, until, resolve_undo, preserved_oids):
+    blobs = {oid for stages in resolve_undo.values() for _, _, oid in stages}
+    if not blobs:
+        return
+    if not preserved_oids:
+        raise Retain("resolve-undo-recovery-required")
+    roots = sorted(preserved_oids)
+    objects = [(oid, "commit") for oid in roots] + [(oid, "blob") for oid in sorted(blobs)]
+    tick(until)
+    types = git(snap["path"], "--no-replace-objects", "cat-file",
+                "--batch-check=%(objectname) %(objecttype)",
+                input_data="".join(oid + "\n" for oid, _ in objects).encode(),
+                raw=True, strict=True, deadline=until)
+    if types != "".join(f"{oid} {kind}\n" for oid, kind in objects).encode():
+        raise Retain("resolve-undo-object-type-or-missing")
+    for name, stages in resolve_undo.items():
+        tick(until)
+        # NUL framing binds literal paths even when names contain newlines.
+        raw = git(snap["path"], "--no-replace-objects", "--literal-pathspecs",
+                  "rev-list", "--objects", "-z", "--full-history", "--stdin", "--", name,
+                  input_data="".join(oid + "\n" for oid in roots).encode(),
+                  raw=True, strict=True, deadline=until)
+        fields = raw.split(b"\0")
+        if fields[-1] != b"":
+            raise Retain("resolve-undo-reachability-invalid")
+        matched, oid = set(), None
+        for field in fields[:-1]:
+            if re.fullmatch(rb"[0-9a-f]{40}", field):
+                oid = field.decode()
+            elif oid is not None and field.startswith(b"path="):
+                if field[5:] == os.fsencode(name):
+                    matched.add(oid)
+                oid = None
+            else:
+                raise Retain("resolve-undo-reachability-invalid")
+        if not {item[2] for item in stages}.issubset(matched):
+            raise Retain("resolve-undo-recovery-required")
 
 
 def tree_entries(raw, *, allow_empty_gitlinks=False):
@@ -362,9 +443,13 @@ def empty_gitlink(snap, name, until):
         return result
 
 
-def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False, allow_empty_gitlinks=False):
+def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
+              allow_empty_gitlinks=False, preserved_oids=None):
     index, index_id = read_file(Path(snap["gitdir"]) / "index", until)
-    entries = index_entries(index, allow_empty_gitlinks=allow_empty_gitlinks)
+    entries, resolve_undo = index_entries(
+        index, allow_empty_gitlinks=allow_empty_gitlinks, allow_resolve_undo=preserved_oids is not None)
+    if resolve_undo is not None:
+        preserved_resolve_undo(snap, git, until, resolve_undo, preserved_oids)
     head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"),
                         allow_empty_gitlinks=allow_empty_gitlinks)
     if any(name == root or name.startswith(root + "/") for name in head for root in discard_ignored):
@@ -492,6 +577,8 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False, 
         raise Retain("gitlink-state-changed")
     result = {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest(),
               "entries": rows, "dependency": dependency}
+    if resolve_undo is not None:
+        result["resolve_undo"] = resolve_undo
     if gitlinks:
         result["gitlinks"] = gitlink_proof
     if discard_ignored:
@@ -786,7 +873,7 @@ def access_boundary(path, until):
     return result
 
 
-def admin_inventory(snap, git, until):
+def admin_inventory(snap, git, until, *, preserved_oids=None):
     root = Path(snap["gitdir"])
     rows = {"": [[*file_identity(root.lstat()), disposable_metadata(root, until)], None]}
     used = 0
@@ -814,11 +901,23 @@ def admin_inventory(snap, git, until):
                     raise Retain("admin-recovery-directory-present")
                 stack.append(path)
                 rows[name] = [[*file_identity(s), attrs], None]
-            elif stat.S_ISREG(s.st_mode) and name in (
+            elif stat.S_ISREG(s.st_mode) and (name in (
                     "HEAD", "index", "commondir", "gitdir", "locked", "ORIG_HEAD", "logs/HEAD",
-                    "config.worktree", "info/sparse-checkout", "COMMIT_EDITMSG", "AUTO_MERGE"):
+                    "config.worktree", "info/sparse-checkout", "COMMIT_EDITMSG", "AUTO_MERGE")
+                    or (name == "FETCH_HEAD" and preserved_oids is not None)):
                 data, identity = read_file(path, until, min(LEAF_LIMIT, PASS_LIMIT - used))
                 used += len(data)
+                if name == "FETCH_HEAD":
+                    # Git writes OID, merge marker, and note/URL, terminated by LF.
+                    # Only manual admission supplies refs retained outside this admin directory.
+                    if data and not data.endswith(b"\n"):
+                        raise Retain("fetch-head-recovery-required")
+                    for line in data.split(b"\n")[:-1]:
+                        tick(until)
+                        record = re.fullmatch(
+                            rb"([0-9a-f]{40}(?:[0-9a-f]{24})?)\t(?:not-for-merge)?\t[^\0\n]*", line)
+                        if record is None or os.fsdecode(record[1]) not in preserved_oids:
+                            raise Retain("fetch-head-recovery-required")
                 if name == "AUTO_MERGE":
                     # Successful ort rebases leave this tree ref. A divergent
                     # conflict snapshot is recovery data, not disposable state.

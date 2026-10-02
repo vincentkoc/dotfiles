@@ -389,6 +389,23 @@ existence and contents. The durable enrollment and completion proof are not
 rewritten.
 Automatic lifecycle checks do not accept this branch transition.
 
+Manual closeout accepts `FETCH_HEAD` only when every record's OID appears in the
+captured current or enrolled branch heads or their preserved common reflogs.
+Records must have Git's complete OID, merge-marker, and note/URL fields with LF
+termination. An empty file is also accepted under this explicit manual proof.
+The file's identity, bytes, metadata, and retained refs remain bound through
+admission and removal. Malformed or unanchored records block closeout.
+Automatic admission continues to reject `FETCH_HEAD`.
+
+Manual closeout also accepts a strictly parsed `REUC` resolve-undo index
+extension. Each recorded stage must be a regular-file or symlink blob reachable
+at its literal path from those same retained commit roots. Bounded Git queries
+must complete without diagnostics or fetching objects. Duplicate, malformed,
+unsupported, missing, or unanchored records block closeout. Closeout stores the
+decoded path/stage/mode/OID mapping in the removal intent and terminal result.
+The full index and retained refs must match across both admissions.
+Automatic admission continues to reject `REUC`.
+
 Manual admission also accepts unpopulated gitlinks when index and HEAD paths,
 modes and commit IDs match exactly. It does not resolve or fetch those commits.
 Each gitlink must be absent or a real empty directory. No-follow descriptor
@@ -428,6 +445,12 @@ The Linux privileged scan accepts one missing-executable shape: a `txt` record
 containing only `f` and `n`, with `n` exactly `/proc/<enclosing-pid>/exe`.
 Linux `lsof` suppresses the `ENOENT` annotation for this root-owned absent
 executable. This accepts only that record, not the process's other references.
+The same privileged route accepts a numeric FD with only `f` and `n` when its
+name is exactly `/proc/<enclosing-pid>/fd/<same-fd> (readlink: No such file or directory)`.
+FD numbers must be canonical decimal (`0` or a positive integer without leading
+zeros). This procfs lookup failure exempts only that record, not its siblings.
+The path can include `/task/<tid>` immediately before `/fd/`. The TID must be
+positive decimal without leading zeros.
 Linux `mem` records with valid device/inode fields can carry one terminal
 ` (stat: No such file or directory)` annotation. The parser removes that
 annotation for pathname matching and retains the mapping's device/inode.

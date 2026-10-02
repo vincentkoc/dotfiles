@@ -84,7 +84,7 @@ def safety():
     return module
 
 
-def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None):
+def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, deadline=None):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("DYLD_", "LD_"))}
     if Path(command[0]).name == "git":
@@ -93,13 +93,14 @@ def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None):
                    GIT_ALLOW_PROTOCOL="")
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
                GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1", LC_ALL="C")
-    result = safety().supervise(command, cwd=cwd, env=env, limit=limit, input_data=input_data)
+    result = safety().supervise(command, cwd=cwd, env=env, limit=limit, input_data=input_data,
+                                deadline=deadline)
     if result.failure or result.returncode not in allowed:
         raise Retain(f"{Path(command[0]).name}-failed")
     return result
 
 
-def git(path, *args, input_data=None, raw=False):
+def git(path, *args, input_data=None, raw=False, strict=False, deadline=None):
     result = run([
         NATIVE_GIT or "git",
         "-c", "core.hooksPath=/dev/null",
@@ -112,7 +113,9 @@ def git(path, *args, input_data=None, raw=False):
         *args,
     ], limit=(32 * 1024 * 1024 if args and args[0] == "ls-tree" else
               safety().LEAF_LIMIT if args and args[0] in ("show", "stripspace") else 1024 * 1024),
-        input_data=input_data)
+        input_data=input_data, deadline=deadline)
+    if strict and result.stderr:
+        raise Retain("git-diagnostic")
     return result.stdout if raw else result.stdout.decode(errors="surrogateescape").rstrip("\n")
 
 
@@ -1069,6 +1072,13 @@ def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=Fal
         if (sys.platform == "linux" and sudo_holder_scan_enabled
                 and fields == {b"f": b"txt", b"n": b"/proc/" + pid + b"/exe"}):
             continue
+        # Linux lsof reports a procfs FD lookup ENOENT with this exact shape.
+        # Exempt only that record; sibling references still need validation.
+        if (sys.platform == "linux" and sudo_holder_scan_enabled
+                and set(fields) == {b"f", b"n"} and re.fullmatch(rb"0|[1-9][0-9]*", descriptor)
+                and re.fullmatch(rb"/proc/" + pid + rb"(?:/task/[1-9][0-9]*)?/fd/"
+                                 + descriptor + rb" \(readlink: No such file or directory\)", name)):
+            continue
         ordinary = re.fullmatch(rb"[0-9]+|\*[0-9]{3}|fp\.", descriptor)
         if not ordinary and (
                 not re.fullmatch(rb"cwd|rtd|pd|tr|txt|ltx|mem|DEL|twd|ctty|jld|v86|m86|mmap"
@@ -1122,9 +1132,13 @@ def finalized_admission(db, row, args, until):
     if set(args.discard_ignored) != ignored:
         raise Retain("ignored-content-needs-exact-disposable-roots")
     module = safety()
+    preserved_oids = {proof["head"] for proof in row["finalized_refs"].values()}
+    for proof in row["finalized_refs"].values():
+        if proof["reflog"] is not None:
+            preserved_oids.update(proof["reflog"]["oids"])
     contents = module.inventory(snap, git, until, discard_ignored=ignored, compact_discarded=True,
-                                allow_empty_gitlinks=True)
-    admin = module.admin_inventory(snap, git, until)
+                                allow_empty_gitlinks=True, preserved_oids=preserved_oids)
+    admin = module.admin_inventory(snap, git, until, preserved_oids=preserved_oids)
     holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
     manual_holders(snap, contents, admin, until, **holder_options)
     refs = preserved_refs(snap, row["finalized_refs"], until)
@@ -1380,6 +1394,8 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         if changed != 1:
             raise Retain("release-generation-changed")
     outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None}
+    if "resolve_undo" in before["contents"]:
+        outcome["resolve_undo"] = before["contents"]["resolve_undo"]
     try:
         final = recheck()
         if any(final[key] != before[key] for key in (
