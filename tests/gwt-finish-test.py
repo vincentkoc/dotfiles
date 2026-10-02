@@ -11,6 +11,7 @@ from pathlib import Path
 import runpy
 import sqlite3
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1158,6 +1159,16 @@ class ReleaseTests(unittest.TestCase):
             real.unlink()
             moved.rename(real)
 
+    def test_fetch_head_remains_unknown_for_automatic_release(self):
+        for data in (b"", (self.head + "\t\tbranch 'main' of https://example.test/repo\n").encode()):
+            with self.subTest(data=data):
+                (self.admin / "FETCH_HEAD").write_bytes(data)
+                with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
+                    self.finish("--release")
+                self.assertTrue(self.wt.exists())
+                self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), data)
+                self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+
     def test_post_remove_branch_reflog_drift_is_unknown(self):
         _, reflog = self.rebased_task()
         original = FINISH.safety().supervise
@@ -1822,6 +1833,339 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.assertEqual({branch: proof["head"] for branch, proof in result["preserved_refs_after"].items()},
                              {"refs/heads/" + branch: head for branch, head in branches.items()})
 
+    def test_fetch_head_removal_preserves_current_and_enrolled_recovery(self):
+        heads, old_tips = {}, []
+        for branch in ("released-feature", "reviewed-current"):
+            if branch == "reviewed-current":
+                git(self.wt, "checkout", "-b", branch)
+            git(self.wt, "commit", "--allow-empty", "-m", "intermediate " + branch)
+            old_tips.append(git(self.wt, "rev-parse", "HEAD"))
+            git(self.wt, "commit", "--amend", "--allow-empty", "-m", "final " + branch)
+            heads[branch] = git(self.wt, "rev-parse", "HEAD")
+        reflogs = {branch: self.repo / ".git/logs/refs/heads" / branch for branch in heads}
+        before = {branch: path.read_bytes() for branch, path in reflogs.items()}
+        for oid in old_tips:
+            self.assertEqual(git(self.repo, "rev-list", oid, "--not", "--all"), oid)
+        (self.admin / "FETCH_HEAD").write_text(
+            heads["released-feature"] + "\t\tbranch 'original' of https://example.test/repo\n"
+            + old_tips[0] + "\tnot-for-merge\tbranch 'old-original' of https://example.test/repo\n"
+            + heads["reviewed-current"] + "\tnot-for-merge\thttps://example.test/repo\\nname\n"
+            + old_tips[1] + "\t\tbranch 'old-current' of https://example.test/repo\tname\rpart\n")
+        with mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        removals = [call.args[0] for call in children.call_args_list
+                    if "worktree" in call.args[0] and "remove" in call.args[0]]
+        self.assertEqual(len(removals), 1)
+        self.assertFalse({"--force", "-f"} & set(removals[0]))
+        for branch, head in heads.items():
+            self.assertEqual(git(self.repo, "rev-parse", branch), head)
+            self.assertEqual(reflogs[branch].read_bytes(), before[branch])
+        for oid in old_tips:
+            self.assertEqual(git(self.repo, "cat-file", "-t", oid), "commit")
+
+    def test_empty_fetch_head_requires_explicit_manual_proof(self):
+        (self.admin / "FETCH_HEAD").write_bytes(b"")
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        for kwargs in ({}, {"preserved_oids": None}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
+                    FINISH.safety().admin_inventory(snap, FINISH.git, time.monotonic() + 10, **kwargs)
+        result = FINISH.safety().admin_inventory(
+            snap, FINISH.git, time.monotonic() + 10, preserved_oids=set())
+        self.assertEqual(result["FETCH_HEAD"][1], hashlib.sha256(b"").hexdigest())
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+
+    def test_malformed_or_unanchored_fetch_head_preserves_checkout_and_lock(self):
+        unanchored = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "fetched-only recovery")
+        self.assertEqual(git(self.repo, "cat-file", "-t", unanchored), "commit")
+        oid = self.head.encode()
+        valid = oid + b"\t\tbranch 'main' of https://example.test/repo\n"
+        path = self.admin / "FETCH_HEAD"
+        lock = (self.admin / "locked").read_bytes()
+        for data in (
+                unanchored.encode() + b"\t\tunretained commit\n",
+                valid + unanchored.encode() + b"\tnot-for-merge\tunretained commit\n",
+                b"0" * 40 + b"\t\tzero oid\n", oid.upper() + b"\t\tuppercase oid\n",
+                oid[:-1] + b"\t\tshort oid\n", oid + b"\tmerge\tnote\n",
+                oid + b"\tnot-for-merge \tnote\n", oid + b"\t\n",
+                oid + b"  note\n", oid + b"\t\tunterminated", valid + b"\n",
+                oid + b"\t\tnote\0url\n", valid + b"partial"):
+            with self.subTest(data=data):
+                path.write_bytes(data)
+                with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+                    self.remove()
+                self.assertEqual(path.read_bytes(), data)
+                self.assertEqual((self.admin / "locked").read_bytes(), lock)
+                self.assertTrue(self.wt.exists())
+                self.assertTrue(self.legacy.exists())
+                with FINISH.ledger(self.state) as db:
+                    item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                    self.assertEqual(item["state"], "enrolled")
+                    self.assertIsNone(item["intent"])
+
+    def test_fetch_head_drift_after_intent_never_dispatches_removal(self):
+        path = self.admin / "FETCH_HEAD"
+        path.write_text(self.head + "\t\toriginal note\n")
+        admission, calls = FINISH.finalized_admission, []
+
+        def drift(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                path.write_text(self.head + "\t\tchanged note\n")
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+        self.assertFalse(any("worktree" in call.args[0] and ("remove" in call.args[0] or "unlock" in call.args[0])
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+        self.assertEqual(path.read_text(), self.head + "\t\tchanged note\n")
+
+    def resolve_undo_fixture(self):
+        base = git(self.wt, "rev-parse", "HEAD:file")
+        (self.wt / "file").write_text("our change\n")
+        git(self.wt, "commit", "-am", "our change")
+        ours = git(self.wt, "rev-parse", "HEAD:file")
+        (self.repo / "file").write_text("their change\n")
+        git(self.repo, "commit", "-am", "their change")
+        theirs = git(self.repo, "rev-parse", "HEAD:file")
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.wt, "merge", "--no-edit", "main")
+        (self.wt / "file").write_text("resolved change\n")
+        git(self.wt, "add", "file")
+        git(self.wt, "commit", "-m", "resolve conflict")
+        # Keep the native REUC index, but make its stage history reflog-only.
+        squashed = git(self.wt, "commit-tree", "HEAD^{tree}", "-m", "resolve conflict")
+        git(self.wt, "update-ref", "refs/heads/released-feature", squashed)
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.proofs[self.url] = self.proof(self.url)
+        return {"file": [[stage, 0o100644, oid] for stage, oid in enumerate((base, ours, theirs), 1)]}
+
+    def test_resolve_undo_native_removal_records_mapping_and_preserves_blob_roots(self):
+        expected = self.resolve_undo_fixture()
+        current_objects = set(git(self.wt, "rev-list", "--objects", "--no-object-names", self.head).splitlines())
+        self.assertTrue(all(oid not in current_objects for _, _, oid in expected["file"]))
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+        before = reflog.read_bytes()
+        (self.admin / "FETCH_HEAD").write_text(self.head + "\t\tretained resolution\n")
+        intent = []
+        native = FINISH.safety().supervise
+
+        def observe(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                self.assertFalse({"--force", "-f"} & set(command))
+                with contextlib.closing(sqlite3.connect(
+                        (self.state / "lifecycle.sqlite").as_uri() + "?mode=ro", uri=True)) as db:
+                    intent.append(json.loads(db.execute("SELECT intent FROM retirement").fetchone()[0]))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(len(intent), 1)
+        self.assertEqual(intent[0]["before"]["contents"]["resolve_undo"], expected)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertIsNone(item["intent"])
+            self.assertEqual(json.loads(item["result"])["resolve_undo"], expected)
+        self.assertEqual(reflog.read_bytes(), before)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        for _, _, oid in expected["file"]:
+            self.assertEqual(git(self.repo, "cat-file", "-t", oid), "blob")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+
+    def test_resolve_undo_default_automatic_admission_remains_strict(self):
+        self.resolve_undo_fixture()
+        before = (self.admin / "index").read_bytes()
+        with self.assertRaisesRegex(FINISH.Retain, "raw-index-extension-unsupported"):
+            self.finish("--release")
+        self.assertEqual((self.admin / "index").read_bytes(), before)
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        self.assertTrue(self.wt.exists())
+
+    def write_resolve_undo(self, entries):
+        git(self.wt, "update-index", "--clear-resolve-undo")
+        path = self.admin / "index"
+        payload = b""
+        for name, stages in entries.items():
+            by_stage = {stage: (mode, oid) for stage, mode, oid in stages}
+            payload += os.fsencode(name) + b"\0"
+            payload += b"".join(format(by_stage.get(stage, (0, None))[0], "o").encode() + b"\0"
+                                for stage in (1, 2, 3))
+            payload += b"".join(bytes.fromhex(by_stage[stage][1]) for stage in (1, 2, 3) if stage in by_stage)
+        body = path.read_bytes()[:-20] + b"REUC" + struct.pack(">I", len(payload)) + payload
+        path.write_bytes(body + hashlib.sha1(body).digest())
+
+    def test_resolve_undo_requires_blobs_at_exact_literal_path_from_commit_roots(self):
+        blob = git(self.wt, "rev-parse", "HEAD:file")
+        tree = git(self.wt, "rev-parse", "HEAD^{tree}")
+        unanchored = FINISH.git(self.wt, "hash-object", "-w", "--stdin", input_data=b"unanchored recovery\n")
+        (self.wt / "nested").mkdir()
+        (self.wt / "nested/file").write_text("only below directory\n")
+        git(self.wt, "add", "nested/file")
+        git(self.wt, "commit", "-m", "nested history")
+        nested = git(self.wt, "rev-parse", "HEAD:nested/file")
+        head = git(self.wt, "rev-parse", "HEAD")
+        lock = (self.admin / "locked").read_bytes()
+        for name, oid, reason in (
+                ("file", self.head, "object-type-or-missing"),
+                ("file", tree, "object-type-or-missing"),
+                ("file", "a1" * 20, "object-type-or-missing"),
+                ("file", unanchored, "recovery-required"),
+                ("[f]ile", blob, "recovery-required"),
+                ("nested", nested, "recovery-required"),
+                ("other", blob, "recovery-required")):
+            self.write_resolve_undo({name: [[2, 0o100644, oid]]})
+            before = (self.admin / "index").read_bytes()
+            with self.subTest(name=name, oid=oid), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.remove()
+            self.assertEqual((self.admin / "index").read_bytes(), before)
+            self.assertEqual((self.admin / "locked").read_bytes(), lock)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
+        self.write_resolve_undo({"file": [[2, 0o100644, blob]]})
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        for roots in ({blob}, set(), {head, tree}):
+            with self.subTest(roots=roots), self.assertRaisesRegex(
+                    FINISH.Retain, "resolve-undo-object-type-or-missing|resolve-undo-recovery-required"):
+                FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 10, preserved_oids=roots)
+
+    def test_resolve_undo_missing_stages_and_literal_unusual_path_survive_native_removal(self):
+        name = "[literal]\nname"
+        (self.wt / name).write_text("retained stage\n")
+        (self.wt / "executable").write_text("retained executable\n")
+        (self.wt / "executable").chmod(0o755)
+        (self.wt / "link").symlink_to(name)
+        git(self.wt, "add", name, "executable", "link")
+        git(self.wt, "commit", "-m", "literal path and modes")
+        expected = {path: [[2, mode, git(self.wt, "rev-parse", "HEAD:" + path)]]
+                    for path, mode in ((name, 0o100644), ("executable", 0o100755), ("link", 0o120000))}
+        self.write_resolve_undo(expected)
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        for stages in expected.values():
+            self.assertEqual(git(self.repo, "cat-file", "-t", stages[0][2]), "blob")
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(json.loads(item["result"])["resolve_undo"], expected)
+
+    def test_resolve_undo_index_drift_after_intent_never_unlocks(self):
+        expected = self.resolve_undo_fixture()
+        admission, calls = FINISH.finalized_admission, []
+
+        def drift(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                self.write_resolve_undo({"file": expected["file"][:1]})
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+        self.assertFalse(any("worktree" in call.args[0] and ("remove" in call.args[0] or "unlock" in call.args[0])
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+        with FINISH.ledger(self.state) as db:
+            intent = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+            self.assertEqual(intent["before"]["contents"]["resolve_undo"], expected)
+
+    def test_resolve_undo_reflog_drift_during_admission_retains_before_intent(self):
+        self.resolve_undo_fixture()
+        index = (self.admin / "index").read_bytes()
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+
+        def drift(*args):
+            reflog.write_bytes(reflog.read_bytes() + reflog.read_bytes().splitlines(keepends=True)[-1])
+
+        with mock.patch.object(FINISH, "manual_holders", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "preserved-refs-changed"):
+                self.call("remove", "--finalized")
+        self.assertEqual((self.admin / "index").read_bytes(), index)
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def test_resolve_undo_git_diagnostics_failed_or_malformed_proofs_retain(self):
+        self.resolve_undo_fixture()
+        before = (self.admin / "index").read_bytes()
+        native = FINISH.safety().supervise
+        for query in ("cat-file", "rev-list"):
+            for fault in ("warning", "nonzero", "partial"):
+                def faulty(command, **kwargs):
+                    result = native(command, **kwargs)
+                    if query in command and "--no-replace-objects" in command:
+                        if fault == "warning":
+                            result.stderr = b"warning: incomplete object evidence\n"
+                        elif fault == "nonzero":
+                            result.returncode = 1
+                        else:
+                            result.stdout = result.stdout[:-1]
+                    return result
+
+                with self.subTest(query=query, fault=fault), \
+                        mock.patch.object(FINISH.safety(), "supervise", side_effect=faulty):
+                    with self.assertRaisesRegex(FINISH.Retain, "git-diagnostic|git-failed|resolve-undo"):
+                        self.remove()
+                self.assertEqual((self.admin / "index").read_bytes(), before)
+                self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+                with FINISH.ledger(self.state) as db:
+                    item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                    self.assertEqual(item["state"], "enrolled")
+                    self.assertIsNone(item["intent"])
+
+    def test_resolve_undo_git_deadline_and_output_limit_reap_owned_probe(self):
+        self.resolve_undo_fixture()
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        roots = {self.head, git(self.wt, "rev-parse", "released-feature@{1}")}
+        native = FINISH.safety().supervise
+        before = (self.admin / "index").read_bytes()
+        for query in ("cat-file", "rev-list"):
+            for fault, script in (
+                    ("deadline", "import sys, time; sys.stdin.buffer.read(); time.sleep(30)"),
+                    ("output", "import sys; sys.stdin.buffer.read(); sys.stdout.write('x' * (2 * 1024 * 1024))")):
+                probes = []
+
+                def oversized(command, **kwargs):
+                    if query in command and "--no-replace-objects" in command:
+                        result = native([sys.executable, "-I", "-c", script], **kwargs)
+                        probes.append(result)
+                        return result
+                    return native(command, **kwargs)
+
+                started = time.monotonic()
+                with self.subTest(query=query, fault=fault), \
+                        mock.patch.object(FINISH.safety(), "supervise", side_effect=oversized):
+                    with self.assertRaisesRegex(FINISH.Retain, "git-failed"):
+                        FINISH.safety().inventory(snap, FINISH.git, started + 0.5, preserved_oids=roots)
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertEqual(len(probes), 1)
+                self.assertIsNotNone(probes[0].failure)
+                self.assertTrue(probes[0].proof["reaped"])
+                self.assertTrue(probes[0].proof["group_absent"])
+                self.assertEqual((self.admin / "index").read_bytes(), before)
+                self.assertTrue((self.admin / "locked").exists())
+
     def test_branch_or_head_drift_after_manual_binding_retains_before_intent(self):
         for change in ("branch", "head"):
             git(self.wt, "checkout", "-b", "reviewed-" + change)
@@ -1868,6 +2212,7 @@ class FinalizedRemovalTests(unittest.TestCase):
         git(self.wt, "checkout", "-b", "reviewed-current")
         git(self.wt, "commit", "--allow-empty", "-m", "reviewed work")
         head = git(self.wt, "rev-parse", "HEAD")
+        (self.admin / "FETCH_HEAD").write_text(self.head + "\t\toriginal ref\n")
         with mock.patch.object(FINISH, "manual_holders", side_effect=lambda *args:
                                git(self.repo, "update-ref", "refs/heads/released-feature", head)):
             with self.assertRaisesRegex(FINISH.Retain, "preserved-refs-changed"):
@@ -2066,12 +2411,15 @@ class FinalizedRemovalTests(unittest.TestCase):
                 (b"fcwd\0n/proc/7/cwd (readlink: Permission denied)", False, "visibility-unknown"),
                 (b"fmem\0n/proc/7/maps (fopen: Permission denied)", False, "visibility-unknown"),
                 (b"ftxt\0n/proc/7/exe\0\n"
+                 b"f0\0n/proc/7/fd/0 (readlink: No such file or directory)\0\n"
                  b"fmem\0D0x8\0i22\0n/elsewhere (stat: No such file or directory)\0\n"
                  b"p8\0\nf3\0n" + os.fsencode(self.wt / "file"), True, "pending-departure"),
                 (b"ftxt\0n/proc/7/exe\0\n"
+                 b"f3\0n/proc/7/task/11/fd/3 (readlink: No such file or directory)\0\n"
                  b"fmem\0D0x8\0i22\0n" + os.fsencode(self.admin)
                  + b" (stat: No such file or directory)", True, "pending-departure"),
                 (b"ftxt\0n/proc/7/exe\0\n"
+                 b"f3\0n/proc/7/fd/3 (readlink: No such file or directory)\0\n"
                  b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", True, "visibility-unknown")):
             def observe(command, **kwargs):
                 if command[0] in ("/fixture/lsof", "/fixture/sudo"):
@@ -2370,22 +2718,29 @@ class ManualHolderTests(unittest.TestCase):
                 self.assertEqual(child.call_args.args[0], prefix + ["/usr/sbin/lsof", "-nP", "+w", "-F0pfnDi"])
                 self.assertEqual(child.call_args.kwargs["limit"], 32 * 1024 * 1024)
 
-    def test_linux_root_exe_absence_is_one_record_not_process_clearance(self):
-        output = b"p7\0\nftxt\0n/proc/7/exe\0\n"
-        self.observe(output, sudo=True)
-        for record, reason in (
-                (b"f3\0D0x9\0i22\0n/external/hardlink", "pending-departure"),
-                (b"fcwd\0D0x8\0i22\0n/fixture/admin", "pending-departure"),
-                (b"fmem\0D0x9\0i23\0n/external/admin-alias", "pending-departure"),
-                (b"p8\0\nf3\0n/fixture/worktree/file", "pending-departure"),
-                (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", "visibility-unknown"),
-                (b"f3\0n/elsewhere (stat: Permission denied)", "visibility-unknown")):
-            with self.subTest(record=record):
-                with self.assertRaisesRegex(FINISH.Retain, reason):
-                    self.observe(output + record + b"\0\n", sudo=True)
+    def test_linux_root_absence_is_one_record_not_process_clearance(self):
+        for absent in (b"ftxt\0n/proc/7/exe",
+                       b"f0\0n/proc/7/fd/0 (readlink: No such file or directory)",
+                       b"f3\0n/proc/7/fd/3 (readlink: No such file or directory)",
+                       b"f12345\0n/proc/7/fd/12345 (readlink: No such file or directory)",
+                       b"f27\0n/proc/7/task/11/fd/27 (readlink: No such file or directory)",
+                       b"f0\0n/proc/7/task/12345/fd/0 (readlink: No such file or directory)"):
+            output = b"p7\0\n" + absent + b"\0\n"
+            with self.subTest(absent=absent):
+                self.observe(output, sudo=True)
+            for record, reason in (
+                    (b"f3\0D0x9\0i22\0n/external/hardlink", "pending-departure"),
+                    (b"fcwd\0D0x8\0i22\0n/fixture/admin", "pending-departure"),
+                    (b"fmem\0D0x9\0i23\0n/external/admin-alias", "pending-departure"),
+                    (b"p8\0\nf3\0n/fixture/worktree/file", "pending-departure"),
+                    (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", "visibility-unknown"),
+                    (b"f3\0n/elsewhere (stat: Permission denied)", "visibility-unknown")):
+                with self.subTest(absent=absent, record=record):
+                    with self.assertRaisesRegex(FINISH.Retain, reason):
+                        self.observe(output + record + b"\0\n", sudo=True)
 
-    def test_linux_root_exe_absence_requires_exact_pid_path_fields_and_privilege(self):
-        for record in (
+    def test_linux_root_absence_requires_exact_record_and_privilege(self):
+        records = [
                 b"ftxt\0n/proc/8/exe", b"ftxt\0n/proc/07/exe", b"ftxt\0n/proc/7/exe/other",
                 b"ftxt\0n/proc/7/../7/exe", b"ftxt\0n/elsewhere/exe",
                 b"ftxt\0D0x8\0n/proc/7/exe", b"ftxt\0i22\0n/proc/7/exe",
@@ -2393,14 +2748,34 @@ class ManualHolderTests(unittest.TestCase):
                 b"ftxt\0n/proc/7/exe (stat: Permission denied)",
                 b"ftxt\0n/proc/7/exe\0xextra", b"ftxt\0n/proc/7/exe\0n/proc/7/exe",
                 b"fcwd\0n/proc/7/exe", b"fmem\0n/proc/7/exe",
-                b"p8\0\nftxt\0n/proc/7/exe"):
+                b"p8\0\nftxt\0n/proc/7/exe"]
+        missing = b" (readlink: No such file or directory)"
+        valid_fd = b"f3\0n/proc/7/fd/3" + missing
+        records += [b"f3\0n" + path + missing for path in (
+            b"/proc/8/fd/3", b"/proc/07/fd/3", b"/proc/7/fd/4", b"/proc/7/fd/03",
+            b"/proc/7/fd/3/other", b"/proc/7/fd/../fd/3", b"/elsewhere/3")]
+        records += [b"f" + fd + b"\0n/proc/7/fd/" + fd + missing
+                    for fd in (b"00", b"03", b"+3", b"-1", b"3u", b"*003", b"fp.")]
+        records += [b"f3\0" + fields + b"n/proc/7/fd/3" + missing for fields in (
+            b"D0x8\0", b"i22\0", b"D0x8\0i22\0", b"Dinvalid\0", b"iinvalid\0", b"D\0")]
+        records += [b"f3\0n/proc/7/fd/3" + error for error in (
+            b" (readlink: Permission denied)", b" (readlink: Input/output error)",
+            b" (stat: No such file or directory)", missing + b" extra", missing + missing)]
+        records += [valid_fd + b"\0xextra", valid_fd + b"\0n/proc/7/fd/3" + missing,
+                    b"p8\0\n" + valid_fd]
+        records += [record.replace(b"/fd/", b"/task/11/fd/") for record in records if b"/fd/" in record]
+        records += [b"f3\0n/proc/7/task/" + tid + b"/fd/3" + missing
+                    for tid in (b"0", b"01", b"+11", b"-11", b"", b"11/extra", b"11/task/12")]
+        for record in records:
             with self.subTest(record=record):
                 with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
                     self.observe(b"p7\0\n" + record + b"\0\n", sudo=True)
-        for platform in ("linux", "darwin", "freebsd14"):
-            with self.subTest(platform=platform):
-                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
-                    self.observe(b"p7\0\nftxt\0n/proc/7/exe\0\n", platform=platform)
+        for platform, sudo in (("linux", False), ("darwin", False), ("freebsd14", False)):
+            for record in (b"ftxt\0n/proc/7/exe", valid_fd, b"f0\0n/proc/7/fd/0" + missing,
+                           b"f3\0n/proc/7/task/11/fd/3" + missing):
+                with self.subTest(platform=platform, sudo=sudo, record=record):
+                    with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                        self.observe(b"p7\0\n" + record + b"\0\n", platform=platform, sudo=sudo)
 
     def test_linux_mem_enoent_retains_inode_and_deannotated_path_matching(self):
         self.contents["discarded_inodes"] = [[9, 25]]

@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -63,7 +64,7 @@ class ReaderTests(unittest.TestCase):
     def test_split_and_unknown_index_extensions_refuse_without_git(self):
         import struct
         base = b"DIRC" + struct.pack(">II", 2, 0)
-        for extension in (b"link", b"sdir", b"FSMN", b"nope"):
+        for extension in (b"link", b"sdir", b"FSMN", b"nope", b"REUC"):
             body = base + extension + struct.pack(">I", 0)
             with self.subTest(extension=extension), self.assertRaisesRegex(NATIVE.Retain, "extension"):
                 NATIVE.index_entries(body + hashlib.sha1(body).digest())
@@ -71,6 +72,57 @@ class ReaderTests(unittest.TestCase):
     def test_invalid_index_checksum_refuses(self):
         with self.assertRaisesRegex(NATIVE.Retain, "raw-index-invalid"):
             NATIVE.index_entries(b"DIRC" + b"\0" * 40)
+
+    def resolve_undo_index(self, *payloads):
+        body = b"DIRC" + struct.pack(">II", 2, 0)
+        for payload in payloads:
+            body += b"REUC" + struct.pack(">I", len(payload)) + payload
+        return body + hashlib.sha1(body).digest()
+
+    def test_resolve_undo_decodes_modes_missing_stages_and_path_bytes(self):
+        first, second = bytes.fromhex("12" * 20), bytes.fromhex("34" * 20)
+        for modes, stages in (
+                (b"100644\0000\000120000\0", [[1, 0o100644, first.hex()], [3, 0o120000, second.hex()]]),
+                (b"0\000100755\000120000\0", [[2, 0o100755, first.hex()], [3, 0o120000, second.hex()]]),
+                (b"100644\000100755\0000\0", [[1, 0o100644, first.hex()], [2, 0o100755, second.hex()]])):
+            with self.subTest(modes=modes):
+                name = b"dir/[literal]\nname\xff"
+                data = self.resolve_undo_index(name + b"\0" + modes + first + second)
+                self.assertEqual(NATIVE.index_entries(data, allow_resolve_undo=True),
+                                 ({}, {os.fsdecode(name): stages}))
+        data = self.resolve_undo_index(b"a\0000\000100644\0000\0" + first
+                                      + b"b\000100755\0000\0000\0" + second)
+        self.assertEqual(NATIVE.index_entries(data, allow_resolve_undo=True)[1],
+                         {"a": [[2, 0o100644, first.hex()]], "b": [[1, 0o100755, second.hex()]]})
+
+    def test_resolve_undo_rejects_unsafe_duplicate_malformed_and_truncated_records(self):
+        oid = bytes.fromhex("12" * 20)
+        record = b"file\000100644\0000\0000\0" + oid
+        malformed = [record + record, record + b"trailing", record + b"\0", b"file\0000\0000\0000\0",
+                     b"file\000100644\0000\0000\0" + b"\0" * 20]
+        malformed += [record[:end] for end in range(1, len(record))]
+        malformed += [name + b"\000100644\0000\0000\0" + oid
+                      for name in (b"", b"/root", b"dir/", b"dir//file", b".",
+                                   b"..", b"dir/../file", b"dir/./file", b".git/file")]
+        malformed += [b"file\0" + mode + b"\0000\0000\0" + oid
+                      for mode in (b"", b"00", b"0100644", b"100664", b"160000",
+                                   b"40000", b"-1", b"100648", b"100644 ")]
+        for payload in malformed:
+            with self.subTest(payload=payload), self.assertRaisesRegex(NATIVE.Retain, "resolve-undo"):
+                NATIVE.index_entries(self.resolve_undo_index(payload), allow_resolve_undo=True)
+        for payloads in ((record, record), (b"", record), (b"", b"")):
+            with self.subTest(payloads=payloads), self.assertRaisesRegex(NATIVE.Retain, "duplicate-extension"):
+                NATIVE.index_entries(self.resolve_undo_index(*payloads), allow_resolve_undo=True)
+
+    def test_resolve_undo_declared_length_and_entry_bound_are_enforced(self):
+        record = b"file\000100644\0000\0000\0" + bytes.fromhex("12" * 20)
+        for size in (len(record) - 1, len(record) + 1, 0xffffffff):
+            body = b"DIRC" + struct.pack(">II", 2, 0) + b"REUC" + struct.pack(">I", size) + record
+            with self.subTest(size=size), self.assertRaises(NATIVE.Retain):
+                NATIVE.index_entries(body + hashlib.sha1(body).digest(), allow_resolve_undo=True)
+        with mock.patch.object(NATIVE, "ENTRY_LIMIT", 1), self.assertRaisesRegex(NATIVE.Retain, "entry-limit"):
+            NATIVE.index_entries(self.resolve_undo_index(record + record.replace(b"file", b"next")),
+                                 allow_resolve_undo=True)
 
     def test_raw_index_limit_is_not_the_discarded_tree_limit(self):
         import struct
@@ -115,7 +167,7 @@ class ReaderTests(unittest.TestCase):
                         yield types.SimpleNamespace(name=str(n), path=str(self.root / str(n)))
                 with mock.patch.object(NATIVE.os, "scandir", return_value=contextlib.nullcontext(population())), \
                         mock.patch.object(NATIVE, "read_file", return_value=(b"", (1,))), \
-                        mock.patch.object(NATIVE, "index_entries", return_value={}), \
+                        mock.patch.object(NATIVE, "index_entries", return_value=({}, None)), \
                         mock.patch.object(NATIVE, "disposable_metadata", return_value=[]), \
                         mock.patch.object(NATIVE, "ENTRY_LIMIT", 4):
                     call = NATIVE.admin_inventory if admin else NATIVE.inventory
@@ -129,7 +181,7 @@ class ReaderTests(unittest.TestCase):
         snap = {"path": str(self.root), "gitdir": str(self.root),
                 "path_id": [self.root.stat().st_dev, self.root.stat().st_ino]}
         with mock.patch.object(NATIVE, "read_file", return_value=(b"", (1,))), \
-                mock.patch.object(NATIVE, "index_entries", return_value={}), \
+                mock.patch.object(NATIVE, "index_entries", return_value=({}, None)), \
                 mock.patch.object(NATIVE, "ENTRY_LIMIT", 3):
             with self.assertRaisesRegex(NATIVE.Retain, "inventory-entry-limit"):
                 NATIVE.inventory(snap, mock.Mock(return_value=""), time.monotonic() + 2)
