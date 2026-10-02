@@ -424,6 +424,16 @@ Git, lifecycle state and deletion remain under the original invoking account.
 The flag is rejected outside manual finalized closeout and on non-Linux
 platforms before launch. Without it, the existing unprivileged scan is unchanged.
 
+The Linux privileged scan accepts one missing-executable shape: a `txt` record
+containing only `f` and `n`, with `n` exactly `/proc/<enclosing-pid>/exe`.
+Linux `lsof` suppresses the `ENOENT` annotation for this root-owned absent
+executable. This accepts only that record, not the process's other references.
+Linux `mem` records with valid device/inode fields can carry one terminal
+` (stat: No such file or directory)` annotation. The parser removes that
+annotation for pathname matching and retains the mapping's device/inode.
+Other errors, partial identities, and mismatched executable paths still block
+closeout. These cases do not change macOS or automatic cleanup.
+
 Warnings, incomplete visibility and actual holders still block removal.
 On interruption, scan timeout or output-limit failure, the helper sends
 `SIGTERM` to its task-owned sudo monitor and waits at most two seconds.

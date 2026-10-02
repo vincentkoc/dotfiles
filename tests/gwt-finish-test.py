@@ -2057,26 +2057,38 @@ class FinalizedRemovalTests(unittest.TestCase):
                 self.remove()
         self.assertEqual(len(attempts), 1)
 
-    def test_inline_holder_errors_refuse_before_intent_unlock_or_removal(self):
+    def test_inline_holder_errors_and_linux_records_preserve_intent_and_lock(self):
         native = FINISH.safety().supervise
         lookup = shutil.which
         lock = (self.admin / "locked").read_bytes()
-        for record in (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)",
-                       b"fcwd\0n/proc/7/cwd (readlink: Permission denied)",
-                       b"fmem\0n/proc/7/maps (fopen: Permission denied)"):
+        for record, sudo, reason in (
+                (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", False, "visibility-unknown"),
+                (b"fcwd\0n/proc/7/cwd (readlink: Permission denied)", False, "visibility-unknown"),
+                (b"fmem\0n/proc/7/maps (fopen: Permission denied)", False, "visibility-unknown"),
+                (b"ftxt\0n/proc/7/exe\0\n"
+                 b"fmem\0D0x8\0i22\0n/elsewhere (stat: No such file or directory)\0\n"
+                 b"p8\0\nf3\0n" + os.fsencode(self.wt / "file"), True, "pending-departure"),
+                (b"ftxt\0n/proc/7/exe\0\n"
+                 b"fmem\0D0x8\0i22\0n" + os.fsencode(self.admin)
+                 + b" (stat: No such file or directory)", True, "pending-departure"),
+                (b"ftxt\0n/proc/7/exe\0\n"
+                 b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", True, "visibility-unknown")):
             def observe(command, **kwargs):
-                if command[0] == "/fixture/lsof":
+                if command[0] in ("/fixture/lsof", "/fixture/sudo"):
                     return types.SimpleNamespace(
                         stdout=b"p7\0\n" + record + b"\0\n", stderr=b"",
                         returncode=0, failure=None)
                 return native(command, **kwargs)
 
             with self.subTest(record=record), \
+                    mock.patch.object(FINISH.sys, "platform", "linux"), \
+                    mock.patch.object(FINISH, "trusted_holder_binary",
+                                      side_effect=lambda name: "/fixture/" + name), \
                     mock.patch.object(FINISH.shutil, "which", side_effect=lambda name:
                                       "/fixture/lsof" if name == "lsof" else lookup(name)), \
                     mock.patch.object(FINISH.safety(), "supervise", side_effect=observe) as child:
-                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
-                    self.call("remove", "--finalized")
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.call("remove", "--finalized", *(["--sudo-holder-scan"] if sudo else []))
                 self.assertFalse(any("worktree" in call.args[0]
                                      and ("remove" in call.args[0] or "unlock" in call.args[0])
                                      for call in child.call_args_list))
@@ -2342,16 +2354,99 @@ class ManualHolderTests(unittest.TestCase):
                                      "node_modules": [9, 24, FINISH.stat.S_IFLNK]}}
         self.admin = {"index": [[9, 23, FINISH.stat.S_IFREG], None]}
 
-    def observe(self, output, *, errors=b"", code=0, failure=None):
+    def observe(self, output, *, errors=b"", code=0, failure=None, sudo=False, platform="linux"):
         result = types.SimpleNamespace(stdout=output, stderr=errors, returncode=code, failure=failure)
-        with mock.patch.object(FINISH.shutil, "which", return_value="/usr/sbin/lsof"), \
+        with mock.patch.object(FINISH.sys, "platform", platform), \
+                mock.patch.object(FINISH, "trusted_holder_binary",
+                                  side_effect=["/usr/bin/sudo", "/usr/sbin/lsof"]), \
+                mock.patch.object(FINISH.shutil, "which", return_value="/usr/sbin/lsof"), \
                 mock.patch.object(FINISH.safety(), "supervise", return_value=result) as child:
             try:
-                FINISH.manual_holders(self.snap, self.contents, self.admin, float("inf"))
+                FINISH.manual_holders(self.snap, self.contents, self.admin, float("inf"),
+                                      sudo_holder_scan_enabled=sudo)
             finally:
                 self.assertEqual(child.call_count, 1)
-                self.assertEqual(child.call_args.args[0], ["/usr/sbin/lsof", "-nP", "+w", "-F0pfnDi"])
+                prefix = ["/usr/bin/sudo", "-n", "-u", "#0", "--"] if sudo else []
+                self.assertEqual(child.call_args.args[0], prefix + ["/usr/sbin/lsof", "-nP", "+w", "-F0pfnDi"])
                 self.assertEqual(child.call_args.kwargs["limit"], 32 * 1024 * 1024)
+
+    def test_linux_root_exe_absence_is_one_record_not_process_clearance(self):
+        output = b"p7\0\nftxt\0n/proc/7/exe\0\n"
+        self.observe(output, sudo=True)
+        for record, reason in (
+                (b"f3\0D0x9\0i22\0n/external/hardlink", "pending-departure"),
+                (b"fcwd\0D0x8\0i22\0n/fixture/admin", "pending-departure"),
+                (b"fmem\0D0x9\0i23\0n/external/admin-alias", "pending-departure"),
+                (b"p8\0\nf3\0n/fixture/worktree/file", "pending-departure"),
+                (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", "visibility-unknown"),
+                (b"f3\0n/elsewhere (stat: Permission denied)", "visibility-unknown")):
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.observe(output + record + b"\0\n", sudo=True)
+
+    def test_linux_root_exe_absence_requires_exact_pid_path_fields_and_privilege(self):
+        for record in (
+                b"ftxt\0n/proc/8/exe", b"ftxt\0n/proc/07/exe", b"ftxt\0n/proc/7/exe/other",
+                b"ftxt\0n/proc/7/../7/exe", b"ftxt\0n/elsewhere/exe",
+                b"ftxt\0D0x8\0n/proc/7/exe", b"ftxt\0i22\0n/proc/7/exe",
+                b"ftxt\0n/proc/7/exe (readlink: No such file or directory)",
+                b"ftxt\0n/proc/7/exe (stat: Permission denied)",
+                b"ftxt\0n/proc/7/exe\0xextra", b"ftxt\0n/proc/7/exe\0n/proc/7/exe",
+                b"fcwd\0n/proc/7/exe", b"fmem\0n/proc/7/exe",
+                b"p8\0\nftxt\0n/proc/7/exe"):
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\n" + record + b"\0\n", sudo=True)
+        for platform in ("linux", "darwin", "freebsd14"):
+            with self.subTest(platform=platform):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\nftxt\0n/proc/7/exe\0\n", platform=platform)
+
+    def test_linux_mem_enoent_retains_inode_and_deannotated_path_matching(self):
+        self.contents["discarded_inodes"] = [[9, 25]]
+        for sudo in (False, True):
+            prefix = b"p7\0\n" + (b"ftxt\0n/proc/7/exe\0\n" if sudo else b"")
+            with self.subTest(sudo=sudo):
+                self.observe(prefix + b"fmem\0D0x8\0i22\0n/elsewhere"
+                             b" (stat: No such file or directory)\0\n", sudo=sudo)
+            for identity, name in (
+                    (b"D0x9\0i22", b"/external/checkout-alias"),
+                    (b"D0x9\0i23", b"/external/admin-alias"),
+                    (b"D0x9\0i25", b"/external/discarded-alias"),
+                    (b"D0x8\0i22", b"/fixture/worktree"),
+                    (b"D0x8\0i22", b"/fixture/worktree/file"),
+                    (b"D0x8\0i22", b"/fixture/admin"),
+                    (b"D0x8\0i22", b"/fixture/admin/index")):
+                with self.subTest(sudo=sudo, identity=identity, name=name):
+                    with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                        self.observe(prefix + b"fmem\0" + identity + b"\0n" + name
+                                     + b" (stat: No such file or directory)\0\n", sudo=sudo)
+
+    def test_mem_enoent_requires_linux_complete_identity_and_single_terminal_error(self):
+        for descriptor, identity, name in (
+                (b"mem", b"", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"Dinvalid\0i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0iinvalid\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"txt", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"3", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (stat: Permission denied)"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory) extra"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory)"
+                 b" (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (readlink: Permission denied)"
+                 b" (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0i22\0", b" (stat: No such file or directory)")):
+            with self.subTest(descriptor=descriptor, identity=identity, name=name):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\nf" + descriptor + b"\0" + identity + b"n" + name + b"\0\n",
+                                 sudo=True)
+        for platform in ("darwin", "freebsd14"):
+            with self.subTest(platform=platform):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\nfmem\0D0x8\0i22\0n/elsewhere"
+                                 b" (stat: No such file or directory)\0\n", platform=platform)
 
     def test_no_matching_holders_accepts_optional_fields_and_preserves_symlink_targets(self):
         self.observe(b"p7\0\nf3\0D0x9\0i24\0n/shared/dependencies\0\n"
