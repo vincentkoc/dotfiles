@@ -1053,6 +1053,7 @@ def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=Fal
         if record.startswith(b"p"):
             if set(fields) != {b"p"} or not re.fullmatch(rb"[1-9][0-9]*", fields[b"p"]):
                 raise Retain("manual-holder-visibility-unknown")
+            pid = fields[b"p"]
             processes += 1
             continue
         if not processes or not record.startswith(b"f") or b"p" in fields:
@@ -1063,12 +1064,23 @@ def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=Fal
                 or (inode is not None and not re.fullmatch(rb"[0-9]+", inode))):
             raise Retain("manual-holder-visibility-unknown")
         descriptor = fields[b"f"]
+        # Linux lsof omits the ENOENT annotation for a root-owned missing exe.
+        # Only this txt record is absent; every sibling still needs validation.
+        if (sys.platform == "linux" and sudo_holder_scan_enabled
+                and fields == {b"f": b"txt", b"n": b"/proc/" + pid + b"/exe"}):
+            continue
         ordinary = re.fullmatch(rb"[0-9]+|\*[0-9]{3}|fp\.", descriptor)
         if not ordinary and (
                 not re.fullmatch(rb"cwd|rtd|pd|tr|txt|ltx|mem|DEL|twd|ctty|jld|v86|m86|mmap"
                                  rb"|L[0-9]+|M[0-9a-fA-F]+|R[0-9]+", descriptor)
                 or device is None or inode is None):
             raise Retain("manual-holder-visibility-unknown")
+        # Linux lsof recovers mapping device/inode from maps when stat fails.
+        # Keep that identity and match the pathname without its one ENOENT suffix.
+        missing_mapping = b" (stat: No such file or directory)"
+        if (sys.platform == "linux" and descriptor == b"mem"
+                and name.endswith(missing_mapping) and len(name) > len(missing_mapping)):
+            name = name[:-len(missing_mapping)]
         # lsof can report visibility failures in NAME with exit 0 and no stderr.
         if re.search(rb"(?:^| )\((?:opendir|readlink|stat|lstat|fstat|fopen):", name):
             raise Retain("manual-holder-visibility-unknown")
