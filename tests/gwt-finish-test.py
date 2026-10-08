@@ -3213,6 +3213,134 @@ class SiblingRegistrationTests(unittest.TestCase):
             self.assertEqual(report["changes"], [{"path": "/sibling", "kind": "identity"}])
 
 
+class ExternalRemovalTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    setUp = ReleaseTests.setUp
+    tearDown = ReleaseTests.tearDown
+
+    def arguments(self):
+        status = self.call("status")[1][0]
+        return ["--external-removal", "--worktree-id", status["id"],
+                "--generation", str(status["generation"]),
+                "--reason", "Operator removed this finished task"]
+
+    def test_external_removal_records_truth_and_preserves_completion_history(self):
+        self.finish()
+        args = self.arguments()
+        with FINISH.ledger(self.state) as db:
+            original = dict(FINISH.get_row(db, self.wt))
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        self.assertEqual(self.call("status")[1][0]["checkout"], "retained")
+        code, rows = self.call("reconcile", *args)
+        result = rows[0]
+        self.assertEqual(code, 0)
+        self.assertEqual(result["checkout"], "removed")
+        self.assertEqual(result["retirement_state"], "removed")
+        self.assertFalse(result["release_available"])
+        self.assertFalse(result["external_removal"]["native_attempted"])
+        self.assertEqual(self.call("reconcile", *args)[1][0], result)
+        self.assertEqual(self.call("status")[1][0], result)
+        with FINISH.ledger(self.state) as db:
+            current = dict(FINISH.get_row(db, self.wt))
+            retirement = FINISH.retirement(db, current)
+            self.assertIsNone(retirement["intent"])
+            self.assertIsNone(retirement["inventory"])
+        for key in original.keys() - {"reason", "checked_at"}:
+            self.assertEqual(current[key], original[key])
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+
+    def test_present_checkout_admin_and_registration_never_count_as_removed(self):
+        self.finish()
+        args = self.arguments()
+        with self.assertRaisesRegex(FINISH.Retain, "target-or-admin-present"):
+            self.call("reconcile", *args)
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        for path in (self.wt, self.admin):
+            with self.subTest(path=path.name):
+                path.symlink_to(self.base / "missing")
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "target-or-admin-present"):
+                        self.call("reconcile", *args)
+                finally:
+                    path.unlink()
+        self.admin.mkdir()
+        (self.admin / "gitdir").write_text(str(self.wt / ".git") + "\n")
+        # Retained registration is independently disqualifying when its recorded
+        # admin path is absent (Git may register the same path under another name).
+        other = self.admin.with_name("other-registration")
+        self.admin.rename(other)
+        (other / "HEAD").write_text("ref: refs/heads/released-feature\n")
+        (other / "commondir").write_text("../..\n")
+        with self.assertRaisesRegex(FINISH.Retain, "target-registered"):
+            self.call("reconcile", *args)
+        self.assertEqual(self.call("status")[1][0]["checkout"], "retained")
+
+    def test_exact_owner_generation_and_retained_branch_are_required(self):
+        self.finish()
+        args = self.arguments()
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        for extra, reason in [(["--owner", "other"], "recorded-owner"),
+                              (["--generation", "999"], "exact-record-and-generation"),
+                              (["--worktree-id", str(uuid.uuid4())], "exact-record-and-generation")]:
+            with self.subTest(extra=extra), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.call("reconcile", *args, *extra)
+        git(self.repo, "branch", "-D", "released-feature")
+        with self.assertRaises(FINISH.Retain):
+            self.call("reconcile", *args)
+        self.assertEqual(self.call("status")[1][0]["checkout"], "retained")
+
+    def test_unfinished_owners_and_recovery_pins_prevent_reconciliation(self):
+        self.finish()
+        self.call("pin", "--reason", "still needed")
+        args = self.arguments()
+        with self.assertRaisesRegex(FINISH.Retain, "finished-owners"):
+            self.call("reconcile", *args)
+        self.finish()
+        args = self.arguments()
+        with self.assertRaisesRegex(FINISH.Retain, "recovery-pin-present"):
+            self.call("reconcile", *args)
+
+    def test_native_attempt_evidence_cannot_be_overwritten(self):
+        self.finish()
+        args = self.arguments()
+        with FINISH.ledger(self.state) as db, db:
+            row = FINISH.get_row(db, self.wt)
+            db.execute("UPDATE retirement SET state='incomplete', intent=? WHERE worktree_id=?",
+                       ('{"original":"native-attempt"}', row["id"]))
+        with self.assertRaisesRegex(FINISH.Retain, "cannot-replace-native-removal-proof"):
+            self.call("reconcile", *args)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual(FINISH.retirement(db, row)["intent"], '{"original":"native-attempt"}')
+
+    def test_observation_failure_rolls_back_the_record(self):
+        self.finish()
+        args = self.arguments()
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        original = FINISH.records
+        checks = 0
+
+        def denied_on_recheck(owner):
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                raise PermissionError(errno.EACCES, "fixture denied")
+            return original(owner)
+
+        with mock.patch.object(FINISH, "records", side_effect=denied_on_recheck):
+            with self.assertRaises(PermissionError):
+                self.call("reconcile", *args)
+        result = self.call("status")[1][0]
+        self.assertEqual(result["checkout"], "retained")
+        self.assertEqual(result["retirement_state"], "enrolled")
+        self.assertNotIn("external_removal", result)
+
+
 class ReconciliationTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call

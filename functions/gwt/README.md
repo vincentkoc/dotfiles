@@ -102,6 +102,26 @@ cancellation. A repeated identical cancellation is a no-op.
 Once the task is finalized, use the manual closeout route below to retire the
 checkout. Cancellation alone does not run deletion or clear another owner's pin.
 
+## Worktrees removed outside GWT
+
+When an explicitly authorized removal already deleted a finished checkout, use
+`gwt finish-status` to obtain its record ID and generation, then record the
+observed outcome:
+
+```sh
+gwt finish-reconcile --external-removal --worktree /absolute/task/path \
+  --worktree-id <id> --generation <n> --reason 'Removed with explicit operator approval'
+```
+
+This command only updates the lifecycle record. It requires a recorded owner,
+completed owners, no recovery pins or native removal attempt, an absent checkout,
+admin directory and registration, and the unchanged source branch in its original
+repository. A repeated identical request leaves the recorded outcome unchanged.
+Existing native removal attempts keep their separate receipt-based reconciliation.
+The record reports `checkout: removed` and `native_attempted: false`; it does not
+claim historical preservation checks that GWT did not perform. History, branches
+and the path reservation remain intact. This command never removes files.
+
 ## Scheduled Git maintenance
 
 Use daily commit-graph maintenance for explicitly enrolled, healthy owning

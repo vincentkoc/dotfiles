@@ -1502,6 +1502,72 @@ def reconciliation(db, row):
     return json.loads(record[0]) if record else None
 
 
+def reconcile_external(db, row, args):
+    """Record a completed owner's external removal without inventing native proof."""
+    item = retirement(db, row)
+    who = owner_id(args)
+    if (args.worktree != row["path"] or args.worktree_id != row["id"] or item is None
+            or item["generation"] != args.generation):
+        raise Retain("external-reconciliation-needs-exact-record-and-generation")
+    owners = owner_rows(db, row["id"])
+    if who not in {owner["owner"] for owner in owners}:
+        raise Retain("reconciliation-requires-recorded-owner")
+    if row["state"] != "finished" or not all(owner["completed"] for owner in owners):
+        raise Retain("external-reconciliation-requires-finished-owners")
+    if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
+        raise Retain("recovery-pin-present")
+    previous = json.loads(item["result"]) if item["result"] else None
+    repeated = (item["state"] == "removed" and previous is not None
+                and previous.get("reason") == "external-removal-reconciled"
+                and previous.get("operator") == who
+                and previous.get("operator_reason") == args.reason)
+    if item["intent"] or (not repeated and (item["state"] != "enrolled" or previous is not None)):
+        raise Retain("external-reconciliation-cannot-replace-native-removal-proof")
+    snap = json.loads(row["identity"])
+
+    def observe():
+        for key in ("owner", "common"):
+            if physical(snap[key]) != snap[key] or identity(snap[key]) != snap[key + "_id"]:
+                raise Retain("reconciliation-owner-identity-changed")
+        if (git(snap["owner"], "rev-parse", "--path-format=absolute", "--git-common-dir") != snap["common"]
+                or repository(git(snap["owner"], "remote", "get-url", "origin")) != snap["repo"]):
+            raise Retain("reconciliation-owner-binding-changed")
+        # Only ENOENT proves absence: denied access and dangling links must not qualify.
+        for key in ("path", "gitdir"):
+            try:
+                os.lstat(snap[key])
+            except FileNotFoundError:
+                if str(Path(snap[key]).resolve()) != snap[key]:
+                    raise Retain("reconciliation-target-path-changed")
+                continue
+            raise Retain("reconciliation-target-or-admin-present")
+        if any(record["worktree"] == snap["path"] for record in records(snap["owner"])):
+            raise Retain("reconciliation-target-registered")
+        if (os.path.lexists(Path(snap["common"]) / (snap["branch"] + ".lock"))
+                or git(snap["owner"], "rev-parse", snap["branch"]) != row["finish_head"]):
+            raise Retain("reconciliation-preserved-ref-changed")
+
+    observe()
+    if repeated:
+        return
+    outcome = {"checkout": "removed", "reason": "external-removal-reconciled",
+               "native_attempted": False, "operator": who, "operator_reason": args.reason,
+               "observed_at": int(time.time()), "generation": args.generation,
+               "path_absent": True, "admin_absent": True, "registration_absent": True,
+               "branch_preserved": True, "head": row["finish_head"]}
+    with db:
+        # Existing result fields keep older readers accurate without deleting history.
+        changed = db.execute(
+            "UPDATE retirement SET state='removed', result=? WHERE worktree_id=? "
+            "AND generation=? AND state='enrolled' AND intent IS NULL AND result IS NULL",
+            (json.dumps(outcome, sort_keys=True), row["id"], args.generation)).rowcount
+        if changed != 1:
+            raise Retain("external-reconciliation-record-changed")
+        observe()
+        db.execute("UPDATE worktrees SET reason=?, checked_at=? WHERE id=?",
+                   (outcome["reason"], outcome["observed_at"], row["id"]))
+
+
 def reconcile(db, row, args):
     """Append current preservation evidence; never retry removal or rewrite history."""
     item = retirement(db, row)
@@ -1673,6 +1739,9 @@ def summary(db, row, reason=None):
     }
     if cancellations:
         result["cancelled_owners"] = cancellations
+    if outcome and outcome.get("reason") == "external-removal-reconciled":
+        result["reason"] = outcome["reason"]
+        result["external_removal"] = outcome
     fact = reconciliation(db, row)
     if fact:
         result["current_disposition"] = "reconciled-target-removed"
@@ -1738,11 +1807,16 @@ def parser():
     result.add_argument("--generation", type=int)
     result.add_argument("--intent-sha256")
     result.add_argument("--result-sha256")
+    result.add_argument("--external-removal", action="store_true")
+    result.add_argument("--worktree-id")
     return result
 
 
 def process_one(db, row, args):
     if args.command == "reconcile":
+        if args.external_removal:
+            reconcile_external(db, row, args)
+            return summary(db, row)
         reconcile(db, row, args)
         return summary(db, row, reason="target-removal-reconciled-original-proof-retained")
     if args.command == "remove":
@@ -1822,16 +1896,24 @@ def main(argv=None):
         raise Retain("sudo-holder-scan-requires-manual-finalized-removal")
     if args.sudo_holder_scan and sys.platform != "linux":
         raise Retain("sudo-holder-scan-requires-linux")
-    reconciliation_options = (args.intent_id, args.generation, args.intent_sha256, args.result_sha256)
+    reconciliation_options = (args.intent_id, args.generation, args.intent_sha256, args.result_sha256,
+                              args.worktree_id)
     if args.command == "reconcile":
-        if (args.pr or args.target or args.wait_for or args.reason or args.policy or args.all or args.apply
+        if (args.pr or args.target or args.wait_for or args.policy or args.all or args.apply
                 or args.release or args.new_token or args.if_enrolled or args.finalized or args.discard_ignored
-                or args.generation is None or args.generation < 0
+                or args.generation is None or args.generation < 0):
+            raise Retain("reconciliation-needs-one-exact-record-and-generation")
+        if args.external_removal:
+            if (args.intent_id or args.intent_sha256 or args.result_sha256
+                    or not args.worktree_id or str(uuid.UUID(args.worktree_id)) != args.worktree_id
+                    or not args.reason or not args.reason.strip() or len(args.reason) > 500):
+                raise Retain("external-reconciliation-needs-record-id-and-bounded-reason")
+        elif (args.worktree_id or args.reason
                 or not args.intent_id or str(uuid.UUID(args.intent_id)) != args.intent_id
                 or any(not value or not re.fullmatch(r"[0-9a-f]{64}", value)
                        for value in (args.intent_sha256, args.result_sha256))):
             raise Retain("reconciliation-needs-one-exact-intent-and-receipt-hashes")
-    elif any(value is not None for value in reconciliation_options):
+    elif args.external_removal or any(value is not None for value in reconciliation_options):
         raise Retain("reconciliation-options-require-reconcile")
     if args.command == "cancel":
         if (args.pr or args.target or args.wait_for or args.all or args.apply
