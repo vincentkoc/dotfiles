@@ -525,15 +525,54 @@ def get_row(db, worktree):
     return row
 
 
+def finalized_closeout_hint(db, row):
+    # Recorded command discovery only; malformed optional data must not hide
+    # the existing summary or refusal. No live admission or ownership probes.
+    try:
+        item = retirement(db, row)
+        if (item is None or item["state"] != "enrolled"
+                or item["intent"] is not None or item["result"] is not None
+                or row["state"] not in ("active", "finished")):
+            return None
+        snap = json.loads(row["identity"])
+        if not isinstance(snap, dict):
+            return None
+        marker = snap.get("lock_reason")
+        if not isinstance(marker, str) or not re.fullmatch(
+                r"gwt-finish\.v2:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", marker):
+            return None
+        path, owner = snap["path"], snap["owner"]
+        if (path != row["path"] or path == owner or any(
+                not isinstance(value, str) or "\0" in value
+                or not os.path.isabs(value) or os.path.normpath(value) != value
+                for value in (path, owner))):
+            return None
+        return {
+            "argv": ["gwt", "rm", path, "--finalized"],
+            "cwd": owner,
+            "admission": "not-checked",
+            "condition": "Only for a finalized task you own; verify ignored disposable roots. "
+                         "Native checks still apply; this hint grants no removal authority.",
+        }
+    except (Retain, OSError, sqlite3.Error, ValueError, TypeError, KeyError, IndexError):
+        return None
+
+
 def guard(db, path, *, owner=False):
     if db is None:
         return
     path = str(Path(path).expanduser().resolve())
-    for row in db.execute("SELECT identity FROM worktrees"):
+    for row in db.execute("SELECT * FROM worktrees"):
         snap = json.loads(row["identity"])
         if ((owner and path == snap["owner"]) or (not owner and any(
                 inside(path, snap[key]) or inside(snap[key], path)
                 for key in ("path", "gitdir")))):
+            if not owner and path == snap["path"] == row["path"]:
+                with contextlib.suppress(OSError):
+                    hint = finalized_closeout_hint(db, row)
+                    if hint is not None:
+                        print("gwt finish: manual closeout hint " + json.dumps(hint, sort_keys=True),
+                              file=sys.stderr)
             raise Retain("enrolled-worktree-owned-by-finish-lifecycle")
 
 
@@ -1751,6 +1790,9 @@ def summary(db, row, reason=None):
             result["reason"] = "target-removal-reconciled-sibling-preservation-unresolved"
         result["reconciliation"] = {key: value for key, value in fact.items()
                                     if key not in ("siblings_after", "sibling_identities")}
+    hint = finalized_closeout_hint(db, row) if not fact else None
+    if hint is not None:
+        result["manual_closeout"] = hint
     return result
 
 
