@@ -409,8 +409,11 @@ existence and contents. The durable enrollment and completion proof are not
 rewritten.
 Automatic lifecycle checks do not accept this branch transition.
 
-Manual closeout accepts `FETCH_HEAD` only when every record's OID appears in the
-captured current or enrolled branch heads or their preserved common reflogs.
+Manual closeout accepts `FETCH_HEAD` only when every record names a literal
+commit preserved by the captured current or enrolled branch heads or their
+common reflogs, including their reachable ancestors. Annotated tag objects do
+not qualify merely because their peeled commit is retained. Bounded Git queries
+disable replacement objects; unavailable or ambiguous proof blocks closeout.
 Records must have Git's complete OID, merge-marker, and note/URL fields with LF
 termination. An empty file is also accepted under this explicit manual proof.
 The file's identity, bytes, metadata, and retained refs remain bound through
