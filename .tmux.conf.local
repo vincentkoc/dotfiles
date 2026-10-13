@@ -262,8 +262,9 @@ tmux_conf_theme_status_left=" ❐ #S "
 tmux_conf_theme_status_right="#{prefix}#{mouse}#{pairing}#{synchronized} | %R %d %b #{user}@#h "
 # Direct overrides: powerline is cheap; shell-backed status segments are not.
 set -g status-style "fg=#565f89,bg=#1a1b26,none" #!important
-setw -g window-style "fg=default,bg=#1a1b26" #!important
-setw -g window-active-style "fg=default,bg=#1a1b26" #!important
+# Explicit defaults let detached restores answer Codex startup colour queries.
+setw -g window-style "fg=#c0caf5,bg=#1a1b26" #!important
+setw -g window-active-style "fg=#c0caf5,bg=#1a1b26" #!important
 set -g status-left "#[fg=#15161e,bg=#ff9e64,bold] ❐ #S #[fg=#ff9e64,bg=#1a1b26,none] " #!important
 set -g status-right "#[fg=#565f89,bg=#1a1b26]#{?client_prefix,⌨ ,  }#{?mouse,↗ ,  }#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#[fg=#9ece6a,bg=#1a1b26,none]#[fg=#1a1b26,bg=#9ece6a,bold] CX SAVE #[fg=#f7768e,bg=#9ece6a,none]#[fg=#c0caf5,bg=#f7768e,bold] %R %d %b #{user}@#h " #!important
 setw -g window-status-separator "" #!important

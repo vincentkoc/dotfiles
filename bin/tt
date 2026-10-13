@@ -1060,6 +1060,9 @@ recovery_server_config() {
   # Only native startup settings. The base config's embedded worker is not safe
   # to run during recovery alongside other servers.
   printf '%s\n' 'set -g default-terminal "tmux-256color"
+# Answer OSC 10/11 before a terminal client attaches and before agents start.
+set -g window-style "fg=#c0caf5,bg=#1a1b26"
+set -g window-active-style "fg=#c0caf5,bg=#1a1b26"
 setw -g aggressive-resize off
 set -g window-size latest
 setw -g xterm-keys on
@@ -1166,8 +1169,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g status-position top
   "$TMUX_BIN" set -g status-left-length 32
   "$TMUX_BIN" set -g status-style "fg=#565f89,bg=#1a1b26,none"
-  "$TMUX_BIN" set -g window-style "fg=default,bg=#1a1b26"
-  "$TMUX_BIN" set -g window-active-style "fg=default,bg=#1a1b26"
+  "$TMUX_BIN" set -g window-style "fg=#c0caf5,bg=#1a1b26"
+  "$TMUX_BIN" set -g window-active-style "fg=#c0caf5,bg=#1a1b26"
   "$TMUX_BIN" set -g window-status-style "fg=#565f89,bg=#1a1b26,none"
   "$TMUX_BIN" set -g window-status-current-style "fg=#1a1b26,bg=#7aa2f7,bold"
   "$TMUX_BIN" set -g message-style "fg=#1a1b26,bg=#7aa2f7,bold"
@@ -2113,12 +2116,13 @@ pane_marker_color() {
 }
 
 pane_marker_window_style() {
+  # Keep foreground queries answerable even before a client attaches.
   case "${1:-}" in
-    amber) printf 'fg=default,bg=#211d17\n' ;;
-    green) printf 'fg=default,bg=#182318\n' ;;
-    blue) printf 'fg=default,bg=#171f2b\n' ;;
-    violet) printf 'fg=default,bg=#211a2c\n' ;;
-    cyan) printf 'fg=default,bg=#17242a\n' ;;
+    amber) printf 'fg=#c0caf5,bg=#211d17\n' ;;
+    green) printf 'fg=#c0caf5,bg=#182318\n' ;;
+    blue) printf 'fg=#c0caf5,bg=#171f2b\n' ;;
+    violet) printf 'fg=#c0caf5,bg=#211a2c\n' ;;
+    cyan) printf 'fg=#c0caf5,bg=#17242a\n' ;;
     dim) printf 'fg=#565f89,bg=#11121a\n' ;;
     *) printf '\n' ;;
   esac
@@ -2126,11 +2130,11 @@ pane_marker_window_style() {
 
 pane_marker_active_style() {
   case "${1:-}" in
-    amber) printf 'fg=default,bg=#292218\n' ;;
-    green) printf 'fg=default,bg=#1f2a1f\n' ;;
-    blue) printf 'fg=default,bg=#1d2736\n' ;;
-    violet) printf 'fg=default,bg=#2a2139\n' ;;
-    cyan) printf 'fg=default,bg=#1c2e35\n' ;;
+    amber) printf 'fg=#c0caf5,bg=#292218\n' ;;
+    green) printf 'fg=#c0caf5,bg=#1f2a1f\n' ;;
+    blue) printf 'fg=#c0caf5,bg=#1d2736\n' ;;
+    violet) printf 'fg=#c0caf5,bg=#2a2139\n' ;;
+    cyan) printf 'fg=#c0caf5,bg=#1c2e35\n' ;;
     dim) printf 'fg=#565f89,bg=#11121a\n' ;;
     *) printf '\n' ;;
   esac
