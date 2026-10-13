@@ -1586,10 +1586,10 @@ def reconcile(db, row, args):
     child = outcome.get("child") or {}
     required = ("path_absent", "admin_absent", "registration_absent", "branch_preserved",
                 "branch_reflog_preserved", "dependency_preserved", "discarded_link_targets_preserved")
-    # The legacy producer lost the after snapshot. Admit only its specific
-    # sibling-comparison failure, not arbitrary partial deletion or failed children.
+    # Current receipts use siblings_preserved; older retained receipts used
+    # siblings_unchanged. Admit only sibling failure with a proven target removal.
     if (outcome.get("checkout") != "unknown" or outcome.get("reason") != "removal-incomplete"
-            or outcome.get("siblings_unchanged") is not False
+            or outcome.get("siblings_preserved", outcome.get("siblings_unchanged")) is not False
             or any(outcome.get(key) is not True for key in required)
             or type(child.get("returncode")) is not int or child["returncode"] != 0
             or child.get("reaped") is not True
