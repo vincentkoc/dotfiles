@@ -877,6 +877,7 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
     root = Path(snap["gitdir"])
     rows = {"": [[*file_identity(root.lstat()), disposable_metadata(root, until)], None]}
     used = 0
+    qualified_fetch_oids = set()
     stack = [root]
     while stack:
         directory = stack.pop()
@@ -916,8 +917,22 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                         tick(until)
                         record = re.fullmatch(
                             rb"([0-9a-f]{40}(?:[0-9a-f]{24})?)\t(?:not-for-merge)?\t[^\0\n]*", line)
-                        if record is None or os.fsdecode(record[1]) not in preserved_oids:
+                        if record is None:
                             raise Retain("fetch-head-recovery-required")
+                        oid = record[1].decode("ascii")
+                        if oid not in qualified_fetch_oids:
+                            try:
+                                if git(snap["path"], "--no-replace-objects", "cat-file", "-t", oid,
+                                       raw=True, strict=True, deadline=until) != b"commit\n":
+                                    raise Retain("fetch-head-recovery-required")
+                                if oid not in preserved_oids and git(
+                                        snap["path"], "--no-replace-objects", "rev-list", "--max-count=1",
+                                        oid, "--not", *sorted(preserved_oids), "--",
+                                        raw=True, strict=True, deadline=until):
+                                    raise Retain("fetch-head-recovery-required")
+                            except Retain as error:
+                                raise Retain("fetch-head-recovery-required") from error
+                            qualified_fetch_oids.add(oid)
                 if name == "AUTO_MERGE":
                     # Successful ort rebases leave this tree ref. A divergent
                     # conflict snapshot is recovery data, not disposable state.

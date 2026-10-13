@@ -1883,6 +1883,46 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertEqual(code, 0, rows)
         self.assertEqual(rows[0]["checkout"], "removed")
 
+    def test_fetch_head_ancestor_survives_without_direct_reflog_entry(self):
+        ancestor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "ancestor")
+        tip = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", ancestor, "-m", "descendant")
+        git(self.wt, "merge", "--ff-only", tip)
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+        before = reflog.read_bytes()
+        self.assertNotIn(ancestor.encode(), before)
+        (self.admin / "FETCH_HEAD").write_text(ancestor + "\t\tretained ancestor\n")
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), tip)
+        self.assertEqual(reflog.read_bytes(), before)
+        self.assertEqual(git(self.repo, "cat-file", "-t", ancestor), "commit")
+
+    def test_fetch_head_rejects_tag_object_even_when_peeled_commit_is_retained(self):
+        git(self.repo, "tag", "-a", "fetched-tag", self.head, "-m", "tag fixture")
+        tag = git(self.repo, "rev-parse", "fetched-tag")
+        self.assertEqual(git(self.repo, "rev-parse", "fetched-tag^{}"), self.head)
+        path = self.admin / "FETCH_HEAD"
+        data = tag + "\t\tannotated tag\n"
+        path.write_text(data)
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(path.read_text(), data)
+
+    def test_fetch_head_mixed_ancestor_and_unretained_commit_keeps_checkout(self):
+        ancestor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "ancestor")
+        tip = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", ancestor, "-m", "descendant")
+        unretained = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "unretained")
+        git(self.wt, "merge", "--ff-only", tip)
+        path = self.admin / "FETCH_HEAD"
+        data = ancestor + "\t\tretained ancestor\n" + unretained + "\tnot-for-merge\tunretained\n"
+        path.write_text(data)
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(path.read_text(), data)
+
     def test_malformed_or_unanchored_fetch_head_preserves_checkout_and_lock(self):
         unanchored = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "fetched-only recovery")
         self.assertEqual(git(self.repo, "cat-file", "-t", unanchored), "commit")
