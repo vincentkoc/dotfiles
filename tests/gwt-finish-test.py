@@ -3389,6 +3389,18 @@ class ReconciliationTests(unittest.TestCase):
     tearDown = ReleaseTests.tearDown
     remove = FinalizedRemovalTests.remove
 
+    def current_removal(self):
+        native = FINISH.safety().supervise
+
+        def concurrent_closeout(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                git(self.repo, "worktree", "remove", str(self.legacy))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=concurrent_closeout):
+            self.assertEqual(self.remove()[1][0]["checkout"], "unknown")
+        self.refresh_binding()
+
     def legacy_removal(self):
         native = FINISH.safety().supervise
         comparison = FINISH.sibling_comparison
@@ -3438,6 +3450,57 @@ class ReconciliationTests(unittest.TestCase):
         with FINISH.ledger(self.state) as db:
             current = dict(FINISH.retirement(db, FINISH.get_row(db, self.wt)))
         self.assertEqual(current, self.original)
+
+    def test_current_producer_receipt_reconciles_missing_sibling_without_retrying(self):
+        self.current_removal()
+        original = json.loads(self.original["result"])
+        self.assertIs(original["siblings_preserved"], False)
+        self.assertNotIn("siblings_unchanged", original)
+        self.assert_sibling_alert("missing")
+        fact = self.call("status")[1][0]["reconciliation"]
+        self.assertEqual(fact["historical_sibling_identities"], "recorded")
+        self.assertEqual(fact["historical_after_snapshot"], "recorded")
+
+    def test_current_sibling_flag_cannot_fall_back_to_legacy_failure(self):
+        self.legacy_removal()
+        original_result = self.original["result"]
+        for value in (True, None, 0, "false"):
+            with self.subTest(value=value):
+                with FINISH.ledger(self.state) as db:
+                    row = FINISH.get_row(db, self.wt)
+                    result = json.loads(original_result)
+                    result["siblings_preserved"] = value
+                    with db:
+                        db.execute("UPDATE retirement SET result=? WHERE worktree_id=?",
+                                   (json.dumps(result, sort_keys=True), row["id"]))
+                self.refresh_binding()
+                with self.assertRaisesRegex(FINISH.Retain, "original-removal-not-qualified"):
+                    self.reconcile()
+                self.assert_receipts_unchanged()
+
+    def test_current_receipt_still_requires_successful_child_and_target_preservation(self):
+        self.current_removal()
+        original_result = self.original["result"]
+        changes = [
+            ("child", key, value) for key, value in
+            (("returncode", 1), ("reaped", False), ("group_absent", False), ("pid", None))
+        ]
+        changes += [(None, key, False) for key in (
+            "path_absent", "admin_absent", "registration_absent", "branch_preserved",
+            "branch_reflog_preserved", "dependency_preserved", "discarded_link_targets_preserved")]
+        for section, key, value in changes:
+            with self.subTest(section=section, key=key):
+                with FINISH.ledger(self.state) as db:
+                    row = FINISH.get_row(db, self.wt)
+                    result = json.loads(original_result)
+                    (result[section] if section else result)[key] = value
+                    with db:
+                        db.execute("UPDATE retirement SET result=? WHERE worktree_id=?",
+                                   (json.dumps(result, sort_keys=True), row["id"]))
+                self.refresh_binding()
+                with self.assertRaisesRegex(FINISH.Retain, "original-removal-not-qualified"):
+                    self.reconcile()
+                self.assert_receipts_unchanged()
 
     def test_reconciles_current_absence_without_rewriting_original_failure_or_retrying(self):
         self.call("cancel", "--reason", "incorporated preparation")

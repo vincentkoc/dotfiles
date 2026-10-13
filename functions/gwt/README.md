@@ -615,10 +615,11 @@ Updated manual removal, prune, cleaner and quarantine consumers respect the
 ledger hold even after registration disappears. Never repeat removal to resolve
 an incomplete result.
 
-An older producer could report `siblings_unchanged=false` solely because another
-owner switched branches. If the child exited successfully and every other
-preservation predicate passed, the recorded owner can reconcile that exact
-intent after reviewing its original bytes:
+Current removal receipts report sibling preservation failure as
+`siblings_preserved=false`; older receipts used `siblings_unchanged=false`.
+Reconciliation accepts either format. If the child exited successfully and
+every other preservation predicate passed, the recorded owner can reconcile
+that exact intent after reviewing its original bytes:
 
 ```sh
 gwt finish-reconcile --worktree /absolute/removed/checkout \
