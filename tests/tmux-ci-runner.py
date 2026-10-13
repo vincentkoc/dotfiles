@@ -21,6 +21,7 @@ OUTPUT_LIMIT = 2 * 1024 * 1024
 TAIL_LIMIT = 16 * 1024
 TESTS = (
     ("mttc-test.py", 30),
+    ("tt-palette-live-test.py", 30),
     ("tt-safety-test.py", 60),
     ("tt-topology-gate-test.sh", 60),
     ("tt-codex-snapshot-live-test.sh", 60),

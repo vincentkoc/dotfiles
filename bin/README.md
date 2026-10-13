@@ -105,6 +105,13 @@ Codex cockpit snapshots retain an exited owner's exact recovery identity and
 record its exit status separately. `tt status` reports exited and failed owners;
 it does not rename, close, or relaunch their panes.
 
+Cold restores set the Tokyo Night foreground and background before launching
+agents. Both colours must be explicit: Codex queries them at startup and caches
+a missing reply, which removes input shading even after a terminal attaches.
+The workstation, server, and marker styles use the same foreground so detached
+launches receive both replies. `tests/tt-palette-live-test.py` checks this on a
+private tmux socket without launching Codex or touching the live cockpit.
+
 `tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
 through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
 show a bucket only when the snapshot header declares it, so current owner and

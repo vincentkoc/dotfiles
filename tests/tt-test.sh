@@ -24,10 +24,10 @@ eval "$(sed -n '/^pane_marker_window_style() {/,/^}/p' "$repo/bin/tt")"
 eval "$(sed -n '/^pane_marker_active_style() {/,/^}/p' "$repo/bin/tt")"
 [[ "$(pane_marker_color violet)" == '#bb9af7' ]]
 [[ "$(pane_marker_color cyan)" == '#7dcfff' ]]
-[[ "$(pane_marker_window_style violet)" == 'fg=default,bg=#211a2c' ]]
-[[ "$(pane_marker_window_style cyan)" == 'fg=default,bg=#17242a' ]]
-[[ "$(pane_marker_active_style violet)" == 'fg=default,bg=#2a2139' ]]
-[[ "$(pane_marker_active_style cyan)" == 'fg=default,bg=#1c2e35' ]]
+[[ "$(pane_marker_window_style violet)" == 'fg=#c0caf5,bg=#211a2c' ]]
+[[ "$(pane_marker_window_style cyan)" == 'fg=#c0caf5,bg=#17242a' ]]
+[[ "$(pane_marker_active_style violet)" == 'fg=#c0caf5,bg=#2a2139' ]]
+[[ "$(pane_marker_active_style cyan)" == 'fg=#c0caf5,bg=#1c2e35' ]]
 
 session_id=33333333-3333-3333-3333-333333333333
 snapshot="$tmp/legacy-snapshot.tsv"
