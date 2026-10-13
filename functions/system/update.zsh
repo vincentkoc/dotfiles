@@ -17,24 +17,64 @@ _up_brew_owns() {
     brew list --versions "$1" >/dev/null 2>&1 || return 2
 }
 
+_up_system() {
+    local system_result=0
+    case "$(uname)" in
+        Darwin)
+            echo "📱 Checking for macOS updates..."
+            sudo softwareupdate -i -a || system_result=$?
+            ;;
+        Linux)
+            if ! command -v apt-get >/dev/null 2>&1; then
+                echo 'apt-get is required for Linux system updates.' >&2
+                return 127
+            fi
+            echo '📦 Updating Linux system packages...'
+            echo 'needrestart will list pending restarts; package scripts may still restart their own services.'
+            if sudo apt-get update --error-on=any; then
+                sudo env NEEDRESTART_MODE=l apt-get upgrade --with-new-pkgs --no-remove || system_result=$?
+            else
+                system_result=$?
+            fi
+            if [[ -e /run/reboot-required ]]; then
+                echo '⚠️  A reboot is required. Schedule it separately; up does not reboot.'
+            fi
+            ;;
+        *) echo 'No operating system updater is configured for this platform.' >&2; return 1 ;;
+    esac
+    if (( system_result == 0 )); then
+        echo '✅ Operating system updates complete'
+    else
+        echo "Operating system update failed (exit $system_result)." >&2
+    fi
+    return "$system_result"
+}
+
 up() {
-    local updates_only=false
+    local updates_only=false system_only=false
     case "$#:${1:-}" in
         0:) ;;
         1:--updates-only) updates_only=true ;;
+        1:--system-only) system_only=true ;;
         1:--help|1:-h)
-            printf '%s\n' 'usage: up [--updates-only | --help]' \
-                '  --updates-only  update tools without cleanup, DNS signals, project pip/Go/Flutter changes, or a sudo keepalive' \
+            printf '%s\n' 'usage: up [--system-only | --updates-only | --help]' \
+                '  --system-only   update only the operating system, without tools, cleanup, or a sudo keepalive' \
+                '  --updates-only  update the OS and tools without cleanup, DNS signals, project pip/Go/Flutter changes, or a sudo keepalive' \
                 '  no arguments    retain the legacy update and cleanup workflow'
             return 0
             ;;
-        *) printf '%s\n' 'usage: up [--updates-only | --help]' >&2; return 2 ;;
+        *) printf '%s\n' 'usage: up [--system-only | --updates-only | --help]' >&2; return 2 ;;
     esac
     if $updates_only; then
         local -x HOMEBREW_NO_INSTALL_CLEANUP=1
     fi
     echo -e "\033[0;36mPlease provide local password (may auto-skip)...\033[0m"
     sudo -v || return $?
+
+    if $system_only; then
+        _up_system
+        return $?
+    fi
 
     if ! $updates_only; then
         while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
@@ -44,13 +84,8 @@ up() {
 
     declare -a failed_updates=()
 
-    if [ "$(uname)" = "Darwin" ]; then
-        echo "📱 Checking for macOS updates..."
-        if sudo softwareupdate -i -a; then
-            echo "✅ macOS updates complete"
-        else
-            failed_updates+=("macOS")
-        fi
+    if ! _up_system; then
+        failed_updates+=("Operating system")
     fi
 
     if command -v brew &> /dev/null; then

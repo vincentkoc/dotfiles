@@ -205,6 +205,16 @@ private `~/.codex` surface remains host-local; no hooks, global instructions,
 model catalog, credentials, QuickSSH, Mosh, or OpenClaw launcher configuration
 is linked.
 
+The server profile links the tracked `.hushlogin` to `~/.hushlogin` to suppress
+the login MOTD and last-login display. This does not change a configured
+pre-authentication SSH banner, package support, or health checks.
+
+Run `up --system-only` for interactive Debian/Ubuntu package updates without
+updating global tools or running cleanup. APT may add required dependencies but
+cannot remove packages; needrestart lists pending restarts. Package scripts may
+still restart their own services. The command reports a required reboot without
+performing it. Use `up --updates-only` when global tool updates are also wanted.
+
 Obtain the SHA256 fingerprint of the designated recovery public key through an
 independent trusted path, then explicitly enable the temporary proof phase:
 
