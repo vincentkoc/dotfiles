@@ -144,6 +144,13 @@
 - After work is finalized, task-local logs, test proof, receipts, archives,
   build outputs, and scratch are disposable. Do not require evidence retention,
   an archive, or another approval to clean up the finalized task.
+- Retain all agent session history, including completed and archived sessions,
+  conversation transcripts, history indexes/databases, and tmux recovery history.
+  These are not disposable task logs or proof artifacts. Task completion, age,
+  a missing pane, or permission for aggressive worktree cleanup never authorizes
+  their deletion or truncation. Preserve them even inside a cleanup candidate;
+  retain that candidate if removal would destroy history. Cleanup does not
+  authorize compressing or migrating session history.
 - Preserve user deliverables, unfinished source, live owners, credentials,
   shared dependency targets, and active/session state. Keep recovery checkpoints
   only while unfinished work needs them or the user explicitly requests retention.

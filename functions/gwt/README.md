@@ -432,6 +432,13 @@ Recovery checkpoints remain necessary only for unfinished work or an explicit
 retention request. Historical evidence alone must not keep a finalized task's
 checkout alive.
 
+Agent session history is retained separately from validation evidence. Preserve
+completed and archived conversations, transcripts, history indexes/databases,
+and tmux recovery history. Worktree retirement never authorizes their deletion
+or truncation. If protected history lives inside the checkout, retain it until
+the history is preserved through a separately authorized operation by its
+native owner; never include it in `--discard-ignored`.
+
 ### Manual finalized-task closeout
 
 For a finalized managed task, run the following from its owning checkout:
