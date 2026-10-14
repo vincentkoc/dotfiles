@@ -122,6 +122,61 @@ The record reports `checkout: removed` and `native_attempted: false`; it does no
 claim historical preservation checks that GWT did not perform. History, branches
 and the path reservation remain intact. This command never removes files.
 
+## Missing enrolled checkout recovery
+
+`gwt recover-missing` restores a missing directory only when its original Git
+registration, native lock, enrollment, owners, branch and index still exist.
+Obtain explicit permission to recover the named checkout first. This operation
+does not recover lost unstaged or untracked files; their disposition stays
+unknown. It is not `gwt new`, adoption, re-enrollment, unlock, reset or pruning.
+
+Plan against exact retained identities, then review the returned preimage hash:
+
+```sh
+gwt recover-missing --worktree /absolute/original/checkout \
+  --worktree-id <enrollment-uuid> --generation <n> \
+  --expected-head <full-commit-sha> --index-sha256 <sha256>
+```
+
+The plan takes native lifecycle and maintenance coordination locks but does not
+create the checkout or a recovery intent. Apply the same operands with
+`--apply --recovery-sha256 <reviewed-plan-hash>`. Both phases require complete
+holder visibility and unchanged admin, branch, lock, index and owner facts.
+Conflicts, sparse/unknown index formats, resolve-undo entries, gitlinks, pending
+Git or lifecycle operations, held paths and appeared destinations refuse.
+
+Device identities are strict by default. After independently establishing a
+device-number change, `--allow-device-renumbering` permits only a bijective map
+with unchanged physical paths, directory ownership and inodes. The missing
+root's recorded device must map to its current parent volume. The plan hash
+binds this map and opt-in; apply and reconciliation require the same option.
+Holder checks include the mapped original root inode. The original identity
+remains in recovery history; only the verified successor identity is normalized.
+
+Only committed blobs whose tree exactly matches the saved index are written.
+The operation runs no checkout filters, hooks, dependency installation or fetch.
+Recovery blob capture and verification are bounded by 16 MiB per file and the
+staging pass by 512 MiB; other native Git/read limits are unchanged.
+the existing 238-second owner deadline is unchanged. A private sibling directory
+is verified before native no-replace publication at the original path. The
+original Git admin files, index, ref, native lock and owner rows remain intact;
+the lifecycle records the actual recovery operator separately and advances the
+root identity/generation once. Extra lifecycle tables are preserved.
+
+An interruption retains a durable pending intent and any staging directory.
+Do not delete that staging directory, clear the intent or rerun blind. Inspect
+the exact checkout with `gwt finish-status`; its `missing_recovery` field provides
+the intent ID and preimage hash. Only the same operands plus `--intent-id <id>`
+can reconcile a complete, verified staging tree or the already-published same
+inode. Partial staging remains held unless a separately reviewed continuation
+adds `--continue-partial` to the exact intent and preimage operands. This mode
+verifies every existing byte, mode and link, refuses extras or corrupt files,
+and admits native holders for the staging inode before writing. It creates only
+missing committed entries with no-follow, exclusive creation; existing files
+are never rewritten. Plan this continuation without `--apply` first. Changed
+identities or later source edits remain held.
+No recovery failure authorizes an alternate checkout or broad maintenance.
+
 ## Scheduled Git maintenance
 
 Use daily commit-graph maintenance for explicitly enrolled, healthy owning

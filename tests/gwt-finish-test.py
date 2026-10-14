@@ -503,6 +503,15 @@ class LifecycleTests(unittest.TestCase):
 
 
 class WrapperTests(unittest.TestCase):
+    def test_recover_missing_wrapper_forwards_exact_native_operands(self):
+        wrapper = ROOT / "functions/gwt/gwt.zsh"
+        program = 'source "$1"; _gwt_finish_tool() { printf "%s\\n" "$@"; }; gwt recover-missing --worktree /original/path --generation 0'
+        result = subprocess.run(["zsh", "-f", "-c", program, "fixture", str(wrapper)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ["recover-missing", "--worktree", "/original/path", "--generation", "0"])
+
     def test_unavailable_release_remove_and_apply_need_no_state(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
@@ -1230,6 +1239,362 @@ class ReleaseTests(unittest.TestCase):
                 finally:
                     subprocess.run(["/usr/bin/xattr", "-d", "com.example.finish-fixture", str(path)], check=True)
         self.assertTrue(self.wt.exists())
+
+
+class MissingRecoveryTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    tearDown = ReleaseTests.tearDown
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        (self.wt / "nested").mkdir()
+        (self.wt / "nested/command").write_bytes(b"#!/bin/sh\nexit 0\n")
+        (self.wt / "nested/command").chmod(0o755)
+        self.external = self.base / "external"
+        self.external.write_text("untouched\n")
+        (self.wt / "external-link").symlink_to(self.external)
+        git(self.wt, "add", ".")
+        git(self.wt, "commit", "-m", "recovery fixture")
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.original = ReleaseTests.row(self)
+        self.before_index = (self.admin / "index").read_bytes()
+        self.before_lock = (self.admin / "locked").read_bytes()
+        self.index_sha = hashlib.sha256(self.before_index).hexdigest()
+        shutil.rmtree(self.wt)
+        self.holders = mock.patch.object(FINISH, "manual_holders")
+        self.holders_mock = self.holders.start()
+        self.addCleanup(self.holders.stop)
+
+    def recover(self, *args):
+        return self.call("recover-missing", "--worktree-id", self.original["id"],
+                         "--generation", "0", "--expected-head", self.head,
+                         "--index-sha256", self.index_sha, *args)[1][0]
+
+    def plan(self):
+        return self.recover()["recovery_sha256"]
+
+    def record(self):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            return FINISH.missing_recovery_record(db, row), dict(FINISH.retirement(db, row))
+
+    def recorded_device_change(self, transform=None):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            snap = json.loads(row["identity"])
+            for key in ("path_id", "owner_id", "common_id", "gitdir_id"):
+                snap[key][0] += 100
+            if transform:
+                transform(snap)
+            with db:
+                db.execute("UPDATE worktrees SET identity=? WHERE id=?", (json.dumps(snap), row["id"]))
+                db.execute("UPDATE retirement SET generation=0 WHERE worktree_id=?", (row["id"],))
+        return snap
+
+    def test_device_change_requires_opt_in_and_preserves_original_history(self):
+        original = self.recorded_device_change()
+        with self.assertRaisesRegex(FINISH.Retain, "admin-owner-identity-changed"):
+            self.recover()
+        plan = self.recover("--allow-device-renumbering")
+        mapped_root = [self.wt.parent.stat().st_dev, original["path_id"][1]]
+        self.assertEqual(plan["device_mapping"], [[original["path_id"][0], mapped_root[0]]])
+        holder_args = self.holders_mock.call_args.args
+        self.assertEqual(holder_args[0]["path_id"], mapped_root)
+        self.assertEqual(holder_args[1]["discarded_inodes"], [mapped_root])
+        self.assertEqual(holder_args[0]["gitdir_id"], FINISH.identity(self.admin))
+        digest = plan["recovery_sha256"]
+        result = self.recover("--allow-device-renumbering", "--apply", "--recovery-sha256", digest)
+        record, retirement = self.record()
+        self.assertEqual(record["preimage"]["identity"], original)
+        self.assertEqual(retirement["generation"], 1)
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            FINISH.revalidate(row)
+            self.assertEqual(FINISH.owner_rows(db, row["id"]), [{"owner": "owner-1", "completed": 0}])
+        self.assertEqual(self.recover("--allow-device-renumbering", "--apply", "--recovery-sha256", digest,
+                                      "--intent-id", result["intent_id"]), result)
+        with self.assertRaisesRegex(FINISH.Retain, "exact-intent-required"):
+            self.recover("--apply", "--recovery-sha256", digest, "--intent-id", result["intent_id"])
+
+    def test_device_opt_in_changes_plan_digest(self):
+        strict = self.recover()
+        opted_in = self.recover("--allow-device-renumbering")
+        self.assertNotEqual(strict["recovery_sha256"], opted_in["recovery_sha256"])
+
+    def test_device_normalization_refuses_changed_inode(self):
+        self.recorded_device_change(lambda snap: snap["gitdir_id"].__setitem__(1, snap["gitdir_id"][1] + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "device-or-inode-changed"):
+            self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_device_normalization_refuses_nonbijective_map(self):
+        self.recorded_device_change(lambda snap: snap["gitdir_id"].__setitem__(0, snap["gitdir_id"][0] + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "device-map-not-bijective"):
+            self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_device_normalization_refuses_unmapped_root(self):
+        self.recorded_device_change(lambda snap: snap["path_id"].__setitem__(0, snap["path_id"][0] + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "parent-volume-unmapped-or-changed"):
+            self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_device_normalization_refuses_parent_volume_change(self):
+        self.recorded_device_change()
+        identity = FINISH.identity
+        def changed_parent(path):
+            dev, inode = identity(path)
+            return [dev + 1, inode] if Path(path) == self.wt.parent else [dev, inode]
+        with mock.patch.object(FINISH, "identity", side_effect=changed_parent):
+            with self.assertRaisesRegex(FINISH.Retain, "parent-volume-unmapped-or-changed"):
+                self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_plan_does_not_create_root_or_recovery_intent(self):
+        result = self.recover()
+        self.assertFalse(result["checkout_mutation"])
+        self.assertEqual(result["untracked_unstaged"], "unavailable")
+        self.assertFalse(self.wt.exists())
+        record, retirement = self.record()
+        self.assertIsNone(record)
+        self.assertEqual(retirement["state"], "enrolled")
+
+    def test_success_preserves_index_admin_branch_and_original_owner(self):
+        digest = self.plan()
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "recovery-operator"}):
+            result = self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(result["operator"], "recovery-operator")
+        self.assertEqual((self.wt / "file").read_text(), "original\n")
+        self.assertEqual(stat_mode(self.wt / "nested/command"), 0o755)
+        self.assertTrue((self.wt / "external-link").is_symlink())
+        self.assertEqual(os.readlink(self.wt / "external-link"), str(self.external))
+        self.assertEqual(self.external.read_text(), "untouched\n")
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual(FINISH.owner_rows(db, row["id"]), [{"owner": "owner-1", "completed": 0}])
+            self.assertEqual(row["state"], "active")
+            FINISH.revalidate(row)
+        replay = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", result["intent_id"])
+        self.assertEqual(replay, result)
+
+    def test_appeared_target_is_not_overwritten(self):
+        digest = self.plan()
+        self.wt.mkdir()
+        (self.wt / "keep").write_text("other owner\n")
+        with self.assertRaisesRegex(FINISH.Retain, "target-present"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual((self.wt / "keep").read_text(), "other owner\n")
+
+    def test_native_publication_does_not_replace_even_empty_directory(self):
+        source, target = self.base / "stage", self.base / "target"
+        source.mkdir()
+        target.mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "no-replace-refused"):
+            FINISH.recovery_publish(source, target)
+        self.assertTrue(source.is_dir())
+        self.assertTrue(target.is_dir())
+
+    def test_index_drift_refuses_before_intent(self):
+        digest = self.plan()
+        (self.admin / "index").write_bytes(self.before_index + b"changed")
+        with self.assertRaisesRegex(FINISH.Retain, "index-changed"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        self.assertIsNone(self.record()[0])
+
+    def test_completed_receipt_cannot_cover_later_source_edit(self):
+        digest = self.plan()
+        result = self.recover("--apply", "--recovery-sha256", digest)
+        (self.wt / "file").write_text("later unfinished edit\n")
+        with self.assertRaisesRegex(FINISH.Retain, "file-content-changed"):
+            self.recover("--apply", "--recovery-sha256", digest, "--intent-id", result["intent_id"])
+        self.assertEqual((self.wt / "file").read_text(), "later unfinished edit\n")
+
+    def test_unknown_index_extension_refuses(self):
+        raw = self.before_index[:-20] + b"TEST" + struct.pack(">I", 0)
+        raw += hashlib.sha1(raw).digest()
+        (self.admin / "index").write_bytes(raw)
+        self.index_sha = hashlib.sha256(raw).hexdigest()
+        with self.assertRaisesRegex(FINISH.Retain, "extension-unsupported"):
+            self.recover()
+
+    def test_index_not_head_refuses(self):
+        original = bytes.fromhex(git(self.repo, "rev-parse", "released-feature:file"))
+        changed = bytes.fromhex(git(self.repo, "rev-parse", "released-feature:nested/command"))
+        body = self.before_index[:-20].replace(original, changed, 1)
+        data = body + hashlib.sha1(body).digest()
+        (self.admin / "index").write_bytes(data)
+        self.index_sha = hashlib.sha256(data).hexdigest()
+        with self.assertRaisesRegex(FINISH.Retain, "index-not-head"):
+            self.recover()
+
+    def test_holder_unknown_and_maintenance_lock_refuse(self):
+        self.holders_mock.side_effect = FINISH.Retain("manual-holder-visibility-unknown")
+        with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+            self.recover()
+        self.holders_mock.side_effect = None
+        with FINISH.safety().maintainer_lock(self.home / ".codex"):
+            with self.assertRaisesRegex(FINISH.Retain, "maintainer-lock-present"):
+                self.recover()
+        self.assertIsNone(self.record()[0])
+
+    def test_lifecycle_lock_contention_refuses(self):
+        with FINISH.ledger(self.state):
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                self.recover()
+
+    def test_partial_staging_is_retained_not_rebuilt(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=RuntimeError("during materialization")):
+            with self.assertRaisesRegex(RuntimeError, "during materialization"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        stage = Path(record["stage"])
+        self.assertTrue(stage.is_dir())
+        with self.assertRaisesRegex(FINISH.Retain, "incomplete-or-rebound"):
+            self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertTrue(stage.is_dir())
+        self.assertFalse(self.wt.exists())
+
+    def partial_stage(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=RuntimeError("during materialization")):
+            with self.assertRaisesRegex(RuntimeError, "during materialization"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        stage = Path(record["stage"])
+        (stage / "file").write_text("original\n")
+        (stage / "file").chmod(0o644)
+        return stage, digest, record["id"]
+
+    def test_explicit_partial_continuation_preserves_existing_file_and_stage(self):
+        stage, digest, intent = self.partial_stage()
+        before = FINISH.identity(stage)
+        file_inode = (stage / "file").stat().st_ino
+        plan = self.recover("--continue-partial", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertTrue(plan["partial_continuation"])
+        self.assertEqual(plan["recovery_sha256"], digest)
+        self.assertEqual(self.holders_mock.call_args.args[0]["path"], str(stage))
+        self.assertIn(before, self.holders_mock.call_args.args[1]["discarded_inodes"])
+        result = self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(FINISH.identity(self.wt), before)
+        self.assertEqual((self.wt / "file").stat().st_ino, file_inode)
+        self.assertEqual(self.record()[0]["id"], intent)
+
+    def test_partial_continuation_refuses_corrupt_existing_bytes(self):
+        stage, digest, intent = self.partial_stage()
+        (stage / "file").write_text("corrupt\n")
+        with self.assertRaisesRegex(FINISH.Retain, "file-content-changed"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual((stage / "file").read_text(), "corrupt\n")
+        self.assertFalse((stage / "nested").exists())
+        self.assertEqual(self.record()[1]["state"], "recovery-pending")
+
+    def test_partial_continuation_refuses_extra_entry(self):
+        stage, digest, intent = self.partial_stage()
+        (stage / "extra").write_text("preserve\n")
+        with self.assertRaisesRegex(FINISH.Retain, "tree-unexpected-entry"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual((stage / "extra").read_text(), "preserve\n")
+        self.assertFalse((stage / "nested").exists())
+
+    def test_partial_continuation_does_not_overwrite_appeared_file(self):
+        stage, digest, intent = self.partial_stage()
+        native_git = FINISH.git
+        def appeared(path, *args, **kwargs):
+            result = native_git(path, *args, **kwargs)
+            if args[:2] == ("cat-file", "blob") and not (stage / "nested/command").exists():
+                (stage / "nested/command").write_text("appeared\n")
+            return result
+        with mock.patch.object(FINISH, "git", side_effect=appeared):
+            with self.assertRaises(FileExistsError):
+                self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual((stage / "nested/command").read_text(), "appeared\n")
+        self.assertFalse(self.wt.exists())
+
+    def test_recovery_blob_above_eight_mib_uses_scoped_capture_and_verification(self):
+        data = b"x" * (9 * 1024 * 1024)
+        oid = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                             input=data, stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+        stage = self.base / "large-stage"
+        stage.mkdir(mode=0o700)
+        entries = {"large": (0o100644, oid)}
+        FINISH.recovery_tree(stage, entries, str(self.admin), FINISH.safety().DEADLINE,
+                             write=True, owner=str(self.repo))
+        FINISH.recovery_tree(stage, entries, str(self.admin), FINISH.safety().DEADLINE)
+        self.assertEqual((stage / "large").read_bytes(), data)
+
+    def test_replaced_staging_parent_symlink_is_not_followed(self):
+        stage = self.base / "stage"
+        stage.mkdir(mode=0o700)
+        (stage / "nested").symlink_to(self.base, target_is_directory=True)
+        fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaises(OSError):
+                with FINISH.recovery_parent(fd, "nested/should-not-write"):
+                    self.fail("followed staging symlink")
+        finally:
+            os.close(fd)
+        self.assertFalse((self.base / "should-not-write").exists())
+
+    def test_crash_before_publish_retains_intent_and_requires_exact_reconciliation(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=RuntimeError("interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, retirement = self.record()
+        self.assertEqual(retirement["state"], "recovery-pending")
+        status = self.call("status")[1][0]["missing_recovery"]
+        self.assertEqual(status["status"], "pending")
+        self.assertEqual(status["intent_id"], record["id"])
+        self.assertFalse(self.wt.exists())
+        self.assertTrue(Path(record["stage"]).is_dir())
+        with self.assertRaisesRegex(FINISH.Retain, "exact-intent-required"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        with self.assertRaisesRegex(FINISH.Retain, "intent"):
+            self.call("resume")
+        result = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertEqual(result["checkout"], "restored")
+
+    def test_crash_after_publish_reconciles_same_inode_once(self):
+        digest = self.plan()
+        publish = FINISH.recovery_publish
+        def interrupted(source, target):
+            publish(source, target)
+            raise RuntimeError("interrupted after publication")
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, "interrupted after"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, retirement = self.record()
+        before = FINISH.identity(self.wt)
+        self.assertEqual(retirement["generation"], 0)
+        result = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(FINISH.identity(self.wt), before)
+
+    def test_post_publish_admin_drift_retains_pending_intent(self):
+        digest = self.plan()
+        publish = FINISH.recovery_publish
+        def changed(source, target):
+            publish(source, target)
+            (self.admin / "locked").write_text("changed-owner\n")
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=changed):
+            with self.assertRaisesRegex(FINISH.Retain, "registration-missing-or-locked"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(self.record()[1]["state"], "recovery-pending")
+
+
+def stat_mode(path):
+    return path.stat().st_mode & 0o777
 
 
 class FinalizedRemovalTests(unittest.TestCase):
