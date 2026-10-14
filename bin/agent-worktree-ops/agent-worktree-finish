@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import functools
 import hashlib
@@ -100,7 +101,7 @@ def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, 
     return result
 
 
-def git(path, *args, input_data=None, raw=False, strict=False, deadline=None):
+def git(path, *args, input_data=None, raw=False, strict=False, deadline=None, capture_limit=None):
     result = run([
         NATIVE_GIT or "git",
         "-c", "core.hooksPath=/dev/null",
@@ -111,7 +112,8 @@ def git(path, *args, input_data=None, raw=False, strict=False, deadline=None):
         "-c", "protocol.allow=never",
         "-C", str(path),
         *args,
-    ], limit=(32 * 1024 * 1024 if args and args[0] == "ls-tree" else
+    ], limit=(capture_limit if capture_limit is not None else
+              32 * 1024 * 1024 if args and args[0] == "ls-tree" else
               safety().LEAF_LIMIT if args and args[0] in ("show", "stripspace") else 1024 * 1024),
         input_data=input_data, deadline=deadline)
     if strict and result.stderr:
@@ -1703,6 +1705,387 @@ def owner_rows(db, worktree_id):
     return [dict(item) for item in db.execute(query, (worktree_id,))]
 
 
+def recovery_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def missing_recovery_record(db, row):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='missing_recoveries'").fetchone():
+        return None
+    result = db.execute("SELECT fact FROM missing_recoveries WHERE worktree_id=?",
+                        (row["id"],)).fetchone()
+    return json.loads(result[0]) if result else None
+
+
+def missing_recovery_preimage(db, row, args, until, *, published=False):
+    module = safety()
+    snap = json.loads(row["identity"])
+    original_identity = json.loads(row["identity"])
+    devices = {}
+    path = Path(snap["path"])
+    if row["id"] != args.worktree_id or row["path"] != str(path):
+        raise Retain("recovery-record-mismatch")
+    if (physical(path.parent) != str(path.parent) or not inside(str(path), snap["root"])
+            or str(path) == snap["root"]):
+        raise Retain("recovery-path-boundary-changed")
+    if not published and os.path.lexists(path):
+        raise Retain("recovery-target-present")
+    for key in ("owner", "common", "gitdir"):
+        current_id = identity(snap[key])
+        recorded_id = snap[key + "_id"]
+        if physical(snap[key]) != snap[key]:
+            raise Retain("recovery-admin-owner-identity-changed")
+        if args.allow_device_renumbering:
+            if (recorded_id[1] != current_id[1]
+                    or devices.setdefault(recorded_id[0], current_id[0]) != current_id[0]):
+                raise Retain("recovery-device-or-inode-changed")
+            snap[key + "_id"] = current_id
+        elif current_id != recorded_id:
+            raise Retain("recovery-admin-owner-identity-changed")
+    if args.allow_device_renumbering:
+        if len(set(devices.values())) != len(devices):
+            raise Retain("recovery-device-map-not-bijective")
+        original_device, original_inode = snap["path_id"]
+        if (original_device not in devices
+                or devices[original_device] != identity(path.parent)[0]):
+            raise Retain("recovery-parent-volume-unmapped-or-changed")
+        snap["path_id"] = [devices[original_device], original_inode]
+    observed_identity = dict(snap)
+    if (git(snap["owner"], "rev-parse", "--path-format=absolute", "--git-common-dir") != snap["common"]
+            or repository(git(snap["owner"], "remote", "get-url", "origin")) != snap["repo"]):
+        raise Retain("recovery-owner-binding-changed")
+    selected = [entry for entry in records(snap["owner"]) if entry.get("worktree") == str(path)]
+    if (len(selected) != 1 or selected[0].get("HEAD") != args.expected_head
+            or selected[0].get("branch") != snap["branch"]
+            or selected[0].get("locked") != snap.get("lock_reason")):
+        raise Retain("recovery-registration-changed")
+    for marker in ("index.lock", "HEAD.lock", "config.lock", "packed-refs.lock", "MERGE_HEAD",
+                   "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge", "rebase-apply", "sequencer"):
+        if any(os.path.lexists(Path(snap[key]) / marker) for key in ("common", "gitdir")):
+            raise Retain("recovery-git-operation-present")
+    snap = {**snap, "head": args.expected_head}
+    admin_path = Path(snap["gitdir"])
+    raw, _ = module.read_file(admin_path / "index", until)
+    if hashlib.sha256(raw).hexdigest() != args.index_sha256:
+        raise Retain("recovery-index-changed")
+    entries, resolve_undo = module.index_entries(raw)
+    if resolve_undo is not None or any(entry[2] for entry in entries.values()):
+        raise Retain("recovery-sparse-or-undo-index")
+    tree = module.tree_entries(git(snap["owner"], "--no-replace-objects", "ls-tree", "-rz",
+                                   args.expected_head, deadline=until))
+    if {name: entry[:2] for name, entry in entries.items()} != tree:
+        raise Retain("recovery-index-not-head")
+    for name, expected in (("HEAD", "ref: " + snap["branch"] + "\n"),
+                           ("gitdir", str(path / ".git") + "\n")):
+        data, _ = module.read_file(admin_path / name, until)
+        if data != os.fsencode(expected):
+            raise Retain("recovery-admin-binding-changed")
+    data, _ = module.read_file(admin_path / "commondir", until)
+    if str((admin_path / os.fsdecode(data).rstrip("\n")).resolve(strict=True)) != snap["common"]:
+        raise Retain("recovery-common-binding-changed")
+    # Checks that need a Git cwd use the unchanged canonical owner while all
+    # inventoried admin paths still belong to this exact missing checkout.
+    admin = module.admin_inventory({**snap, "path": snap["owner"]}, git, until,
+                                   preserved_oids={args.expected_head})
+    refs = preserved_refs(snap, [snap["branch"]], until)
+    if refs[snap["branch"]]["head"] != args.expected_head:
+        raise Retain("recovery-branch-changed")
+    item = retirement(db, row)
+    if item is None or item["generation"] != args.generation:
+        raise Retain("recovery-generation-changed")
+    owners = owner_rows(db, row["id"])
+    if not owners or row["state"] != "active":
+        raise Retain("recovery-needs-existing-active-owners")
+    if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
+        raise Retain("recovery-pin-present")
+    if db.execute("SELECT 1 FROM owner_releases WHERE worktree_id=?", (row["id"],)).fetchone():
+        raise Retain("recovery-release-present")
+    boundaries = [module.access_boundary(str(path.parent), until),
+                  module.access_boundary(snap["gitdir"], until)]
+    manual_holders(snap, {"entries": {}, "discarded_inodes": [snap["path_id"]]}, admin, until)
+    return {"identity": original_identity, "observed_identity": observed_identity,
+            "allow_device_renumbering": args.allow_device_renumbering,
+            "device_mapping": sorted([old, new] for old, new in devices.items()),
+            "head": args.expected_head,
+            "index_sha256": args.index_sha256, "registration": selected[0], "admin": admin,
+            "refs": refs, "boundaries": boundaries, "owners": owners,
+            "generation": item["generation"], "state": row["state"]}, tree
+
+
+RECOVERY_BLOB_LIMIT = 16 * 1024 * 1024
+
+
+def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allow_partial=False):
+    module = safety()
+    root = Path(root)
+    root_id = identity(root)
+    if root.lstat().st_mode & 0o077:
+        raise Retain("recovery-private-staging-required")
+    expected = {**entries, ".git": (0o100600, None)}
+    directories = {""}
+    for name in expected:
+        directories.update(str(p) for p in Path(name).parents if str(p) != ".")
+    present = set()
+    present_bytes = 0
+    if write and allow_partial:
+        verified_id, present, present_bytes = recovery_tree(root, entries, gitdir, until, allow_partial=True)
+        if verified_id != root_id:
+            raise Retain("recovery-staging-rebound")
+    if write:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if list(module.file_identity(os.fstat(root_fd))[:2]) != root_id:
+                raise Retain("recovery-staging-rebound")
+            for name in sorted(directories - {""}, key=lambda p: (p.count("/"), p)):
+                if name in present:
+                    continue
+                with recovery_parent(root_fd, name) as (parent_fd, leaf):
+                    os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
+            total = present_bytes
+            for name, (mode, oid) in expected.items():
+                module.tick(until)
+                if name in present:
+                    continue
+                data = (os.fsencode("gitdir: " + gitdir + "\n") if oid is None else
+                        git(owner, "cat-file", "blob", oid, raw=True, strict=True, deadline=until,
+                            capture_limit=RECOVERY_BLOB_LIMIT))
+                total += len(data)
+                if total > module.PASS_LIMIT:
+                    raise Retain("recovery-source-byte-limit")
+                if oid is not None and hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
+                    raise Retain("recovery-blob-identity-mismatch")
+                with recovery_parent(root_fd, name) as (parent_fd, leaf):
+                    if mode == 0o120000:
+                        os.symlink(os.fsdecode(data), leaf, dir_fd=parent_fd)
+                    else:
+                        fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     mode & 0o777, dir_fd=parent_fd)
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(data)
+                            stream.flush()
+                            os.fchmod(stream.fileno(), mode & 0o777)
+                            os.fsync(stream.fileno())
+        finally:
+            os.close(root_fd)
+    observed = set()
+    total = 0
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        module.tick(until)
+        for name in dirs + files:
+            path = Path(directory) / name
+            relative = str(path.relative_to(root))
+            if relative in observed:
+                raise Retain("recovery-tree-duplicate")
+            observed.add(relative)
+            details = path.lstat()
+            if relative in directories:
+                if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid() or details.st_mode & 0o077:
+                    raise Retain("recovery-directory-changed")
+                continue
+            if relative not in expected or details.st_uid != os.getuid():
+                raise Retain("recovery-tree-unexpected-entry")
+            mode, oid = expected[relative]
+            if mode == 0o120000:
+                if not stat.S_ISLNK(details.st_mode):
+                    raise Retain("recovery-link-changed")
+                data = os.fsencode(os.readlink(path))
+            else:
+                if not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != mode & 0o777:
+                    raise Retain("recovery-file-mode-changed")
+                data, _ = module.read_file(path, until, RECOVERY_BLOB_LIMIT)
+            total += len(data)
+            if total > module.PASS_LIMIT:
+                raise Retain("recovery-source-byte-limit")
+            if oid is None:
+                matched = data == os.fsencode("gitdir: " + gitdir + "\n")
+            else:
+                matched = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() == oid
+            if not matched:
+                raise Retain("recovery-file-content-changed")
+    if ((not (allow_partial and not write) and observed != set(expected) | (directories - {""}))
+            or identity(root) != root_id):
+        raise Retain("recovery-tree-incomplete-or-rebound")
+    if write:
+        for name in sorted(directories, reverse=True):
+            fd = os.open(root / name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    return (root_id, observed, total) if allow_partial and not write else root_id
+
+
+@contextlib.contextmanager
+def recovery_parent(root_fd, name):
+    with contextlib.ExitStack() as close:
+        parent_fd = root_fd
+        parts = Path(name).parts
+        for part in parts[:-1]:
+            parent_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            close.callback(os.close, parent_fd)
+        yield parent_fd, parts[-1]
+
+
+def recovery_publish(source, target):
+    lib = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        function = lib.renamex_np
+        function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        args = (os.fsencode(source), os.fsencode(target), 4)  # RENAME_EXCL
+    elif sys.platform == "linux" and hasattr(lib, "renameat2"):
+        function = lib.renameat2
+        function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        args = (-100, os.fsencode(source), -100, os.fsencode(target), 1)  # RENAME_NOREPLACE
+    else:
+        raise Retain("recovery-no-replace-unavailable")
+    function.restype = ctypes.c_int
+    if function(*args) != 0:
+        raise Retain("recovery-no-replace-refused")
+    fd = os.open(Path(target).parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def recover_missing(db, row, args):
+    until = safety().DEADLINE
+    who = owner_id(args)
+    with safety().maintainer_lock(Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))):
+        record = missing_recovery_record(db, row)
+        if args.continue_partial and (record is None or record.get("result")):
+            raise Retain("recovery-partial-needs-pending-intent")
+        if record is not None:
+            if (not args.intent_id or record["id"] != args.intent_id
+                    or record["digest"] != args.recovery_sha256
+                    or record["preimage"]["generation"] != args.generation
+                    or record["preimage"]["head"] != args.expected_head
+                    or record["preimage"]["index_sha256"] != args.index_sha256
+                    or record["preimage"]["allow_device_renumbering"] != args.allow_device_renumbering):
+                raise Retain("recovery-exact-intent-required")
+            if record.get("result"):
+                current = revalidate(row)
+                if (current["head"] != args.expected_head
+                        or current["path_id"] != record["stage_id"]
+                        or retirement(db, row)["generation"] != args.generation + 1
+                        or owner_rows(db, row["id"]) != record["preimage"]["owners"]):
+                    raise Retain("recovery-successor-changed")
+                successor_args = types.SimpleNamespace(**{**vars(args), "generation": args.generation + 1})
+                original_row = {**dict(row), "identity": json.dumps(record["preimage"]["identity"])}
+                observed, entries = missing_recovery_preimage(db, original_row, successor_args, until, published=True)
+                observed.update(generation=args.generation, registration=record["preimage"]["registration"])
+                if recovery_digest(observed) != record["digest"]:
+                    raise Retain("recovery-successor-admin-changed")
+                recovery_tree(row["path"], entries, current["gitdir"], until)
+                return record["result"]
+        elif args.intent_id:
+            raise Retain("recovery-intent-not-found")
+        item = retirement(db, row)
+        if item is None or (record is None and (item["state"] != "enrolled" or item["intent"] or item["result"])):
+            raise Retain("recovery-pending-lifecycle-action")
+        if record and (item["state"] != "recovery-pending" or json.loads(item["intent"]) != record["intent"]):
+            raise Retain("recovery-intent-state-changed")
+        published = record is not None and os.path.lexists(row["path"])
+        preimage, entries = missing_recovery_preimage(db, row, args, until, published=published)
+        if record is not None:
+            # Only the target's presence changes when the same staged inode was published.
+            preimage["registration"] = record["preimage"]["registration"]
+        digest = recovery_digest(preimage)
+        if record and digest != record["digest"]:
+            raise Retain("recovery-preimage-drift")
+        if args.continue_partial:
+            if (published or record["stage_id"] is None
+                    or identity(record["stage"]) != record["stage_id"]):
+                raise Retain("recovery-partial-stage-changed")
+            recovery_tree(record["stage"], entries, preimage["identity"]["gitdir"], until,
+                          allow_partial=True)
+            inodes = [record["stage_id"]]
+            for directory, dirs, files in os.walk(record["stage"], followlinks=False):
+                for name in dirs + files:
+                    safety().tick(until)
+                    details = (Path(directory) / name).lstat()
+                    if not stat.S_ISLNK(details.st_mode):
+                        inodes.append([details.st_dev, details.st_ino])
+            manual_holders({**preimage["observed_identity"], "path": record["stage"]},
+                           {"entries": {}, "discarded_inodes": inodes}, preimage["admin"], until)
+        if not args.apply:
+            return {"checkout": "unknown" if record else "missing", "recovery_sha256": digest, "entries": len(entries),
+                    "worktree_id": row["id"], "generation": args.generation,
+                    "head": args.expected_head, "index_sha256": args.index_sha256,
+                    "allow_device_renumbering": args.allow_device_renumbering,
+                    "device_mapping": preimage["device_mapping"],
+                    "partial_continuation": args.continue_partial,
+                    "stage_id": record["stage_id"] if record else None,
+                    "untracked_unstaged": "unavailable", "checkout_mutation": False}
+        if args.recovery_sha256 != digest:
+            raise Retain("recovery-reviewed-preimage-required")
+        if record is None:
+            identifier = str(uuid.uuid4())
+            staging = str(Path(row["path"]).parent / (".gwt-recover-" + identifier))
+            intent = {"kind": "recover-missing", "id": identifier, "digest": digest,
+                      "operator": who, "stage": staging}
+            record = {"id": identifier, "intent": intent, "digest": digest, "preimage": preimage,
+                      "stage": staging, "stage_id": None, "result": None}
+            with db:
+                db.execute("CREATE TABLE IF NOT EXISTS missing_recoveries ("
+                           "worktree_id TEXT PRIMARY KEY REFERENCES worktrees(id), fact TEXT NOT NULL)")
+                changed = db.execute("UPDATE retirement SET state='recovery-pending', intent=? "
+                                     "WHERE worktree_id=? AND generation=? AND state='enrolled' AND intent IS NULL",
+                                     (json.dumps(intent, sort_keys=True), row["id"], args.generation)).rowcount
+                if changed != 1:
+                    raise Retain("recovery-generation-cas-failed")
+                db.execute("INSERT INTO missing_recoveries VALUES (?, ?)",
+                           (row["id"], json.dumps(record, sort_keys=True)))
+            Path(staging).mkdir(mode=0o700)
+            record["stage_id"] = identity(staging)
+            with db:
+                db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
+                           (json.dumps(record, sort_keys=True), row["id"]))
+            recovery_tree(staging, entries, preimage["identity"]["gitdir"], until,
+                          write=True, owner=preimage["identity"]["owner"])
+        elif args.continue_partial:
+            recovery_tree(record["stage"], entries, preimage["identity"]["gitdir"], until,
+                          write=True, owner=preimage["identity"]["owner"], allow_partial=True)
+        source = row["path"] if published else record["stage"]
+        if (record["stage_id"] is None or identity(source) != record["stage_id"]
+                or (published and os.path.lexists(record["stage"]))):
+            raise Retain("recovery-staged-inode-unknown")
+        recovery_tree(source, entries, preimage["identity"]["gitdir"], until)
+        final, _ = missing_recovery_preimage(db, row, args, until, published=published)
+        final["registration"] = preimage["registration"]
+        if recovery_digest(final) != digest:
+            raise Retain("recovery-pre-publication-drift")
+        if not published:
+            recovery_publish(source, row["path"])
+        current = snapshot(row["path"], preimage["identity"]["root"], preimage["identity"].get("lock_reason"))
+        if immutable(current) != {**preimage["observed_identity"], "path_id": record["stage_id"]}:
+            raise Retain("recovery-published-identity-changed")
+        recovery_tree(row["path"], entries, preimage["identity"]["gitdir"], until)
+        final, _ = missing_recovery_preimage(db, row, args, until, published=True)
+        final["registration"] = preimage["registration"]
+        if recovery_digest(final) != digest:
+            raise Retain("recovery-post-publication-drift")
+        result = {"checkout": "restored", "intent_id": record["id"], "recovery_sha256": digest,
+                  "generation": args.generation + 1, "head": args.expected_head,
+                  "entries": len(entries), "operator": who, "owners_preserved": True,
+                  "untracked_unstaged": "unavailable", "source": "committed-index-equal"}
+        record["result"] = result
+        with db:
+            changed = db.execute("UPDATE retirement SET state='enrolled', intent=NULL "
+                                 "WHERE worktree_id=? AND generation=? AND state='recovery-pending' AND intent=?",
+                                 (row["id"], args.generation, json.dumps(record["intent"], sort_keys=True))).rowcount
+            if changed != 1:
+                raise Retain("recovery-final-cas-failed")
+            db.execute("UPDATE worktrees SET identity=? WHERE id=? AND identity=?",
+                       (json.dumps(immutable(current), sort_keys=True), row["id"], row["identity"]))
+            if retirement(db, row)["generation"] != args.generation + 1:
+                raise Retain("recovery-successor-generation-invalid")
+            db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
+                       (json.dumps(record, sort_keys=True), row["id"]))
+        return result
+
+
 def summary(db, row, reason=None):
     item = retirement(db, row)
     outcome = json.loads(item["result"]) if item is not None and item["result"] else None
@@ -1739,6 +2122,13 @@ def summary(db, row, reason=None):
     }
     if cancellations:
         result["cancelled_owners"] = cancellations
+    recovery = missing_recovery_record(db, row)
+    if recovery is not None:
+        result["missing_recovery"] = {
+            "intent_id": recovery["id"], "recovery_sha256": recovery["digest"],
+            "status": "complete" if recovery["result"] else "pending",
+            "operator": recovery["intent"]["operator"], "result": recovery["result"],
+        }
     if outcome and outcome.get("reason") == "external-removal-reconciled":
         result["reason"] = outcome["reason"]
         result["external_removal"] = outcome
@@ -1767,6 +2157,7 @@ def parser():
         "release",
         "remove",
         "reconcile",
+        "recover-missing",
         "resume",
         "pin",
         "unpin",
@@ -1809,10 +2200,17 @@ def parser():
     result.add_argument("--result-sha256")
     result.add_argument("--external-removal", action="store_true")
     result.add_argument("--worktree-id")
+    result.add_argument("--expected-head")
+    result.add_argument("--index-sha256")
+    result.add_argument("--recovery-sha256")
+    result.add_argument("--allow-device-renumbering", action="store_true")
+    result.add_argument("--continue-partial", action="store_true")
     return result
 
 
 def process_one(db, row, args):
+    if args.command == "recover-missing":
+        return recover_missing(db, row, args)
     if args.command == "reconcile":
         if args.external_removal:
             reconcile_external(db, row, args)
@@ -1898,7 +2296,23 @@ def main(argv=None):
         raise Retain("sudo-holder-scan-requires-linux")
     reconciliation_options = (args.intent_id, args.generation, args.intent_sha256, args.result_sha256,
                               args.worktree_id)
-    if args.command == "reconcile":
+    if args.command == "recover-missing":
+        if (args.pr or args.target or args.wait_for or args.policy or args.all or args.release
+                or args.new_token or args.if_enrolled or args.finalized or args.discard_ignored
+                or args.external_removal or args.intent_sha256 or args.result_sha256 or args.reason
+                or args.generation is None or args.generation < 0 or not args.worktree_id
+                or str(uuid.UUID(args.worktree_id)) != args.worktree_id
+                or not args.expected_head or not re.fullmatch(r"[0-9a-f]{40}", args.expected_head)
+                or not args.index_sha256 or not re.fullmatch(r"[0-9a-f]{64}", args.index_sha256)
+                or (args.apply and not args.recovery_sha256)
+                or (args.continue_partial and (not args.intent_id or not args.recovery_sha256))
+                or (args.recovery_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.recovery_sha256))
+                or (args.intent_id and str(uuid.UUID(args.intent_id)) != args.intent_id)):
+            raise Retain("recovery-needs-exact-record-head-index-generation")
+    elif (args.expected_head or args.index_sha256 or args.recovery_sha256
+          or args.allow_device_renumbering or args.continue_partial):
+        raise Retain("recovery-options-require-recover-missing")
+    elif args.command == "reconcile":
         if (args.pr or args.target or args.wait_for or args.policy or args.all or args.apply
                 or args.release or args.new_token or args.if_enrolled or args.finalized or args.discard_ignored
                 or args.generation is None or args.generation < 0):
@@ -1937,7 +2351,7 @@ def main(argv=None):
             raise Retain("discard-ignored-needs-literal-relative-roots")
     elif args.finalized or args.discard_ignored:
         raise Retain("finalized-options-require-remove")
-    if args.apply and args.command != "check":
+    if args.apply and args.command not in ("check", "recover-missing"):
         raise Retain("apply-is-only-valid-for-check")
     if args.policy and args.command not in ("finish", "release", "check"):
         raise Retain("policy-is-only-valid-for-finish-release-or-check")

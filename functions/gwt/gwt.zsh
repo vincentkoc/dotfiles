@@ -1261,6 +1261,9 @@ Commands:
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all]         Show local completion state
+  gwt recover-missing --worktree <path> --worktree-id <id> --generation <n>
+    --expected-head <sha> --index-sha256 <sha256> [--apply --recovery-sha256 <sha256>]
+                                    Plan or restore an exact missing enrolled checkout
   gwt finish-reconcile --worktree <path> --intent-id <id> --generation <n>
       --intent-sha256 <hash> --result-sha256 <hash>  Reconcile removed target; preserve original proof
   gwt finish-reconcile --external-removal --worktree <path> --worktree-id <id>
@@ -1331,6 +1334,10 @@ gwt() {
             ;;
         finish-status|finish-check|finish-reconcile)
             _gwt_finish_tool "${subcommand#finish-}" "$@"
+            return $?
+            ;;
+        recover-missing)
+            _gwt_finish_tool recover-missing "$@"
             return $?
             ;;
         finish|release|cancel|resume|finish-pin|finish-unpin)
