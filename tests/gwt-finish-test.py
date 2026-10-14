@@ -2133,6 +2133,10 @@ class FinalizedRemovalTests(unittest.TestCase):
             code, rows = self.remove()
         self.assertEqual(code, 1)
         self.assertEqual(rows[0]["checkout"], "unknown")
+        status = self.call("status")[1][0]
+        self.assertEqual(status["checkout"], "unknown")
+        self.assertEqual(status["retirement_state"], "incomplete")
+        self.assertNotEqual(status["reason"], "finalized-task-worktree-removed")
         with FINISH.ledger(self.state) as db:
             result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
         self.assertEqual(result["reason"], "sibling-readback-unavailable")
@@ -2159,6 +2163,45 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.assertIsNone(row["intent"])
             self.assertIsNone(row["inventory"])
             self.assertEqual(row["state"], "removed")
+
+    def test_status_keeps_removed_reason_after_prior_policy_retention(self):
+        with mock.patch.object(FINISH, "qualified_policy", side_effect=FINISH.Retain(
+                "explicit-release-policy-not-installed")):
+            retained = self.finish("--release")[1][0]
+        self.assertEqual(retained["reason"], "explicit-release-policy-not-installed")
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        removed = rows[0]
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            original = dict(row), dict(FINISH.retirement(db, row))
+            self.assertEqual(FINISH.summary(db, row, reason="explicit-refusal")["reason"],
+                             "explicit-refusal")
+        with mock.patch.object(FINISH, "evaluate_release") as evaluate, \
+                mock.patch.object(FINISH, "remove_with_intent") as remove:
+            for options in ((), ("--all",)):
+                with self.subTest(options=options):
+                    code, records = self.call("status", *options)
+                    self.assertEqual(code, 0)
+                    status = next(row for row in records if row["worktree"] == str(self.wt))
+                    self.assertEqual(status["checkout"], "removed")
+                    self.assertEqual(status["reason"], removed["reason"])
+                    self.assertFalse(status["removal_available"])
+        evaluate.assert_not_called()
+        remove.assert_not_called()
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual((dict(row), dict(FINISH.retirement(db, row))), original)
+
+    def test_removed_status_preserves_owner_cancellation(self):
+        cancelled = self.call("cancel", "--reason", "superseded upstream")[1][0]
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        status = self.call("status")[1][0]
+        self.assertEqual(status["checkout"], "removed")
+        self.assertEqual(status["reason"], rows[0]["reason"])
+        self.assertEqual(status["state"], "cancelled")
+        self.assertEqual(status["cancelled_owners"], cancelled["cancelled_owners"])
 
     def test_finalized_branch_transition_preserves_both_refs_and_enrollment(self):
         self.finish()
