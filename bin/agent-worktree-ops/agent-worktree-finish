@@ -2089,6 +2089,10 @@ def recover_missing(db, row, args):
 def summary(db, row, reason=None):
     item = retirement(db, row)
     outcome = json.loads(item["result"]) if item is not None and item["result"] else None
+    # A completed removal owns its status reason; an older retention reason
+    # must not imply that the checkout still needs policy or owner action.
+    if not reason and outcome and outcome["checkout"] == "removed":
+        reason = outcome["reason"]
     owners = owner_rows(db, row["id"])
     cancellations = cancellation_rows(db, row["id"])
     cancelled = {entry["owner"] for entry in cancellations}
