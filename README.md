@@ -304,3 +304,9 @@ identity version, content deduplication and history retention are unchanged.
 
 - tmux: [gpakosz/.tmux](https://github.com/gpakosz/.tmux)
 - neovim: [NvChad](https://github.com/NvChad/NvChad) & [nyoom.nvim](https://github.com/nyoom-engineering/nyoom.nvim)
+
+## OpenClaw agent setup
+
+See [OpenClaw agent runtime setup](profiles/linux-server/openclaw-agent-setup.md)
+for the built-in runtime selection, credential boundaries, and the dated
+X-search verification and recovery status.
