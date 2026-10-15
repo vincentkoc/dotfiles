@@ -111,6 +111,10 @@ a missing reply, which removes input shading even after a terminal attaches.
 The workstation, server, and marker styles use the same foreground so detached
 launches receive both replies. `tests/tt-palette-live-test.py` checks this on a
 private tmux socket without launching Codex or touching the live cockpit.
+Startup also clears inherited `NO_COLOR` and `TERMINFO` overrides before the
+first process starts. Native restores scrub the child environment even when
+reusing an existing server, without changing that server's other sessions.
+The Linux profile applies the same startup defaults as the workstation profile.
 
 `tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
 through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews

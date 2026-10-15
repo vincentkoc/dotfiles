@@ -14,6 +14,14 @@ if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | g
 if-shell '! tmux -N -S #{q:socket_path} show-options -gqv update-environment | grep -Fxq XAUTHORITY' 'set -ga update-environment XAUTHORITY'
 
 set -g default-terminal "tmux-256color"
+# Preserve shell/TUI color inside tmux. NO_COLOR can leak in from agent shells.
+set-environment -gu NO_COLOR
+set-environment -g CLICOLOR 1
+set-environment -g CLICOLOR_FORCE 1
+set-environment -gu FORCE_COLOR
+set-environment -g COLORTERM truecolor
+set-environment -gu TERMINFO
+set-environment -g TERMINFO_DIRS "$HOME/.terminfo:/usr/share/terminfo"
 %if "#{==:#{m/r:(^| )xterm[*]:RGB:clipboard:ccolour:cstyle:extkeys:focus:title($| ),#{terminal-features}},0}"
 set -ga terminal-features ",xterm*:RGB:clipboard:ccolour:cstyle:extkeys:focus:title"
 %endif

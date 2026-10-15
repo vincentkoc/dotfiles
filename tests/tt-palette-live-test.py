@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Probe OSC 10/11 on a private, detached tmux server; never launch an agent."""
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,9 +17,12 @@ import termios
 import time
 import tty
 import unittest
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
+COLOR_ENV = ("NO_COLOR", "TERMINFO", "COLORTERM", "CLICOLOR", "CLICOLOR_FORCE",
+             "FORCE_COLOR", "TERMINFO_DIRS")
 
 
 def wait_for(path):
@@ -29,6 +34,8 @@ def wait_for(path):
 
 
 def probe(root):
+    (root / "environment.json").write_text(json.dumps(
+        {key: os.environ.get(key) for key in COLOR_ENV}))
     (root / "ready").touch()
     wait_for(root / "start")
     fd = os.open("/dev/tty", os.O_RDWR)
@@ -61,6 +68,9 @@ class PaletteTest(unittest.TestCase):
                     "SHELL": "/bin/sh", "TERM": "xterm-256color",
                     "XDG_STATE_HOME": str(self.root / "state"),
                     "XDG_CONFIG_HOME": str(self.root / "config")}
+        self.env.update({"NO_COLOR": "1", "TERMINFO": str(self.root / "invalid-terminfo"),
+                         "COLORTERM": "", "CLICOLOR": "0", "CLICOLOR_FORCE": "0",
+                         "FORCE_COLOR": "0", "TERMINFO_DIRS": "/invalid-terminfo"})
         Path(self.env["HOME"]).mkdir()
         wrapper = self.root / "tmux"
         wrapper.write_text("#!/bin/sh\nexec " + shlex.join(
@@ -84,6 +94,7 @@ class PaletteTest(unittest.TestCase):
         self.assertEqual(self.run_tmux("list-clients").stdout, "")
 
     def stop(self):
+        (self.root / "start").touch()
         (self.root / "stop").touch()
         deadline = time.monotonic() + 5
         while self.run_tmux("has-session", "-t", "palette", check=False).returncode == 0:
@@ -91,10 +102,11 @@ class PaletteTest(unittest.TestCase):
                 self.fail("private palette fixture did not exit through its stop file")
             time.sleep(0.01)
 
-    def replies(self):
-        (self.root / "start").touch()
-        wait_for(self.root / "reply.json")
-        data = json.loads((self.root / "reply.json").read_text())
+    def replies(self, root=None):
+        root = root or self.root
+        (root / "start").touch()
+        wait_for(root / "reply.json")
+        data = json.loads((root / "reply.json").read_text())
         return dict(re.findall(r"\x1b\](10|11);rgb:([0-9a-f/]+)", data))
 
     def recovery_config(self):
@@ -104,9 +116,47 @@ class PaletteTest(unittest.TestCase):
     def assert_palette(self, replies, background="1a1a/1b1b/2626"):
         self.assertEqual(replies, {"10": "c0c0/caca/f5f5", "11": background})
 
+    def assert_color_environment(self, root=None, force=None):
+        environment = json.loads(((root or self.root) / "environment.json").read_text())
+        self.assertEqual(environment, {
+            "NO_COLOR": None, "TERMINFO": None, "COLORTERM": "truecolor",
+            "CLICOLOR": "1", "CLICOLOR_FORCE": "1", "FORCE_COLOR": force,
+            "TERMINFO_DIRS": f"{self.env['HOME']}/.terminfo:/usr/share/terminfo",
+        })
+
     def test_detached_cold_recovery_has_rgb_defaults(self):
         self.start(self.recovery_config())
+        self.assert_color_environment()
         self.assert_palette(self.replies())
+
+    def test_native_recovery_scrubs_existing_server_environment(self):
+        self.start(self.recovery_config() + "\nset-environment -g NO_COLOR 1\n"
+                   "set-environment -g TERMINFO /invalid-terminfo\n")
+        loader = importlib.machinery.SourceFileLoader(
+            "palette_snapshot_writer", str(REPO / "bin/tt-codex-snapshot-writer"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        writer = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = writer
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        loader.exec_module(writer)
+        root = self.root / "native"
+        root.mkdir()
+        self.addCleanup(lambda: (root / "stop").touch())
+        command = shlex.join([sys.executable, str(Path(__file__).resolve()),
+                              "--probe", str(root)])
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
+            writer, "LOGIN_SHELL", "/bin/true"
+        ):
+            self.run_tmux("new-window", "-d", *writer.recovery_environment(),
+                          *writer.recovery_shell_command(command))
+        wait_for(root / "ready")
+        self.assert_color_environment(root, force="3")
+        self.assert_palette(self.replies(root))
+        self.assertEqual(self.run_tmux("show-environment", "-g", "NO_COLOR").stdout.strip(),
+                         "NO_COLOR=1")
+        self.assertEqual(self.run_tmux("show-environment", "-g", "TERMINFO").stdout.strip(),
+                         "TERMINFO=/invalid-terminfo")
+        (root / "stop").touch()
 
     def test_detached_marked_pane_keeps_rgb_defaults(self):
         self.start(self.recovery_config())
@@ -124,8 +174,9 @@ class PaletteTest(unittest.TestCase):
     def check_profile(self, relative):
         text = (REPO / relative).read_text()
         styles = "\n".join(line for line in text.splitlines()
-                           if re.match(r"setw -g window-(?:active-)?style ", line))
+                           if re.match(r"setw -g window-(?:active-)?style |set-environment ", line))
         self.start(styles + "\n")
+        self.assert_color_environment()
         self.assert_palette(self.replies())
 
     def test_workstation_defaults(self):
