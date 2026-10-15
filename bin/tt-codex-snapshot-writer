@@ -899,8 +899,18 @@ def recovery_environment():
         "TMPDIR": str(scratch),
         "PATH": os.pathsep.join(dict.fromkeys(path for path in paths if path)),
         "COLORTERM": "truecolor", "CLICOLOR": "1", "CLICOLOR_FORCE": "1", "FORCE_COLOR": "3",
+        "TERMINFO_DIRS": f"{pathlib.Path.home()}/.terminfo:/usr/share/terminfo",
     }
     return [argument for key, value in values.items() for argument in ("-e", f"{key}={value}")]
+
+
+def recovery_shell_command(command):
+    # Existing servers keep their environment. Scrub only the restored process
+    # and its fallback shell; tmux -e cannot remove inherited variables.
+    program = f"exec {shlex.quote(LOGIN_SHELL)} -il"
+    if command:
+        program = f"{command}; {program}"
+    return ["env", "-u", "NO_COLOR", "-u", "TERMINFO", "/bin/sh", "-c", program]
 
 
 def freeze_recovery(schema, source, selector):
@@ -1159,7 +1169,7 @@ def restore_dead(source, mode, selector):
             # Never -k: tmux itself must refuse a pane that became active after
             # the last identity check. No presentation or metadata is changed.
             run([TMUX, "respawn-pane", "-t", pane, "-c", cwd.replace("#", "##"), *environment,
-                 "/bin/sh", "-c", f"{command}; exec {shlex.quote(LOGIN_SHELL)} -il"])
+                 *recovery_shell_command(command)])
             restored += 1
             print(f"{target}\trestored exact session")
     except (SnapshotError, OSError):
@@ -1235,10 +1245,7 @@ def recover_cold(schema, source, selector, expected_running):
         cwd, _, command = item
         if not pathlib.Path(cwd).is_dir():
             raise SnapshotError("recovery cwd disappeared")
-        program = f"exec {shlex.quote(LOGIN_SHELL)} -il"
-        if command:
-            program = f"{command}; {program}"
-        return ["-c", cwd.replace("#", "##"), *environment], ["/bin/sh", "-c", program]
+        return ["-c", cwd.replace("#", "##"), *environment], recovery_shell_command(command)
 
     try:
         for session, entries in plans.items():

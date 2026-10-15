@@ -1060,6 +1060,14 @@ recovery_server_config() {
   # Only native startup settings. The base config's embedded worker is not safe
   # to run during recovery alongside other servers.
   printf '%s\n' 'set -g default-terminal "tmux-256color"
+# Sanitize inherited agent-shell overrides before the first restored process.
+set-environment -gu NO_COLOR
+set-environment -g CLICOLOR 1
+set-environment -g CLICOLOR_FORCE 1
+set-environment -gu FORCE_COLOR
+set-environment -g COLORTERM truecolor
+set-environment -gu TERMINFO
+set-environment -g TERMINFO_DIRS "$HOME/.terminfo:/usr/share/terminfo"
 # Answer OSC 10/11 before a terminal client attaches and before agents start.
 set -g window-style "fg=#c0caf5,bg=#1a1b26"
 set -g window-active-style "fg=#c0caf5,bg=#1a1b26"

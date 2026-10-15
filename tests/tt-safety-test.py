@@ -287,6 +287,8 @@ class RecoveryTests(Fixture):
         self.assertEqual(args[1:4], ["respawn-pane", "-t", "%3"])
         self.assertNotIn("-k", args)
         self.assertLess(args.index(f"TMPDIR={self.cwd}"), args.index("/bin/sh"))
+        self.assertEqual(args[args.index("/bin/sh") - 5:args.index("/bin/sh")],
+                         ["env", "-u", "NO_COLOR", "-u", "TERMINFO"])
         self.assertIn(f"codex resume --no-alt-screen {SID}", args[-1])
         self.assertNotIn("unsafe", args[-1])
 
@@ -420,6 +422,8 @@ class RecoveryTests(Fixture):
         for args in calls:
             if "new-session" in args or "split-window" in args:
                 self.assertLess(args.index(f"TMPDIR={self.cwd}"), args.index("/bin/sh"))
+                self.assertEqual(args[args.index("/bin/sh") - 5:args.index("/bin/sh")],
+                                 ["env", "-u", "NO_COLOR", "-u", "TERMINFO"])
         self.assertFalse(any("respawn-pane" in args or "-k" in args or "-g" in args for args in calls))
         self.assertFalse(any("unaffected" in args for args in calls))
         self.assertEqual(calls[0][1:], ["topology-authorize", "recover", "factory2"])
@@ -1504,10 +1508,10 @@ apply_pane_marker_style %7 violet
         result = self.shell(["recovery_server_config"], "recovery_server_config\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(len(result.stdout.encode()), 2546)
+        self.assertEqual(len(result.stdout.encode()), 3063)
         # This native recovery config must retain every quote and shell placeholder.
         self.assertEqual(hashlib.sha256(result.stdout.encode()).hexdigest(),
-                         "94438dc50c3e948784a1f00d3bdf9758206eacb07ede1cacf2f74c8274eb2832")
+                         "d2ffc9aaaecf1309b1e9e68723a0a6c8405571afa564122a554c41aac22cf7b4")
 
     def test_collector_preserves_large_rows_empty_fields_and_filters(self):
         title = "worker " + "x" * 4096
