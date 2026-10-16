@@ -369,15 +369,38 @@ fi
 
 set_connection_title "$input"
 
-if [[ "$use_mosh" == "true" ]]; then
-  mosh_ssh=(ssh "${ssh_args[@]}")
-  if [[ "$has_remote_command" == "true" ]]; then
-    exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target" "${remote_command[@]}"
-  fi
-  exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target"
+terminal_state=""
+if [[ -t 0 ]]; then
+  terminal_state="$(stty -g 2>/dev/null || true)"
 fi
 
-if [[ "$has_remote_command" == "true" ]]; then
-  exec ssh "${ssh_args[@]}" "$target" "${remote_command[@]}"
+restore_terminal() {
+  local status=$?
+
+  # A lost transport cannot undo remote terminal modes. Restore the caller's
+  # tty settings and stop mouse reports before they reach the local prompt.
+  [[ -z "$terminal_state" ]] || stty "$terminal_state" 2>/dev/null || true
+  if [[ -t 1 && -n "${TERM:-}" && "$TERM" != "dumb" ]]; then
+    printf '\033[?9;1000;1001;1002;1003;1004;1005;1006;1015;1016;2004l' || true
+  fi
+  return "$status"
+}
+
+trap restore_terminal EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ "$use_mosh" == "true" ]]; then
+  mosh_ssh=(ssh "${ssh_args[@]}")
+  transport=(mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target")
+  if [[ "$has_remote_command" == "true" ]]; then
+    transport+=("${remote_command[@]}")
+  fi
+else
+  transport=(ssh "${ssh_args[@]}" "$target")
+  if [[ "$has_remote_command" == "true" ]]; then
+    transport+=("${remote_command[@]}")
+  fi
 fi
-exec ssh "${ssh_args[@]}" "$target"
+"${transport[@]}"

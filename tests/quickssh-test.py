@@ -7,14 +7,18 @@ import pty
 import select
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import termios
+import time
 import unittest
 
 
 QUICKSSH = Path(__file__).resolve().parents[1] / "bin" / "quickssh"
 KEEPALIVE = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
 TMUX = shutil.which("tmux")
+TERMINAL_CLEANUP = b"\x1b[?9;1000;1001;1002;1003;1004;1005;1006;1015;1016;2004l"
 STUB = """#!/usr/bin/env python3
 import json
 import os
@@ -32,6 +36,16 @@ elif name == "fzf":
     Path(os.environ["PICKER_LOG"]).write_text("\\n".join(lines) + "\\n")
     print(lines[0])
 elif name in ("ssh", "mosh"):
+    if os.environ.get("DIRTY_TERMINAL"):
+        import termios
+        attrs = termios.tcgetattr(0)
+        attrs[3] &= ~(termios.ECHO | termios.ICANON)
+        termios.tcsetattr(0, termios.TCSANOW, attrs)
+        os.write(1, b"\\x1b[?1003h\\x1b[?1006h")
+    if os.environ.get("TRANSPORT_SIGNAL"):
+        import signal
+        # Signal the foreground process group, as a terminal interrupt does.
+        os.killpg(os.getpgrp(), int(os.environ["TRANSPORT_SIGNAL"]))
     sys.exit(int(os.environ.get("TRANSPORT_EXIT", "0")))
 """
 
@@ -74,7 +88,7 @@ class QuicksshTest(unittest.TestCase):
             "TT_TMUX_BIN": str(self.bin / "tmux"),
             "TMUX_TMPDIR": str(self.tmux_tmpdir),
         }
-        for key in ("TMUX", "TMUX_PANE", "TRANSPORT_EXIT"):
+        for key in ("TMUX", "TMUX_PANE", "TRANSPORT_EXIT", "DIRTY_TERMINAL", "TRANSPORT_SIGNAL"):
             self.env.pop(key, None)
 
     def run_quickssh(self, *args, terminal=False, **changes):
@@ -122,14 +136,14 @@ class QuicksshTest(unittest.TestCase):
 
     def test_direct_ssh_title_uses_alias_not_private_target(self):
         code, output, calls = self.run_quickssh("testbox", terminal=True)
-        self.assertEqual((code, output), (0, b"\x1b]2;testbox\x07"))
+        self.assertEqual((code, output), (0, b"\x1b]2;testbox\x07" + TERMINAL_CLEANUP))
         self.assertEqual(
             calls, [["ssh", *KEEPALIVE, "-p", "2222", "tester@node.example.invalid"]]
         )
 
     def test_picker_title_uses_selected_alias(self):
         code, output, calls = self.run_quickssh(terminal=True)
-        self.assertEqual((code, output), (0, b"\x1b]2;testbox\x07"))
+        self.assertEqual((code, output), (0, b"\x1b]2;testbox\x07" + TERMINAL_CLEANUP))
         self.assertEqual(calls[-1][-1], "tester@node.example.invalid")
         self.assertEqual(
             self.picker_log.read_text().splitlines(),
@@ -157,7 +171,7 @@ class QuicksshTest(unittest.TestCase):
 
     def test_mosh_title_and_exec_arguments(self):
         code, output, calls = self.run_quickssh("mobilebox", terminal=True)
-        self.assertEqual((code, output), (0, b"\x1b]2;mobilebox\x07"))
+        self.assertEqual((code, output), (0, b"\x1b]2;mobilebox\x07" + TERMINAL_CLEANUP))
         self.assertEqual(
             calls,
             [[
@@ -171,7 +185,7 @@ class QuicksshTest(unittest.TestCase):
         code, output, calls = self.run_quickssh(
             "-l", "8080", "-d", "80", "mobilebox", terminal=True
         )
-        self.assertEqual((code, output), (0, b"\x1b]2;mobilebox\x07"))
+        self.assertEqual((code, output), (0, b"\x1b]2;mobilebox\x07" + TERMINAL_CLEANUP))
         self.assertEqual(
             calls,
             [["ssh", *KEEPALIVE, "-p", "22", "-L", "8080:localhost:80",
@@ -222,12 +236,12 @@ class QuicksshTest(unittest.TestCase):
         alias = "literal%name#{session_name}\x1b]2;bad\x07\n\r\t\x7f"
         expected = "literal%name#{session_name}]2;bad"
         code, output, calls = self.run_quickssh(alias, terminal=True)
-        self.assertEqual((code, output), (0, f"\x1b]2;{expected}\x07".encode()))
+        self.assertEqual((code, output), (0, f"\x1b]2;{expected}\x07".encode() + TERMINAL_CLEANUP))
         self.assertEqual(calls[-1][-1], alias)
         code, output, calls = self.run_quickssh(
             alias, terminal=True, TMUX_PANE="%7"
         )
-        self.assertEqual((code, output), (0, b""))
+        self.assertEqual((code, output), (0, TERMINAL_CLEANUP))
         self.assertIn(
             ["tmux", "select-pane", "-t", "%7", "-T", expected.replace("#", "##")],
             calls,
@@ -239,7 +253,7 @@ class QuicksshTest(unittest.TestCase):
                 code, output, calls = self.run_quickssh(
                     alias, terminal=True, TMUX_PANE="%7"
                 )
-                self.assertEqual((code, output), (0, b""))
+                self.assertEqual((code, output), (0, TERMINAL_CLEANUP))
                 expected = [
                     ["tmux", "set-option", "-pt", "%7", "@tt_base_title", alias],
                     ["tmux", "select-pane", "-t", "%7", "-T", alias],
@@ -254,7 +268,7 @@ class QuicksshTest(unittest.TestCase):
         code, output, calls = self.run_quickssh(
             "testbox", terminal=True, TMUX_PANE="%7", PANE_COUNT="3"
         )
-        self.assertEqual((code, output), (0, b""))
+        self.assertEqual((code, output), (0, TERMINAL_CLEANUP))
         self.assertEqual(
             calls[:-1],
             [
@@ -264,6 +278,55 @@ class QuicksshTest(unittest.TestCase):
                 ["tmux", "display-message", "-p", "-t", "@17", "#{window_panes}"],
             ],
         )
+
+    def test_disconnect_restores_termios_and_mouse_modes(self):
+        for alias in ("testbox", "mobilebox"):
+            for status, signum in ((0, None), (43, None), (255, None),
+                                   (129, signal.SIGHUP), (130, signal.SIGINT),
+                                   (143, signal.SIGTERM)):
+                with self.subTest(alias=alias, status=status):
+                    master, slave = pty.openpty()
+                    before = termios.tcgetattr(slave)
+                    env = self.env | {"DIRTY_TERMINAL": "1", "TRANSPORT_EXIT": str(status)}
+                    if signum is not None:
+                        env["TRANSPORT_SIGNAL"] = str(signum)
+                    process = subprocess.Popen(
+                        [str(QUICKSSH), alias], env=env, stdin=slave,
+                        stdout=slave, stderr=slave, process_group=0,
+                    )
+                    try:
+                        output = b""
+                        deadline = time.monotonic() + 10
+                        # Drain concurrently: tty restoration can wait for pending
+                        # output, so waiting for exit before reading deadlocks.
+                        while process.poll() is None:
+                            if time.monotonic() > deadline:
+                                raise subprocess.TimeoutExpired(process.args, 10)
+                            if select.select([master], [], [], 0.1)[0]:
+                                output += os.read(master, 4096)
+                        while select.select([master], [], [], 0)[0]:
+                            chunk = os.read(master, 4096)
+                            if not chunk:
+                                break
+                            output += chunk
+                        code = process.wait()
+                        after = termios.tcgetattr(slave)
+                        # Darwin sets PENDIN when canonical input is restored;
+                        # this kernel retype marker is not a caller setting.
+                        before[3] &= ~getattr(termios, "PENDIN", 0)
+                        after[3] &= ~getattr(termios, "PENDIN", 0)
+                        self.assertEqual(after, before)
+                        self.assertEqual(code, status)
+                        self.assertIn(b"\x1b[?1003h\x1b[?1006h", output)
+                        self.assertTrue(output.endswith(TERMINAL_CLEANUP), output)
+                        self.assertEqual(output.count(TERMINAL_CLEANUP), 1)
+                    finally:
+                        if slave is not None:
+                            os.close(slave)
+                        os.close(master)
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
 
     @unittest.skipUnless(TMUX, "tmux is not installed")
     def test_real_tmux_literal_titles_and_sibling_preservation(self):

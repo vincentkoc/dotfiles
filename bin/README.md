@@ -16,6 +16,7 @@ Top-level wrappers:
 - `retire-agent-worktree-scheduler`
 - `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
+- `quickssh` - connect to a saved SSH/Mosh host; restores local tty settings and disables mouse reporting after disconnects
 - `sublime-sync` - verify or restore Sublime User settings and Package Control plugins from a portable bundle
 - `task-runtime` - check configurable disk reserve before new heavy work and atomically update one bounded task phase receipt
 - `tt` - create or attach tmux sessions, including a `mobile` pane-picker profile; agent-driven topology changes require an exact `TT_OPERATOR_TMUX_SCOPE=<action>:<target>`, while interactive use and isolated fixtures remain available
