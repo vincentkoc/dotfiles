@@ -153,6 +153,22 @@ legacy_host_prefers_mosh() {
   return 1
 }
 
+legacy_host_mosh_ports() {
+  local alias_key="${1//-/_}" ports_var
+
+  mosh_ports=""
+  [[ -n "$alias_key" && "$alias_key" != *[!a-zA-Z0-9_]* ]] || return 0
+  load_legacy_hosts || return 0
+  ports_var="quickssh_mosh_ports_${alias_key}"
+  # Mosh's numeric validator accepts a trailing newline; reject non-port
+  # characters here so malformed config cannot reach SSH.
+  mosh_ports="${!ports_var:-}"
+  if [[ "$mosh_ports" == *[!0-9:]* ]]; then
+    printf 'quickssh: invalid Mosh UDP port or range for %s\n' "$1" >&2
+    exit 2
+  fi
+}
+
 set_tmux_connection_title() {
   local title="$1" window_id pane_count tmux_title
 
@@ -393,7 +409,10 @@ trap 'exit 143' TERM
 
 if [[ "$use_mosh" == "true" ]]; then
   mosh_ssh=(ssh "${ssh_args[@]}")
-  transport=(mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target")
+  transport=(mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}")
+  legacy_host_mosh_ports "$input"
+  [[ -z "$mosh_ports" ]] || transport+=(--port="$mosh_ports")
+  transport+=(-- "$target")
   if [[ "$has_remote_command" == "true" ]]; then
     transport+=("${remote_command[@]}")
   fi

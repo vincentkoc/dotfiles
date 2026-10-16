@@ -18,6 +18,7 @@ import unittest
 QUICKSSH = Path(__file__).resolve().parents[1] / "bin" / "quickssh"
 KEEPALIVE = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
 TMUX = shutil.which("tmux")
+MOSH = shutil.which("mosh")
 TERMINAL_CLEANUP = b"\x1b[?9;1000;1001;1002;1003;1004;1005;1006;1015;1016;2004l"
 STUB = """#!/usr/bin/env python3
 import json
@@ -182,6 +183,8 @@ class QuicksshTest(unittest.TestCase):
         )
 
     def test_forwarding_falls_back_to_ssh_with_title(self):
+        with (self.extras / "quickssh_hosts.sh").open("a") as hosts:
+            hosts.write("quickssh_mosh_ports_mobilebox='60000:60010'\n")
         code, output, calls = self.run_quickssh(
             "-l", "8080", "-d", "80", "mobilebox", terminal=True
         )
@@ -191,6 +194,42 @@ class QuicksshTest(unittest.TestCase):
             [["ssh", *KEEPALIVE, "-p", "22", "-L", "8080:localhost:80",
               "tester@mobile.example.invalid"]],
         )
+
+    def test_configured_mosh_ports_follow_hyphenated_alias(self):
+        with (self.extras / "quickssh_hosts.sh").open("a") as hosts:
+            hosts.write(
+                "quickssh_hosts_test_box='tester:node.example.invalid:2222:'\n"
+                "quickssh_mosh_hosts+=(test-box)\n"
+                "quickssh_mosh_ports_test_box='60000:60010'\n"
+            )
+        code, _, calls = self.run_quickssh("test-box")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            calls,
+            [[
+                "mosh", "-4", "-a", "--bind-server=any",
+                "--ssh=ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p 2222",
+                "--port=60000:60010", "--", "tester@node.example.invalid",
+            ]],
+        )
+
+    def test_explicit_mosh_dotted_host_has_no_configured_ports(self):
+        code, _, calls = self.run_quickssh("-m", "node.example.invalid")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[-1][-2:], ["--", "node.example.invalid"])
+        self.assertFalse(any(arg.startswith("--port") for arg in calls[-1]))
+
+    @unittest.skipUnless(MOSH, "mosh is not installed")
+    def test_malformed_mosh_ports_fail_before_ssh(self):
+        (self.bin / "mosh").unlink()
+        (self.bin / "mosh").symlink_to(MOSH)
+        for ports in ("60010:60000", "60000:65536", "60000\t60010", "60000\n"):
+            with self.subTest(ports=ports):
+                with (self.extras / "quickssh_hosts.sh").open("a") as hosts:
+                    hosts.write(f"quickssh_mosh_ports_mobilebox={shlex.quote(ports)}\n")
+                code, _, calls = self.run_quickssh("mobilebox")
+                self.assertNotEqual(code, 0)
+                self.assertEqual(calls, [])
 
     def test_invalid_arguments_and_help_do_not_mutate_titles(self):
         cases = (
