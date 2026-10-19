@@ -153,6 +153,16 @@ legacy_host_prefers_mosh() {
   return 1
 }
 
+service_account_target() {
+  local alias_key="${1//-/_}" target_var
+
+  [[ -n "$alias_key" && "$alias_key" != *[!a-zA-Z0-9_]* ]] || return 1
+  load_legacy_hosts || return 1
+  target_var="quickssh_service_targets_${alias_key}"
+  [[ -n "${!target_var:-}" ]] || return 1
+  printf '%s\n' "${!target_var}"
+}
+
 legacy_host_mosh_ports() {
   local alias_key="${1//-/_}" ports_var
 
@@ -345,8 +355,15 @@ fi
 
 target="$input"
 port=""
+service_target=""
 
-if resolved="$(resolve_legacy_host "$input")"; then
+if service_target="$(service_account_target "$input")"; then
+  # Resolve opted-in aliases before the desktop password/clipboard path.
+  # The private helper owns credentials and routing; failures never fall back.
+  if legacy_host_prefers_mosh "$input"; then
+    use_mosh=true
+  fi
+elif resolved="$(resolve_legacy_host "$input")"; then
   IFS=$'\t' read -r target port _ <<< "$resolved"
   if legacy_host_prefers_mosh "$input"; then
     use_mosh=true
@@ -407,7 +424,24 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [[ "$use_mosh" == "true" ]]; then
+if [[ -n "$service_target" ]]; then
+  transport=(fleet-credentials ssh "$service_target")
+  [[ -z "$local_port" ]] || transport+=(--local-forward "$local_port:$destination_port")
+  if [[ "$use_mosh" == "true" ]]; then
+    transport+=(--mosh)
+    legacy_host_mosh_ports "$input"
+    [[ -z "$mosh_ports" ]] || transport+=(--mosh-ports "$mosh_ports")
+  elif [[ "$has_remote_command" == "true" ]]; then
+    transport+=(--tty)
+  fi
+  transport+=(--)
+  if [[ "$has_remote_command" == "true" ]]; then
+    transport+=("${remote_command[@]}")
+  fi
+  # The helper owns terminal restoration and suspension for this route. Exec
+  # keeps the shell's original job PID instead of leaving a waiting Bash parent.
+  exec "${transport[@]}"
+elif [[ "$use_mosh" == "true" ]]; then
   mosh_ssh=(ssh "${ssh_args[@]}")
   transport=(mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}")
   legacy_host_mosh_ports "$input"

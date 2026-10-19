@@ -28,6 +28,19 @@ import sys
 
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
+if name == "fleet-credentials":
+    import atexit, signal, termios
+    state = termios.tcgetattr(0) if os.isatty(0) else None
+    def restore():
+        if state is not None:
+            termios.tcsetattr(0, termios.TCSANOW, state)
+        if os.isatty(1) and os.environ.get("TERM") not in (None, "", "dumb"):
+            os.write(1, b"\\x1b[?9;1000;1001;1002;1003;1004;1005;1006;1015;1016;2004l")
+    def interrupted(sig, frame):
+        sys.exit(128 + sig)
+    atexit.register(restore)
+    for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, interrupted)
 with open(os.environ["CALL_LOG"], "a") as log:
     log.write(json.dumps([name, *args]) + "\\n")
 if name == "tmux" and args[0] == "display-message":
@@ -36,7 +49,7 @@ elif name == "fzf":
     lines = sys.stdin.read().splitlines()
     Path(os.environ["PICKER_LOG"]).write_text("\\n".join(lines) + "\\n")
     print(lines[0])
-elif name in ("ssh", "mosh"):
+elif name in ("ssh", "mosh", "fleet-credentials"):
     if os.environ.get("DIRTY_TERMINAL"):
         import termios
         attrs = termios.tcgetattr(0)
@@ -65,7 +78,7 @@ class QuicksshTest(unittest.TestCase):
         self.tmux_tmpdir = self.root / "tmux-root"
         self.tmux_tmpdir.mkdir()
         self.tmux_tmpdir.chmod(0o700)
-        for name in ("ssh", "mosh", "tmux", "fzf"):
+        for name in ("ssh", "mosh", "tmux", "fzf", "fleet-credentials", "op", "pbcopy"):
             stub = self.bin / name
             stub.write_text(STUB)
             stub.chmod(0o755)
@@ -141,6 +154,40 @@ class QuicksshTest(unittest.TestCase):
         self.assertEqual(
             calls, [["ssh", *KEEPALIVE, "-p", "2222", "tester@node.example.invalid"]]
         )
+
+    def service_alias(self, alias="testbox"):
+        with (self.extras / "quickssh_hosts.sh").open("a") as hosts:
+            hosts.write(f"quickssh_service_targets_{alias}='approved-target'\n")
+            hosts.write(f"quickssh_hosts_{alias}='tester:node.example.invalid:22:$1password'\n")
+
+    def test_service_alias_bypasses_desktop_password_and_preserves_failure(self):
+        self.service_alias()
+        code, output, calls = self.run_quickssh("testbox", terminal=True, TRANSPORT_EXIT="41")
+        self.assertEqual(code, 41)
+        self.assertEqual(output, b"\x1b]2;testbox\x07" + TERMINAL_CLEANUP)
+        self.assertEqual(calls, [["fleet-credentials", "ssh", "approved-target", "--"]])
+
+    def test_service_alias_screen_forwarding_and_mosh(self):
+        self.service_alias("mobilebox")
+        with (self.extras / "quickssh_hosts.sh").open("a") as hosts:
+            hosts.write("quickssh_mosh_ports_mobilebox='60000:60010'\n")
+        code, _, calls = self.run_quickssh("-s", "mobilebox")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [["fleet-credentials", "ssh", "approved-target", "--mosh",
+                                 "--mosh-ports", "60000:60010", "--", "screen", "-xRR"]])
+        self.log.unlink()
+        code, _, calls = self.run_quickssh("-s", "-l", "8080", "-d", "80", "mobilebox")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [["fleet-credentials", "ssh", "approved-target", "--local-forward",
+                                 "8080:80", "--tty", "--", "screen", "-xRR"]])
+
+    def test_missing_service_helper_never_falls_back(self):
+        self.service_alias()
+        # An installed-but-unavailable helper is still an opted-in alias.
+        (self.bin / "fleet-credentials").write_text("#!/bin/sh\nexit 127\n")
+        code, _, calls = self.run_quickssh("testbox")
+        self.assertEqual(code, 127)
+        self.assertEqual(calls, [])
 
     def test_picker_title_uses_selected_alias(self):
         code, output, calls = self.run_quickssh(terminal=True)
@@ -319,7 +366,8 @@ class QuicksshTest(unittest.TestCase):
         )
 
     def test_disconnect_restores_termios_and_mouse_modes(self):
-        for alias in ("testbox", "mobilebox"):
+        self.service_alias("servicebox")
+        for alias in ("testbox", "mobilebox", "servicebox"):
             for status, signum in ((0, None), (43, None), (255, None),
                                    (129, signal.SIGHUP), (130, signal.SIGINT),
                                    (143, signal.SIGTERM)):
