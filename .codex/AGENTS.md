@@ -316,3 +316,16 @@ Recovery mode rules:
 - This guard covers PATH-resolved Git history downloads, not a firewall.
   Absolute binaries and custom shell aliases/hooks can bypass it. Do not claim
   a whole-machine bandwidth cap.
+
+## OpenClaw macOS releases
+
+- Read the [maintainer runbook](https://github.com/openclaw/maintainers/blob/main/release/macos.md)
+  before macOS release work. It owns the procedure. Avoid duplicating it here.
+- Use `openclaw/releases` and its main-only `mac-release` environment.
+  The organization-owned OpenClaw macOS Publisher App supplies scoped tokens. Do not restore the personal PAT path.
+- Use Firefox for GitHub App changes. Keep private keys and tokens out of source, chat, logs, and command arguments.
+- Stable feeds land through `automation/macos-appcast-<version>` PRs to `openclaw/openclaw` `main`.
+  No direct-main push, force-push, protected `release/appcast-*` branch, or takeover of an orphan or foreign branch.
+- A new workflow revision requires a new dispatch. An old-run rerun retains its original workflow revision.
+- Verify artifact promotion, all three feed files, and the installed-client upgrade separately.
+  Setup probes and green workflow CI do not prove a completed macOS release.
