@@ -119,6 +119,27 @@ list_legacy_aliases() {
   fi
 }
 
+legacy_host_description() {
+  local alias="$1" alias_key info_var description_var info
+  local user host port _
+
+  load_legacy_hosts || return 1
+  alias_key="${alias//-/_}"
+  [[ -n "$alias_key" && "$alias_key" != *[!a-zA-Z0-9_]* ]] || return 1
+  description_var="quickssh_descriptions_${alias_key}"
+  if [[ -n "${!description_var:-}" ]]; then
+    printf '%s\n' "${!description_var}"
+    return 0
+  fi
+
+  info_var="quickssh_hosts_${alias_key}"
+  info="${!info_var:-}"
+  [[ -n "$info" ]] || return 1
+  IFS=: read -r user host port _ <<< "$info"
+  [[ -n "$host" ]] || return 1
+  printf 'ssh · %s%s%s\n' "${user:+$user@}" "$host" "${port:+:$port}"
+}
+
 legacy_host_prefers_mosh() {
   local alias="$1" key
 
@@ -130,6 +151,22 @@ legacy_host_prefers_mosh() {
   fi
 
   return 1
+}
+
+legacy_host_mosh_ports() {
+  local alias_key="${1//-/_}" ports_var
+
+  mosh_ports=""
+  [[ -n "$alias_key" && "$alias_key" != *[!a-zA-Z0-9_]* ]] || return 0
+  load_legacy_hosts || return 0
+  ports_var="quickssh_mosh_ports_${alias_key}"
+  # Mosh's numeric validator accepts a trailing newline; reject non-port
+  # characters here so malformed config cannot reach SSH.
+  mosh_ports="${!ports_var:-}"
+  if [[ "$mosh_ports" == *[!0-9:]* ]]; then
+    printf 'quickssh: invalid Mosh UDP port or range for %s\n' "$1" >&2
+    exit 2
+  fi
 }
 
 set_tmux_connection_title() {
@@ -245,12 +282,13 @@ choose_option() {
 }
 
 choose_host() {
-  local host row selection
+  local host row selection description
   local -a options=()
 
   while IFS= read -r host; do
     [[ -n "$host" ]] || continue
-    options+=("$(printf '%-28s %s' "$host" "quickssh alias")")
+    description="$(legacy_host_description "$host" || printf 'ssh alias')"
+    options+=("$(printf '%-28s %s' "$host" "$description")")
   done < <(list_legacy_aliases | awk 'NF && !seen[$0]++')
 
   if [[ ${#options[@]} -eq 0 ]]; then
@@ -347,15 +385,41 @@ fi
 
 set_connection_title "$input"
 
-if [[ "$use_mosh" == "true" ]]; then
-  mosh_ssh=(ssh "${ssh_args[@]}")
-  if [[ "$has_remote_command" == "true" ]]; then
-    exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target" "${remote_command[@]}"
-  fi
-  exec mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}" -- "$target"
+terminal_state=""
+if [[ -t 0 ]]; then
+  terminal_state="$(stty -g 2>/dev/null || true)"
 fi
 
-if [[ "$has_remote_command" == "true" ]]; then
-  exec ssh "${ssh_args[@]}" "$target" "${remote_command[@]}"
+restore_terminal() {
+  local status=$?
+
+  # A lost transport cannot undo remote terminal modes. Restore the caller's
+  # tty settings and stop mouse reports before they reach the local prompt.
+  [[ -z "$terminal_state" ]] || stty "$terminal_state" 2>/dev/null || true
+  if [[ -t 1 && -n "${TERM:-}" && "$TERM" != "dumb" ]]; then
+    printf '\033[?9;1000;1001;1002;1003;1004;1005;1006;1015;1016;2004l' || true
+  fi
+  return "$status"
+}
+
+trap restore_terminal EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ "$use_mosh" == "true" ]]; then
+  mosh_ssh=(ssh "${ssh_args[@]}")
+  transport=(mosh -4 -a --bind-server=any --ssh="${mosh_ssh[*]}")
+  legacy_host_mosh_ports "$input"
+  [[ -z "$mosh_ports" ]] || transport+=(--port="$mosh_ports")
+  transport+=(-- "$target")
+  if [[ "$has_remote_command" == "true" ]]; then
+    transport+=("${remote_command[@]}")
+  fi
+else
+  transport=(ssh "${ssh_args[@]}" "$target")
+  if [[ "$has_remote_command" == "true" ]]; then
+    transport+=("${remote_command[@]}")
+  fi
 fi
-exec ssh "${ssh_args[@]}" "$target"
+"${transport[@]}"

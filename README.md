@@ -158,6 +158,11 @@ separately reviewed tailnet UDP policy before opting into Mosh. `prepare` does
 not install, write, validate, or reload the SSH server; the Ubuntu host must
 already have a working `sshd`.
 
+For an approved Mosh host, add its alias to `quickssh_mosh_hosts` in the private
+`quickssh_hosts.sh`. Set `quickssh_mosh_ports_<alias>='60000:60010'` to match
+the allowed UDP range, replacing hyphens in the alias with underscores.
+Hosts without that setting keep Mosh's default range. Forwarding still uses SSH.
+
 The Linux tmux profile keeps the desktop status/tab colors, powerline separators,
 indicators, and `tt` note/pane menus without macOS clipboard helpers or GUI setup.
 On an existing server, parse it with `tmux source-file -n ~/.tmux.conf.local`,
