@@ -93,6 +93,15 @@ class NewWindowTests(unittest.TestCase):
             timeout=20, check=check,
         )
 
+    def inherit_recovery_agent_environment(self):
+        for name, value in (
+            ("CODEX_THREAD_ID", "fixture-recovery-thread"),
+            ("CODEX_SESSION_ID", "fixture-recovery-session"),
+            ("CLAUDE_AGENT_ID", "fixture-recovery-agent"),
+            ("TT_OPERATOR_TMUX_SCOPE", "recover:cockpit"),
+        ):
+            self.tmux("set-environment", "-g", name, value)
+
     def assert_grid(self, target):
         rows = [row.split("|") for row in self.panes(target)]
         self.assertEqual(len(rows), 6)
@@ -202,6 +211,10 @@ class NewWindowTests(unittest.TestCase):
         self.assertEqual(self.windows(), before)
 
     def test_status_menu_actions_use_the_clicked_window(self):
+        # A recovered server can retain agent IDs and an unrelated old scope.
+        self.invoke()
+        self.tmux("set-option", "-u", "-t", self.session, "@tt_profile")
+        self.inherit_recovery_agent_environment()
         # Source only the three production binding blocks, as a local deployment would.
         local = (REPO / ".tmux.conf.local").read_text()
         bindings = local.split("# Cockpit windows use", 1)[1].split("# Recover a pane", 1)[0]
@@ -279,6 +292,7 @@ class NewWindowTests(unittest.TestCase):
         self.fail(f"fixture terminal never displayed {needle!r}: {output[-500:]!r}")
 
     def test_full_configuration_retains_all_three_bindings(self):
+        self.inherit_recovery_agent_environment()
         home = self.root / "home"
         shutil.copyfile(REPO / ".tmux.conf", home / ".tmux.conf")
         local = (REPO / ".tmux.conf.local").read_text().replace(
@@ -303,7 +317,7 @@ class NewWindowTests(unittest.TestCase):
         self.assertNotIn("new-window -c", keyboard)
         for key in ("MouseDown3Status", "M-MouseDown3Status"):
             menu = self.tmux("list-keys", "-T", "root", key)
-            self.assertEqual(menu.count("new-window"), 3)
+            self.assertEqual(menu.count("new-window --"), 3)
             self.assertIn("new-window --before --socket", menu)
             self.assertIn("new-window --after --socket", menu)
             self.assertIn("new-window --socket", menu)

@@ -386,7 +386,7 @@ set -ga terminal-features ",xterm*:extkeys"
 set -g pane-border-status off
 
 # Cockpit windows use the same grid and titles as their initial windows.
-bind c run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' #!important
+bind c run-shell -b "TT_OPERATOR_TMUX_SCOPE=new-window:#{q:socket_path}:'#{session_id}':#{window_id} \"\$HOME/bin/tt\" new-window --socket #{q:socket_path} --target #{pane_id}" #!important
 bind -T root MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{window_name}" -t = -x W -y W \
     "#{?#{>:#{session_windows},1},,-}Swap Left" l { swap-window -t :-1 } \
     "#{?#{>:#{session_windows},1},,-}Swap Right" r { swap-window -t :+1 } \
@@ -396,9 +396,9 @@ bind -T root MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{
     "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
     Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
     "" \
-    "New Before" b { run-shell -b '"$HOME/bin/tt" new-window --before --socket #{q:socket_path} --target #{pane_id}' } \
-    "New After" w { run-shell -b '"$HOME/bin/tt" new-window --after --socket #{q:socket_path} --target #{pane_id}' } \
-    "New At End" W { run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' }
+    "New Before" b { run-shell -b "TT_OPERATOR_TMUX_SCOPE=new-window:#{q:socket_path}:'#{session_id}':#{window_id} \"\$HOME/bin/tt\" new-window --before --socket #{q:socket_path} --target #{pane_id}" } \
+    "New After" w { run-shell -b "TT_OPERATOR_TMUX_SCOPE=new-window:#{q:socket_path}:'#{session_id}':#{window_id} \"\$HOME/bin/tt\" new-window --after --socket #{q:socket_path} --target #{pane_id}" } \
+    "New At End" W { run-shell -b "TT_OPERATOR_TMUX_SCOPE=new-window:#{q:socket_path}:'#{session_id}':#{window_id} \"\$HOME/bin/tt\" new-window --socket #{q:socket_path} --target #{pane_id}" }
 bind -T root M-MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{window_name}" -t = -x W -y W \
     "#{?#{>:#{session_windows},1},,-}Swap Left" l { swap-window -t :-1 } \
     "#{?#{>:#{session_windows},1},,-}Swap Right" r { swap-window -t :+1 } \
@@ -408,9 +408,9 @@ bind -T root M-MouseDown3Status display-menu -T "#[align=centre]#{window_index}:
     "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
     Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
     "" \
-    "New Before" b { run-shell -b '"$HOME/bin/tt" new-window --before --socket #{q:socket_path} --target #{pane_id}' } \
-    "New After" w { run-shell -b '"$HOME/bin/tt" new-window --after --socket #{q:socket_path} --target #{pane_id}' } \
-    "New At End" W { run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' }
+    "New Before" b { run-shell -b "TT_OPERATOR_TMUX_SCOPE=new-window:#{q:socket_path}:'#{session_id}':#{window_id} \"\$HOME/bin/tt\" new-window --before --socket #{q:socket_path} --target #{pane_id}" } \
+    "New After" w { run-shell -b "TT_OPERATOR_TMUX_SCOPE=new-window:#{q:socket_path}:'#{session_id}':#{window_id} \"\$HOME/bin/tt\" new-window --after --socket #{q:socket_path} --target #{pane_id}" } \
+    "New At End" W { run-shell -b "TT_OPERATOR_TMUX_SCOPE=new-window:#{q:socket_path}:'#{session_id}':#{window_id} \"\$HOME/bin/tt\" new-window --socket #{q:socket_path} --target #{pane_id}" }
 
 # Right-click uses the clicked pane, socket and client, not the active pane.
 bind -T root MouseDown3Pane if-shell -t = -F "#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}" "select-pane -t = \\; send-keys -M" "run-shell -b -t = 'TMUX=#{q:socket_path},0,0 \"\$HOME/bin/tt\" pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{q:client_name}'"

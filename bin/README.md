@@ -132,6 +132,8 @@ Existing windows and raw `tmux new-window` calls keep their current behavior.
 Restored sessions without a profile reuse a surviving 3x2 grid in the same session.
 Cold recovery reinstalls these bindings. To refresh only the window menu and
 `Ctrl-b c` on an existing server, run `tt window-menu-bind [socket-path]`.
+Each keyboard or menu action supplies the exact source window's scope, so
+inherited agent IDs and recovery scopes do not block operator clicks.
 
 Let enabled plugins own their MCP registrations, including Computer Use. Avoid
 duplicate `[mcp_servers.computer-use]` overrides and paths into versioned plugin
