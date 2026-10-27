@@ -396,6 +396,7 @@ bind -T root MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{
     "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
     Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
     "" \
+    "New Before" b { run-shell -b '"$HOME/bin/tt" new-window --before --socket #{q:socket_path} --target #{pane_id}' } \
     "New After" w { run-shell -b '"$HOME/bin/tt" new-window --after --socket #{q:socket_path} --target #{pane_id}' } \
     "New At End" W { run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' }
 bind -T root M-MouseDown3Status display-menu -T "#[align=centre]#{window_index}:#{window_name}" -t = -x W -y W \
@@ -407,6 +408,7 @@ bind -T root M-MouseDown3Status display-menu -T "#[align=centre]#{window_index}:
     "#{?pane_marked,Unmark,Mark}" m { select-pane -m } \
     Rename n { command-prompt -F -I "#W" { rename-window -t "#{window_id}" "%%" } } \
     "" \
+    "New Before" b { run-shell -b '"$HOME/bin/tt" new-window --before --socket #{q:socket_path} --target #{pane_id}' } \
     "New After" w { run-shell -b '"$HOME/bin/tt" new-window --after --socket #{q:socket_path} --target #{pane_id}' } \
     "New At End" W { run-shell -b '"$HOME/bin/tt" new-window --socket #{q:socket_path} --target #{pane_id}' }
 

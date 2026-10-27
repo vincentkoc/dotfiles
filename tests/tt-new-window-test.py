@@ -129,6 +129,45 @@ class NewWindowTests(unittest.TestCase):
         self.invoke(env={"TMUX": f"{self.root}/nonexistent,1,0", "TMUX_PANE": "%999"})
         self.assert_grid(self.windows()[-1])
 
+    def test_before_preserves_source_and_inserts_grid(self):
+        before = self.panes(self.window)
+        self.invoke("--before")
+        self.assertEqual(self.windows()[1], self.window)
+        self.assert_grid(self.windows()[0])
+        self.assertEqual(self.panes(self.window), before)
+
+    def test_conflicting_positions_refuse_without_mutation(self):
+        before = self.windows()
+        result = self.invoke("--before", "--after", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.windows(), before)
+
+    def test_restored_session_uses_surviving_grid_without_profile(self):
+        self.invoke()
+        existing = {window: self.panes(window) for window in self.windows()}
+        self.tmux("set-option", "-u", "-t", self.session, "@tt_profile")
+        self.invoke("--after")
+        self.assert_grid(self.windows()[1])
+        self.assertEqual(existing, {window: self.panes(window) for window in existing})
+
+    def test_explicit_plain_profile_does_not_inherit_grid(self):
+        self.invoke()
+        self.tmux("set-option", "-t", self.session, "@tt_profile", "plain")
+        self.invoke()
+        self.assertEqual(self.display(self.windows()[-1], "#{window_panes}"), "1")
+
+    def test_window_menu_bind_repairs_default_bindings(self):
+        self.tmux("bind-key", "c", "new-window")
+        subprocess.run(
+            [str(REPO / "bin/tt"), "window-menu-bind", str(self.socket)],
+            env=self.env, capture_output=True, text=True, timeout=10, check=True,
+        )
+        self.assertIn("tt", self.tmux("list-keys", "-T", "prefix", "c"))
+        for key in ("MouseDown3Status", "M-MouseDown3Status"):
+            menu = self.tmux("list-keys", "-T", "root", key)
+            self.assertIn("new-window --before --socket", menu)
+            self.assertIn("new-window --after --socket", menu)
+
     def test_non_cockpit_and_raw_new_window_stay_single_pane(self):
         native = self.tmux("new-window", "-d", "-P", "-F", "#{window_id}", "-t", self.session)
         native_cwd = self.display(native, "#{pane_current_path}")
@@ -182,7 +221,7 @@ class NewWindowTests(unittest.TestCase):
         try:
             self.wait_terminal(master, b"0:")
             for key in ("MouseDown3Status", "M-MouseDown3Status"):
-                for choice in ("w", "W"):
+                for choice in ("b", "w", "W"):
                     with self.subTest(binding=key, choice=choice):
                         self.tmux("select-window", "-t", other)
                         before = self.windows()
@@ -214,8 +253,9 @@ class NewWindowTests(unittest.TestCase):
                         created = next(window for window in self.windows() if window not in before)
                         while time.monotonic() < deadline and self.display(self.session, "#{window_id}") != created:
                             time.sleep(0.02)
-                        if choice == "w":
-                            self.assertEqual(self.windows()[1], created)
+                        if choice in ("b", "w"):
+                            source_index = self.windows().index(self.window)
+                            self.assertEqual(self.windows()[source_index + (-1 if choice == "b" else 1)], created)
                         else:
                             self.assertEqual(self.windows()[-1], created)
                         self.assert_grid(created)
@@ -263,7 +303,8 @@ class NewWindowTests(unittest.TestCase):
         self.assertNotIn("new-window -c", keyboard)
         for key in ("MouseDown3Status", "M-MouseDown3Status"):
             menu = self.tmux("list-keys", "-T", "root", key)
-            self.assertEqual(menu.count("new-window"), 2)
+            self.assertEqual(menu.count("new-window"), 3)
+            self.assertIn("new-window --before --socket", menu)
             self.assertIn("new-window --after --socket", menu)
             self.assertIn("new-window --socket", menu)
             self.assertIn("--target #{pane_id}", menu)

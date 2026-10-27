@@ -122,13 +122,16 @@ through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
 show a bucket only when the snapshot header declares it, so current owner and
 exit fields are never mistaken for old bucket columns.
 
-In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
-and **New At End** create a 3x2 grid with pane titles, starting in the source
+In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New Before**,
+**New After** and **New At End** create a 3x2 grid with pane titles, starting in the source
 pane's directory. Other sessions get a single pane. These bindings call
-`tt new-window [--after] --socket <socket> --target <pane-id|window-id>`;
+`tt new-window [--before|--after] --socket <socket> --target <pane-id|window-id>`;
 inside tmux, the socket and pane default to the invoking pane. Agent calls need
 `TT_OPERATOR_TMUX_SCOPE=new-window:<socket>:<session-id>:<window-id>`.
 Existing windows and raw `tmux new-window` calls keep their current behavior.
+Restored sessions without a profile reuse a surviving 3x2 grid in the same session.
+Cold recovery reinstalls these bindings. To refresh only the window menu and
+`Ctrl-b c` on an existing server, run `tt window-menu-bind [socket-path]`.
 
 Let enabled plugins own their MCP registrations, including Computer Use. Avoid
 duplicate `[mcp_servers.computer-use]` overrides and paths into versioned plugin
