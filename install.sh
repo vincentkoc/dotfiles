@@ -296,6 +296,21 @@ link_dotfile() {
     success "Symlinked $dest"
 }
 
+setup_tt_recovery_guidance() {
+    local df_dir source_file state_dir
+    df_dir="$(dotfiles_dir)"
+    source_file="$df_dir/.local/state/tt/AGENTS.md"
+    state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/tt"
+
+    if [[ ! -f "$source_file" ]]; then
+        warn "tt recovery guidance missing in dotfiles: $source_file"
+        return 1
+    fi
+
+    mkdir -p "$state_dir"
+    link_dotfile "$source_file" "$state_dir/AGENTS.md"
+}
+
 setup_shell_symlinks() {
     local df_dir
     df_dir="$(dotfiles_dir)"
@@ -1065,6 +1080,7 @@ main() {
     install_vim_theme
     install_nvim_plugins
     setup_shell_symlinks
+    setup_tt_recovery_guidance
     setup_discrawl_shim
     setup_config_symlinks
     setup_spec_symlink

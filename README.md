@@ -184,6 +184,14 @@ entries. Shell startup retains all
 noninteractive helper functions; login shells avoid loading the profile twice,
 and inherited private cockpit scratch paths avoid another tmux query.
 
+The installer links the maintained `.local/state/tt/AGENTS.md` recovery guide
+beside the snapshots, respecting `XDG_STATE_HOME`. To install only that guide,
+source `install.sh` and run `setup_tt_recovery_guidance`. Mackup's tmux profile
+includes the guide without backing up live snapshot, marker or timer state.
+Read it before restoring: native RGB defaults, pane colors and the native agent
+environment must be ready before Codex starts; six-pane studio windows use
+three columns and two rows.
+
 Snapshots include owner state and exit status; recovery still reads legacy
 eight-column files. They keep the task title set by `tt title`, falling back to
 the terminal title when no task title is set. Exited session IDs are retained
