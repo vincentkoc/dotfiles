@@ -1814,6 +1814,65 @@ def missing_recovery_preimage(db, row, args, until, *, published=False):
 
 
 RECOVERY_BLOB_LIMIT = 16 * 1024 * 1024
+RECOVERY_BATCH_ENTRIES = 512
+
+
+def recovery_blob_sizes(owner, oids, until):
+    if not oids:
+        return []
+    data = git(owner, "--no-replace-objects", "cat-file", "--batch-check", raw=True,
+               strict=True, deadline=until, input_data=("\n".join(oids) + "\n").encode(),
+               capture_limit=len(oids) * 64)
+    lines = data.split(b"\n")
+    if len(lines) != len(oids) + 1 or lines[-1] != b"":
+        raise Retain("recovery-blob-metadata-invalid")
+    sizes = []
+    for oid, line in zip(oids, lines):
+        fields = line.split(b" ")
+        if (len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"]
+                or not re.fullmatch(rb"0|[1-9][0-9]{0,7}", fields[2])):
+            raise Retain("recovery-blob-metadata-invalid")
+        size = int(fields[2])
+        if size > RECOVERY_BLOB_LIMIT:
+            raise Retain("recovery-blob-size-limit")
+        sizes.append(size)
+    return sizes
+
+
+def recovery_blobs(owner, requests, until):
+    # Batch bodies stay bounded independently of the complete source budget.
+    # Exact framing and hashes reject missing/replaced objects before writing.
+    offset = 0
+    while offset < len(requests):
+        batch, size = [], 0
+        while offset < len(requests) and len(batch) < RECOVERY_BATCH_ENTRIES:
+            oid, length = requests[offset]
+            if batch and size + length > RECOVERY_BLOB_LIMIT:
+                break
+            batch.append((oid, length))
+            size += length
+            offset += 1
+        headers = [f"{oid} blob {length}\n".encode() for oid, length in batch]
+        data = git(owner, "--no-replace-objects", "cat-file", "--batch", raw=True,
+                   strict=True, deadline=until,
+                   input_data="".join(oid + "\n" for oid, _ in batch).encode(),
+                   capture_limit=size + sum(map(len, headers)) + len(batch))
+        blobs, cursor = [], 0
+        for (oid, length), header in zip(batch, headers):
+            if data[cursor:cursor + len(header)] != header:
+                raise Retain("recovery-blob-framing-invalid")
+            cursor += len(header)
+            blob = data[cursor:cursor + length]
+            cursor += length
+            if len(blob) != length or data[cursor:cursor + 1] != b"\n":
+                raise Retain("recovery-blob-framing-invalid")
+            cursor += 1
+            if hashlib.sha1(b"blob " + str(length).encode() + b"\0" + blob).hexdigest() != oid:
+                raise Retain("recovery-blob-identity-mismatch")
+            blobs.append(blob)
+        if cursor != len(data):
+            raise Retain("recovery-blob-framing-invalid")
+        yield from blobs
 
 
 def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allow_partial=False):
@@ -1833,6 +1892,13 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
         if verified_id != root_id:
             raise Retain("recovery-staging-rebound")
     if write:
+        oids = [oid for name, (_, oid) in expected.items() if name not in present and oid is not None]
+        sizes = recovery_blob_sizes(owner, oids, until)
+        git_pointer = os.fsencode("gitdir: " + gitdir + "\n")
+        total = present_bytes + sum(sizes) + (len(git_pointer) if ".git" not in present else 0)
+        if total > module.SOURCE_LIMIT:
+            raise Retain("recovery-source-byte-limit")
+        blobs = recovery_blobs(owner, list(zip(oids, sizes)), until)
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             if list(module.file_identity(os.fstat(root_fd))[:2]) != root_id:
@@ -1842,19 +1908,11 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
                     continue
                 with recovery_parent(root_fd, name) as (parent_fd, leaf):
                     os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
-            total = present_bytes
             for name, (mode, oid) in expected.items():
                 module.tick(until)
                 if name in present:
                     continue
-                data = (os.fsencode("gitdir: " + gitdir + "\n") if oid is None else
-                        git(owner, "cat-file", "blob", oid, raw=True, strict=True, deadline=until,
-                            capture_limit=RECOVERY_BLOB_LIMIT))
-                total += len(data)
-                if total > module.PASS_LIMIT:
-                    raise Retain("recovery-source-byte-limit")
-                if oid is not None and hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
-                    raise Retain("recovery-blob-identity-mismatch")
+                data = git_pointer if oid is None else next(blobs)
                 with recovery_parent(root_fd, name) as (parent_fd, leaf):
                     if mode == 0o120000:
                         os.symlink(os.fsdecode(data), leaf, dir_fd=parent_fd)
@@ -1895,7 +1953,7 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
                     raise Retain("recovery-file-mode-changed")
                 data, _ = module.read_file(path, until, RECOVERY_BLOB_LIMIT)
             total += len(data)
-            if total > module.PASS_LIMIT:
+            if total > module.SOURCE_LIMIT:
                 raise Retain("recovery-source-byte-limit")
             if oid is None:
                 matched = data == os.fsencode("gitdir: " + gitdir + "\n")
