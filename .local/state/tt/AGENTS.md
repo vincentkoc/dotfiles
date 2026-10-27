@@ -46,8 +46,8 @@ installed `codex-session-recovery` skill and its tt recovery reference.
    saved titles and persisted pane-marker styles before launching any Codex
    process. Include both active and inactive styles and default/unmarked panes.
 4. Use the installed `tt` native agent launch contract, including its color
-   prefix and login-shell fallback. Retain exact UUID/options and use
-   `--no-alt-screen --disable goals` so restoration does not continue tasks.
+   prefix and login-shell fallback. Retain exact UUID/original options and use
+   `--no-alt-screen`. Do not add a goals-disabling override during restoration.
    The current prefix clears `NO_COLOR`/`TERMINFO` and supplies `CLICOLOR=1`,
    `CLICOLOR_FORCE=1`, `FORCE_COLOR=3`, `COLORTERM=truecolor` and native
    `TERMINFO_DIRS`. Sanitizing global tmux variables alone is insufficient.
@@ -61,6 +61,24 @@ terminal afterward cannot repair a process that started without valid RGB
 defaults. Bare `codex resume` also bypasses the native color environment.
 Use native helpers where they preserve the audited map; if a custom exact
 restore is necessary, preserve these native contracts in full.
+
+## Preserve goals and their native continuation
+
+- Preserve the original goals feature configuration. Never add `--disable goals`
+  or `features.goals=false` as a recovery precaution. Remove recovery-added
+  overrides from corrected launch plans; retain intentional user preferences.
+- Inspect native thread goal state read-only before owner replacement when
+  available. Preserve ID, objective, lifecycle, token/time budgets and consumed
+  usage. Report missing state as unknown; do not recreate goals or reset budgets.
+- Active goals retain normal native continuation. Paused, blocked, complete,
+  cancelled and budget-limited goals retain their saved states. Do not issue
+  blanket resume/pause/clear commands or edit goal databases. An explicit user
+  request to change lifecycle is separate from cockpit restoration.
+- Interrupting a turn can pause its goal. Preserve busy owners. If correcting a
+  launch flag requires a restart, obtain current authority naming the exact
+  eligible owners; completed earlier restore permission does not cover another
+  restart cycle. Preserve safety notices; do not automatically retry affected
+  requests through recovery.
 
 ## Completion proof
 
@@ -76,7 +94,12 @@ restore is necessary, preserve these native contracts in full.
   Codex UI. Bold/dim output, `TERM` and an idle-looking glyph are insufficient.
   Inspect selected color variables only; never dump full environments.
 - Resolve startup directory-choice dialogs according to the audited CWD map;
-  a dialog is not a loaded conversation. Do not send tasks or resume goals.
+  a dialog is not a loaded conversation. Do not send new task text or change
+  goal lifecycle; allow the restored thread's normal native continuation.
+- Verify goal capability, unchanged budgets and no reset or recovery-induced
+  lifecycle change after launch. Normal progress may increase usage, complete
+  the goal or reach its budget. Check for recovery-added disabling flags; a
+  matching UUID alone does not prove that the process loaded its persisted goal.
 - Return the attached client to its mapped pane, remove only the task-owned
   holding session, then enable native menus/autosave. Preserve the source hash
   and outside processes. For a full rebuild, verify all old owners were replaced.
