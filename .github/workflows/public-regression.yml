@@ -10,6 +10,8 @@ on:
       - ".zshenv"
       - "tests/optional-shell-hooks-test.py"
       - "bin/linux-server-bootstrap"
+      - "profiles/linux-server/**"
+      - "tests/linux-server-startup-test.py"
       - "bin/quickssh"
       - "bin/agent-worktree-ops/**"
       - "bin/gwt-storage"
@@ -56,6 +58,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 tests/optional-shell-hooks-test.py
+          python3 tests/linux-server-startup-test.py
           bash tests/install-foundations-test.sh
           bash tests/agent-worktree-maintain-test.sh
           python3 tests/gwt-storage-test.py

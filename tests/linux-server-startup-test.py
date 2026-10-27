@@ -101,6 +101,54 @@ class StartupTests(unittest.TestCase):
         self.env["DOTFILES_EXPORTS_LOADED"] = "1"
         self.test_four_shell_modes()
 
+    def test_private_local_profile_in_all_shell_modes(self):
+        self.shell("-lc", '[[ -z "${OPENCLAW_CRABBOX_SYNC_TMPDIR:-}" ]]')
+        local = self.home / ".profile.local"
+        local.write_text('export OPENCLAW_CRABBOX_SYNC_TMPDIR="${OPENCLAW_CRABBOX_SYNC_TMPDIR:-$HOME/data/sync}"\n')
+        local.chmod(0o600)
+        for mode in ("-c", "-lc", "-ic", "-ilc"):
+            with self.subTest(mode=mode):
+                self.shell(mode, '[[ "$OPENCLAW_CRABBOX_SYNC_TMPDIR" == "$HOME/data/sync" ]]')
+        self.shell("-lc", 'emulate sh; source "$HOME/.profile"; '
+                   '[[ "$OPENCLAW_CRABBOX_SYNC_TMPDIR" == "$HOME/data/sync" ]]')
+        self.env["OPENCLAW_CRABBOX_SYNC_TMPDIR"] = "/task/explicit"
+        self.shell("-lc", '[[ "$OPENCLAW_CRABBOX_SYNC_TMPDIR" == /task/explicit ]]')
+
+    def test_unsafe_local_profile_is_not_sourced(self):
+        local = self.home / ".profile.local"
+        target = self.home / "unsafe-profile"
+        target.write_text('touch "$HOME/local-profile-ran"\n')
+        target.chmod(0o600)
+        modes = {"writable": 0o666, "readable": 0o644, "special": 0o1600}
+        for kind in ("symlink", "hardlink", *modes, "directory"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    local.symlink_to(target)
+                elif kind == "hardlink":
+                    os.link(target, local)
+                elif kind in modes:
+                    local.write_text(target.read_text())
+                    local.chmod(modes[kind])
+                else:
+                    local.mkdir()
+                self.shell("-lc", ":")
+                self.assertFalse((self.home / "local-profile-ran").exists())
+                local.rmdir() if kind == "directory" else local.unlink()
+
+    @unittest.skipUnless(os.uname().sysname == "Linux", "GNU stat branch runs on Linux")
+    def test_local_profile_in_bash(self):
+        local = self.home / ".profile.local"
+        local.write_text('export OPENCLAW_CRABBOX_SYNC_TMPDIR="$HOME/data/sync"\n')
+        local.chmod(0o600)
+        for mode, expected in ((0o600, str(self.home / "data/sync")), (0o666, "")):
+            local.chmod(mode)
+            subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc", "-c",
+                 '. "$1"; [[ "${OPENCLAW_CRABBOX_SYNC_TMPDIR:-}" == "$2" ]]',
+                 "fixture", str(PROFILE / "profile"), expected],
+                env=self.env, check=True, capture_output=True, timeout=15,
+            )
+
     def test_profile_in_sh_emulation(self):
         self.shell("-lc", 'emulate sh\nsource "$HOME/.profile"\n'
                    '[[ "$TMPDIR" == "$HOME/.cache/cockpit-tmp" ]]')
