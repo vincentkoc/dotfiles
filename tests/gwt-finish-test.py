@@ -1512,7 +1512,7 @@ class MissingRecoveryTests(unittest.TestCase):
         native_git = FINISH.git
         def appeared(path, *args, **kwargs):
             result = native_git(path, *args, **kwargs)
-            if args[:2] == ("cat-file", "blob") and not (stage / "nested/command").exists():
+            if args[-2:] == ("cat-file", "--batch") and not (stage / "nested/command").exists():
                 (stage / "nested/command").write_text("appeared\n")
             return result
         with mock.patch.object(FINISH, "git", side_effect=appeared):
@@ -1591,6 +1591,107 @@ class MissingRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(FINISH.Retain, "registration-missing-or-locked"):
                 self.recover("--apply", "--recovery-sha256", digest)
         self.assertEqual(self.record()[1]["state"], "recovery-pending")
+
+
+class RecoveryBlobBatchTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-b", "main")
+        self.stage = self.base / "stage"
+        self.stage.mkdir(mode=0o700)
+        self.admin = str(self.repo / ".git")
+        self.deadline = float("inf")
+        patch = mock.patch.object(FINISH.safety(), "DEADLINE", self.deadline)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def blob(self, data):
+        return subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                              input=data, check=True, capture_output=True).stdout.decode().strip()
+
+    def write(self, entries, **kwargs):
+        FINISH.recovery_tree(self.stage, entries, self.admin, self.deadline,
+                             write=True, owner=str(self.repo), **kwargs)
+
+    def test_real_batches_preserve_binary_empty_symlink_and_repeated_objects(self):
+        binary = b"\0binary\n\xff\0"
+        oid = self.blob(binary)
+        entries = {"binary": (0o100755, oid), "empty": (0o100644, self.blob(b"")),
+                   "link": (0o120000, self.blob(b"binary")), "duplicate": (0o100644, oid)}
+        with mock.patch.object(FINISH, "RECOVERY_BATCH_ENTRIES", 2), \
+                mock.patch.object(FINISH, "git", wraps=FINISH.git) as calls:
+            self.write(entries)
+        bodies = [call for call in calls.call_args_list if call.args[-1] == "--batch"]
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual((self.stage / "binary").read_bytes(), binary)
+        self.assertEqual(stat_mode(self.stage / "binary"), 0o755)
+        self.assertEqual((self.stage / "empty").read_bytes(), b"")
+        self.assertEqual(os.readlink(self.stage / "link"), "binary")
+        self.assertEqual((self.stage / "duplicate").read_bytes(), binary)
+        FINISH.recovery_tree(self.stage, entries, self.admin, self.deadline)
+
+    def test_body_byte_budget_splits_batches_independently_of_entry_count(self):
+        oid = self.blob(b"x" * 128)
+        with mock.patch.object(FINISH, "RECOVERY_BLOB_LIMIT", 200), \
+                mock.patch.object(FINISH, "git", wraps=FINISH.git) as calls:
+            self.write({"one": (0o100644, oid), "two": (0o100644, oid)})
+        self.assertEqual(sum(call.args[-1] == "--batch" for call in calls.call_args_list), 2)
+
+    def test_invalid_metadata_refuses_before_creating_entries(self):
+        oid = self.blob(b"abc")
+        for reply in (f"{oid} missing\n", f"{'f' * 40} blob 3\n", f"{oid} tree 3\n",
+                      f"{oid} blob 03\n", f"{oid} blob -1\n", f"{oid} blob +3\n",
+                      f"{oid} blob 3", f"{oid} blob 3\nextra\n", ""):
+            with self.subTest(reply=reply), mock.patch.object(FINISH, "git", return_value=reply.encode()):
+                with self.assertRaisesRegex(FINISH.Retain, "metadata-invalid"):
+                    self.write({"nested/file": (0o100644, oid)})
+                self.assertEqual(list(self.stage.iterdir()), [])
+        with mock.patch.object(FINISH, "RECOVERY_BLOB_LIMIT", 2):
+            with self.assertRaisesRegex(FINISH.Retain, "blob-size-limit"):
+                self.write({"nested/file": (0o100644, oid)})
+        self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_invalid_body_framing_or_identity_never_writes_source(self):
+        oid = self.blob(b"abc")
+        header = f"{oid} blob 3\n".encode()
+        replies = [f"{oid} missing\n".encode(), f"{'f' * 40} blob 3\nabc\n".encode(),
+                   f"{oid} tree 3\nabc\n".encode(), f"{oid} blob 4\nabc\n".encode(),
+                   f"{oid} blob 03\nabc\n".encode(), header + b"ab\n", header + b"abc",
+                   header + b"abc\nextra", header + b"abd\n"]
+        native_git = FINISH.git
+        for reply in replies:
+            def response(path, *args, **kwargs):
+                return reply if args[-1] == "--batch" else native_git(path, *args, **kwargs)
+            with self.subTest(reply=reply), mock.patch.object(FINISH, "git", side_effect=response):
+                with self.assertRaisesRegex(FINISH.Retain, "framing-invalid|identity-mismatch"):
+                    self.write({"file": (0o100644, oid)})
+                self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_source_budget_is_separate_and_includes_existing_partial_bytes(self):
+        data = b"source content"
+        oid = self.blob(data)
+        entries = {"one": (0o100644, oid), "two": (0o100644, oid)}
+        expected = 2 * len(data) + len(os.fsencode("gitdir: " + self.admin + "\n"))
+        module = FINISH.safety()
+        (self.stage / "one").write_bytes(data)
+        original_inode = (self.stage / "one").stat().st_ino
+        with mock.patch.object(module, "SOURCE_LIMIT", expected - 1):
+            with self.assertRaisesRegex(FINISH.Retain, "source-byte-limit"):
+                self.write(entries, allow_partial=True)
+        self.assertEqual(list(self.stage.iterdir()), [self.stage / "one"])
+        self.assertEqual((self.stage / "one").stat().st_ino, original_inode)
+        with mock.patch.object(module, "PASS_LIMIT", 1), \
+                mock.patch.object(module, "SOURCE_LIMIT", expected):
+            self.write(entries, allow_partial=True)
+            FINISH.recovery_tree(self.stage, entries, self.admin, self.deadline)
+        self.assertEqual((self.stage / "one").stat().st_ino, original_inode)
+        with mock.patch.object(module, "SOURCE_LIMIT", expected - 1):
+            with self.assertRaisesRegex(FINISH.Retain, "source-byte-limit"):
+                FINISH.recovery_tree(self.stage, entries, self.admin, self.deadline)
 
 
 def stat_mode(path):

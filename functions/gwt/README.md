@@ -156,10 +156,12 @@ remains in recovery history; only the verified successor identity is normalized.
 Only committed blobs whose tree exactly matches the saved index are written.
 The operation runs no checkout filters, hooks, dependency installation or fetch.
 Recovery blob capture and verification are bounded by 16 MiB per file and the
-staging pass by 512 MiB; other native Git/read limits are unchanged.
-the existing 238-second owner deadline is unchanged. A private sibling directory
-is verified before native no-replace publication at the original path. The
-original Git admin files, index, ref, native lock and owner rows remain intact;
+staging source by 1 GiB, including existing files during partial continuation.
+Missing blobs use size-checked batches of at most 512 objects and 16 MiB of body
+data; other native Git/read limits and the 238-second owner deadline are unchanged.
+A private sibling directory is verified before native no-replace publication at
+the original path. Original Git admin files, index, ref, native lock and owner
+rows remain intact;
 the lifecycle records the actual recovery operator separately and advances the
 root identity/generation once. Extra lifecycle tables are preserved.
 
