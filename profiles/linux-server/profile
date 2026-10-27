@@ -20,6 +20,27 @@ export DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 export TOKENJUICE_STATS=off
 
+# Host storage belongs in a private local file, not the shared profile. This
+# hook also runs in non-interactive zsh children through .zshenv.
+_linux_profile_local="$HOME/.profile.local"
+if [[ -f "$_linux_profile_local" && ! -L "$_linux_profile_local" && -O "$_linux_profile_local" ]]; then
+  _linux_profile_local_safe() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+      local -A metadata
+      zmodload -F zsh/stat b:zstat 2>/dev/null &&
+        zstat -L -H metadata "$1" 2>/dev/null &&
+        [[ "$(( ${metadata[mode]} & 4095 ))" == 384 && "${metadata[nlink]}" == 1 ]]
+    else
+      [[ "$(stat -c '%a:%h' -- "$1" 2>/dev/null)" == 600:1 ]]
+    fi
+  }
+  if _linux_profile_local_safe "$_linux_profile_local"; then
+    . "$_linux_profile_local"
+  fi
+  unset -f _linux_profile_local_safe
+fi
+unset _linux_profile_local
+
 # Reviewers isolate HOME; resolve the native executable in the caller's shell.
 if [[ -z "${CODEX_BIN:-}" ]]; then
   _codex_native="${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/bin/codex"

@@ -158,6 +158,14 @@ separately reviewed tailnet UDP policy before opting into Mosh. `prepare` does
 not install, write, validate, or reload the SSH server; the Ubuntu host must
 already have a working `sshd`.
 
+The Linux profile also reads `~/.profile.local` when it is a regular,
+current-user-owned, single-link file at mode `0600`, with no symlink at that
+path. The bootstrap leaves this optional host configuration untouched. Use it
+for reviewed tool-specific storage settings, preserving explicit task overrides;
+qualify the destination mount before setting a path there. It runs in login and
+non-interactive zsh children, so keep it silent and avoid installing tools or
+starting services from it. Existing processes keep their current environment.
+
 For an approved Mosh host, add its alias to `quickssh_mosh_hosts` in the private
 `quickssh_hosts.sh`. Set `quickssh_mosh_ports_<alias>='60000:60010'` to match
 the allowed UDP range, replacing hyphens in the alias with underscores.
