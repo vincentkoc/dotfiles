@@ -80,6 +80,158 @@ class Fixture(unittest.TestCase):
         return text
 
 
+class MarkerSnapshotTests(Fixture):
+    def marked_document(self, rows=None, colors=None):
+        rows = rows or [self.row()]
+        colors = colors or {row[0]: "green" for row in rows}
+        return writer.marker_header(rows, colors) + self.document(rows)
+
+    def test_marker_metadata_roundtrips_and_rejects_identity_drift(self):
+        for color in ("default", "amber", "green", "blue", "violet", "cyan", "dim"):
+            text = self.marked_document(colors={"cockpit:1.1": color})
+            self.assertEqual(writer.saved_markers(text), {"cockpit:1.1": color})
+            for old, new in ((SID, OTHER_SID), (str(self.cwd), str(self.root))):
+                lines = text.splitlines(keepends=True)
+                lines[-1] = lines[-1].replace(old, new)
+                with self.assertRaises(writer.SnapshotError):
+                    writer.validate_recovery("".join(lines), "codex")
+        self.assertIsNone(writer.saved_markers(self.document()))
+
+    def test_bad_or_incomplete_markers_fail_before_recovery_authorization(self):
+        text = self.marked_document()
+        for broken in (text.replace('"green"', '"red"'),
+                       text.replace('"version": 1', '"version": 2'),
+                       text + text.splitlines(keepends=True)[0],
+                       text + "\t".join(self.row(target="cockpit:1.2", sid=OTHER_SID)) + "\n"):
+            with self.subTest(broken=broken), patch.object(writer, "run") as run:
+                self.source.write_text(broken)
+                with self.assertRaises(writer.SnapshotError):
+                    writer.recover_cold("codex", self.source, "cockpit", "1")
+                run.assert_not_called()
+
+    def test_frozen_selection_retains_bound_markers_including_explicit_default(self):
+        rows = [self.row(), self.row(target="other:1.1", sid=OTHER_SID)]
+        text = self.marked_document(rows, {"cockpit:1.1": "default", "other:1.1": "amber"})
+        identity = json.loads(json.dumps(self.identity))
+        identity["server"].update(host=os.uname().nodename, uid=os.getuid())
+        text = text.replace(json.dumps(self.identity), json.dumps(identity))
+        self.source.write_text(text)
+        frozen = pathlib.Path(writer.freeze_recovery("codex", self.source, "cockpit"))
+        self.assertEqual(writer.saved_markers(frozen.read_text()), {"cockpit:1.1": "default"})
+        self.assertEqual(self.source.read_text(), text)
+
+    def test_marker_collection_requires_exact_pane_and_cwd(self):
+        self.identity["panes"]["cockpit:1.1"]["dead"] = "0"
+        record = f"cockpit:1.1\t%3\t{self.cwd}\tgreen\n"
+        with patch.object(writer, "run", return_value=record):
+            self.assertEqual(writer.collect_markers([self.row()], self.identity),
+                             {"cockpit:1.1": "green"})
+        for broken in (record.replace("%3", "%4"), record.replace(str(self.cwd), str(self.root)),
+                       record + record, record.replace("green", "invalid")):
+            with patch.object(writer, "run", return_value=broken), self.assertRaises(writer.SnapshotError):
+                writer.collect_markers([self.row()], self.identity)
+
+
+    def test_freeze_keeps_unresolved_markers_bound_to_normalized_shell(self):
+        rows = [self.row(sid="", status="unresolved")]
+        self.source.write_text(writer.marker_header(rows, {rows[0][0]: "violet"}) +
+                               self.document(rows, identity=False))
+        frozen = pathlib.Path(writer.freeze_recovery("codex", self.source, "cockpit"))
+        self.assertEqual(writer.parse_snapshot_rows(frozen.read_text())[0][1], "shell")
+        self.assertEqual(writer.saved_markers(frozen.read_text()), {"cockpit:1.1": "violet"})
+
+    def test_linked_physical_panes_cannot_have_conflicting_colors(self):
+        self.identity["panes"]["other:1.1"] = copy.deepcopy(self.identity["panes"]["cockpit:1.1"])
+        self.identity["panes"]["other:1.1"]["session"] = "$2"
+        rows = [self.row(), self.row(target="other:1.1")]
+        text = self.marked_document(rows, {"cockpit:1.1": "green", "other:1.1": "blue"})
+        with self.assertRaisesRegex(writer.SnapshotError, "linked pane markers"):
+            writer.saved_markers(text)
+
+
+class MarkerRestoreTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.source.write_text(writer.marker_header([self.row()], {"cockpit:1.1": "green"}) +
+                               self.document())
+        self.current = copy.deepcopy(self.identity)
+        self.current["panes"]["cockpit:8.2"] = self.current["panes"].pop("cockpit:1.1")
+        self.current["panes"]["cockpit:8.2"].update(dead="0", process={"pid": 200, "uid": os.getuid(), "start": "3"})
+        self.live = self.row(target="cockpit:8.2")
+        self.colors = {"cockpit:8.2": "default"}
+        self.calls = []
+
+    def observed_state(self):
+        return self.current, [self.live], dict(self.colors)
+
+    def fake_run(self, args, **kwargs):
+        self.calls.append(args)
+        if args[1:3] == ["marker", "set"]:
+            self.colors[self.live[0]] = args[4]
+        return ""
+
+    def restore(self, mode="--preview"):
+        with patch.object(writer, "marker_restore_state", side_effect=self.observed_state), \
+             patch.object(writer, "restore_identity", return_value=self.current), \
+             patch.object(writer, "run", side_effect=self.fake_run), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            writer.restore_markers(self.source, "cockpit", mode)
+        return output.getvalue()
+
+    def test_preview_is_read_only_and_execute_matches_moved_uuid(self):
+        self.assertIn("cockpit:1.1\tcockpit:8.2\tgreen\twould restore", self.restore())
+        self.assertEqual(self.calls, [])
+        self.restore("--execute")
+        self.assertEqual([args[1:] for args in self.calls],
+                         [["marker", "set", "%3", "green"], ["marker", "verify", "%3", "green"]])
+
+    def test_newer_amber_color_and_saved_default_never_clear_live_markers(self):
+        self.colors[self.live[0]] = "amber"
+        self.assertIn("current amber; preserved", self.restore("--execute"))
+        self.assertEqual(self.calls, [])
+        self.source.write_text(writer.marker_header([self.row()], {"cockpit:1.1": "default"}) +
+                               self.document())
+        self.restore("--execute")
+        self.assertEqual(self.calls, [])
+
+    def test_cwd_drift_other_session_and_unknown_uuid_are_skipped(self):
+        for changes in ({"cwd": str(self.root)}, {"target": "outside:8.2"}, {"sid": OTHER_SID}):
+            self.live = self.row(target="cockpit:8.2")
+            for key, value in changes.items():
+                self.live[{"target": 0, "cwd": 2, "sid": 5}[key]] = value
+            self.current["panes"][self.live[0]] = self.current["panes"]["cockpit:8.2"]
+            self.colors[self.live[0]] = "default"
+            self.assertIn("no exact live match", self.restore("--execute"))
+            self.assertEqual(self.calls, [])
+
+    def test_stale_identity_or_color_stops_before_set(self):
+        initial = self.observed_state()
+        changed = (self.current, [self.live], {self.live[0]: "amber"})
+        with patch.object(writer, "marker_restore_state", side_effect=[initial, changed]), \
+             patch.object(writer, "run") as run, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(writer.SnapshotError, "stale"):
+                writer.restore_markers(self.source, "cockpit", "--execute")
+            run.assert_not_called()
+
+    def test_duplicate_live_uuid_in_distinct_panes_refuses_all_writes(self):
+        second = self.row(target="cockpit:8.3")
+        current = copy.deepcopy(self.current)
+        current["panes"][second[0]] = dict(current["panes"][self.live[0]], pane="%4")
+        with patch.object(writer, "marker_restore_state", return_value=(
+                current, [self.live, second], {self.live[0]: "default", second[0]: "default"})), \
+             patch.object(writer, "run") as run, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(writer.SnapshotError, "ambiguous live UUID"):
+                writer.restore_markers(self.source, "cockpit", "--execute")
+            run.assert_not_called()
+
+    def test_legacy_missing_marker_map_refuses_without_live_reads(self):
+        self.document()
+        with patch.object(writer, "marker_restore_state") as state:
+            with self.assertRaisesRegex(writer.SnapshotError, "legacy snapshot"):
+                writer.restore_markers(self.source, "cockpit", "--preview")
+            state.assert_not_called()
+
+
 class ParserTests(Fixture):
     def test_eight_and_ten_columns_are_accepted_without_replaying_commands(self):
         for suffix in ([], ["running", ""], ["exited", "137"]):
@@ -293,6 +445,21 @@ class RecoveryTests(Fixture):
     def setUp(self):
         super().setUp()
         self.patch("recovery_environment", lambda: ["-e", f"TMPDIR={self.cwd}"])
+
+    def test_dead_restore_applies_snapshot_marker_before_agent_start(self):
+        self.source.write_text(writer.marker_header([self.row()], {"cockpit:1.1": "green"}) +
+                               self.document())
+        with patch.object(writer, "restore_identity", return_value=self.identity), \
+             patch.object(writer, "live_session_evidence", return_value={}), \
+             patch.object(writer, "run", return_value="") as run, \
+             contextlib.redirect_stdout(io.StringIO()):
+            writer.restore_dead(self.source, "all", "")
+        calls = [item.args[0] for item in run.call_args_list]
+        setting = next(i for i, args in enumerate(calls) if args[1:3] == ["marker", "set"])
+        verification = next(i for i, args in enumerate(calls) if args[1:3] == ["marker", "verify"])
+        launch = next(i for i, args in enumerate(calls) if args[1] == "respawn-pane")
+        self.assertLess(setting, verification)
+        self.assertLess(verification, launch)
 
     def test_cold_snapshot_lock_contention_never_calls_tmux(self):
         with patch.object(writer, "acquire_snapshot_lock", return_value=None), patch.object(
@@ -772,6 +939,10 @@ class SnapshotTests(Fixture):
                      for path in (agent, previous)}
         codex = self.state / "tt/codex-cockpit.tsv"
         codex_history = self.state / "tt/history/codex-cockpit"
+        operation = patch.object(writer, "collect_markers", side_effect=lambda rows, identity:
+                                 {row[0]: "default" for row in rows})
+        operation.start()
+        self.addCleanup(operation.stop)
         write_snapshot, record_history = writer.write_snapshot, writer.record_snapshot_history
 
         def publish(rows, output=codex, header=None):
@@ -1098,6 +1269,10 @@ class LinkedPaneTests(Fixture):
 
     def test_linked_snapshot_publishes_all_contexts_and_deduplicates_history(self):
         history = self.state / "tt/history/codex-cockpit"
+        operation = patch.object(writer, "collect_markers", side_effect=lambda rows, identity:
+                                 {row[0]: "default" for row in rows})
+        operation.start()
+        self.addCleanup(operation.stop)
         write_snapshot, record_history = writer.write_snapshot, writer.record_snapshot_history
         rows = [row + ["exited", ""] for row in self.rows]
         with patch.object(writer, "AUTOSAVE", False), patch.object(writer, "AGENT_ONLY", False), \

@@ -842,8 +842,89 @@ def parse_snapshot_rows(text):
     return rows
 
 
+MARKERS = frozenset(("default", "amber", "green", "blue", "violet", "cyan", "dim"))
+MARKER_PREFIX = "# pane-markers\t"
+MARKER_FORMAT = (
+    "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t"
+    "#{pane_current_path}\t#{@tt_marker}"
+)
+
+
+def marker_header(rows, colors):
+    panes = {
+        row[0]: {"kind": row[1], "cwd": row[2], "session_id": row[5], "marker": colors[row[0]]}
+        for row in rows
+    }
+    return MARKER_PREFIX + json.dumps({"version": 1, "panes": panes}, sort_keys=True) + "\n"
+
+
+def saved_markers(text, rows=None):
+    lines = [line[len(MARKER_PREFIX):] for line in records(text) if line.startswith(MARKER_PREFIX)]
+    if not lines:
+        return None  # Legacy absence is not an explicit cleared marker.
+    if len(lines) != 1:
+        raise SnapshotError("duplicate saved marker maps")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise SnapshotError("duplicate saved marker field")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(lines[0], object_pairs_hook=unique_object)
+    except ValueError:
+        raise SnapshotError("invalid saved marker map") from None
+    if (not isinstance(value, dict) or type(value.get("version")) is not int
+            or value["version"] != 1 or not isinstance(value.get("panes"), dict)):
+        raise SnapshotError("unsupported saved marker map")
+    rows = parse_snapshot_rows(text) if rows is None else rows
+    panes = value["panes"]
+    if set(panes) != {row[0] for row in rows}:
+        raise SnapshotError("saved marker map does not cover the snapshot")
+    for row in rows:
+        item = panes[row[0]]
+        if (
+            not isinstance(item, dict)
+            or any(item.get(key) != row[index] for key, index in (("kind", 1), ("cwd", 2), ("session_id", 5)))
+            or not isinstance(item.get("marker"), str) or item["marker"] not in MARKERS
+        ):
+            raise SnapshotError("saved marker identity or color disagrees with snapshot")
+    colors = {target: item["marker"] for target, item in panes.items()}
+    if "# restore-identity\t" in text:
+        physical = validate_linked_rows(rows, saved_restore_identity(text))
+        seen = {}
+        for target, pane in physical.items():
+            if pane in seen and seen[pane] != colors[target]:
+                raise SnapshotError("linked pane markers disagree")
+            seen[pane] = colors[target]
+    return colors
+
+
+def collect_markers(rows, identity):
+    expected = {row[0]: row for row in rows}
+    colors = {}
+    for item in parse_tsv(run([TMUX, "list-panes", "-a", "-F", MARKER_FORMAT]), (4,)):
+        target, pane, cwd, marker = item
+        proof = identity["panes"].get(target, {})
+        if (
+            target not in expected or target in colors or proof.get("pane") != pane
+            or (cwd != expected[target][2] and not (proof.get("dead") == "1" and cwd == ""))
+            or (marker or "default") not in MARKERS
+        ):
+            raise SnapshotError("pane identity, cwd or marker changed during capture")
+        colors[target] = marker or "default"
+    if set(colors) != set(expected):
+        raise SnapshotError("marker capture omitted snapshot panes")
+    return colors
+
+
 def validate_recovery(text, schema, mode="all", selector="", cold=False):
     rows = parse_tsv(text, (5,)) if schema == "agents" else parse_snapshot_rows(text)
+    if schema != "agents":
+        saved_markers(text, rows)
     identity = saved_restore_identity(text) if schema != "agents" and "# restore-identity\t" in text else {}
     physical = validate_linked_rows(rows, identity) if schema != "agents" else {}
     validated, targets, ids, selected_panes = [], set(), {}, set()
@@ -955,6 +1036,9 @@ def freeze_recovery(schema, source, selector):
     fd, name = tempfile.mkstemp(prefix=f"{schema}-", suffix=".tsv", dir=root)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
         handle.write("# validated recovery input; outside snapshot retention\n")
+        colors = saved_markers(text) if schema == "codex" else None
+        if colors is not None:
+            handle.write(marker_header(rows, colors))
         for row in rows:
             handle.write("\t".join(row) + "\n")
         handle.flush()
@@ -1131,9 +1215,92 @@ def running_session_target(live, row, identity=None):
     raise SnapshotError(f"session UUID is already running elsewhere: {row[0]}")
 
 
+def marker_restore_state():
+    identity = restore_identity()
+    rows = build_rows(identity=identity)
+    colors = collect_markers(rows, identity)
+    if identity != restore_identity():
+        raise SnapshotError("pane ownership changed while planning marker repair")
+    return identity, [row for row in rows if identity["panes"][row[0]]["dead"] == "0"], colors
+
+
+def preview_markers(source):
+    colors = saved_markers(read_document(source))
+    if colors is None:
+        print("pane markers: legacy snapshot has no saved color map")
+    else:
+        print("pane markers (snapshot):")
+        for target, color in colors.items():
+            print(f"{target}\t{color}")
+
+
+def restore_markers(source, session, mode):
+    if not SESSION_RE.fullmatch(session) or mode not in ("--preview", "--execute"):
+        raise SnapshotError("invalid marker restore arguments")
+    text = read_document(source)
+    rows = parse_snapshot_rows(text)
+    colors = saved_markers(text, rows)
+    if colors is None:
+        raise SnapshotError("legacy snapshot has no saved marker map; audit historical markers first")
+    saved = saved_restore_identity(text)
+    validate_linked_rows(rows, saved)
+    current, live_rows, live_colors = marker_restore_state()
+    if any(saved.get("server", {}).get(key) != current["server"].get(key) for key in ("host", "uid")):
+        raise SnapshotError("marker snapshot belongs to another host or user")
+    plan, planned = [], set()
+    for row in rows:
+        color = colors[row[0]]
+        if row[6] == "exact":
+            # Never infer identity from a slot, title, or shared working directory.
+            matches = [live for live in live_rows if live[6] == "exact" and live[5] == row[5]]
+            physical = {current["panes"][live[0]]["pane"] for live in matches}
+            if len(physical) > 1:
+                raise SnapshotError("ambiguous live UUID during marker restore")
+            matches = [live for live in matches if live[1:3] == row[1:3]]
+        elif row[1] == "shell" and saved["server"] == current["server"]:
+            matches = [live for live in live_rows if live[0] == row[0] and live[1:3] == row[1:3]
+                       and live[6] == "shell" and same_physical_pane(
+                           saved.get("panes", {}).get(row[0]), current["panes"].get(live[0]))]
+        else:
+            matches = []
+        matches = [live for live in matches if live[0].split(":", 1)[0] == session]
+        if not matches:
+            print(f"{row[0]}\tno exact live match; skipped")
+            continue
+        live = matches[0]
+        target = live[0]
+        pane = current["panes"][target]["pane"]
+        if pane in planned:
+            continue
+        planned.add(pane)
+        existing = live_colors[target]
+        if existing != "default" or color == "default":
+            print(f"{row[0]}\t{target}\t{color}\tcurrent {existing}; preserved")
+            continue
+        plan.append((row[0], live, pane, color))
+        print(f"{row[0]}\t{target}\t{color}\t{'restore' if mode == '--execute' else 'would restore'}")
+    if mode == "--preview":
+        return
+    helper = str(pathlib.Path(__file__).resolve().with_name("tt"))
+    for _, live, pane, color in plan:
+        check, check_rows, check_colors = marker_restore_state()
+        target = live[0]
+        now = next((item for item in check_rows if item[0] == target), None)
+        if (
+            check != current or now is None or now[1:3] != live[1:3] or now[5:7] != live[5:7]
+            or check_colors[target] != "default"
+        ):
+            raise SnapshotError("marker restore plan became stale; stopped")
+        run([helper, "marker", "set", pane, color])
+        run([helper, "marker", "verify", pane, color])
+        if restore_identity() != current:
+            raise SnapshotError("pane identity changed during marker repair; stopped")
+
+
 def restore_dead(source, mode, selector):
     text = read_document(source)
     rows = validate_recovery(text, "codex", mode, selector)
+    colors = saved_markers(text)
     saved = saved_restore_identity(text)
     current = restore_identity()
     if saved.get("server") != current["server"]:
@@ -1191,8 +1358,16 @@ def restore_dead(source, mode, selector):
             if not pathlib.Path(cwd).is_dir():
                 raise SnapshotError(f"recovery cwd disappeared: {cwd}")
             pane = current["panes"][target]["pane"]
+            if colors is not None:
+                marker = run([TMUX, "show-option", "-pt", pane, "-qv", "@tt_marker"]).strip()
+                if not marker and colors[target] != "default":
+                    helper = str(pathlib.Path(__file__).resolve().with_name("tt"))
+                    run([helper, "marker", "set", pane, colors[target]])
+                    run([helper, "marker", "verify", pane, colors[target]])
+                    if restore_identity() != check:
+                        raise SnapshotError("pane changed during pre-launch marker repair")
             # Never -k: tmux itself must refuse a pane that became active after
-            # the last identity check. No presentation or metadata is changed.
+            # the last identity check.
             run([TMUX, "respawn-pane", "-t", pane, "-c", cwd.replace("#", "##"), *environment,
                  *recovery_shell_command(command)])
             restored += 1
@@ -1216,8 +1391,10 @@ def recover_cold(schema, source, selector, expected_running):
 def _recover_cold(schema, source, selector, expected_running):
     if schema not in ("codex", "agents") or expected_running not in ("0", "1"):
         raise SnapshotError("invalid cold recovery mode")
+    text = read_document(source)
+    colors = saved_markers(text) if schema == "codex" else None
     rows = validate_recovery(
-        read_document(source), schema,
+        text, schema,
         "session" if schema == "codex" else "all", selector, cold=True,
     )
     plans = {}
@@ -1389,8 +1566,12 @@ def _recover_cold(schema, source, selector, expected_running):
                  if pane["session"] in session_ids}
         if current["server"] != server or sorted(pane["pane"] for pane in owned.values()) != sorted(created):
             raise SnapshotError("cold recovery resource identity changed before completion")
-        for pane in owned.values():
-            run([helper, "marker", "sync", pane["pane"]])
+        for target, pane in owned.items():
+            if colors is None:
+                run([helper, "marker", "sync", pane["pane"]])
+            else:
+                run([helper, "marker", "set", pane["pane"], colors[target]])
+                run([helper, "marker", "verify", pane["pane"], colors[target]])
         for pane, gate in pending:
             check = restore_identity()
             if check["server"] != server or any(
@@ -1455,12 +1636,14 @@ def main():
             return 0
         identity = restore_identity()
         rows = build_rows(identity=identity)
+        colors = collect_markers(rows, identity)
         if identity != restore_identity():
             raise SnapshotError("restore identities changed during collection")
         validate_linked_rows(rows, identity)
         header = ("# target\tkind\tcwd\ttitle\tcurrent_command\tsession_id\t"
                   "status\trestore\towner_state\texit_status\n")
         header += "# restore-identity\t" + json.dumps(identity, sort_keys=True) + "\n"
+        header += marker_header(rows, colors)
         write_snapshot(rows, header=header)
         record_snapshot_history()
     except SnapshotError as error:
@@ -1480,13 +1663,17 @@ def dispatch():
     global DEADLINE
     if sys.argv[1:2] in (
         ["--freeze-recovery"], ["--restore-dead"],
-        ["--recover-cold"], ["--verify-cold-completion"],
+        ["--recover-cold"], ["--verify-cold-completion"], ["--restore-markers"], ["--preview-markers"],
     ):
         try:
             if sys.argv[1] == "--freeze-recovery" and len(sys.argv) == 5:
                 print(freeze_recovery(*sys.argv[2:]))
             elif sys.argv[1] == "--restore-dead" and len(sys.argv) == 5:
                 restore_dead(*sys.argv[2:])
+            elif sys.argv[1] == "--restore-markers" and len(sys.argv) == 5:
+                restore_markers(*sys.argv[2:])
+            elif sys.argv[1] == "--preview-markers" and len(sys.argv) == 3:
+                preview_markers(*sys.argv[2:])
             elif sys.argv[1] == "--recover-cold" and len(sys.argv) == 6:
                 DEADLINE = time.monotonic() + positive_env("TT_RECOVERY_TOTAL_TIMEOUT_SECONDS", 300)
                 recover_cold(*sys.argv[2:])

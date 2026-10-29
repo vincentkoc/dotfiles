@@ -25,8 +25,8 @@ COLOR_ENV = ("NO_COLOR", "TERMINFO", "COLORTERM", "CLICOLOR", "CLICOLOR_FORCE",
              "FORCE_COLOR", "TERMINFO_DIRS")
 
 
-def wait_for(path):
-    deadline = time.monotonic() + 5
+def wait_for(path, timeout=5):
+    deadline = time.monotonic() + timeout
     while not path.exists():
         if time.monotonic() >= deadline:
             raise RuntimeError(f"fixture did not create {path.name}")
@@ -37,7 +37,7 @@ def probe(root):
     (root / "environment.json").write_text(json.dumps(
         {key: os.environ.get(key) for key in COLOR_ENV}))
     (root / "ready").touch()
-    wait_for(root / "start")
+    wait_for(root / "start", 30)
     fd = os.open("/dev/tty", os.O_RDWR)
     previous = termios.tcgetattr(fd)
     data = b""
@@ -53,7 +53,7 @@ def probe(root):
         termios.tcsetattr(fd, termios.TCSANOW, previous)
         os.close(fd)
     (root / "reply.json").write_text(json.dumps(data.decode("utf-8", "replace")))
-    wait_for(root / "stop")
+    wait_for(root / "stop", 30)
 
 
 class PaletteTest(unittest.TestCase):
@@ -65,7 +65,7 @@ class PaletteTest(unittest.TestCase):
         self.tmux = shutil.which("tmux")
         self.assertIsNotNone(self.tmux, "real tmux is required")
         self.env = {"PATH": os.environ["PATH"], "HOME": str(self.root / "home"),
-                    "SHELL": "/bin/sh", "TERM": "xterm-256color",
+                    "SHELL": "/bin/sh", "TERM": "xterm-256color", "LC_ALL": "C.UTF-8",
                     "XDG_STATE_HOME": str(self.root / "state"),
                     "XDG_CONFIG_HOME": str(self.root / "config")}
         self.env.update({"NO_COLOR": "1", "TERMINFO": str(self.root / "invalid-terminfo"),
@@ -129,7 +129,56 @@ class PaletteTest(unittest.TestCase):
         self.assert_color_environment()
         self.assert_palette(self.replies())
 
+    def test_public_snapshot_and_live_marker_repair_preserve_process(self):
+        self.start(self.recovery_config())
+        env = dict(self.env, CODEX_HOME=str(self.root / "codex"))
+
+        def tt(*args):
+            result = subprocess.run([str(REPO / "bin/tt"), *args], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            return result
+
+        identity = self.run_tmux("display-message", "-p", "-t", "%0",
+                                 "#{pane_id} #{pane_pid} #{pane_start_command}").stdout
+        exit_file = self.root / "exit-unrelated-fixture"
+        dead = self.run_tmux(
+            "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "palette", "-n", "exited",
+            "/bin/sh", "-c", 'while [ ! -f "$1" ]; do sleep 0.01; done; exit 7',
+            "fixture", str(exit_file),
+        ).stdout.strip()
+        self.addCleanup(self.run_tmux, "kill-pane", "-t", dead, check=False)
+        self.run_tmux("set-option", "-pt", dead, "remain-on-exit", "on")
+        exit_file.touch()
+        deadline = time.monotonic() + 3
+        while self.run_tmux("display-message", "-p", "-t", dead, "#{pane_dead}").stdout.strip() != "1":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        tt("marker", "set", "%0", "green")
+        snapshot = self.root / "live.tsv"
+        subprocess.run([str(REPO / "bin/tt-codex-snapshot-writer"), str(snapshot)],
+                       env=env, capture_output=True, text=True, check=True, timeout=15)
+        self.assertIn('"marker": "green"', snapshot.read_text())
+        self.assertIn("green", tt("restore-preview", str(snapshot)).stdout)
+        tt("marker", "clear", "%0")
+        self.assertIn("would restore", tt("marker", "restore", "palette", str(snapshot)).stdout)
+        self.assertEqual(self.run_tmux("show-option", "-pt", "%0", "-qv", "@tt_marker").stdout, "")
+        tt("marker", "restore", "palette", str(snapshot), "--execute")
+        tt("marker", "verify", "%0", "green")
+        self.assertEqual(self.run_tmux("display-message", "-p", "-t", "%0",
+                                      "#{pane_id} #{pane_pid} #{pane_start_command}").stdout, identity)
+        tt("marker", "set", "%0", "amber")
+        self.assertIn("current amber; preserved",
+                      tt("marker", "restore", "palette", str(snapshot), "--execute").stdout)
+        tt("marker", "verify", "%0", "amber")
+
     def test_cold_recovery_preserves_partial_window_and_marks_before_agent_probe(self):
+        self.check_partial_recovery(False)
+
+    def test_snapshot_markers_survive_freeze_without_local_marker_files(self):
+        self.check_partial_recovery(True)
+
+    def check_partial_recovery(self, embedded):
         # The only "codex" on this fixture's PATH is our OSC probe. Every pane
         # exits through the same stop file, without signaling a real agent.
         home_bin = Path(self.env["HOME"]) / "bin"
@@ -151,16 +200,34 @@ class PaletteTest(unittest.TestCase):
             ["palette:12.4", "shell", str(self.root), "shell4", "sh", "", "shell", ""],
         ]
         snapshot = self.root / "snapshot.tsv"
-        snapshot.write_text("".join("\t".join(row) + "\n" for row in rows))
+        text = "".join("\t".join(row) + "\n" for row in rows)
+        colors = ["green", "default", "blue", "violet"]
+        if embedded:
+            metadata = {"version": 1, "panes": {
+                row[0]: {"kind": row[1], "cwd": row[2], "session_id": row[5], "marker": color}
+                for row, color in zip(rows, colors)
+            }}
+            text = "# pane-markers\t" + json.dumps(metadata) + "\n" + text
+        snapshot.write_text(text)
         marker = Path(self.env["XDG_STATE_HOME"]) / "tt/pane-markers/saved.md"
         marker.parent.mkdir(parents=True)
         marker.write_text('---\nsession: "palette"\nwindow: "12"\npane: "1"\nmarker: "amber"\n---\n')
         env = dict(self.env, TT_OPERATOR_TMUX_SCOPE="recover:palette", TT_LOGIN_SHELL=str(shell),
                    PATH=f"{home_bin}:/usr/bin:/bin:/usr/sbin:/sbin")
         self.addCleanup(self.stop)
+        recovery_input = snapshot
+        if embedded:
+            # An explicit default must also clear an old marker at a reused slot.
+            (marker.parent / "stale.md").write_text(
+                '---\nsession: "palette"\nwindow: "12"\npane: "2"\nmarker: "amber"\n---\n')
+            frozen = subprocess.run([
+                str(REPO / "bin/tt-codex-snapshot-writer"), "--freeze-recovery", "codex",
+                str(snapshot), "palette",
+            ], env=env, capture_output=True, text=True, check=True, timeout=5)
+            recovery_input = Path(frozen.stdout.strip())
         result = subprocess.run([
             str(REPO / "bin/tt-codex-snapshot-writer"), "--recover-cold", "codex",
-            str(snapshot), "palette", "0",
+            str(recovery_input), "palette", "0",
         ], env=env, capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         try:
@@ -169,7 +236,15 @@ class PaletteTest(unittest.TestCase):
             self.fail(self.run_tmux("capture-pane", "-p", "-t", "palette:12.1").stdout[-3000:] +
                       self.run_tmux("show-environment", "-t", "palette", "PATH").stdout)
         self.assert_color_environment(force="3")
-        self.assert_palette(self.replies(), "2929/2222/1818")
+        self.assert_palette(self.replies(), "1f1f/2a2a/1f1f" if embedded else "2929/2222/1818")
+        if embedded:
+            observed = self.run_tmux("list-panes", "-t", "palette:12", "-F",
+                                     "#{pane_index} #{@tt_marker}").stdout.splitlines()
+            self.assertEqual(observed, ["1 green", "2 ", "3 blue", "4 violet"])
+            for index, color in enumerate(colors, 1):
+                subprocess.run([str(REPO / "bin/tt"), "marker", "verify",
+                                f"palette:12.{index}", color],
+                               env=env, capture_output=True, text=True, check=True, timeout=5)
         panes = self.run_tmux("list-panes", "-a", "-F",
                               "#{window_index} #{pane_index} #{pane_left} #{pane_top} #{@tt_base_title}").stdout.splitlines()
         self.assertEqual(len(panes), 4)
@@ -177,7 +252,7 @@ class PaletteTest(unittest.TestCase):
         self.assertEqual(len({line.split()[2] for line in panes}), 2)
         self.assertEqual(len({line.split()[3] for line in panes}), 2)
         self.assertIn("[unresolved codex] unknown", panes[1])
-        self.assertEqual(snapshot.read_text(), "".join("\t".join(row) + "\n" for row in rows))
+        self.assertEqual(snapshot.read_text(), text)
 
     def test_native_recovery_scrubs_existing_server_environment(self):
         self.start(self.recovery_config() + "\nset-environment -g NO_COLOR 1\n"

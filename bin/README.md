@@ -176,6 +176,20 @@ through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
 show a bucket only when the snapshot header declares it, so current owner and
 exit fields are never mistaken for old bucket columns.
 
+Codex snapshots also embed a complete `# pane-markers` map, bound to each saved
+kind, session UUID and directory. It includes explicit default markers, survives
+the frozen recovery input, and overrides stale position-based marker files on a
+cold start. `tt restore-preview <snapshot>` shows these saved colors. Older
+snapshots still use native marker files; they cannot recover colors absent from
+both sources.
+
+For an already-live cockpit, `tt marker restore <session> <snapshot>` previews
+missing colors by exact UUID and directory even when windows moved. Add
+`--execute` to apply the plan without restarting agents. Current nonempty colors
+win, unmatched sessions are skipped, and shells require the original physical
+process identity. Legacy snapshots without embedded colors are refused by this
+marker-only command. `tt restore` remains the layout helper.
+
 In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
 and **New At End** create a 3x2 grid with pane titles, starting in the source
 pane's directory. Other sessions get a single pane. These bindings call
