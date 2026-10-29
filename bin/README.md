@@ -162,6 +162,15 @@ first process starts. Native restores scrub the child environment even when
 reusing an existing server, without changing that server's other sessions.
 The Linux profile applies the same startup defaults as the workstation profile.
 
+`tt recover` retains the saved windows and pane counts. Unresolved identities
+become labeled shells; they never launch a picker or guess the latest session.
+Six-pane windows use three columns and two rows; four-pane windows use a 2×2
+fallback when historical geometry is unavailable. The complete shell scaffold
+and saved markers are ready before any agent starts. Restores retain validated
+launch flags and native goal state, and hold the snapshot lock while building
+so autosave cannot publish the scaffold. Cold recovery has a separate bounded
+five-minute deadline (`TT_RECOVERY_TOTAL_TIMEOUT_SECONDS`).
+
 `tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
 through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
 show a bucket only when the snapshot header declares it, so current owner and

@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import signal
 import stat
@@ -769,7 +770,26 @@ def manifest_resume_command(command):
     if any(flag not in allowed for flag in flags):
         raise SnapshotError("unsupported manifest resume arguments")
     session_id = args[-1]
-    return resume_command(kind, session_id, "exact"), session_id
+    command = resume_command(kind, session_id, "exact")
+    if "--dangerously-bypass-approvals-and-sandbox" in flags:
+        command = command.replace("resume ", "resume --dangerously-bypass-approvals-and-sandbox ", 1)
+    return command, session_id
+
+
+def cold_resume_command(kind, session_id, status, saved, cwd):
+    command = resume_command(kind, session_id, status)
+    # The shell column is untrusted. Recover only allowlisted options from a
+    # complete command whose kind, UUID and optional cd match the identity row.
+    try:
+        args = shlex.split(saved)
+        if args[:3] == ["cd", cwd, "&&"]:
+            args = args[3:]
+        validated, saved_id = manifest_resume_command(shlex.join(args))
+        if args and args[0] == kind and saved_id == session_id:
+            return validated
+    except (SnapshotError, ValueError):
+        pass
+    return command
 
 
 def selected_target(target, mode, selector):
@@ -848,10 +868,15 @@ def validate_recovery(text, schema, mode="all", selector="", cold=False):
                 raise SnapshotError("snapshot target is outside the recovery grid")
             if not cold and kind == "shell":
                 continue
-            if kind == "shell" and cold and status == "shell" and not session_id:
+            if cold and status == "unresolved" and not session_id:
+                row[1], row[3], row[6], row[7] = "shell", f"[unresolved {kind}] {title}", "shell", ""
+                if len(row) == 10:
+                    row[8:10] = ["shell", ""]
+            elif kind == "shell" and cold and status == "shell" and not session_id:
                 row[7] = ""
             else:
-                row[7] = resume_command(kind, session_id, status)
+                row[7] = (cold_resume_command(kind, session_id, status, row[7], cwd) if cold
+                          else resume_command(kind, session_id, status))
         pane = physical.get(target)
         if cold and pane and pane in selected_panes:
             raise SnapshotError("cold recovery cannot reconstruct linked windows within the selection")
@@ -1178,6 +1203,17 @@ def restore_dead(source, mode, selector):
 
 
 def recover_cold(schema, source, selector, expected_running):
+    # Autosave hooks on an existing server must not publish the shell scaffold.
+    lock = acquire_snapshot_lock()
+    if lock is None:
+        raise SnapshotError("snapshot collection is busy; recovery did not start")
+    try:
+        return _recover_cold(schema, source, selector, expected_running)
+    finally:
+        lock.close()
+
+
+def _recover_cold(schema, source, selector, expected_running):
     if schema not in ("codex", "agents") or expected_running not in ("0", "1"):
         raise SnapshotError("invalid cold recovery mode")
     rows = validate_recovery(
@@ -1194,6 +1230,11 @@ def recover_cold(schema, source, selector, expected_running):
             session, window, pane = match[1], int(match[2]), int(match[3])
             cwd, title, command = row[2], row[3], row[7]
         plans.setdefault(session, {})[window, pane] = (cwd, title, command)
+    for entries in plans.values():
+        for window in {window for window, _ in entries}:
+            panes = sorted(pane for saved_window, pane in entries if saved_window == window)
+            if panes != list(range(1, len(panes) + 1)):
+                raise SnapshotError("cold recovery requires contiguous saved pane indices")
     if selector and selector not in plans:
         raise SnapshotError("attach session is not present in the validated recovery input")
     # Direct helper callers get the same gate as tt. Authorize the complete
@@ -1228,39 +1269,45 @@ def recover_cold(schema, source, selector, expected_running):
             os.fchmod(handle.fileno(), 0o400)
     created = set()
     session_ids = []
+    pending = []
+    helper = str(pathlib.Path(__file__).resolve().with_name("tt"))
 
     def checked(args):
         if server is not None and server_identity() != server:
             raise SnapshotError("server changed during cold recovery")
         return run([TMUX, *args])
 
-    def pane_settings(pane, title, command):
+    def pane_settings(pane, title, command, gate):
         checked(["set-option", "-pt", pane, "@tt_base_title", title])
         checked(["set-option", "-pt", pane, "@tt_agent_command", command])
         kind = command.split(" ", 1)[0].upper() if command else "SHELL"
         checked(["set-option", "-pt", pane, "@tt_agent_kind", kind])
         checked(["select-pane", "-t", pane, "-T", title])
+        if command:
+            pending.append((pane, gate))
 
     def launch_args(item):
         cwd, _, command = item
         if not pathlib.Path(cwd).is_dir():
             raise SnapshotError("recovery cwd disappeared")
-        return ["-c", cwd.replace("#", "##"), *environment], recovery_shell_command(command)
+        # A new shell waits for our gate. No agent can probe its palette until
+        # the complete scaffold, final pane indices and saved markers exist.
+        gate = ""
+        if command:
+            gate = "tt-recovery-" + secrets.token_hex(16)
+            command = f"{shlex.join([TMUX, 'wait-for', gate])} && {command}"
+        return ["-c", cwd.replace("#", "##"), *environment], recovery_shell_command(command), gate
 
     try:
         for session, entries in plans.items():
-            default_cwd = next(iter(entries.values()))[0]
-            windows = sorted({1, 2, 3, 4, 5} | {window for window, _ in entries}) if schema == "codex" else [1]
+            windows = sorted({window for window, _ in entries})
             session_id = None
             for window_number in windows:
                 name = ("ops" if window_number == 1 else f"L{window_number - 1}") if schema == "codex" else "main"
                 def item(pane_number):
-                    return entries.get(
-                        (window_number, pane_number),
-                        (default_cwd, f"{name}.{pane_number}", ""),
-                    )
+                    return entries[window_number, pane_number]
 
-                options, program = launch_args(item(1))
+                options, program, gate = launch_args(item(1))
                 if session_id is None:
                     result = checked([
                         "-f", configuration, "new-session", "-d", "-x", "240", "-y", "80",
@@ -1282,8 +1329,8 @@ def recover_cold(schema, source, selector, expected_running):
                     session_ids.append(session_id)
                     checked(["set-option", "-t", session_id, "base-index", "1"])
                     index = checked(["display-message", "-p", "-t", window_id, "#{window_index}"]).strip()
-                    if index != "1":
-                        checked(["move-window", "-s", window_id, "-t", f"{session_id}:1"])
+                    if index != str(window_number):
+                        checked(["move-window", "-s", window_id, "-t", f"{session_id}:{window_number}"])
                     checked(["set-option", "-t", session_id, "@tt_profile",
                              "ops" if schema == "codex" else "studio"])
                 else:
@@ -1303,20 +1350,27 @@ def recover_cold(schema, source, selector, expected_running):
                     raise SnapshotError("invalid or reused cold recovery resource ID")
                 created.add(first)
                 checked(["set-window-option", "-t", window_id, "pane-base-index", "1"])
-                pane_settings(first, *item(1)[1:])
+                for style in ("window-style", "window-active-style"):
+                    checked(["set-option", "-t", window_id, style, "fg=#c0caf5,bg=#1a1b26"])
+                pane_settings(first, *item(1)[1:], gate)
                 columns = [first]
                 window_panes = {first}
+                count = sum(saved_window == window_number for saved_window, _ in entries)
+                splits = {
+                    1: (), 2: ((2, 0, "-v"),),
+                    3: ((2, 0, "-h"), (3, 1, "-h")),
+                    4: ((3, 0, "-h"), (2, 0, "-v"), (4, 1, "-v")),
+                    5: ((3, 0, "-h"), (5, 1, "-h"), (2, 0, "-v"), (4, 1, "-v")),
+                    6: ((3, 0, "-h"), (5, 1, "-h"), (2, 0, "-v"), (4, 1, "-v"), (6, 2, "-v")),
+                }[count]
                 # tmux's pane order is column-major: 1/2, 3/4, then 5/6.
-                for logical, parent, direction in (
-                    (3, 0, "-h"), (5, 1, "-h"),
-                    (2, 0, "-v"), (4, 1, "-v"), (6, 2, "-v"),
-                ):
+                for logical, parent, direction in splits:
                     observed = set(records(checked([
                         "list-panes", "-t", window_id, "-F", "#{pane_id}"
                     ])))
                     if observed != window_panes:
                         raise SnapshotError("new recovery window changed; stopping")
-                    options, program = launch_args(item(logical))
+                    options, program, gate = launch_args(item(logical))
                     pane = checked([
                         "split-window", "-d", direction, "-P", "-F", "#{pane_id}",
                         "-t", columns[parent], *options, *program,
@@ -1325,16 +1379,25 @@ def recover_cold(schema, source, selector, expected_running):
                         raise SnapshotError("split did not return a new stable pane ID")
                     created.add(pane)
                     window_panes.add(pane)
-                    if logical in (3, 5):
+                    if direction == "-h":
                         columns.append(pane)
-                    if logical == 5:
+                    if direction == "-h" and len(columns) == (3 if count in (3, 5, 6) else 2):
                         checked(["select-layout", "-t", window_id, "even-horizontal"])
-                    pane_settings(pane, *item(logical)[1:])
+                    pane_settings(pane, *item(logical)[1:], gate)
         current = restore_identity()
         owned = {target: pane for target, pane in current["panes"].items()
                  if pane["session"] in session_ids}
         if current["server"] != server or sorted(pane["pane"] for pane in owned.values()) != sorted(created):
             raise SnapshotError("cold recovery resource identity changed before completion")
+        for pane in owned.values():
+            run([helper, "marker", "sync", pane["pane"]])
+        for pane, gate in pending:
+            check = restore_identity()
+            if check["server"] != server or any(
+                check["panes"].get(target) != identity for target, identity in owned.items()
+            ):
+                raise SnapshotError("cold recovery scaffold changed before agent launch")
+            checked(["wait-for", "-S", gate])
         proof = {"server": server, "sessions": session_ids, "identities": owned,
                  "panes": sorted(created), "existing_server": expected_running}
         proof_path = pathlib.Path(source).with_suffix(".completed.json")
@@ -1414,6 +1477,7 @@ def main():
 
 
 def dispatch():
+    global DEADLINE
     if sys.argv[1:2] in (
         ["--freeze-recovery"], ["--restore-dead"],
         ["--recover-cold"], ["--verify-cold-completion"],
@@ -1424,6 +1488,7 @@ def dispatch():
             elif sys.argv[1] == "--restore-dead" and len(sys.argv) == 5:
                 restore_dead(*sys.argv[2:])
             elif sys.argv[1] == "--recover-cold" and len(sys.argv) == 6:
+                DEADLINE = time.monotonic() + positive_env("TT_RECOVERY_TOTAL_TIMEOUT_SECONDS", 300)
                 recover_cold(*sys.argv[2:])
             elif sys.argv[1] == "--verify-cold-completion" and len(sys.argv) in (3, 4):
                 verify_cold_completion(*sys.argv[2:])

@@ -165,6 +165,30 @@ class ParserTests(Fixture):
         rows = writer.validate_recovery(self.document(), "codex")
         self.assertEqual(rows[0][7], f"codex resume --no-alt-screen {SID}")
 
+    def test_cold_unresolved_entries_are_labeled_shells_without_commands(self):
+        for kind in ("codex", "claude", "shell"):
+            row = self.row(kind=kind, sid="", status="unresolved")
+            with self.subTest(kind=kind):
+                restored = writer.validate_recovery(self.document([row]), "codex", cold=True)[0]
+                self.assertEqual(restored[1], "shell")
+                self.assertIn("unresolved", restored[3])
+                self.assertEqual(restored[7], "")
+                if kind != "shell":
+                    with self.assertRaises(writer.SnapshotError):
+                        writer.validate_recovery(self.document([row]), "codex")
+
+    def test_cold_snapshot_retains_only_validated_original_launch_flags(self):
+        command = f"cd {writer.shlex.quote(str(self.cwd))} && codex resume --dangerously-bypass-approvals-and-sandbox --no-alt-screen {SID}"
+        restored = writer.validate_recovery(
+            self.document([self.row(command=command)]), "codex", cold=True
+        )[0]
+        self.assertEqual(restored[7], f"codex resume --dangerously-bypass-approvals-and-sandbox --no-alt-screen {SID}")
+        for unsafe in (command + "; touch /unsafe", command.replace(SID, OTHER_SID)):
+            restored = writer.validate_recovery(
+                self.document([self.row(command=unsafe)]), "codex", cold=True
+            )[0]
+            self.assertEqual(restored[7], f"codex resume --no-alt-screen {SID}")
+
     def test_ambiguous_and_duplicate_records_fail_whole_selection(self):
         cases = [
             [self.row(sid=""), self.row(target="cockpit:1.2", sid=OTHER_SID)],
@@ -190,7 +214,7 @@ class ParserTests(Fixture):
         command, session_id = writer.manifest_resume_command(
             f"codex resume --dangerously-bypass-approvals-and-sandbox --no-alt-screen {SID}"
         )
-        self.assertEqual(command, f"codex resume --no-alt-screen {SID}")
+        self.assertEqual(command, f"codex resume --dangerously-bypass-approvals-and-sandbox --no-alt-screen {SID}")
         self.assertEqual(session_id, SID)
         for command in ("codex", "codex resume --last", "claude resume",
                         f"codex resume {SID}; touch /unsafe", "printf ready"):
@@ -269,6 +293,21 @@ class RecoveryTests(Fixture):
     def setUp(self):
         super().setUp()
         self.patch("recovery_environment", lambda: ["-e", f"TMPDIR={self.cwd}"])
+
+    def test_cold_snapshot_lock_contention_never_calls_tmux(self):
+        with patch.object(writer, "acquire_snapshot_lock", return_value=None), patch.object(
+            writer, "run"
+        ) as run, self.assertRaisesRegex(writer.SnapshotError, "snapshot collection is busy"):
+            writer.recover_cold("codex", self.source, "cockpit", "0")
+        run.assert_not_called()
+
+    def test_cold_missing_pane_index_fails_before_authorization(self):
+        self.document([self.row(), self.row(target="cockpit:1.3", sid=OTHER_SID)], identity=False)
+        with patch.object(writer, "run") as run, self.assertRaisesRegex(
+            writer.SnapshotError, "contiguous saved pane indices"
+        ):
+            writer.recover_cold("codex", self.source, "cockpit", "0")
+        run.assert_not_called()
 
     def execute(self, identities=None, live=None):
         with patch.object(writer, "restore_identity", side_effect=identities or [
@@ -416,7 +455,7 @@ class RecoveryTests(Fixture):
             writer, "run", side_effect=fake_run
         ), contextlib.redirect_stdout(io.StringIO()) as output:
             writer.recover_cold("agents", self.source, "factory2", "1")
-        self.assertEqual(len(panes), 6)
+        self.assertEqual(len(panes), 1)
         self.assertTrue(pathlib.Path(output.getvalue().strip()).is_file())
         self.assertTrue(any("new-session" in args and SID in args[-1] for args in calls))
         for args in calls:
@@ -429,11 +468,11 @@ class RecoveryTests(Fixture):
         self.assertEqual(calls[0][1:], ["topology-authorize", "recover", "factory2"])
 
     def test_cold_cockpit_preserves_saved_windows_and_exact_commands(self):
-        for saved_windows in ([1], list(range(1, 7)), [99]):
+        for saved_windows in ([1], list(range(1, 7)), [99], [8], [9], [10], [11], [12]):
             with self.subTest(saved_windows=saved_windows):
                 rows = []
                 for window in saved_windows:
-                    for pane in range(1, 7):
+                    for pane in range(1, {8: 1, 9: 2, 10: 3, 11: 5, 12: 4}.get(window, 6) + 1):
                         values = {"target": f"cockpit:{window}.{pane}",
                                   "sid": f"11111111-1111-1111-1111-{window * 6 + pane:012d}"}
                         if window == 1 and pane <= 3:
@@ -447,7 +486,7 @@ class RecoveryTests(Fixture):
                     if args[1] == "list-sessions":
                         return "unaffected\n"
                     if "new-session" in args or args[1] == "new-window":
-                        number = 1 if "new-session" in args else int(args[args.index("-t") + 1].split(":")[1])
+                        number = saved_windows[0] if "new-session" in args else int(args[args.index("-t") + 1].split(":")[1])
                         pane = f"%{len(commands) + 1}"
                         window = f"@{number}"
                         windows[window] = [pane]
@@ -481,9 +520,9 @@ class RecoveryTests(Fixture):
                     writer, "run", side_effect=fake_run
                 ), contextlib.redirect_stdout(io.StringIO()) as output:
                     writer.recover_cold("codex", self.source, "cockpit", "1")
-                expected_windows = {1, 2, 3, 4, 5} | set(saved_windows)
+                expected_windows = set(saved_windows)
                 self.assertEqual(set(windows), {f"@{window}" for window in expected_windows})
-                self.assertEqual(len(commands), len(expected_windows) * 6)
+                self.assertEqual(len(commands), len(rows))
                 proof_path = pathlib.Path(output.getvalue().strip())
                 proof = json.loads(proof_path.read_text())
                 self.assertEqual(set(proof["panes"]), set(commands))
@@ -492,7 +531,18 @@ class RecoveryTests(Fixture):
                 for target, pane in proof["identities"].items():
                     sid = expected.get(target, "")
                     program = (f"codex resume --no-alt-screen {sid}; " if sid else "")
-                    self.assertEqual(commands[pane["pane"]], program + f"exec {writer.LOGIN_SHELL} -il")
+                    saved = commands[pane["pane"]]
+                    if sid:
+                        gate, saved = saved.split(" && ", 1)
+                        self.assertRegex(gate, r"wait-for tt-recovery-[a-f0-9]{32}$")
+                    self.assertEqual(saved, program + f"exec {writer.LOGIN_SHELL} -il")
+                gates = [i for i, args in enumerate(calls) if args[1:3] == ["wait-for", "-S"]]
+                markers = [i for i, args in enumerate(calls) if args[1:3] == ["marker", "sync"]]
+                self.assertEqual(len(markers), len(rows))
+                if gates:
+                    self.assertGreater(min(gates), max(markers))
+                self.assertEqual(len(gates), sum(bool(row[5]) for row in rows))
+                self.assertFalse(any(args[1] == "send-keys" for args in calls))
                 self.assertEqual(calls[0][1:], ["topology-authorize", "recover", "cockpit"])
                 self.assertFalse(any("respawn-pane" in args or "-k" in args or "-g" in args for args in calls))
                 self.assertFalse(any("unaffected" in args for args in calls))
