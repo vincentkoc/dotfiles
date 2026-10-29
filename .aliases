@@ -8,6 +8,9 @@
 # Enable aliases to be sudo’ed
 alias sudo='sudo '
 
+# TokenJuice keeps its existing provider and credential configuration.
+alias tj='tokenjuice'
+
 _dotfiles_has() {
     if [[ -n "${ZSH_VERSION:-}" ]]; then
         (( $+commands[$1] ))

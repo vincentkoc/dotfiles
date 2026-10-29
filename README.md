@@ -49,13 +49,43 @@ If the file already contains unrelated signer entries, preserve them and
 replace only the entry for `vincentkoc@ieee.org` and the key above. The private
 fleet bootstrap performs that normalization atomically.
 
-Optional: restore additional app configs managed via Mackup.
+Mackup is opt-in and selects only the custom `portable-tool-preferences`
+application. Install its definition from `.mackup/portable-tool-preferences.cfg`
+to `~/.mackup/portable-tool-preferences.cfg` explicitly before using the tracked
+configuration. It includes only `.ripgreprc`, `.config/gh/config.yml`, and
+Sublime's `Packages/User/Preferences.sublime-settings`; it does not select entire
+app directories, authentication, browser profiles, or sessions.
 
-```bash
-mackup restore
-```
+The tracked storage policy still uses iCloud's `dotfiles` directory. Mackup 0.10
+uses copy mode; the obsolete `[sync] symlink = true` setting is removed. This
+explicit application list replaces Mackup's all-app default. For a one-time
+migration, review a separate local-filesystem configuration and private custom
+definition directory instead of running a global or iCloud restore. No Mackup
+backup or restore runs as part of installing these dotfiles.
 
 > For full macOS setup (apps, system prefs, Homebrew), see [natilius](https://github.com/vincentkoc/natilius).
+
+## Portable macOS preferences
+
+Check the small personal preferences profile before applying it:
+
+```sh
+~/.dotfiles/bin/mac-preferences --check --json
+~/.dotfiles/bin/mac-preferences --apply
+```
+
+The default command only checks. Apply changes individual typed keys, including
+portable trackpad gestures, force click and hot corners. It merges the managed
+input-switching shortcuts while preserving other preferences.
+It never restarts apps, logs out, copies whole preference files, or changes
+accounts, credentials, privacy permissions, network or hardware identity settings.
+Verification covers stored values; the current UI may need a later login to
+adopt them. See [the command's scope and exit codes](bin/README.md#portable-macos-preferences).
+
+Keep machine-specific shell paths in `~/.exports.local` and Git overrides in
+`~/.gitconfig.local`; both load after the tracked defaults. Set `DOTFILES_ENV_FILE`
+in the local exports file to choose a persistent local dotenv path. The core
+dotfiles can stay symlinked to this checkout without losing local overrides.
 
 ## Windows and WSL2
 
