@@ -2251,6 +2251,24 @@ sync_pane_marker() {
   fi
 }
 
+verify_pane_marker() {
+  local target="$1" marker="$2" current file style active
+  current="$("$TMUX_BIN" show-option -pt "$target" -qv @tt_marker)" || return
+  if [[ "$marker" == "default" ]]; then
+    [[ -z "$current" ]] || return 1
+    # A cleared pane must inherit its window's palette, without local overrides.
+    [[ -z "$("$TMUX_BIN" show-options -pt "$target" | awk '/^window-(active-)?style /')" ]]
+    return
+  fi
+  [[ "$current" == "$marker" ]] || return 1
+  file="$("$TMUX_BIN" show-option -pt "$target" -qv @tt_marker_file)" || return
+  [[ -f "$file" && "$(pane_marker_from_file "$file")" == "$marker" ]] || return 1
+  style="$("$TMUX_BIN" show-option -pt "$target" -qv window-style)" || return
+  active="$("$TMUX_BIN" show-option -pt "$target" -qv window-active-style)" || return
+  [[ "$style" == "$(pane_marker_window_style "$marker")" &&
+    "$active" == "$(pane_marker_active_style "$marker")" ]]
+}
+
 sync_pane_markers() {
   local target="${1:-all}"
   if [[ "$target" == "all" ]]; then
@@ -2718,6 +2736,9 @@ restore_preview() {
       printf "%-16s %-7s %-10s %-12s %-28s %-38s %s\n", $1, $2, $7, bucket, title, cwd, $8
     }
   ' "$snapshot"
+  if grep -q '^# pane-markers' "$snapshot"; then
+    "$SCRIPT_DIR/tt-codex-snapshot-writer" --preview-markers "$snapshot"
+  fi
 }
 
 popup_view() {
@@ -4669,11 +4690,26 @@ case "${1:-}" in
       sync)
         sync_pane_markers "${3:-all}"
         ;;
+      restore)
+        [[ $# -ge 3 && $# -le 5 ]] || {
+          echo "usage: tt marker restore <session> [snapshot] [--execute]" >&2; exit 2;
+        }
+        snapshot="${4:-}"
+        execute="${5:-}"
+        if [[ "$snapshot" == "--execute" ]]; then execute="$snapshot"; snapshot=""; fi
+        [[ -z "$execute" || "$execute" == "--execute" ]] || exit 2
+        TT_TMUX_BIN="$TMUX_BIN" "$SCRIPT_DIR/tt-codex-snapshot-writer" --restore-markers \
+          "${snapshot:-$(codex_cockpit_snapshot_file)}" "$3" "${execute:---preview}"
+        ;;
+      verify)
+        [[ $# -eq 4 ]] || exit 2
+        verify_pane_marker "$3" "$4"
+        ;;
       list)
         list_pane_markers
         ;;
       *)
-        echo "usage: tt marker [set <pane> default|amber|green|blue|violet|cyan|dim|clear <pane>|sync [pane|all]|list]" >&2
+        echo "usage: tt marker [set <pane> default|amber|green|blue|violet|cyan|dim|clear <pane>|sync [pane|all]|restore <session> [snapshot] [--execute]|list]" >&2
         exit 2
         ;;
     esac

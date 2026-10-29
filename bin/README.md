@@ -162,10 +162,33 @@ first process starts. Native restores scrub the child environment even when
 reusing an existing server, without changing that server's other sessions.
 The Linux profile applies the same startup defaults as the workstation profile.
 
+`tt recover` retains the saved windows and pane counts. Unresolved identities
+become labeled shells; they never launch a picker or guess the latest session.
+Six-pane windows use three columns and two rows; four-pane windows use a 2×2
+fallback when historical geometry is unavailable. The complete shell scaffold
+and saved markers are ready before any agent starts. Restores retain validated
+launch flags and native goal state, and hold the snapshot lock while building
+so autosave cannot publish the scaffold. Cold recovery has a separate bounded
+five-minute deadline (`TT_RECOVERY_TOTAL_TIMEOUT_SECONDS`).
+
 `tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
 through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
 show a bucket only when the snapshot header declares it, so current owner and
 exit fields are never mistaken for old bucket columns.
+
+Codex snapshots also embed a complete `# pane-markers` map, bound to each saved
+kind, session UUID and directory. It includes explicit default markers, survives
+the frozen recovery input, and overrides stale position-based marker files on a
+cold start. `tt restore-preview <snapshot>` shows these saved colors. Older
+snapshots still use native marker files; they cannot recover colors absent from
+both sources.
+
+For an already-live cockpit, `tt marker restore <session> <snapshot>` previews
+missing colors by exact UUID and directory even when windows moved. Add
+`--execute` to apply the plan without restarting agents. Current nonempty colors
+win, unmatched sessions are skipped, and shells require the original physical
+process identity. Legacy snapshots without embedded colors are refused by this
+marker-only command. `tt restore` remains the layout helper.
 
 In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
 and **New At End** create a 3x2 grid with pane titles, starting in the source
