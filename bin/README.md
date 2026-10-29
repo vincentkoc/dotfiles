@@ -14,6 +14,7 @@ Top-level wrappers:
 - `discrawl` - preserve explicit remote auth or load `openclaw-crawl/remote.env` from the trusted XDG config location before dispatching to a real backend
 - `install-agent-worktree-ops`
 - `retire-agent-worktree-scheduler`
+- `mac-preferences` - check or apply the small typed macOS preferences profile without restarting apps
 - `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
 - `quickssh` - connect to a saved SSH/Mosh host; restores local tty settings and disables mouse reporting after disconnects
@@ -29,6 +30,46 @@ Tool folders:
   - bash completion scripts
 - `zsh-completion/`
   - zsh completion scripts
+
+## Portable macOS preferences
+
+`mac-preferences` defaults to a read-only check. It needs macOS and Python 3.9+.
+
+```sh
+mac-preferences --check --json
+mac-preferences --apply
+```
+
+The profile is `profiles/macos/personal-preferences.json`. `--profile <path>`
+accepts the same strict 13-key schema: appearance, scrolling, languages, Finder's
+30-day Trash policy, screenshot thumbnails, window tiling/widgets, and built-in
+U.S./Pinyin input sources. It excludes accounts, credentials, TCC permissions,
+device-specific preferences, power, network and display configuration.
+
+Writes use typed CFPreferences at current-user/any-host scope. The global domain
+uses the native AnyApplication constant. Input switching enables the existing
+Ctrl-Space and Option-Ctrl-Space bindings; a different stored binding stops the
+operation. The hotkey merge preserves unknown IDs and fields. The helper checks
+both built-in input-method bundles and every preimage before writing. It refreshes
+the native domain cache before the full preflight, each key's comparison, and
+final readback; each write is synchronized and its typed value checked.
+Already matching keys are not written. Other preference keys are not imported,
+exported, or replaced.
+
+These checks do not make CFPreferences a transaction: another app can race a
+write. A conflict or failure stops the run and reports any keys already written;
+there is no automatic retry or rollback. Exit status is 0 for matching stored
+preferences, 1 for drift in check mode, and 2 for an error. JSON output omits
+preference values. No app is restarted and no logout is performed, so stored
+preference verification is separate from already-loaded UI state. The Trash
+option enables Finder's normal future cleanup policy; this command does not
+read or remove Trash contents.
+
+Run the focused, fake-storage tests with:
+
+```sh
+python3 -B tests/mac-preferences-test.py
+```
 
 ## Claude managed settings
 

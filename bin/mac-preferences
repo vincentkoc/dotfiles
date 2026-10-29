@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""Check or apply the small, portable macOS preferences profile. Python 3.9+."""
+
+import argparse
+import copy
+import ctypes
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import stat
+import sys
+
+
+MISSING = object()
+HOTKEYS = ("com.apple.symbolichotkeys", "AppleSymbolicHotKeys")
+INPUT_DOMAIN = "com.apple.HIToolbox"
+BOOLEAN_KEYS = {
+    ("NSGlobalDomain", "com.apple.swipescrolldirection"),
+    ("com.apple.finder", "FXRemoveOldTrashItems"),
+    ("com.apple.screencapture", "show-thumbnail"),
+    *[("com.apple.WindowManager", key) for key in (
+        "StandardHideWidgets", "EnableTiledWindowMargins",
+        "EnableTilingByEdgeDrag", "EnableTopTilingByEdgeDrag")],
+}
+ALLOWED_KEYS = BOOLEAN_KEYS | {
+    ("NSGlobalDomain", "AppleAquaColorVariant"),
+    ("NSGlobalDomain", "AppleLanguages"),
+    HOTKEYS,
+    *[(INPUT_DOMAIN, key) for key in (
+        "AppleEnabledInputSources", "AppleSelectedInputSources",
+        "AppleCurrentKeyboardLayoutInputSourceID")],
+}
+US_LAYOUT = {"InputSourceKind": "Keyboard Layout", "KeyboardLayout ID": 0,
+             "KeyboardLayout Name": "U.S."}
+PRESS_AND_HOLD = {"Bundle ID": "com.apple.PressAndHold",
+                  "InputSourceKind": "Non Keyboard Input Method"}
+INPUT_VALUES = {
+    "AppleEnabledInputSources": [
+        US_LAYOUT,
+        {"Bundle ID": "com.apple.CharacterPaletteIM",
+         "InputSourceKind": "Non Keyboard Input Method"},
+        PRESS_AND_HOLD,
+        {"Bundle ID": "com.apple.inputmethod.SCIM",
+         "InputSourceKind": "Keyboard Input Method"},
+        {"Bundle ID": "com.apple.inputmethod.SCIM",
+         "Input Mode": "com.apple.inputmethod.SCIM.ITABC",
+         "InputSourceKind": "Input Mode"},
+    ],
+    "AppleSelectedInputSources": [PRESS_AND_HOLD, US_LAYOUT],
+    "AppleCurrentKeyboardLayoutInputSourceID": "com.apple.keylayout.US",
+}
+HOTKEY_VALUES = {
+    "60": {"enabled": True, "value": {"parameters": [32, 49, 262144], "type": "standard"}},
+    "61": {"enabled": True, "value": {"parameters": [32, 49, 786432], "type": "standard"}},
+    "176": {"enabled": False, "value": {"type": "SAE1.0"}},
+}
+INPUT_BUNDLES = (
+    (Path("/System/Library/Input Methods/SCIM.app"),
+     {"com.apple.inputmethod.SCIM", "com.apple.SCIM-Container"}),
+    (Path("/System/Library/Input Methods/PressAndHold.app"),
+     {"com.apple.PressAndHold", "com.apple.PAH-Container"}),
+)
+
+
+class PreferenceError(Exception):
+    def __init__(self, message, written=()):
+        super().__init__(message)
+        self.written = list(written)
+
+
+def require(condition, message):
+    if not condition:
+        raise PreferenceError(message)
+
+
+def encoded(value):
+    """Unlike Python equality, a property list distinguishes false from zero."""
+    return plistlib.dumps(value, fmt=plistlib.FMT_BINARY, sort_keys=True)
+
+
+def same(left, right):
+    if left is MISSING or right is MISSING:
+        return left is right
+    return encoded(left) == encoded(right)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def portable_value(value):
+    if type(value) in (bool, int, str):
+        return True
+    if isinstance(value, list):
+        return all(portable_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and portable_value(item) for key, item in value.items())
+    return False
+
+
+def validate_profile(document):
+    require(isinstance(document, dict) and set(document) == {"schema_version", "preferences"},
+            "profile requires schema_version and preferences only")
+    require(type(document["schema_version"]) is int and document["schema_version"] == 1,
+            "unsupported profile schema")
+    rows = document["preferences"]
+    require(isinstance(rows, list) and len(rows) == len(ALLOWED_KEYS),
+            "profile must contain the 13 portable keys")
+    result = {}
+    for row in rows:
+        require(isinstance(row, dict) and set(row) == {"domain", "key", "value"},
+                "invalid preference entry")
+        require(isinstance(row["domain"], str) and isinstance(row["key"], str),
+                "preference domain and key must be strings")
+        pair = row["domain"], row["key"]
+        require(pair in ALLOWED_KEYS, "domain/key is outside the portable allowlist")
+        require(pair not in result, "duplicate preference entry")
+        value = row["value"]
+        require(portable_value(value), "profile values must use strings, integers, booleans, arrays or dictionaries")
+        if pair in BOOLEAN_KEYS:
+            require(type(value) is bool, "boolean preference requires true or false")
+        elif pair == ("NSGlobalDomain", "AppleAquaColorVariant"):
+            require(type(value) is int and value in (1, 6), "invalid Aqua color variant")
+        elif pair == ("NSGlobalDomain", "AppleLanguages"):
+            require(isinstance(value, list) and 0 < len(value) <= 16 and
+                    all(isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9-]{2,40}", item)
+                        for item in value) and len(set(value)) == len(value),
+                    "invalid preferred language list")
+        elif pair == HOTKEYS:
+            require(same(value, HOTKEY_VALUES), "only the reviewed input-switching hotkeys are supported")
+        elif pair[0] == INPUT_DOMAIN:
+            require(same(value, INPUT_VALUES[pair[1]]), "only the reviewed built-in input sources are supported")
+        result[pair] = copy.deepcopy(value)
+    require(set(result) == ALLOWED_KEYS, "portable keys are missing")
+    return result
+
+
+def load_profile(path):
+    with path.open("rb") as stream:
+        raw = stream.read(65537)
+    require(len(raw) <= 65536, "profile exceeds 64 KiB")
+    return validate_profile(json.loads(raw, object_pairs_hook=unique_object))
+
+
+def merge_hotkeys(current, wanted):
+    current = {} if current is MISSING else current
+    require(isinstance(current, dict), "stored hotkeys must be a dictionary")
+    merged = copy.deepcopy(current)
+    for identifier, desired in wanted.items():
+        entry = merged.setdefault(identifier, {})
+        require(isinstance(entry, dict), "stored managed hotkey must be a dictionary")
+        binding = entry.setdefault("value", {})
+        require(isinstance(binding, dict), "stored managed hotkey binding must be a dictionary")
+        # Enabling a known shortcut must not silently replace a custom binding.
+        for field, value in desired["value"].items():
+            require(field not in binding or same(binding[field], value),
+                    "managed hotkey has a different binding")
+            binding[field] = copy.deepcopy(value)
+        entry["enabled"] = desired["enabled"]
+    return merged
+
+
+def file_identity(value):
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def validate_input_bundles():
+    for root, identifiers in INPUT_BUNDLES:
+        require(root.resolve(strict=True) == root, "input-method bundle must be physical")
+        for directory in (root, *root.parents):
+            info = directory.lstat()
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                    "input-method ancestor must be a protected system directory")
+        path = root / "Contents/Info.plist"
+        require(path.resolve(strict=True) == path, "input-method metadata must be physical")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(descriptor)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and
+                    0 < before.st_size <= 1048576, "invalid system input-method metadata")
+            raw = os.read(descriptor, 1048577)
+            require(len(raw) == before.st_size and file_identity(before) ==
+                    file_identity(os.fstat(descriptor)) == file_identity(path.lstat()),
+                    "system input-method metadata changed")
+            bundle = plistlib.loads(raw)
+        finally:
+            os.close(descriptor)
+        require(bundle.get("CFBundleIdentifier") in identifiers, "unexpected system input-method identifier")
+        executable = bundle.get("CFBundleExecutable")
+        require(isinstance(executable, str) and executable not in ("", ".", "..") and
+                "/" not in executable, "invalid system input-method executable name")
+        path = root / "Contents/MacOS" / executable
+        info = path.lstat()
+        require(path.resolve(strict=True) == path and stat.S_ISREG(info.st_mode) and
+                info.st_uid == 0 and info.st_mode & 0o111,
+                "system input-method executable is unavailable")
+
+
+class NativePreferences:
+    """Typed CFPreferences access to only the current-user/any-host scope."""
+
+    def __init__(self):
+        require(sys.platform == "darwin", "mac-preferences requires macOS")
+        require(os.geteuid() == os.getuid() and os.getuid() != 0,
+                "run as the logged-in user, without sudo")
+        self.cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        self.owned = []
+        self.strings = {}
+        pointer, index = ctypes.c_void_p, ctypes.c_long
+        def bind(name, arguments, returns):
+            function = getattr(self.cf, name)
+            function.argtypes, function.restype = arguments, returns
+            return function
+        self.release = bind("CFRelease", [pointer], None)
+        self.string = bind("CFStringCreateWithCString", [pointer, ctypes.c_char_p, ctypes.c_uint32], pointer)
+        self.data_create = bind("CFDataCreate", [pointer, pointer, index], pointer)
+        self.data_length = bind("CFDataGetLength", [pointer], index)
+        self.data_bytes = bind("CFDataGetBytePtr", [pointer], pointer)
+        self.plist_create = bind("CFPropertyListCreateWithData",
+                                 [pointer, pointer, ctypes.c_ulong, pointer, pointer], pointer)
+        self.plist_data = bind("CFPropertyListCreateData",
+                               [pointer, pointer, index, ctypes.c_ulong, pointer], pointer)
+        self.copy_value = bind("CFPreferencesCopyValue", [pointer] * 4, pointer)
+        self.set_value = bind("CFPreferencesSetValue", [pointer] * 5, None)
+        self.synchronize = bind("CFPreferencesSynchronize", [pointer] * 3, ctypes.c_ubyte)
+        self.user = pointer.in_dll(self.cf, "kCFPreferencesCurrentUser").value
+        self.host = pointer.in_dll(self.cf, "kCFPreferencesAnyHost").value
+        self.any_application = pointer.in_dll(self.cf, "kCFPreferencesAnyApplication").value
+
+    def reference(self, text):
+        if text not in self.strings:
+            reference = self.string(None, text.encode("utf-8"), 0x08000100)
+            require(reference, "cannot create native preference string")
+            self.owned.append(reference)
+            self.strings[text] = reference
+        return self.strings[text]
+
+    def domain(self, name):
+        return self.any_application if name == "NSGlobalDomain" else self.reference(name)
+
+    def read(self, pair):
+        domain, key = pair
+        reference = self.copy_value(self.reference(key), self.domain(domain), self.user, self.host)
+        if not reference:
+            return MISSING
+        data, error = None, ctypes.c_void_p()
+        try:
+            data = self.plist_data(None, reference, 200, 0, ctypes.byref(error))
+            require(data and not error.value, "cannot decode stored preference")
+            length = self.data_length(data)
+            require(0 <= length <= 1048576, "stored preference exceeds 1 MiB")
+            return plistlib.loads(ctypes.string_at(self.data_bytes(data), length))
+        finally:
+            self.release(reference)
+            if data:
+                self.release(data)
+            if error.value:
+                self.release(error.value)
+
+    def write(self, pair, value):
+        raw = encoded(value)
+        buffer = ctypes.create_string_buffer(raw)
+        data = self.data_create(None, buffer, len(raw))
+        require(data, "cannot encode native preference")
+        reference, error = None, ctypes.c_void_p()
+        try:
+            reference = self.plist_create(None, data, 0, None, ctypes.byref(error))
+            require(reference and not error.value, "cannot create native property list")
+            domain, key = pair
+            self.set_value(self.reference(key), reference, self.domain(domain), self.user, self.host)
+        finally:
+            self.release(data)
+            if reference:
+                self.release(reference)
+            if error.value:
+                self.release(error.value)
+
+    def sync(self, domain):
+        require(self.synchronize(self.domain(domain), self.user, self.host) == 1,
+                "cannot synchronize preference domain: " + domain)
+
+    def refresh(self, domain):
+        # Call only with no pending writes: CopyValue otherwise reads this process's cache.
+        self.sync(domain)
+
+    def close(self):
+        for reference in reversed(self.owned):
+            self.release(reference)
+        self.owned.clear()
+
+
+def reconcile(profile, backend, apply=False, input_guard=validate_input_bundles):
+    before = {pair: backend.read(pair) for pair in profile}
+    desired = {pair: merge_hotkeys(before[pair], value) if pair == HOTKEYS else value
+               for pair, value in profile.items()}
+    input_guard()
+    changed = [pair for pair in profile if not same(before[pair], desired[pair])]
+    written = []
+    if apply and changed:
+        try:
+            # Complete preflight before the first write; repeat each key's CAS below.
+            for domain in dict.fromkeys(pair[0] for pair in profile):
+                backend.refresh(domain)
+            for pair in profile:
+                require(same(backend.read(pair), before[pair]),
+                        "preference changed during preflight: " + "/".join(pair))
+            for pair in changed:
+                backend.refresh(pair[0])
+                require(same(backend.read(pair), before[pair]),
+                        "preference changed before write: " + "/".join(pair))
+                backend.write(pair, desired[pair])
+                written.append(pair)
+                backend.sync(pair[0])
+                require(same(backend.read(pair), desired[pair]),
+                        "preference readback differs: " + "/".join(pair))
+            for domain in dict.fromkeys(pair[0] for pair in profile):
+                backend.refresh(domain)
+            for pair in profile:
+                require(same(backend.read(pair), desired[pair]),
+                        "preference changed before final readback: " + "/".join(pair))
+        except (PreferenceError, OSError, ValueError) as error:
+            raise PreferenceError(str(error), written) from error
+    return {"mode": "apply" if apply else "check", "keys": len(profile),
+            "stored_preferences_match": not changed or apply,
+            "differences": [{"domain": domain, "key": key} for domain, key in changed],
+            "written_keys": [{"domain": domain, "key": key} for domain, key in written],
+            "loaded_ui_verified": False, "restarted_apps": False}
+
+
+def main(argv=None, backend_factory=NativePreferences, input_guard=validate_input_bundles):
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="check stored preferences (default)")
+    mode.add_argument("--apply", action="store_true", help="apply only differing portable keys")
+    parser.add_argument("--json", action="store_true", help="emit a structured result without preference values")
+    parser.add_argument("--profile", type=Path,
+                        default=Path(__file__).resolve().parents[1] / "profiles/macos/personal-preferences.json",
+                        help="profile using the same portable-key allowlist")
+    arguments = parser.parse_args(argv)
+    backend = None
+    try:
+        profile = load_profile(arguments.profile)
+        backend = backend_factory()
+        result = reconcile(profile, backend, arguments.apply, input_guard)
+        if arguments.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            state = "match" if result["stored_preferences_match"] else "differ"
+            print("stored preferences " + state + "; " + str(len(result["written_keys"])) + " keys written")
+            for row in result["differences"]:
+                print("  " + row["domain"] + "/" + row["key"])
+            print("loaded UI state is unverified; no apps were restarted")
+        return 0 if result["stored_preferences_match"] else 1
+    except (PreferenceError, OSError, ValueError, TypeError, OverflowError) as error:
+        result = {"error": str(error), "written_keys":
+                  [{"domain": domain, "key": key} for domain, key in getattr(error, "written", ())],
+                  "loaded_ui_verified": False, "restarted_apps": False}
+        print(json.dumps(result, sort_keys=True) if arguments.json else "mac-preferences: " + str(error))
+        return 2
+    finally:
+        if backend is not None:
+            backend.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

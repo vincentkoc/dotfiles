@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "preferences": [
+    {"domain": "NSGlobalDomain", "key": "AppleAquaColorVariant", "value": 1},
+    {"domain": "NSGlobalDomain", "key": "com.apple.swipescrolldirection", "value": false},
+    {"domain": "NSGlobalDomain", "key": "AppleLanguages", "value": ["en-US", "zh-Hans-US"]},
+    {"domain": "com.apple.finder", "key": "FXRemoveOldTrashItems", "value": true},
+    {"domain": "com.apple.screencapture", "key": "show-thumbnail", "value": false},
+    {"domain": "com.apple.WindowManager", "key": "StandardHideWidgets", "value": false},
+    {"domain": "com.apple.WindowManager", "key": "EnableTiledWindowMargins", "value": false},
+    {"domain": "com.apple.WindowManager", "key": "EnableTilingByEdgeDrag", "value": false},
+    {"domain": "com.apple.WindowManager", "key": "EnableTopTilingByEdgeDrag", "value": false},
+    {
+      "domain": "com.apple.symbolichotkeys",
+      "key": "AppleSymbolicHotKeys",
+      "value": {
+        "60": {"enabled": true, "value": {"parameters": [32, 49, 262144], "type": "standard"}},
+        "61": {"enabled": true, "value": {"parameters": [32, 49, 786432], "type": "standard"}},
+        "176": {"enabled": false, "value": {"type": "SAE1.0"}}
+      }
+    },
+    {
+      "domain": "com.apple.HIToolbox",
+      "key": "AppleEnabledInputSources",
+      "value": [
+        {"InputSourceKind": "Keyboard Layout", "KeyboardLayout ID": 0, "KeyboardLayout Name": "U.S."},
+        {"Bundle ID": "com.apple.CharacterPaletteIM", "InputSourceKind": "Non Keyboard Input Method"},
+        {"Bundle ID": "com.apple.PressAndHold", "InputSourceKind": "Non Keyboard Input Method"},
+        {"Bundle ID": "com.apple.inputmethod.SCIM", "InputSourceKind": "Keyboard Input Method"},
+        {"Bundle ID": "com.apple.inputmethod.SCIM", "Input Mode": "com.apple.inputmethod.SCIM.ITABC", "InputSourceKind": "Input Mode"}
+      ]
+    },
+    {
+      "domain": "com.apple.HIToolbox",
+      "key": "AppleSelectedInputSources",
+      "value": [
+        {"Bundle ID": "com.apple.PressAndHold", "InputSourceKind": "Non Keyboard Input Method"},
+        {"InputSourceKind": "Keyboard Layout", "KeyboardLayout ID": 0, "KeyboardLayout Name": "U.S."}
+      ]
+    },
+    {"domain": "com.apple.HIToolbox", "key": "AppleCurrentKeyboardLayoutInputSourceID", "value": "com.apple.keylayout.US"}
+  ]
+}
