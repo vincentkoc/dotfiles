@@ -64,7 +64,7 @@ class PreferencesTests(unittest.TestCase):
         return preferences.reconcile(self.profile, self.backend, apply, input_guard)
 
     def test_exact_bundled_profile_and_idempotent_apply(self):
-        self.assertEqual(len(self.profile), 13)
+        self.assertEqual(len(self.profile), 70)
         self.assertEqual(set(self.profile), preferences.ALLOWED_KEYS)
         result = self.reconcile(apply=True)
         self.assertTrue(result["stored_preferences_match"])
@@ -102,6 +102,42 @@ class PreferencesTests(unittest.TestCase):
         self.reconcile(apply=True)
         self.assertEqual(self.backend.writes, [pair])
         self.assertEqual(self.backend.values[unrelated], {"opaque": b"public fixture"})
+
+    def test_trackpad_types_and_hot_corner_mappings_are_preserved(self):
+        boolean = (preferences.TRACKPAD_DOMAINS[0], "TrackpadRightClick")
+        numeric = (preferences.TRACKPAD_DOMAINS[0], "Clicking")
+        self.assertIs(self.profile[boolean], True)
+        self.assertIs(type(self.profile[numeric]), int)
+        self.backend.values[boolean] = 1
+        self.backend.values[numeric] = False
+        self.reconcile(apply=True)
+        self.assertEqual(set(self.backend.writes), {boolean, numeric})
+        self.assertIs(self.backend.values[boolean], True)
+        self.assertIs(type(self.backend.values[numeric]), int)
+        self.assertEqual([self.profile[("com.apple.dock", "wvous-" + corner + "-corner")]
+                          for corner in ("tl", "tr", "bl", "br")], [12, 0, 4, 13])
+
+    def test_device_metadata_and_unaudited_trackpad_keys_are_rejected(self):
+        for key in ("version", "UserPreferences", "DeviceIdentifier", "ForceSuppressed"):
+            document = copy.deepcopy(self.document)
+            row = next(row for row in document["preferences"]
+                       if row["domain"] == preferences.TRACKPAD_DOMAINS[1])
+            row["key"] = key
+            with self.subTest(key=key), self.assertRaises(preferences.PreferenceError):
+                preferences.validate_profile(document)
+
+    def test_numeric_gesture_and_corner_values_reject_wrong_types_and_scope(self):
+        cases = [(preferences.TRACKPAD_DOMAINS[0], "Clicking", value)
+                 for value in (False, -1, 2147483648, 1.0)]
+        cases += [("com.apple.dock", "wvous-tl-corner", 99),
+                  ("com.apple.dock", "wvous-tr-modifier", 131072)]
+        for domain, key, value in cases:
+            document = copy.deepcopy(self.document)
+            row = next(row for row in document["preferences"]
+                       if (row["domain"], row["key"]) == (domain, key))
+            row["value"] = value
+            with self.subTest(key=key, value=value), self.assertRaises(preferences.PreferenceError):
+                preferences.validate_profile(document)
 
     def test_auth_domain_is_rejected_before_backend_creation(self):
         self.document["preferences"][0]["domain"] = "com.apple.security"

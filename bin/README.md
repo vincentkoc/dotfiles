@@ -41,10 +41,14 @@ mac-preferences --apply
 ```
 
 The profile is `profiles/macos/personal-preferences.json`. `--profile <path>`
-accepts the same strict 13-key schema: appearance, scrolling, languages, Finder's
+accepts the same strict 70-key allowlist: appearance, scrolling, languages, Finder's
 30-day Trash policy, screenshot thumbnails, window tiling/widgets, and built-in
-U.S./Pinyin input sources. It excludes accounts, credentials, TCC permissions,
-device-specific preferences, power, network and display configuration.
+U.S./Pinyin input sources, trackpad gestures and force click, and hot corners.
+Trackpad values retain their native boolean/integer types. Device identifiers,
+version markers, UserPreferences blobs and per-host overrides are excluded,
+along with accounts, credentials, TCC permissions, power, network and display
+configuration. The hot-corner profile uses Notification Center, disabled,
+Desktop and Lock Screen in top-left, top-right, bottom-left and bottom-right.
 
 Writes use typed CFPreferences at current-user/any-host scope. The global domain
 uses the native AnyApplication constant. Input switching enables the existing

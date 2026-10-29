@@ -137,3 +137,5 @@
 [gpg "ssh"]
 	allowedSignersFile = ~/GIT/_Perso/dotfiles/.ssh/allowed_signers
 	program = /usr/bin/ssh-keygen
+[include]
+	path = ~/.gitconfig.local

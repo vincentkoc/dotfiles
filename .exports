@@ -412,3 +412,8 @@ export KUBECTL_EXTERNAL_DIFF="colordiff -N -u"
 
 export PATH
 unset -f path_prepend path_append
+
+# Machine-local paths and settings stay outside the tracked defaults.
+if [ -r "$HOME/.exports.local" ]; then
+    . "$HOME/.exports.local"
+fi

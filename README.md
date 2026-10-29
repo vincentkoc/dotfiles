@@ -74,12 +74,18 @@ Check the small personal preferences profile before applying it:
 ~/.dotfiles/bin/mac-preferences --apply
 ```
 
-The default command only checks. Apply changes individual typed keys and merges
-the managed input-switching shortcuts while preserving other preferences.
+The default command only checks. Apply changes individual typed keys, including
+portable trackpad gestures, force click and hot corners. It merges the managed
+input-switching shortcuts while preserving other preferences.
 It never restarts apps, logs out, copies whole preference files, or changes
-accounts, credentials, privacy permissions, network or device settings.
+accounts, credentials, privacy permissions, network or hardware identity settings.
 Verification covers stored values; the current UI may need a later login to
 adopt them. See [the command's scope and exit codes](bin/README.md#portable-macos-preferences).
+
+Keep machine-specific shell paths in `~/.exports.local` and Git overrides in
+`~/.gitconfig.local`; both load after the tracked defaults. Set `DOTFILES_ENV_FILE`
+in the local exports file to choose a persistent local dotenv path. The core
+dotfiles can stay symlinked to this checkout without losing local overrides.
 
 ## Windows and WSL2
 

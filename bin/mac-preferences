@@ -16,15 +16,40 @@ import sys
 MISSING = object()
 HOTKEYS = ("com.apple.symbolichotkeys", "AppleSymbolicHotKeys")
 INPUT_DOMAIN = "com.apple.HIToolbox"
+TRACKPAD_DOMAINS = ("com.apple.AppleMultitouchTrackpad",
+                    "com.apple.driver.AppleBluetoothMultitouch.trackpad")
+TRACKPAD_BOOLEAN_KEYS = {
+    "TrackpadHandResting", "TrackpadMomentumScroll", "TrackpadScroll",
+    "TrackpadRightClick", "TrackpadThreeFingerDrag",
+}
+TRACKPAD_INTEGER_KEYS = {
+    "TrackpadPinch", "TrackpadFourFingerVertSwipeGesture", "USBMouseStopsTrackpad",
+    "TrackpadRotate", "TrackpadHorizScroll", "TrackpadTwoFingerDoubleTapGesture",
+    "TrackpadThreeFingerTapGesture", "TrackpadThreeFingerHorizSwipeGesture",
+    "Clicking", "TrackpadFourFingerPinchGesture", "DragLock",
+    "TrackpadFiveFingerPinchGesture", "TrackpadThreeFingerVertSwipeGesture",
+    "TrackpadTwoFingerFromRightEdgeSwipeGesture", "Dragging",
+    "TrackpadCornerSecondaryClick", "TrackpadFourFingerHorizSwipeGesture",
+}
+INTEGER_KEYS = {
+    *((domain, key) for domain in TRACKPAD_DOMAINS for key in TRACKPAD_INTEGER_KEYS),
+    *((TRACKPAD_DOMAINS[0], key) for key in
+      ("ActuateDetents", "SecondClickThreshold", "FirstClickThreshold")),
+    *(("com.apple.dock", "wvous-" + corner + "-" + suffix)
+      for corner in ("tl", "tr", "bl", "br") for suffix in ("corner", "modifier")),
+}
 BOOLEAN_KEYS = {
     ("NSGlobalDomain", "com.apple.swipescrolldirection"),
+    ("NSGlobalDomain", "com.apple.trackpad.forceClick"),
+    *((domain, key) for domain in TRACKPAD_DOMAINS for key in TRACKPAD_BOOLEAN_KEYS),
+    (TRACKPAD_DOMAINS[0], "ForceSuppressed"),
     ("com.apple.finder", "FXRemoveOldTrashItems"),
     ("com.apple.screencapture", "show-thumbnail"),
     *[("com.apple.WindowManager", key) for key in (
         "StandardHideWidgets", "EnableTiledWindowMargins",
         "EnableTilingByEdgeDrag", "EnableTopTilingByEdgeDrag")],
 }
-ALLOWED_KEYS = BOOLEAN_KEYS | {
+ALLOWED_KEYS = BOOLEAN_KEYS | INTEGER_KEYS | {
     ("NSGlobalDomain", "AppleAquaColorVariant"),
     ("NSGlobalDomain", "AppleLanguages"),
     HOTKEYS,
@@ -111,7 +136,7 @@ def validate_profile(document):
             "unsupported profile schema")
     rows = document["preferences"]
     require(isinstance(rows, list) and len(rows) == len(ALLOWED_KEYS),
-            "profile must contain the 13 portable keys")
+            "profile must contain all " + str(len(ALLOWED_KEYS)) + " portable keys")
     result = {}
     for row in rows:
         require(isinstance(row, dict) and set(row) == {"domain", "key", "value"},
@@ -125,6 +150,12 @@ def validate_profile(document):
         require(portable_value(value), "profile values must use strings, integers, booleans, arrays or dictionaries")
         if pair in BOOLEAN_KEYS:
             require(type(value) is bool, "boolean preference requires true or false")
+        elif pair in INTEGER_KEYS:
+            require(type(value) is int and 0 <= value <= 2147483647,
+                    "numeric preference requires a nonnegative 32-bit integer")
+            if pair[0] == "com.apple.dock":
+                allowed = {0} if pair[1].endswith("-modifier") else {0, 4, 12, 13}
+                require(value in allowed, "only the reviewed hot-corner mappings are supported")
         elif pair == ("NSGlobalDomain", "AppleAquaColorVariant"):
             require(type(value) is int and value in (1, 6), "invalid Aqua color variant")
         elif pair == ("NSGlobalDomain", "AppleLanguages"):
