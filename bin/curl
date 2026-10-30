@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# dotfiles: curl wrapper
+set -euo pipefail
+
+# Resolve the existing curl, including installations reached through symlinks.
+backend=""
+while IFS= read -r candidate; do
+    # Separate installed/source copies can have different inodes and versions.
+    if [[ "$candidate" -ef "${BASH_SOURCE[0]}" ]] ||
+        LC_ALL=C grep -qFx '# dotfiles: curl wrapper' "$candidate"; then
+        continue
+    fi
+    backend="$candidate"
+    break
+done < <(type -aP curl)
+if [[ -z "$backend" ]]; then
+    printf 'curl: no backend found outside the dotfiles wrapper\n' >&2
+    exit 127
+fi
+
+# Explicit environment settings (including empty values) retain native behavior.
+# Read current settings per invocation so toggling the VPN needs no shell reload.
+if [[ "$(uname -s)" == Darwin &&
+      ! ${http_proxy+x} && ! ${https_proxy+x} && ! ${all_proxy+x} &&
+      ! ${HTTP_PROXY+x} && ! ${HTTPS_PROXY+x} && ! ${ALL_PROXY+x} ]] &&
+    command -v scutil >/dev/null 2>&1; then
+    http_enabled=0 https_enabled=0
+    http_host="" http_port="" https_host="" https_port=""
+    while read -r key _ value; do
+        case "$key" in
+            HTTPEnable) http_enabled="$value" ;;
+            HTTPProxy) http_host="$value" ;;
+            HTTPPort) http_port="$value" ;;
+            HTTPSEnable) https_enabled="$value" ;;
+            HTTPSProxy) https_host="$value" ;;
+            HTTPSPort) https_port="$value" ;;
+        esac
+    done < <(scutil --proxy 2>/dev/null || true)
+
+    if [[ "$http_enabled" == 1 && -n "$http_host" && -n "$http_port" ]]; then
+        [[ "$http_host" != *:* ]] || http_host="[$http_host]"
+        export http_proxy="http://$http_host:$http_port"
+    fi
+    if [[ "$https_enabled" == 1 && -n "$https_host" && -n "$https_port" ]]; then
+        [[ "$https_host" != *:* ]] || https_host="[$https_host]"
+        export https_proxy="http://$https_host:$https_port"
+    fi
+    if [[ -n "${http_proxy:-}${https_proxy:-}" &&
+          ! ${no_proxy+x} && ! ${NO_PROXY+x} ]]; then
+        # Local MCP/dev servers must not be sent through the VPN proxy.
+        export no_proxy="localhost,127.0.0.1,::1"
+    fi
+fi
+
+exec "$backend" "$@"

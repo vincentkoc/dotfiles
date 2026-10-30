@@ -11,6 +11,7 @@ Top-level wrappers:
 - `codex` - launch the installed CLI, preserving inherited GitHub credentials and filling missing token variables from native `gh` when available; supports opt-in constrained-network and heavy-work admission controls
 - `codex-github-mcp` - start GitHub MCP over stdio with inherited credentials or native `gh` authentication; forwards extra server arguments
 - `codex-hooks` - render the effective hooks file from stable integration fragments while preserving unknown user hooks and concurrent-edit safety
+- `curl` - use enabled macOS HTTP/HTTPS system proxies for the existing curl executable, including installer subprocesses
 - `discrawl` - preserve explicit remote auth or load `openclaw-crawl/remote.env` from the trusted XDG config location before dispatching to a real backend
 - `install-agent-worktree-ops`
 - `retire-agent-worktree-scheduler`
@@ -86,6 +87,25 @@ ACLs. A blocked or interrupted transaction retains its recovery files for
 inspection; do not delete those files or strip metadata to bypass a refusal.
 Without the option, or when statistics are already off, existing settings are
 not rewritten.
+
+## curl and macOS proxies
+
+The `curl` wrapper reads the current manual HTTP/HTTPS proxy settings from
+`scutil --proxy` on each invocation. Shadowrocket's enabled system proxy is used
+without hardcoding its address or port. Disabling the system proxy restores
+direct requests on the next invocation; no shell reload is needed. Other
+platforms keep native curl behavior.
+
+Explicit proxy environment variables, including empty values, take precedence
+over automatic detection. Curl's `--proxy`, `--noproxy`, and configuration files
+keep their native precedence. Automatically proxied requests bypass
+`localhost`, `127.0.0.1`, and `::1` unless a bypass environment variable is
+already set. The wrapper does not write proxy settings or export them into the
+parent shell. Native `codex update` and other PATH-based curl callers use the
+same routing.
+
+Run `python3 -B tests/curl-proxy-test.py` for the focused regressions, including
+real curl requests against an isolated local proxy.
 
 ## Codex MCP
 
