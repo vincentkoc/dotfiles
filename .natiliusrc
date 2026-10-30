@@ -239,7 +239,7 @@ BREWPACKAGES=(
     "vhs"
     "xz"
     "zlib"
-    "natilius"
+    "vincentkoc/tap/natilius"
 )
 
 # ============================================================================
@@ -277,8 +277,8 @@ BREWCASKS=(
     "sublime-merge"
     "ngrok"
     "android-platform-tools"
-    "tfswitch"
-    "tflint"
+    "warrensbox/tap/tfswitch"
+    "terraform-linters/tap/tflint"
     "claude"
     "chatgpt"
     "claude-code"
