@@ -65,6 +65,14 @@ backup or restore runs as part of installing these dotfiles.
 
 > For full macOS setup (apps, system prefs, Homebrew), see [natilius](https://github.com/vincentkoc/natilius).
 
+The tracked [`.natiliusrc`](.natiliusrc) is the personal daily-driver package
+inventory, including applications, developer CLIs, archive tools, fonts and
+global packages. It excludes Kubernetes, Spark/Scala and the retired desktop
+utilities. Package-only reruns should select Natilius's application modules;
+they must not change Time Machine policy or trigger storage cleanup. Keep
+credentials, archive migration, Git owner selection, scheduled maintenance and
+pnpm dependency qualification in the private Mac bootstrap workflow.
+
 ## Portable macOS preferences
 
 Check the small personal preferences profile before applying it:
