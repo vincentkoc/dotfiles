@@ -1,9 +1,9 @@
 #!/bin/bash
 # shellcheck disable=SC2034,SC2088,SC2148
-# Natilius Example Configuration (Full)
+# Natilius personal daily-driver configuration
 #
 # Copy to ~/.natiliusrc before running natilius.
-# This is a full-featured example mirroring the base style but enabling all modules.
+# Package defaults live here. Host-local credentials, stores and Git owners do not.
 
 # ============================================================================
 # CORE SETTINGS
@@ -13,10 +13,9 @@ SKIP_UPDATE_CHECK=false
 NATILIUS_INSTALL_OHMYZSH=true
 
 # ============================================================================
-# ENABLED MODULES (Full)
+# ENABLED MODULES (daily driver; language pins are explicit opt-ins)
 # ============================================================================
 ENABLED_MODULES=(
-    "system/system_update"
     "system/directories"
     "system/security"
     "preferences/mac_preferences"
@@ -24,17 +23,8 @@ ENABLED_MODULES=(
     "applications/homebrew"
     "applications/apps"
     "applications/espanso"
-    "dev_environments/java"
-    "dev_environments/ruby"
-    "dev_environments/python"
-    "dev_environments/node"
-    "dev_environments/rust"
-    "dev_environments/go"
-    "dev_environments/php"
-    "dev_environments/flutter"
     "ide/ide_setup"
     "dotfiles"
-    "system/cleanup"
 )
 
 # ============================================================================
@@ -47,7 +37,7 @@ JAMF_RECON_ON_COMPLETE=false
 # ============================================================================
 # CLEANUP SETTINGS
 # ============================================================================
-USE_MOLE_CLEANUP=true
+USE_MOLE_CLEANUP=false
 
 # ============================================================================
 # LANGUAGE VERSIONS
@@ -66,8 +56,8 @@ FLUTTER_CHANNEL="stable"
 INSTALL_VSCODE=true
 INSTALL_CURSOR=false
 INSTALL_JETBRAINS=true
-INSTALL_SUBLIME=false
-INSTALL_ZED=false
+INSTALL_SUBLIME=true
+INSTALL_ZED=true
 
 # ============================================================================
 # DIRECTORIES
@@ -79,28 +69,8 @@ DIRS=(
     "~/Library/Mobile Documents/com~apple~CloudDocs/dotfiles"
 )
 
-DIRSTOEXCLUDEFROMTIMEMACHINE=(
-    "~/.mackup"
-    "~/GIT"
-    "~/Dropbox"
-    "~/.gnupg"
-    "~/.ssh"
-    "~/.config"
-    "~/.aws"
-    "~/.bun"
-    "~/.cache"
-    "~/.cursor/worktrees"
-    "~/.factory/sessions"
-    "~/.ollama/models"
-    "~/.npm"
-    "~/.cargo"
-    "~/.local/share/pnpm"
-    "~/.pyenv"
-    "~/.rbenv"
-    "~/.rustup"
-    "~/.nodenv"
-    "~/go"
-)
+# Backup policy is machine-local; setup must not change Time Machine exclusions.
+DIRSTOEXCLUDEFROMTIMEMACHINE=()
 
 # ============================================================================
 # HOMEBREW TAPS
@@ -108,9 +78,10 @@ DIRSTOEXCLUDEFROMTIMEMACHINE=(
 BREWTAPS=(
     "warrensbox/tap"
     "terraform-linters/tap"
-    "derailed/popeye"
     "supabase/tap"
     "vincentkoc/tap"
+    "openclaw/tap"
+    "brunoborges/tap"
 )
 
 # ============================================================================
@@ -125,6 +96,8 @@ BREWPACKAGES=(
     "tig"
     "diff-so-fancy"
     "lazygit"
+    "brunoborges/tap/ghx"
+    "openclaw/tap/octopool"
 
     # Shell Essentials
     "coreutils"
@@ -185,17 +158,12 @@ BREWPACKAGES=(
     "telnet"
     "lynx"
     "croc"
+    "cloudflared"
 
-    # Containers & Kubernetes
+    # Containers
     "docker-compose"
-    "kubernetes-cli"
-    "kubectx"
-    "helm"
-    "minikube"
     "ctop"
-    "popeye"
     "podman"
-    "stern"
 
     # Backend Services
     "supabase"
@@ -236,12 +204,22 @@ BREWPACKAGES=(
     "golangci-lint"
 
     # Data & ML
-    "apache-spark"
-    "scala"
     "hf"
 
     # AI Tools
     "gemini-cli"
+    "github-mcp-server"
+    "openclaw/tap/autoreview"
+    "vincentkoc/tap/agentrinse"
+
+    # Local-first archives (stores are migrated separately from binaries)
+    "openclaw/tap/crabbox"
+    "openclaw/tap/gitcrawl"
+    "openclaw/tap/discrawl"
+    "openclaw/tap/graincrawl"
+    "openclaw/tap/slacrawl"
+    "openclaw/tap/notcrawl"
+    "openclaw/tap/wacrawl"
 
     # Python Tools
     "uv"
@@ -271,10 +249,7 @@ BREWCASKS=(
     # Security & Privacy
     "1password"
     "1password-cli"
-    "blockblock"
-    "little-snitch"
     "do-not-disturb"
-    "knockknock"
 
     # Browsers
     "google-chrome"
@@ -282,15 +257,16 @@ BREWCASKS=(
     "firefox"
 
     # Productivity & System
-    "raycast"
-    "alt-tab"
-    "keyboard-maestro"
     "betterdisplay"
     "stats"
     "onyx"
     "pika"
     "wispr-flow"
     "granola"
+    "repobar"
+    "codexbar"
+    "jump-desktop"
+    "jump-desktop-connect"
 
     # Terminal & Development
     "iterm2"
@@ -304,8 +280,14 @@ BREWCASKS=(
     "tfswitch"
     "tflint"
     "claude"
+    "chatgpt"
+    "claude-code"
     "ollama-app"
+    "lm-studio"
+    "llama-app"
     "zed"
+    "gcloud-cli"
+    "azure-cli"
 
     # Java Runtimes
     "temurin"
@@ -332,12 +314,13 @@ BREWCASKS=(
     "slack"
     "zoom"
     "discord"
-    "loom"
+    "wechat"
 
     # Notes & Knowledge
     "notion"
     "obsidian"
     "logseq"
+    "anki"
 
     # Media & Entertainment
     "spotify"
@@ -412,13 +395,11 @@ APPSTORE=(
     # Productivity
     "441258766"   # Magnet
     "937984704"   # Amphetamine
-    "1564015476"  # Shell History
     "975937182"   # Fantastical
     "375589283"   # Parcel
     "1246781916"  # Kerberos Ticket Autorenewal
     "1346247457"  # Endel
     "1423210932"  # Flow
-    "1039633667"  # Irvue
     "585829637"   # Todoist
     "1608529689"  # Nautomate
     "1378123825"  # Negative
@@ -434,6 +415,9 @@ APPSTORE=(
 
 MANUAL_APPS=(
     "cotypist"
+    # Preserve the existing Grok Bot bundle; do not substitute another Grok app.
+    "grok-bot"
+    "blacksmith" # Official CLI installer: https://get.blacksmith.sh
 )
 
 # ============================================================================
@@ -447,6 +431,9 @@ GLOBAL_NODE_PACKAGES=(
     "yarn"
     "pnpm"
     "gatsby"
+    "clawpatch@0.8.4"
+    "tokenjuice@0.8.5"
+    "tokscale@4.15.1"
 )
 
 GLOBAL_PYTHON_PACKAGES=(
