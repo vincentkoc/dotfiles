@@ -90,13 +90,41 @@ def load_profile():
     return profile
 
 
+def manifest_document(data):
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, "duplicate manifest JSON key")
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=unique_keys)
+
+
 def manifest_bytes(data, profile):
     require(hashlib.sha256(data).hexdigest() == profile["manifest_sha256"], "manifest digest mismatch")
-    manifest = json.loads(data)
+    manifest = manifest_document(data)
     layers = [layer for layer in manifest["layers"]
               if layer.get("mediaType") == "application/vnd.ollama.image.model"]
     require(len(layers) == 1 and layers[0].get("digest") == "sha256:" + profile["blob_sha256"]
             and layers[0].get("size") == profile["blob_bytes"], "manifest model layer mismatch")
+    return manifest
+
+
+def native_manifest(path, store, profile):
+    data = read_small(path)
+    if hashlib.sha256(data).hexdigest() == profile["manifest_sha256"]:
+        manifest_bytes(data, profile)
+        return
+    # Ollama's WriteLegacyAnchor appends the original manifest as provenance.
+    original = read_small(store / "blobs" / ("sha256-" + profile["manifest_sha256"]))
+    expected = manifest_bytes(original, profile)
+    expected["layers"].append({"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                               "digest": "sha256:" + profile["manifest_sha256"], "size": len(original)})
+    actual = manifest_document(data)
+    # Canonical JSON preserves scalar types, unlike Python's True == 1 equality.
+    require(json.dumps(actual, sort_keys=True, allow_nan=False) ==
+            json.dumps(expected, sort_keys=True, allow_nan=False),
+            "native manifest differs from the pinned manifest plus exact provenance")
 
 
 def symlink_state(path, target):
@@ -264,7 +292,7 @@ def inspect(paths, profile):
     manifest = paths["manifest"]
     has_manifest = os.path.lexists(manifest)
     if has_manifest:
-        manifest_bytes(read_small(manifest), profile)
+        native_manifest(manifest, paths["store"], profile)
     else:
         owned_path(manifest, missing=True)
     blob = paths["blob"]
