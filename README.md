@@ -73,6 +73,21 @@ they must not change Time Machine policy or trigger storage cleanup. Keep
 credentials, archive migration, Git owner selection, scheduled maintenance and
 pnpm dependency qualification in the private Mac bootstrap workflow.
 
+## One shared local AI model
+
+After installing Ollama, LM Studio and Llama, use the pinned small-model helper:
+
+```sh
+~/.dotfiles/bin/local-ai-setup --check --json
+~/.dotfiles/bin/local-ai-setup --apply
+```
+
+Check mode only inspects files. Apply requires an initialized LM Studio and an
+already-running loopback-only Ollama server. It downloads the 2.5 GB Qwen3 4B
+Instruct 2507 GGUF once into Ollama's cache, verifies its pinned manifest and
+SHA-256, and shares those bytes through symbolic links. It preserves other
+models and settings. See [setup requirements and failure behavior](bin/README.md#shared-local-ai-model).
+
 ## Portable macOS preferences
 
 Check the small personal preferences profile before applying it:

@@ -15,6 +15,7 @@ Top-level wrappers:
 - `discrawl` - preserve explicit remote auth or load `openclaw-crawl/remote.env` from the trusted XDG config location before dispatching to a real backend
 - `install-agent-worktree-ops`
 - `retire-agent-worktree-scheduler`
+- `local-ai-setup` - share one pinned Ollama GGUF with LM Studio and Llama; defaults to a file-only check
 - `mac-preferences` - check or apply the small typed macOS preferences profile without restarting apps
 - `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
@@ -31,6 +32,57 @@ Tool folders:
   - bash completion scripts
 - `zsh-completion/`
   - zsh completion scripts
+
+## Shared local AI model
+
+`local-ai-setup` shares one Qwen3 4B Instruct 2507 Q4_K_M GGUF across native
+Ollama, LM Studio and Llama on macOS. The 2,497,280,480-byte Apache 2.0 model
+stays in Ollama's cache; the other apps use symbolic links to those same bytes.
+The public pins and Llama defaults are in `profiles/local-ai/default.json`.
+
+```sh
+local-ai-setup --check --json
+local-ai-setup --apply
+```
+
+The default check reads files only, including full model SHA-256 verification.
+It does not invoke app CLIs, initialize LM Studio, access the network, or start
+services. Exit status is 0 when all stored links/configuration match, 1 when
+setup is incomplete, and 2 for a conflict or error. Readiness verifies stored
+configuration, not a running inference engine.
+
+Before applying, install the three native apps, initialize LM Studio once, and
+start Ollama bound only to loopback. Apply verifies the pinned registry manifest
+before one native pull when needed, then checks the local manifest, byte count
+and SHA-256 before sharing the model. It creates the friendly link under
+`~/Models/LocalAI/`, runs native `lms import --symbolic-link --yes --dry-run`
+followed by the same symbolic-link import, and adds only
+`[local/qwen3-4b-instruct-2507:Q4_K_M]` to Llama's
+`~/.config/llama/models.user.ini` with context 4096 and temperature 0.7.
+It does not edit generated `models.ini`, select cloud providers, start inference,
+change app defaults, install runtimes, or add startup jobs.
+
+LM Studio's existing home pointer and `settings.json` `downloadsFolder` select
+its native model root; neither is changed. Invalid or ambiguous settings stop
+apply. For a custom Ollama daemon store, pass its absolute path with
+`--ollama-models`; an inherited custom `OLLAMA_MODELS` must match that argument.
+The running daemon must already use that store. A custom `XDG_CONFIG_HOME`
+requires separate Llama setup. Existing files, foreign or dangling links,
+conflicting model sections, and non-loopback Ollama listeners are preserved and
+reported as errors. Matching reruns do not pull, import, or rewrite configuration.
+
+A failed apply stops at that operation and retains any completed download/link;
+there is no automatic retry, rollback, or cleanup. Keep the Ollama blob while
+other apps use its links. The helper and profile can remain in a retained
+checkout: invoking the helper through a symlink still finds its adjacent profile.
+
+Native contracts: [LM Studio symbolic-link import](https://lmstudio.ai/docs/cli/local-models/import),
+[Llama user model overrides](https://github.com/ggml-org/Llama-macOS/blob/5287ef20606c4a69e81b4ddcca918ed4c5df3579/Llama/Server/UserModelOverrides.swift),
+and the [pinned Ollama manifest](https://registry.ollama.ai/v2/library/qwen3/manifests/4b-instruct-2507-q4_K_M).
+
+Run the isolated filesystem and fake-vendor fixtures with
+`python3 -B tests/local-ai-setup-test.py`. They do not download models or contact
+host apps or services.
 
 ## Portable macOS preferences
 
