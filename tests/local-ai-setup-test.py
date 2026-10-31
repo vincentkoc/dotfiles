@@ -44,7 +44,8 @@ class LocalAISetupTests(unittest.TestCase):
         self.blob = b"GGUF tiny fixture model, never inference weights\n"
         self.profile["blob_bytes"] = len(self.blob)
         self.profile["blob_sha256"] = hashlib.sha256(self.blob).hexdigest()
-        self.manifest = json.dumps({"layers": [{"mediaType": "application/vnd.ollama.image.model",
+        self.manifest = json.dumps({"schemaVersion": 2, "config": {"size": 1, "digest": "sha256:" + "0" * 64},
+                       "layers": [{"mediaType": "application/vnd.ollama.image.model",
                        "digest": "sha256:" + self.profile["blob_sha256"],
                        "size": len(self.blob)}]}, separators=(",", ":")).encode()
         self.profile["manifest_sha256"] = hashlib.sha256(self.manifest).hexdigest()
@@ -160,6 +161,68 @@ class LocalAISetupTests(unittest.TestCase):
                     self.apply()
                 self.assertEqual(self.calls, [])
                 self.assertFalse(os.path.lexists(self.paths["friendly"]))
+
+    def native_anchor(self):
+        self.populate_cache()
+        original = self.paths["store"] / "blobs" / ("sha256-" + self.profile["manifest_sha256"])
+        original.write_bytes(self.manifest)
+        document = json.loads(self.manifest)
+        document["layers"].append({"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                                   "digest": "sha256:" + self.profile["manifest_sha256"],
+                                   "size": len(self.manifest)})
+        self.paths["manifest"].write_text(json.dumps(document, indent=2, sort_keys=True))
+        return original, document
+
+    def test_exact_native_provenance_reuses_verified_cache_without_pull(self):
+        self.initialized_home()
+        self.native_anchor()
+        self.assertTrue(self.apply()["ready"])
+        self.assertFalse(any("pull" in call for call in self.calls))
+        with patch.object(setup, "run", side_effect=AssertionError("check invoked app")), \
+                patch.object(setup, "get_bytes", side_effect=AssertionError("check used network")):
+            self.assertTrue(setup.reconcile(self.home, self.profile)["ready"])
+
+    def test_native_provenance_rejects_changed_origin_or_descriptor(self):
+        self.initialized_home()
+        original, document = self.native_anchor()
+        for field, value in (("size", 0), ("digest", "sha256:" + "1" * 64),
+                             ("mediaType", "application/vnd.ollama.image.model")):
+            bad = copy.deepcopy(document)
+            bad["layers"][-1][field] = value
+            self.paths["manifest"].write_text(json.dumps(bad))
+            with self.subTest(field=field), self.assertRaises(setup.SetupError):
+                self.apply()
+        self.paths["manifest"].write_text(json.dumps(document))
+        original.write_bytes(self.manifest + b" ")
+        with self.assertRaisesRegex(setup.SetupError, "manifest digest mismatch"):
+            self.apply()
+        original.unlink()
+        with self.assertRaisesRegex(setup.SetupError, "required local path is missing"):
+            self.apply()
+        self.assertEqual(self.calls, [])
+        self.assertFalse(os.path.lexists(self.paths["friendly"]))
+
+    def test_native_provenance_preserves_full_manifest_and_scalar_types(self):
+        self.initialized_home()
+        _, document = self.native_anchor()
+        cases = []
+        bad = copy.deepcopy(document); bad["config"]["size"] = True; cases.append(bad)
+        bad = copy.deepcopy(document); bad["config"]["digest"] = "sha256:" + "2" * 64; cases.append(bad)
+        bad = copy.deepcopy(document); bad["schemaVersion"] = 2.0; cases.append(bad)
+        bad = copy.deepcopy(document); bad["layers"][0]["size"] += 1; cases.append(bad)
+        bad = copy.deepcopy(document); bad["layers"].reverse(); cases.append(bad)
+        bad = copy.deepcopy(document); bad["layers"].append(bad["layers"][-1].copy()); cases.append(bad)
+        bad = copy.deepcopy(document); bad["extra"] = "unrecognized"; cases.append(bad)
+        for bad in cases:
+            self.paths["manifest"].write_text(json.dumps(bad))
+            with self.subTest(document=bad), self.assertRaises(setup.SetupError):
+                self.apply()
+        duplicate = json.dumps(document)[:-1] + ', "schemaVersion": 2}'
+        self.paths["manifest"].write_text(duplicate)
+        with self.assertRaisesRegex(setup.SetupError, "duplicate manifest JSON key"):
+            self.apply()
+        self.assertEqual(self.calls, [])
+        self.assertFalse(os.path.lexists(self.paths["friendly"]))
 
     def test_file_foreign_and_dangling_link_collisions_are_preserved(self):
         self.initialized_home()
