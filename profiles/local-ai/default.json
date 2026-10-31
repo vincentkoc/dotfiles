@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "model": "qwen3:4b-instruct-2507-q4_K_M",
+  "manifest_sha256": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+  "blob_sha256": "85e4a5b7b8ef0e48af0e8658f5aaab9c2324c76c1641493f4d1e25fce54b18b9",
+  "blob_bytes": 2497280480,
+  "filename": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+  "repository": "local/qwen3-4b-instruct-2507",
+  "quantization": "Q4_K_M",
+  "context_size": 4096,
+  "temperature": 0.7,
+  "license": "Apache-2.0"
+}

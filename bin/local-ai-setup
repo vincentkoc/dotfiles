@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""Share one pinned Ollama GGUF with LM Studio and Llama. Python 3.9+."""
+
+import argparse
+import configparser
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PROFILE = Path(__file__).resolve().parents[1] / "profiles/local-ai/default.json"
+MAX_METADATA = 1024 * 1024
+
+
+class SetupError(Exception):
+    pass
+
+
+def require(condition, message):
+    if not condition:
+        raise SetupError(message)
+
+
+def owned_path(path, *, directory=False, missing=False):
+    """Reject symlink parents and foreign ownership before a managed write."""
+    path = Path(path)
+    require(path.is_absolute() and ".." not in path.parts
+            and not any(ord(c) < 32 or ord(c) == 127 for c in str(path)),
+            "paths must be absolute without control characters or '..'")
+    for parent in reversed(path.parents):
+        if parent == Path(parent.anchor):
+            continue
+        info = parent.lstat() if os.path.lexists(parent) else None
+        if info:
+            require(stat.S_ISDIR(info.st_mode), "a parent is not a real directory")
+            if parent == Path.home() or Path.home() in parent.parents:
+                require(info.st_uid == os.getuid(), "a managed parent has a different owner")
+    if not os.path.lexists(path):
+        require(missing, "required local path is missing")
+        return None
+    info = path.lstat()
+    require(info.st_uid == os.getuid(), "managed path has a different owner")
+    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
+            "managed path has the wrong type or is a symlink")
+    return info
+
+
+def read_small(path):
+    info = owned_path(path)
+    require(info.st_size <= MAX_METADATA, "metadata exceeds the size limit")
+    return path.read_bytes()
+
+
+def sha256(path):
+    before = owned_path(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    after = owned_path(path)
+    require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) ==
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+            "model changed during verification")
+    return digest.hexdigest()
+
+
+def load_profile():
+    profile = json.loads(PROFILE.read_bytes())
+    require(profile.get("schema_version") == 1, "unsupported profile schema")
+    for key in ("manifest_sha256", "blob_sha256"):
+        require(re.fullmatch(r"[0-9a-f]{64}", profile[key]), "invalid profile digest")
+    require(re.fullmatch(r"[a-z0-9-]+:[a-zA-Z0-9_.-]+", profile["model"]), "invalid model tag")
+    require(re.fullmatch(r"local/[a-z0-9-]+", profile["repository"]), "invalid model repository")
+    require(re.fullmatch(r"[a-zA-Z0-9_.-]+\.gguf", profile["filename"]), "invalid GGUF filename")
+    require(type(profile["blob_bytes"]) is int and profile["blob_bytes"] > 0, "invalid model size")
+    require(profile["context_size"] == 4096 and profile["temperature"] == 0.7,
+            "unsupported inference defaults")
+    return profile
+
+
+def manifest_bytes(data, profile):
+    require(hashlib.sha256(data).hexdigest() == profile["manifest_sha256"], "manifest digest mismatch")
+    manifest = json.loads(data)
+    layers = [layer for layer in manifest["layers"]
+              if layer.get("mediaType") == "application/vnd.ollama.image.model"]
+    require(len(layers) == 1 and layers[0].get("digest") == "sha256:" + profile["blob_sha256"]
+            and layers[0].get("size") == profile["blob_bytes"], "manifest model layer mismatch")
+
+
+def symlink_state(path, target):
+    if not os.path.lexists(path):
+        owned_path(path, missing=True)
+        return False
+    owned_path(path.parent, directory=True)
+    require(path.is_symlink() and path.lstat().st_uid == os.getuid(), "model link path is occupied")
+    require(path.resolve(strict=True) == target.resolve(strict=True), "model link points elsewhere")
+    return True
+
+
+def ini_update(data, profile, friendly):
+    try:
+        text = data.decode("utf-8")
+        parsed = configparser.ConfigParser(interpolation=None, strict=True)
+        parsed.read_string(text)
+    except (UnicodeError, configparser.Error) as error:
+        raise SetupError("Llama user INI is malformed or contains duplicates") from error
+    section = profile["repository"] + ":" + profile["quantization"]
+    expected = {"model": str(friendly), "ctx-size": str(profile["context_size"]),
+                "temp": str(profile["temperature"])}
+    if parsed.has_section(section):
+        require(dict(parsed[section]) == expected, "Llama's model section conflicts with the profile")
+        return data
+    block = "[" + section + "]\n" + "".join(key + "=" + value + "\n" for key, value in expected.items())
+    return data + (b"\n" if data and not data.endswith(b"\n") else b"") + block.encode()
+
+
+def run(argv, *, timeout=60, env=None):
+    """Drain progress without storing it; bound stdout and the owned CLI's life."""
+    process = None
+    selector = selectors.DefaultSelector()
+    output = bytearray()
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env=env)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        selector.register(process.stderr, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, Path(argv[0]).name + " timed out; no automatic retry")
+            for key, _ in selector.select(min(remaining, 1)):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                elif key.fileobj is process.stdout:
+                    require(len(output) + len(chunk) <= MAX_METADATA, "native stdout exceeds the limit")
+                    output.extend(chunk)
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "native command timed out")
+        result = process.wait(timeout=remaining)
+        require(result == 0, Path(argv[0]).name + " failed (exit " + str(result) + ")")
+        return bytes(output)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SetupError(Path(argv[0]).name + " could not complete; no automatic retry") from error
+    finally:
+        selector.close()
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+            process.stdout.close()
+            process.stderr.close()
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        raise SetupError("unexpected HTTP redirect")
+
+
+def get_bytes(url, *, local=False):
+    handlers = [NoRedirect()]
+    if local:
+        handlers.append(urllib.request.ProxyHandler({}))
+    try:
+        with urllib.request.build_opener(*handlers).open(url, timeout=15) as response:
+            require(response.status == 200, "unexpected HTTP status")
+            data = response.read(MAX_METADATA + 1)
+    except (OSError, urllib.error.URLError) as error:
+        raise SetupError("model registry or local Ollama is unavailable") from error
+    require(len(data) <= MAX_METADATA, "HTTP metadata exceeds the limit")
+    return data
+
+
+def loopback_endpoint(env):
+    host = env.get("OLLAMA_HOST", "127.0.0.1:11434")
+    parsed = urllib.parse.urlsplit(host if "://" in host else "http://" + host)
+    require(parsed.scheme == "http" and not parsed.username and not parsed.password
+            and not parsed.query and not parsed.fragment and parsed.path in ("", "/"),
+            "Ollama must use a plain loopback HTTP endpoint")
+    try:
+        require(parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname).is_loopback,
+                "Ollama must use a loopback endpoint")
+        port = parsed.port or 11434
+    except ValueError as error:
+        raise SetupError("Ollama must use a loopback endpoint") from error
+    return "http://" + ("[::1]" if parsed.hostname == "::1" else parsed.hostname) + ":" + str(port), port
+
+
+def require_loopback_listener(port):
+    output = run(["/usr/sbin/lsof", "-nP", "-iTCP:" + str(port), "-sTCP:LISTEN", "-Fn"]).decode()
+    addresses = [line[1:] for line in output.splitlines() if line.startswith("n")]
+    require(addresses, "start native Ollama on loopback before applying")
+    for address in addresses:
+        host = address.rsplit(":", 1)[0].strip("[]")
+        try:
+            require(ipaddress.ip_address(host).is_loopback, "Ollama has a non-loopback listener")
+        except ValueError as error:
+            raise SetupError("Ollama listener is not loopback-only") from error
+
+
+def lmstudio_models(home):
+    pointer = home / ".lmstudio-home-pointer"
+    if not os.path.lexists(pointer):
+        return None
+    native_home = Path(read_small(pointer).decode("utf-8").strip())
+    require(native_home.is_absolute(), "LM Studio home pointer is not absolute")
+    owned_path(native_home, directory=True, missing=True)
+    settings = native_home / "settings.json"
+    models = native_home / "models"
+    if os.path.lexists(settings):
+        document = json.loads(read_small(settings))
+        require(isinstance(document, dict), "LM Studio settings are not an object")
+        if "downloadsFolder" in document:
+            folder = document["downloadsFolder"]
+            require(isinstance(folder, str) and folder and Path(folder).is_absolute(),
+                    "LM Studio's custom model root is ambiguous; review its native settings")
+            models = Path(folder)
+    owned_path(models, directory=True, missing=True)
+    return models
+
+
+def paths_for(home, profile, explicit_store, env):
+    owned_path(home, directory=True)
+    require(not any(c in str(home) for c in "\n\r"), "unsupported home path")
+    default = home / ".ollama/models"
+    configured = env.get("OLLAMA_MODELS")
+    if configured and Path(configured) != default:
+        require(explicit_store is not None and Path(configured) == explicit_store,
+                "custom OLLAMA_MODELS requires matching --ollama-models")
+    store = explicit_store or default
+    owned_path(store, directory=True, missing=True)
+    require(env.get("XDG_CONFIG_HOME", str(home / ".config")) == str(home / ".config"),
+            "custom XDG_CONFIG_HOME requires a separate Llama setup")
+    model, tag = profile["model"].split(":", 1)
+    models = lmstudio_models(home)
+    return {
+        "store": store,
+        "manifest": store / "manifests/registry.ollama.ai/library" / model / tag,
+        "blob": store / "blobs" / ("sha256-" + profile["blob_sha256"]),
+        "friendly": home / "Models/LocalAI" / profile["filename"],
+        "lm_models": models,
+        "lm_link": models / profile["repository"] / profile["filename"] if models else None,
+        "ini": home / ".config/llama/models.user.ini",
+    }
+
+
+def inspect(paths, profile):
+    manifest = paths["manifest"]
+    has_manifest = os.path.lexists(manifest)
+    if has_manifest:
+        manifest_bytes(read_small(manifest), profile)
+    else:
+        owned_path(manifest, missing=True)
+    blob = paths["blob"]
+    has_blob = os.path.lexists(blob)
+    if has_blob:
+        require(owned_path(blob).st_size == profile["blob_bytes"], "model byte size mismatch")
+        require(sha256(blob) == profile["blob_sha256"], "model digest mismatch")
+    else:
+        owned_path(blob, missing=True)
+    friendly = symlink_state(paths["friendly"], blob)
+    lm_link = paths["lm_link"]
+    imported = symlink_state(lm_link, blob) if lm_link else False
+    ini = paths["ini"]
+    before = read_small(ini) if os.path.lexists(ini) else None
+    owned_path(ini, missing=True)
+    after = ini_update(before or b"", profile, paths["friendly"])
+    state = {"ollama_model": has_manifest and has_blob, "shared_gguf": friendly,
+             "lmstudio_initialized": lm_link is not None, "lmstudio_import": imported,
+             "llama_config": before == after}
+    return state, before, after
+
+
+def make_parents(path):
+    owned_path(path, missing=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    owned_path(path.parent, directory=True)
+
+
+def publish_ini(path, before, after):
+    if before == after:
+        return
+    make_parents(path)
+    descriptor, name = tempfile.mkstemp(prefix=".local-ai-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(after)
+        if before is None:
+            require(not os.path.lexists(path), "Llama config appeared during apply")
+            os.link(temporary, path)
+        else:
+            info = owned_path(path)
+            require(read_small(path) == before, "Llama config changed during apply")
+            temporary.chmod(stat.S_IMODE(info.st_mode))
+            os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+OLLAMA = Path("/Applications/Ollama.app/Contents/Resources/ollama")
+LMS = Path("/Applications/LM Studio.app/Contents/Resources/app/.webpack/lms")
+
+
+def reconcile(home, profile, *, apply=False, explicit_store=None, env=None):
+    env = dict(os.environ if env is None else env)
+    paths = paths_for(home, profile, explicit_store, env)
+    endpoint, port = loopback_endpoint(env)
+    state, ini_before, ini_after = inspect(paths, profile)
+    changed = []
+    if apply:
+        require(sys.platform == "darwin", "apply requires native macOS applications")
+        require(state["lmstudio_initialized"], "initialize LM Studio once before applying; no app is started by this helper")
+        for binary in (OLLAMA, LMS):
+            require(binary.is_file() and os.access(binary, os.X_OK), "install native Ollama and LM Studio first")
+        require_loopback_listener(port)
+        require(isinstance(json.loads(get_bytes(endpoint + "/api/version", local=True)).get("version"), str),
+                "loopback endpoint is not a ready Ollama server")
+        if not state["ollama_model"]:
+            model, tag = profile["model"].split(":", 1)
+            manifest_bytes(get_bytes("https://registry.ollama.ai/v2/library/" + model + "/manifests/" + tag), profile)
+            ancestor = paths["store"]
+            while not ancestor.exists():
+                ancestor = ancestor.parent
+            require(shutil.disk_usage(ancestor).free >= profile["blob_bytes"] + 256 * 1024 * 1024,
+                    "insufficient free space for the pinned model")
+            pull_env = {**env, "OLLAMA_HOST": endpoint, "OLLAMA_MODELS": str(paths["store"])}
+            run([str(OLLAMA), "pull", profile["model"]], timeout=2700, env=pull_env)
+            state, _, _ = inspect(paths, profile)
+            require(state["ollama_model"], "native pull did not populate the selected Ollama store")
+            changed.append("ollama_model")
+        if not state["shared_gguf"]:
+            make_parents(paths["friendly"])
+            paths["friendly"].symlink_to(paths["blob"])
+            changed.append("shared_gguf")
+        if not state["lmstudio_import"]:
+            require(lmstudio_models(home) == paths["lm_models"], "LM Studio model root changed during apply")
+            command = [str(LMS), "import", str(paths["friendly"]), "--user-repo", profile["repository"],
+                       "--symbolic-link", "--yes"]
+            run(command + ["--dry-run"])
+            require(lmstudio_models(home) == paths["lm_models"], "LM Studio model root changed during dry-run")
+            require(not os.path.lexists(paths["lm_link"]), "LM Studio import target appeared during apply")
+            run(command)
+            require(symlink_state(paths["lm_link"], paths["blob"]), "LM Studio did not create the expected symbolic link")
+            changed.append("lmstudio_import")
+        publish_ini(paths["ini"], ini_before, ini_after)
+        if ini_before != ini_after:
+            changed.append("llama_config")
+        state, _, _ = inspect(paths, profile)
+    return {"mode": "apply" if apply else "check", "ready": all(state.values()),
+            "checks": state, "changed": changed, "model": profile["model"]}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="inspect local files only (default)")
+    mode.add_argument("--apply", action="store_true", help="pull once if missing and share the verified model")
+    parser.add_argument("--json", action="store_true", help="print a structured readiness report")
+    parser.add_argument("--ollama-models", type=Path, help="explicit existing native Ollama store")
+    args = parser.parse_args(argv)
+    try:
+        report = reconcile(Path.home(), load_profile(), apply=args.apply, explicit_store=args.ollama_models)
+    except (SetupError, OSError, ValueError, KeyError, TypeError) as error:
+        message = str(error) if isinstance(error, SetupError) else "invalid or inaccessible local setup metadata"
+        report = {"mode": "apply" if args.apply else "check", "ready": False, "error": message}
+        status = 2
+    else:
+        status = 0 if report["ready"] else 1
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+    elif "error" in report:
+        print(report["error"], file=sys.stderr)
+    else:
+        print("Local AI ready" if report["ready"] else "Missing: " + ", ".join(
+            key for key, value in report["checks"].items() if not value))
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
