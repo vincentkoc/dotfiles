@@ -14,6 +14,12 @@ It prefers the canonical checkout, then an existing `~/.dotfiles`, before the
 platform default. A Git-based fzf install downloads and verifies the executable;
 shared shell exports add its binary directory without replacing fzf shell files.
 
+Codex and Claude Code share the instructions in [`.codex/AGENTS.md`](.codex/AGENTS.md).
+Claude setup links that owner to the native
+[`~/.claude/CLAUDE.md` user file](https://code.claude.com/docs/en/memory#choose-where-to-put-claudemd-files)
+only when no file or symlink exists. Existing files and links, including dangling
+links, remain user overrides and are reported without replacement.
+
 Git uses the dedicated SSH signing-only key at
 `~/.ssh/git_signing_vincentkoc_ieee`. Keep a local `.ssh/allowed_signers` file
 in the dotfiles root. It is intentionally ignored from git, and the installer
