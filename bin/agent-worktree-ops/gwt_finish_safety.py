@@ -444,7 +444,7 @@ def empty_gitlink(snap, name, until):
 
 
 def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
-              allow_empty_gitlinks=False, preserved_oids=None):
+              allow_empty_gitlinks=False, preserved_oids=None, logical_index=False):
     index, index_id = read_file(Path(snap["gitdir"]) / "index", until)
     entries, resolve_undo = index_entries(
         index, allow_empty_gitlinks=allow_empty_gitlinks, allow_resolve_undo=preserved_oids is not None)
@@ -577,6 +577,8 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
         raise Retain("gitlink-state-changed")
     result = {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest(),
               "entries": rows, "dependency": dependency}
+    if logical_index:
+        result["logical_index"] = {name: list(entry) for name, entry in entries.items()}
     if resolve_undo is not None:
         result["resolve_undo"] = resolve_undo
     if gitlinks:
@@ -910,7 +912,7 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                 used += len(data)
                 if name == "FETCH_HEAD":
                     # Git writes OID, merge marker, and note/URL, terminated by LF.
-                    # Only manual admission supplies refs retained outside this admin directory.
+                    # The caller supplies refs retained outside this admin directory.
                     if data and not data.endswith(b"\n"):
                         raise Retain("fetch-head-recovery-required")
                     for line in data.split(b"\n")[:-1]:
@@ -967,7 +969,10 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                         raise Retain("worktree-config-recovery-required")
                     if file_identity(path.lstat()) != identity:
                         raise Retain("worktree-config-changed")
-                if name in ("ORIG_HEAD", "logs/HEAD"):
+                if name == "FETCH_HEAD":
+                    rows[name] = [[*identity, attrs], hashlib.sha256(data).hexdigest(),
+                                  sorted(qualified_fetch_oids)]
+                elif name in ("ORIG_HEAD", "logs/HEAD"):
                     # All referenced commits must remain named by the preserved
                     # branch. The caller checks reachability before removal.
                     refs = data.split() if name == "ORIG_HEAD" else [
