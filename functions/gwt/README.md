@@ -57,6 +57,25 @@ from this variable; its workspace owner must update persisted references during
 relocation. Do not make an application invoke shell GWT or enroll its existing
 workspaces in personal managed finish to obtain cleanup authority.
 
+### Allocator ownership and retention
+
+A shared parent directory does not give different allocators the same lifecycle.
+
+| Producer | Placement and retention owner |
+| --- | --- |
+| Shell GWT | `DOTFILES_WORKTREES_ROOT` controls new GWT paths. Use GWT's task closeout and recorded ownership. |
+| Codex CLI | In [0.166.0](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/worktree/src/settings.rs), `--worktree` shares the desktop root setting or defaults to `$CODEX_HOME/worktrees`, but CLI automatic cleanup is disabled. CLI exit does not imply removal. |
+| Codex desktop app | [Codex-managed chats](https://learn.chatgpt.com/docs/environments/git-worktrees#worktree-cleanup) have app-owned cleanup. The default keeps the latest 15 trees; pinned and active chats are protected. Archiving a chat can trigger cleanup. |
+| Claude Code | Native `--worktree` uses `<project>/.claude/worktrees/`. [Interactive exit](https://code.claude.com/docs/en/worktrees#clean-up-worktrees) removes a clean unnamed tree; named or work-bearing trees prompt. Noninteractive `-p` runs leave the tree and creation lock for later owner closeout. |
+
+Claude's [`worktree.location`](https://code.claude.com/docs/en/settings-reference#worktreelocation)
+setting applies only to Desktop SSH sessions. CLI worktrees, `EnterWorktree`,
+isolated subagents and background sessions ignore it. It does not configure GWT.
+
+Identify the producer and its native owner before closing a finished checkout.
+Do not enroll existing app or CLI trees in GWT to obtain deletion authority.
+Changing a shared root is not a retention fix and does not migrate existing trees.
+
 ## Preferred owners
 
 Keep host-specific policy in private dotfiles. Install a regular, current-user
