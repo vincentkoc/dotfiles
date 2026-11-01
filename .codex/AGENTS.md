@@ -81,9 +81,11 @@
 - Establish the requested completion condition before implementation. Optional
   credentials, channel checks, profiling, or post-merge improvements do not
   extend it; record a follow-up when they are outside the accepted scope.
-- Completion, checkout retention, and physical deletion are separate outcomes.
-  A retained path does not keep completed work running. Report its disposition
-  once; do not re-audit unchanged custody or rebuild proof to justify stopping.
+- Task closeout includes removing its disposable checkout through the native
+  owner. Retention needs a concrete unfinished consumer or native blocker,
+  with the responsible owner and exact next action. Do not claim a retry is
+  scheduled unless an installed consumer owns it. Report the disposition once;
+  do not re-audit unchanged custody or rebuild proof to justify stopping.
 - Do not reopen settled scope, replace an active execution route, repeat
   completed work, or dispatch a replacement root task unless the user or
   concrete new evidence invalidates the current route.
@@ -285,18 +287,21 @@ Recovery mode rules:
   shared symlink or inside `~/.codex/worktrees`.
 - Enroll only new personal worktrees with `--finish-managed`. Never adopt an
   existing/shared/native checkout to obtain completion or deletion capability.
-- Record finished PR work with `gwt finish --pr <URL>`; add `--release` when this
-  owner relinquishes future use. For superseded/cancelled work without matching
-  PR proof, use supported `gwt cancel --reason <text>`. Then perform native
-  finalized-task closeout when no live owner or unfinished work needs the tree.
+- Record finished PR work with `gwt finish --pr <URL>` and complete native
+  checkout closeout. Follow the installed helper's completion/release contract;
+  older helpers may still require `--release`. Keep a recovery pin only while
+  unfinished work needs the checkout. For superseded/cancelled work without
+  matching PR proof, use supported `gwt cancel --reason <text>` and its native
+  finalized-task closeout; never invent a PR to obtain removal.
 - Only sign off for the current owner. Preserve stack dependencies and recovery
   pins. Resume before reuse; changed inputs invalidate old completion/release.
 - Finalized work does not need an evidence archive. Clean up its disposable
   artifacts through the native task-closeout route; preserve source branches and
-  actual user deliverables. Automatic removal still requires its qualified host
-  admission. Unknown live owners or incomplete removal intents retain state;
-  do not activate cleanup, retry uncertain removal, or clear locks by inference.
-  Report the actual checkout outcome once, then stop.
+  actual user deliverables. Use the supported foreground closeout route without
+  imposing unattended-worker activation on it. Unknown live owners or incomplete
+  removal intents retain state; do not activate a scheduler, retry uncertain
+  removal, or clear locks by inference. A pending merge or live holder needs an
+  exact native retry command and responsible owner, not indefinite retention.
 
 ## Low Data Mode
 
