@@ -664,8 +664,11 @@ if gwt new feature main --full --finish-managed; then exit 93; fi
 class ReleaseTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
-    finish = LifecycleTests.finish
     check_reason = LifecycleTests.check_reason
+
+    def finish(self, *args):
+        # This suite exercises the activated unattended backend explicitly.
+        return LifecycleTests.finish(self, "--policy", str(self.base / "policy.json"), *args)
 
     def setUp(self):
         LifecycleTests.setUp(self)
@@ -1248,6 +1251,70 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(self.wt.exists())
 
 
+class ForegroundCompletionTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        FINISH.qualified_policy.side_effect = FINISH.Retain("foreground-must-not-need-automatic-policy")
+
+    tearDown = ReleaseTests.tearDown
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_plain_finish_removes_merged_checkout_without_activation(self):
+        result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        FINISH.qualified_policy.assert_not_called()
+
+    def test_pending_merge_records_signoff_even_with_ignored_recovery_content(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        (self.wt / "ignored").write_text("keep this recovery content\n")
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "pr-not-merged")
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual((self.wt / "ignored").read_text(), "keep this recovery content\n")
+
+    def test_completion_rechecks_owner_signoff_before_removal(self):
+        self.call("resume", "--owner", "owner-2")
+        self.assertEqual(self.finish()[1][0]["reason"], "awaiting-owner-release")
+        admission = FINISH.finalized_admission
+        calls = []
+
+        def revoke(db, row, args, until, **options):
+            result = admission(db, row, args, until, **options)
+            calls.append(result)
+            if len(calls) == 1:
+                with db:
+                    db.execute("DELETE FROM owner_releases WHERE worktree_id=? AND owner=?",
+                               (row["id"], "owner-1"))
+            return result
+
+        with mock.patch.object(FINISH, "manual_holders"), \
+                mock.patch.object(FINISH, "finalized_admission", side_effect=revoke):
+            result = self.finish("--owner", "owner-2")[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(result["reason"], "awaiting-owner-release")
+        self.assertTrue(self.wt.exists())
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_foreground_dependency_link_preserves_external_donor(self):
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        donor = self.base / "dependency-donor"
+        donor.mkdir()
+        (donor / "keep").write_text("shared dependency\n")
+        (self.wt / "node_modules").symlink_to(donor, target_is_directory=True)
+        with mock.patch.object(FINISH, "manual_holders"):
+            result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual((donor / "keep").read_text(), "shared dependency\n")
+
+
 class MissingRecoveryTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
@@ -1607,7 +1674,7 @@ def stat_mode(path):
 class FinalizedRemovalTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
-    finish = LifecycleTests.finish
+    finish = ReleaseTests.finish
     setUp = ReleaseTests.setUp
     tearDown = ReleaseTests.tearDown
 
@@ -2211,7 +2278,10 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertEqual(status["cancelled_owners"], cancelled["cancelled_owners"])
 
     def test_finalized_branch_transition_preserves_both_refs_and_enrollment(self):
+        # Keep the checkout available until its PR merges before manual closeout.
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
         self.finish()
+        self.proofs[self.url] = self.proof(self.url)
         with FINISH.ledger(self.state) as db:
             enrolled = dict(FINISH.get_row(db, self.wt))
         git(self.wt, "checkout", "-b", "reviewed-current")

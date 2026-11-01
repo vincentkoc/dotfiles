@@ -559,13 +559,15 @@ inode sets bind their preimage and detect holders through external hardlinks;
 symlink targets, nested repositories, mounts and live special files remain
 protected. The 131072-entry source/index limit is unchanged.
 It does not claim complete macOS mapping
-coverage or qualify unattended deletion. Automatic finish checks and host
+coverage or qualify unattended deletion. Unattended checks and host
 activation retain their stronger admission requirements below.
 
 ### Completion and unattended removal
 
 `gwt finish` records completion and signs off this owner's future checkout use
-for native managed enrollments. `--release` remains accepted for existing callers.
+for native managed enrollments, then attempts native foreground closeout. This
+operator-invoked route does not require an unattended host policy. `--release`
+remains accepted for existing callers.
 Use a recovery pin while the checkout is still needed. Generic Codex Stop is
 turn-scoped attention state and never creates completion or release.
 
@@ -613,7 +615,9 @@ and restores an identical proof. Claims never expire.
 The wrapper parks only its own shell before release. It cannot move the parent
 Codex process. An alive parent outside the checkout/admin paths may remain
 alive; any actual CWD, FD, thread CWD, fileport or mapped reference inside those
-domains blocks removal. The pending consumer revisits departure and merges:
+domains blocks removal. If a merge or departure is pending, retry `gwt finish`
+from outside the checkout after that blocker clears. A future pending consumer
+can revisit these conditions only after explicit installation and activation:
 
 ```sh
 gwt finish-status --all
@@ -718,7 +722,15 @@ or interpret another repository's closeout receipts.
 
 ### Activation and proof limits
 
-Installing source does not activate deletion. Version-1 `report-only` policies
+Installing source does not activate unattended deletion. Native foreground
+`finish` and `release` use the same admission and non-force removal engine as
+explicit finalized closeout, with exact merged proof and every owner's signoff
+rechecked before removal. Unknown ignored content retains the checkout without
+preventing completion or signoff from being recorded. Explicit `--policy` selects
+the unattended evaluator and its frozen release inventory contract; foreground
+signoff alone does not qualify a later unattended removal.
+
+Version-1 `report-only` policies
 and existing enrollments retain their contract. A version-2 policy has schema
 `gwt-finish-policy.v2`, mode `explicit-release`, the stable host identity and
 one to eight exact owner/root/common-directory identities. Its `qualification`
@@ -727,7 +739,7 @@ source hashes, known process identities and a private activation receipt.
 
 The current Darwin arm64 backend reports `mapping_coverage: unqualified`.
 Public libproc APIs omit submap vnode details and can hide vnode acquisition
-failures. Automatic Mac deletion therefore remains blocked, even with a valid
+failures. Unattended Mac deletion therefore remains blocked, even with a valid
 external qualification or activation receipt. Completion and explicit release
 still record their facts.
 Linux, WSL and Windows have no deletion qualification in this change. The private
