@@ -135,6 +135,11 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.check_reason(), "completion-confirmed-checkout-retained")
         self.assertTrue(self.wt.exists())
 
+    def test_explicit_release_still_rejects_report_only_enrollment(self):
+        with self.assertRaisesRegex(FINISH.Retain, "legacy-enrollment-report-only"):
+            self.finish("--release")
+        self.assertTrue(self.wt.exists())
+
     def test_cancel_without_pr_retains_dirty_files_and_pins_without_proof(self):
         self.call("pin", "--reason", "recovery")
         (self.wt / "unpublished").write_text("keep me\n")
@@ -603,6 +608,8 @@ cd "$2"
 gwt new feature main --full --finish-managed || exit
 [[ "$PWD" == "$3" ]] || exit 91
 gwt finish --pr https://github.com/example/repo/pull/1 || exit
+[[ "$PWD" == "$2" ]] || exit 90
+cd "$3"
 _gwt_finish_tool() { return 1; }
 _gwt_tmux_sync_context() { exit 98; }
 if gwt cancel --release --reason invalid; then exit 97; fi
@@ -710,11 +717,11 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(FINISH.Retain, "intent"):
             self.call("resume")
 
-    def test_plain_finish_retains_until_owner_explicitly_releases(self):
+    def test_plain_finish_releases_completed_owner_and_removes_eligible_checkout(self):
         result = self.finish()[1][0]
-        self.assertEqual(result["reason"], "awaiting-owner-release")
-        self.assertTrue(self.wt.exists())
-        self.assertEqual(self.call("release")[1][0]["checkout"], "removed")
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
 
     def test_unqualified_apply_preserves_release_without_admission_work(self):
         self.capability.stop()
@@ -854,8 +861,8 @@ class ReleaseTests(unittest.TestCase):
         self.call("resume", "--owner", "owner-2")
         self.assertEqual(self.finish("--release")[1][0]["checkout"], "retained")
         second = self.finish("--owner", "owner-2")[1][0]
-        self.assertEqual(second["released_owners"], ["owner-1"])
-        self.assertEqual(self.call("release", "--owner", "owner-2")[1][0]["checkout"], "removed")
+        self.assertEqual(second["released_owners"], ["owner-1", "owner-2"])
+        self.assertEqual(second["checkout"], "removed")
 
     def test_unclassified_ignored_payload_is_never_deleted(self):
         (self.wt / "ignored").write_text("synthetic recovery")
@@ -3665,8 +3672,13 @@ class ExternalRemovalTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
     finish = LifecycleTests.finish
-    setUp = ReleaseTests.setUp
     tearDown = ReleaseTests.tearDown
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        # Keep this finished checkout pending so the external-removal owner
+        # can exercise its own closeout instead of the normal finish route.
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
 
     def arguments(self):
         status = self.call("status")[1][0]
@@ -3694,7 +3706,6 @@ class ExternalRemovalTests(unittest.TestCase):
             current = dict(FINISH.get_row(db, self.wt))
             retirement = FINISH.retirement(db, current)
             self.assertIsNone(retirement["intent"])
-            self.assertIsNone(retirement["inventory"])
         for key in original.keys() - {"reason", "checked_at"}:
             self.assertEqual(current[key], original[key])
         self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)

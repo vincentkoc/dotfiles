@@ -2278,7 +2278,8 @@ def process_one(db, row, args):
     current = db.execute(
         "SELECT * FROM worktrees WHERE id = ?", (row["id"],)
     ).fetchone()
-    if args.command == "release" or (args.command == "finish" and args.release):
+    if args.command == "release" or (args.command == "finish" and (
+            args.release or retirement(db, current) is not None)):
         release(db, current, args)
     if args.command in ("finish", "release", "check") and retirement(db, current) is not None:
         reason = evaluate_release(db, current, args,

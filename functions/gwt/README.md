@@ -564,8 +564,9 @@ activation retain their stronger admission requirements below.
 
 ### Completion and unattended removal
 
-`gwt finish` records completion. `gwt finish --release` additionally signs off
-this owner's future checkout use. Release is deliberate; generic Codex Stop is
+`gwt finish` records completion and signs off this owner's future checkout use
+for native managed enrollments. `--release` remains accepted for existing callers.
+Use a recovery pin while the checkout is still needed. Generic Codex Stop is
 turn-scoped attention state and never creates completion or release.
 
 ```sh
@@ -573,11 +574,8 @@ turn-scoped attention state and never creates completion or release.
 export GWT_OWNER_ID=payment-fix
 gwt new fix/payment origin/main --finish-managed
 
-# Implementation is complete, but keep this owner's checkout claim.
+# Finish this owner's work and sign off checkout use in one operation.
 gwt finish --pr https://github.com/example/project/pull/123
-
-# Once the checkout is no longer needed, sign off explicitly.
-gwt finish --pr https://github.com/example/project/pull/123 --release
 ```
 
 Only newly created `--finish-managed` worktrees receive release-capable

@@ -1253,7 +1253,7 @@ Commands:
   gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...] [--sudo-holder-scan]
                                     Manually close one finalized managed task
   gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...] [--release]
-                                    Complete; --release explicitly signs off checkout use
+                                    Complete and sign off this owner's checkout use
   gwt release [--worktree <path>]   Release this already-completed owner
   gwt cancel --reason <text> [--worktree <path>]
                                     End this owner's work without PR proof or removal
@@ -1443,10 +1443,9 @@ gwt() {
             local lifecycle_target="$PWD" lifecycle_release=false
             local -a lifecycle_args
             lifecycle_args=("$@")
-            [[ "$subcommand" == release ]] && lifecycle_release=true
+            [[ "$subcommand" == finish || "$subcommand" == release ]] && lifecycle_release=true
             local lifecycle_i
             for (( lifecycle_i=1; lifecycle_i <= ${#lifecycle_args}; lifecycle_i++ )); do
-                [[ "$subcommand" == finish && "${lifecycle_args[$lifecycle_i]}" == --release ]] && lifecycle_release=true
                 if [[ "${lifecycle_args[$lifecycle_i]}" == --worktree ]]; then
                     lifecycle_target="${lifecycle_args[$((lifecycle_i + 1))]}"
                 elif [[ "${lifecycle_args[$lifecycle_i]}" == --worktree=* ]]; then

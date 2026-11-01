@@ -7,8 +7,8 @@ Bins in this folder:
 - `agent-worktree-finish`
   - explicitly enrolls new managed worktrees and tracks owner completion,
     recovery pins, exact PR heads and stack dependencies in a private ledger
-  - plain `finish` records completion; explicit `finish --release` relinquishes
-    that owner's future checkout use and immediately checks eligible removal
+  - plain `finish` records completion and relinquishes that owner's future
+    checkout use for native managed enrollments; `--release` remains an alias
   - `status` and `check` retain; the same `check --all --apply --policy <path>`
     consumer revisits merges and departure only after host-specific activation
   - new private, natively locked enrollments use durable generation/release/
