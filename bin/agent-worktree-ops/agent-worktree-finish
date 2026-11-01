@@ -751,7 +751,7 @@ def check(db, row):
     return reason
 
 
-def release(db, row, args):
+def release(db, row, args, *, capture_inventory=True):
     item = require_open_retirement(db, row)
     who = owner_id(args)
     if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=? AND completed=1",
@@ -760,12 +760,14 @@ def release(db, row, args):
     snap = revalidate(row)
     if snap["head"] != row["finish_head"]:
         raise Retain("head-changed-repeat-finish")
-    until = time.monotonic() + 45
-    contents = {"working": safety().inventory(snap, git, until),
-                "admin": safety().admin_inventory(snap, git, until)}
-    encoded = json.dumps(contents, sort_keys=True)
-    if item["inventory"] is not None and item["inventory"] != encoded:
-        raise Retain("release-inventory-changed-resume-first")
+    encoded = item["inventory"]
+    if capture_inventory:
+        until = time.monotonic() + 45
+        contents = {"working": safety().inventory(snap, git, until),
+                    "admin": safety().admin_inventory(snap, git, until)}
+        encoded = json.dumps(contents, sort_keys=True)
+        if item["inventory"] is not None and item["inventory"] != encoded:
+            raise Retain("release-inventory-changed-resume-first")
     with db:
         db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
                    (encoded, row["id"]))
@@ -892,6 +894,8 @@ def deletion_admission(row, item, qualification, until):
         raise Retain("unfinished-or-head-changed")
     boundaries = [module.access_boundary(snap[key], until) for key in ("path", "gitdir")]
     contents = module.inventory(snap, git, until)
+    if item["inventory"] is None:
+        raise Retain("automatic-release-inventory-required")
     released = json.loads(item["inventory"])
     if contents != released["working"]:
         raise Retain("released-worktree-changed")
@@ -1106,7 +1110,7 @@ def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=Fal
         raise Retain("pending-departure")
 
 
-def finalized_admission(db, row, args, until):
+def finalized_admission(db, row, args, until, *, completed=False):
     snap = revalidate(row)
     if snap["head"] != row["finish_head"]:
         raise Retain("finalized-head-changed")
@@ -1131,14 +1135,16 @@ def finalized_admission(db, row, args, until):
     ignored = {name.rstrip("/") for name in git(
         snap["path"], "ls-files", "--others", "--ignored", "--exclude-standard",
         "--directory", "-z").split("\0") if name}
-    if set(args.discard_ignored) != ignored:
+    disposable = set(args.discard_ignored)
+    dependency_link = completed and ignored == {"node_modules"} and (Path(snap["path"]) / "node_modules").is_symlink()
+    if disposable != ignored and not dependency_link:
         raise Retain("ignored-content-needs-exact-disposable-roots")
     module = safety()
     preserved_oids = {proof["head"] for proof in row["finalized_refs"].values()}
     for proof in row["finalized_refs"].values():
         if proof["reflog"] is not None:
             preserved_oids.update(proof["reflog"]["oids"])
-    contents = module.inventory(snap, git, until, discard_ignored=ignored, compact_discarded=True,
+    contents = module.inventory(snap, git, until, discard_ignored=disposable, compact_discarded=True,
                                 allow_empty_gitlinks=True, preserved_oids=preserved_oids)
     admin = module.admin_inventory(snap, git, until, preserved_oids=preserved_oids)
     holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
@@ -1154,13 +1160,13 @@ def finalized_admission(db, row, args, until):
             "branch_reflog": refs[snap["branch"]]["reflog"], "preserved_refs": refs}
 
 
-def remove_finalized(db, row, args):
+def remove_finalized(db, row, args, *, completed=False):
     item = require_open_retirement(db, row)
     enrolled_branch = json.loads(row["identity"])["branch"]
-    snap = revalidate(row, allow_device_renumbering=True, allow_branch_change=True)
+    snap = revalidate(row, allow_device_renumbering=not completed, allow_branch_change=not completed)
     if "lock_reason" not in snap:
         raise Retain("manual-closeout-needs-native-enrollment")
-    # Explicit closeout binds the current branch, HEAD and device numbers once.
+    # Manual closeout may rebind identity; completion keeps its recorded identity.
     # Keep the durable enrollment and automatic lifecycle qualification unchanged.
     row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True),
            "finish_head": snap["head"]}
@@ -1169,10 +1175,21 @@ def remove_finalized(db, row, args):
     until = time.monotonic() + 120
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
         row["finalized_refs"] = preserved_refs(snap, (enrolled_branch, snap["branch"]), until)
-        before = finalized_admission(db, row, args, until)
+        def admit():
+            if completed:
+                current = get_row(db, snap["path"])
+                if any(current[key] != row[key] for key in (
+                        "finish_head", "primary_pr", "target", "dependencies")):
+                    raise Retain("completion-proof-changed")
+                completion_checks(db, current, local=False)
+                all_released(db, current, item)
+            options = {"completed": True} if completed else {}
+            return finalized_admission(db, row, args, until, **options)
+
+        before = admit()
         return remove_with_intent(
             db, row, item, before,
-            lambda: finalized_admission(db, row, args, until),
+            admit,
             {"mode": "explicit-finalized-task", "operator": owner_id(args),
              "discard_ignored": sorted(args.discard_ignored)},
             restore_lock=True)
@@ -1488,6 +1505,8 @@ def evaluate_release(db, row, args, *, apply):
         if not apply:
             completion_checks(db, row)
             return "released-completion-confirmed-checkout-retained"
+        if args.command in ("finish", "release") and args.policy is None:
+            return remove_finalized(db, row, args, completed=True)
         storage_guard()
         qualification = qualified_policy(args, row)
         return remove_released(db, row, item, qualification, args)
@@ -2280,7 +2299,7 @@ def process_one(db, row, args):
     ).fetchone()
     if args.command == "release" or (args.command == "finish" and (
             args.release or retirement(db, current) is not None)):
-        release(db, current, args)
+        release(db, current, args, capture_inventory=args.policy is not None)
     if args.command in ("finish", "release", "check") and retirement(db, current) is not None:
         reason = evaluate_release(db, current, args,
                                   apply=args.command in ("finish", "release") or args.apply)
