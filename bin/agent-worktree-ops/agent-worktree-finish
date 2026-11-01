@@ -751,7 +751,96 @@ def check(db, row):
     return reason
 
 
-def release(db, row, args, *, capture_inventory=True):
+RELEASE_BASELINE_SCHEMA = "gwt-release-baseline.v1"
+
+
+def semantic_inventory(contents, admin):
+    """Compare release semantics; native effect admission keeps the full snapshots."""
+    def metadata(value, *, replaceable=False):
+        # Git replaces its index while refreshing cached state.
+        result = list(value[:6])
+        if replaceable:
+            result[1] = None
+        return [*result, None if stat.S_ISDIR(value[2]) or replaceable else value[6], *value[9:]]
+
+    working = {key: value for key, value in contents.items() if key not in ("index", "index_sha256")}
+    working["entries"] = {name: metadata(value) for name, value in contents["entries"].items()}
+    # Explicitly discarded content has no tracked-blob proof. Its compact hash
+    # and inode evidence remain exact, including timestamps and population.
+    administrative = {
+        name: ([metadata(value[0], replaceable=True), None] if name == "index" else
+               [metadata(value[0]), *value[1:]])
+        for name, value in admin.items() if name != "FETCH_HEAD"
+    }
+    return {"working": working, "admin": administrative}
+
+
+def release_refs(snap, target, until):
+    branches = {snap["branch"]}
+    target_ref = "refs/remotes/origin/" + target
+    if target_ref in git(snap["owner"], "for-each-ref", "--format=%(refname)", target_ref).splitlines():
+        branches.add(target_ref)
+    refs = preserved_refs(snap, branches, until)
+    roots = {proof["head"] for proof in refs.values()}
+    for proof in refs.values():
+        if proof["reflog"] is not None:
+            roots.update(proof["reflog"]["oids"])
+    return refs, roots
+
+
+def release_inventory(snap, target, until, discarded):
+    module = safety()
+    refs, roots = release_refs(snap, target, until)
+    ignored = {name.rstrip("/") for name in git(
+        snap["path"], "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z").split("\0") if name}
+    dependency = ignored == {"node_modules"} and (Path(snap["path"]) / "node_modules").is_symlink()
+    if set(discarded) != ignored and not (not discarded and dependency):
+        raise Retain("ignored-roots-require-explicit-disposal")
+    contents = module.inventory(snap, git, until, discard_ignored=discarded,
+                                compact_discarded=True, preserved_oids=roots, logical_index=True)
+    admin = module.admin_inventory(snap, git, until, preserved_oids=roots)
+    recovery = sorted({oid for value in admin.values() if len(value) == 3 for oid in value[2]})
+    preserve_release_recovery(snap, recovery, roots, until)
+    if preserved_refs(snap, refs, until) != refs:
+        raise Retain("preserved-refs-changed")
+    return contents, admin, refs, roots, recovery
+
+
+def preserve_release_recovery(snap, recovery, roots, until):
+    if len(recovery) > 128:
+        raise Retain("recovery-proof-limit")
+    for oid in recovery:
+        if not SHA.fullmatch(oid):
+            raise Retain("recovery-reference-invalid")
+        if oid not in roots and git(
+                snap["owner"], "--no-replace-objects", "rev-list", "--max-count=1", oid,
+                "--not", *sorted(roots), "--", raw=True, strict=True, deadline=until):
+            raise Retain("admin-recovery-not-preserved")
+
+
+def capture_release_inventory(db, row, args):
+    item = require_open_retirement(db, row)
+    # Only an authenticated releasing owner can establish the baseline. A
+    # failed capture is durable too; resume/release is required to replace it.
+    if item["inventory"] is not None:
+        return
+    baseline = {"schema": RELEASE_BASELINE_SCHEMA, "discard_ignored": sorted(args.discard_ignored),
+                "baseline": None, "blocker": None}
+    try:
+        snap = revalidate(row)
+        if snap["head"] != row["finish_head"]:
+            raise Retain("head-changed-repeat-finish")
+        contents, admin, _, _, recovery = release_inventory(
+            snap, row["target"], time.monotonic() + 45, args.discard_ignored)
+        baseline.update(baseline=semantic_inventory(contents, admin), recovery_oids=recovery)
+    except (Retain, OSError, ValueError) as error:
+        baseline["blocker"] = str(error) if isinstance(error, Retain) else "release-inventory-unavailable"
+    with db:
+        db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=? AND inventory IS NULL",
+                   (json.dumps(baseline, sort_keys=True), row["id"]))
+
+
+def release(db, row, args):
     item = require_open_retirement(db, row)
     who = owner_id(args)
     if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=? AND completed=1",
@@ -760,17 +849,7 @@ def release(db, row, args, *, capture_inventory=True):
     snap = revalidate(row)
     if snap["head"] != row["finish_head"]:
         raise Retain("head-changed-repeat-finish")
-    encoded = item["inventory"]
-    if capture_inventory:
-        until = time.monotonic() + 45
-        contents = {"working": safety().inventory(snap, git, until),
-                    "admin": safety().admin_inventory(snap, git, until)}
-        encoded = json.dumps(contents, sort_keys=True)
-        if item["inventory"] is not None and item["inventory"] != encoded:
-            raise Retain("release-inventory-changed-resume-first")
     with db:
-        db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
-                   (encoded, row["id"]))
         db.execute("INSERT INTO owner_releases VALUES (?, ?, ?) "
                    "ON CONFLICT(worktree_id,owner) DO UPDATE SET generation=excluded.generation",
                    (row["id"], who, item["generation"]))
@@ -893,20 +972,38 @@ def deletion_admission(row, item, qualification, until):
     if snap["head"] != row["finish_head"]:
         raise Retain("unfinished-or-head-changed")
     boundaries = [module.access_boundary(snap[key], until) for key in ("path", "gitdir")]
-    contents = module.inventory(snap, git, until)
     if item["inventory"] is None:
         raise Retain("automatic-release-inventory-required")
     released = json.loads(item["inventory"])
-    if contents != released["working"]:
-        raise Retain("released-worktree-changed")
+    semantic = released.get("schema") == RELEASE_BASELINE_SCHEMA
+    if "schema" in released and not semantic:
+        raise Retain("release-inventory-schema-unsupported-resume-first")
+    refs = None
+    if semantic:
+        if released["baseline"] is None:
+            raise Retain(released["blocker"] or "automatic-release-baseline-unavailable-resume-first")
+        contents, admin, refs, roots, _ = release_inventory(
+            snap, row["target"], until, released["discard_ignored"])
+        preserve_release_recovery(snap, released["recovery_oids"], roots, until)
+        current = semantic_inventory(contents, admin)
+        if current["working"] != released["baseline"]["working"]:
+            raise Retain("released-worktree-changed")
+        if current["admin"] != released["baseline"]["admin"]:
+            raise Retain("released-admin-changed-resume-first")
+    else:
+        # Shipped full inventories retain their exact comparison contract.
+        contents = module.inventory(snap, git, until)
+        if contents != released["working"]:
+            raise Retain("released-worktree-changed")
     # Native remove runs status, whose index refresh can execute clean/process
     # filters. Do not dispatch unqualified external programs during removal.
     keys = git(snap["path"], "config", "--includes", "--null", "--name-only", "--list")
     if any(key.lower().startswith("filter.") for key in keys.split("\0")):
         raise Retain("git-conversion-filter-unqualified")
-    admin = module.admin_inventory(snap, git, until)
-    if admin != released["admin"]:
-        raise Retain("released-admin-changed-resume-first")
+    if not semantic:
+        admin = module.admin_inventory(snap, git, until)
+        if admin != released["admin"]:
+            raise Retain("released-admin-changed-resume-first")
     for directory in (Path(snap["common"]), Path(snap["common"]) / "refs"):
         stack = [directory]
         visited = 0
@@ -924,7 +1021,7 @@ def deletion_admission(row, item, qualification, until):
                    "rebase-merge", "rebase-apply", "sequencer"):
         if any(os.path.lexists(Path(snap[key]) / marker) for key in ("common", "gitdir")):
             raise Retain("git-operation-in-progress")
-    recovery = {oid for value in admin.values() if len(value) == 3 for oid in value[2]}
+    recovery = set() if semantic else {oid for value in admin.values() if len(value) == 3 for oid in value[2]}
     reflog = preserved_branch_reflog(snap, until)
     if len(recovery) > 128:
         raise Retain("recovery-proof-limit")
@@ -940,6 +1037,7 @@ def deletion_admission(row, item, qualification, until):
                 raise Retain("admin-recovery-not-preserved") from error
     inodes = {tuple(snap[key]) for key in ("path_id", "gitdir_id")}
     inodes.update(tuple(value[:2]) for value in contents["entries"].values())
+    inodes.update(tuple(value) for value in contents.get("discarded_inodes", []))
     inodes.update(tuple(value[0][:2]) for value in admin.values())
     observed = module.Darwin(until).observe(
         [snap["path"], snap["gitdir"]], inodes, qualification["known_processes"])
@@ -948,8 +1046,11 @@ def deletion_admission(row, item, qualification, until):
     # Qualification files cannot supply missing evidence from the native reader.
     if observed.get("mapping_coverage") != "complete":
         raise Retain("holder-mapping-coverage-unqualified")
-    return {"snapshot": snap, "boundaries": boundaries, "contents": contents,
-            "admin": admin, "holders": observed, "branch_reflog": reflog}
+    result = {"snapshot": snap, "boundaries": boundaries, "contents": contents,
+              "admin": admin, "holders": observed, "branch_reflog": reflog}
+    if refs is not None:
+        result["preserved_refs"] = refs
+    return result
 
 
 def holder_qualification():
@@ -1418,7 +1519,8 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
     try:
         final = recheck()
         if any(final[key] != before[key] for key in (
-                "snapshot", "boundaries", "contents", "admin", "branch_reflog")):
+                "snapshot", "boundaries", "contents", "admin", "branch_reflog")) or (
+                final.get("preserved_refs") != before.get("preserved_refs")):
             raise Retain("removal-preimage-changed")
         # Recursive deletion needs its own phase, not admission's remaining time.
         # Keep two seconds to reap and thirty for readbacks inside the owner clock.
@@ -2145,6 +2247,21 @@ def summary(db, row, reason=None):
     }
     if cancellations:
         result["cancelled_owners"] = cancellations
+    if item is not None and item["state"] == "enrolled":
+        baseline = json.loads(item["inventory"]) if item["inventory"] else None
+        semantic = baseline is not None and baseline.get("schema") == RELEASE_BASELINE_SCHEMA
+        result["automatic_handoff"] = {
+            "baseline": ("unavailable" if baseline is None or (semantic and baseline["baseline"] is None)
+                         else "ready"),
+            "blocker": baseline.get("blocker") if semantic else (
+                "automatic-release-inventory-required" if baseline is None else None),
+            "native_qualification": holder_qualification(),
+            # A release receipt does not attest installation or scheduling.
+            "consumer_eligibility": "not-attested",
+            "scheduled_retry": "not-attested",
+            "owner_retry": ("resume-then-finish-from-owning-checkout" if baseline is None or (
+                semantic and baseline["baseline"] is None) else "repeat-finish-from-owning-checkout"),
+        }
     recovery = missing_recovery_record(db, row)
     if recovery is not None:
         result["missing_recovery"] = {
@@ -2299,10 +2416,18 @@ def process_one(db, row, args):
     ).fetchone()
     if args.command == "release" or (args.command == "finish" and (
             args.release or retirement(db, current) is not None)):
-        release(db, current, args, capture_inventory=args.policy is not None)
+        release(db, current, args)
+        if args.policy is not None:
+            capture_release_inventory(db, current, args)
     if args.command in ("finish", "release", "check") and retirement(db, current) is not None:
         reason = evaluate_release(db, current, args,
                                   apply=args.command in ("finish", "release") or args.apply)
+        # Foreground closeout has priority and needs no automatic baseline.
+        # Only a retained, still-enrolled owner release hands off to the worker.
+        item = retirement(db, current)
+        if (args.command in ("finish", "release") and args.policy is None
+                and item["state"] == "enrolled"):
+            capture_release_inventory(db, current, args)
         with db:
             db.execute("UPDATE worktrees SET reason=?, checked_at=? WHERE id=?",
                        (reason, int(time.time()), row["id"]))
@@ -2368,13 +2493,16 @@ def main(argv=None):
         if (args.pr or args.target or args.wait_for or args.all or args.apply
                 or args.release or args.policy or args.new_token or args.if_enrolled):
             raise Retain("finalized-removal-is-one-explicit-worktree")
+    elif args.finalized:
+        raise Retain("finalized-options-require-remove")
+    if args.discard_ignored:
+        if args.command not in ("finish", "release", "remove"):
+            raise Retain("discard-ignored-requires-owner-finish-release-or-finalized-remove")
         if len(args.discard_ignored) != len(set(args.discard_ignored)) or any(
                 not value or value.startswith("/") or any(
                     part in ("", ".", "..", ".git") for part in value.split("/"))
                 for value in args.discard_ignored):
             raise Retain("discard-ignored-needs-literal-relative-roots")
-    elif args.finalized or args.discard_ignored:
-        raise Retain("finalized-options-require-remove")
     if args.apply and args.command not in ("check", "recover-missing"):
         raise Retain("apply-is-only-valid-for-check")
     if args.policy and args.command not in ("finish", "release", "check"):

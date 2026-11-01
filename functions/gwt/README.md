@@ -480,7 +480,10 @@ Records must have Git's complete OID, merge-marker, and note/URL fields with LF
 termination. An empty file is also accepted under this explicit manual proof.
 The file's identity, bytes, metadata, and retained refs remain bound through
 admission and removal. Malformed or unanchored records block closeout.
-Automatic admission continues to reject `FETCH_HEAD`.
+New automatic release baselines use the same recovery proof, including the
+recorded target's `origin` remote-tracking ref. Release-time OIDs remain required
+even if a later fetch overwrites or removes `FETCH_HEAD`. Legacy full inventories
+continue to reject it.
 
 Manual closeout also accepts a strictly parsed `REUC` resolve-undo index
 extension. Each recorded stage must be a regular-file or symlink blob reachable
@@ -489,7 +492,8 @@ must complete without diagnostics or fetching objects. Duplicate, malformed,
 unsupported, missing, or unanchored records block closeout. Closeout stores the
 decoded path/stage/mode/OID mapping in the removal intent and terminal result.
 The full index and retained refs must match across both admissions.
-Automatic admission continues to reject `REUC`.
+New automatic release baselines preserve this decoded mapping and revalidate its
+roots. Legacy full inventories continue to reject `REUC`.
 
 Manual admission also accepts unpopulated gitlinks when index and HEAD paths,
 modes and commit IDs match exactly. It does not resolve or fetch those commits.
@@ -616,8 +620,9 @@ The wrapper parks only its own shell before release. It cannot move the parent
 Codex process. An alive parent outside the checkout/admin paths may remain
 alive; any actual CWD, FD, thread CWD, fileport or mapped reference inside those
 domains blocks removal. If a merge or departure is pending, retry `gwt finish`
-from outside the checkout after that blocker clears. A future pending consumer
-can revisit these conditions only after explicit installation and activation:
+from outside the checkout after that blocker clears. Retained owner releases
+capture a versioned semantic baseline for the existing bounded pending consumer.
+Only explicit installation and qualified activation let that consumer remove trees:
 
 ```sh
 gwt finish-status --all
@@ -629,10 +634,23 @@ gwt finish-check --all --apply --policy /absolute/private/policy.json
 The evaluator removes one exact checkout at a time with native non-force
 `git worktree remove`. It preserves local branches, siblings and external
 dependency targets. It never runs GC, prunes, or selects unenrolled worktrees.
-Ignored content is not assumed disposable: the initial supported exception is
-an exact root `node_modules` symlink to an unchanged owned external directory.
-Unknown files, real ignored directories, unresolved Git recovery data, changed
-bytes/index/modes, pins or locks retain the checkout.
+Ignored content is not assumed disposable. An exact root `node_modules` symlink
+to an unchanged owned external directory is supported. Owners may also name
+literal disposable roots with `gwt finish --discard-ignored <root>` or
+`gwt release --discard-ignored <root>`. That decision and the discarded contents'
+exact inventory are frozen at release; a worker cannot approve later contents.
+Unknown files, unresolved Git recovery data, changed source/index semantics,
+modes, pins or locks retain the checkout.
+
+The release baseline preserves tracked bytes at the recorded HEAD, logical index
+entries, sparse configuration, recovery obligations and ownership. A later Git
+index stat-cache refresh or pure timestamp change does not invalidate it.
+Physical snapshots still match exactly immediately before native removal.
+Legacy full-inventory receipts keep their original exact comparison. Failed
+capture preserves completion and owner release, but cannot authorize automatic
+retry: status reports the blocker and requires that owner to resume then finish
+again. `automatic_handoff` reports baseline readiness and native qualification
+separately; it does not attest consumer installation or a scheduled retry.
 Checkout and admin files, directories and links receive no-follow xattr-name
 checks, including Darwin compression names. Only the OS-created
 `com.apple.provenance` tracking attribute is disposable; resource forks,
@@ -651,8 +669,10 @@ reduce to the committed message; divergent drafts, unsupported cleanup modes
 and verbose/scissors residue retain.
 Reads are bounded to 8MiB per leaf, 1GiB of verified working bytes per pass and
 131072 source entries including directories. Subprocess and admin reads keep
-the separate 512MiB bound. Apply uses one release inventory and
-two admission inventories; it does not expand sparse checkouts or install tools.
+the separate 512MiB bound. A retained owner release captures its baseline once;
+apply uses two fresh admission inventories. Successful foreground closeout does
+not capture an automatic baseline. Neither route expands sparse checkouts or
+installs tools.
 
 Before unlocking its unique native lock, the owner durably commits a removal
 intent. It then repeats admission and observes checkout, admin, registration,
@@ -743,9 +763,9 @@ failures. Unattended Mac deletion therefore remains blocked, even with a valid
 external qualification or activation receipt. Completion and explicit release
 still record their facts.
 Linux, WSL and Windows have no deletion qualification in this change. The private
-`scripts/install-gwt-finish.py` owner must gain a reviewed v2 activation route
-before use; its existing report-only scheduler must not be relabelled as ready.
-Reuse that scheduler for the bounded pending consumer, not another daemon.
+`scripts/install-gwt-finish.py` owner already provides the reviewed v2 activation
+route for the existing bounded scheduler. Installed report-only scheduling is
+separate from qualified apply activation; no second daemon is needed.
 
 Activation must qualify every configured automatic cleanup route and actually
 running cleanup job, including loaded callbacks that can run without a new

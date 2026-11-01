@@ -709,6 +709,14 @@ class ReleaseTests(unittest.TestCase):
         with FINISH.ledger(self.state) as db:
             return dict(FINISH.get_row(db, self.wt))
 
+    def assert_release_blocked(self, reason):
+        result = self.finish("--release")[1][0]
+        self.assertEqual(result["checkout"], "retained", result)
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["automatic_handoff"]["baseline"], "unavailable")
+        self.assertRegex(result["automatic_handoff"]["blocker"], reason)
+        return result
+
     def test_explicit_release_removes_fresh_merged_task_and_preserves_branch_and_sibling(self):
         result = self.finish("--release")[1][0]
         self.assertEqual(result["checkout"], "removed", result)
@@ -869,8 +877,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_unclassified_ignored_payload_is_never_deleted(self):
         (self.wt / "ignored").write_text("synthetic recovery")
-        with self.assertRaisesRegex(FINISH.Retain, "unclassified"):
-            self.finish("--release")
+        self.assert_release_blocked("ignored-roots-require-explicit-disposal")
         self.assertEqual((self.wt / "ignored").read_text(), "synthetic recovery")
 
     def test_released_inventory_change_requires_new_signoff(self):
@@ -880,6 +887,23 @@ class ReleaseTests(unittest.TestCase):
         self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
         self.assertEqual(self.call("check", "--apply")[1][0]["checkout"], "retained")
         self.assertTrue((self.wt / "late").exists())
+
+    def test_legacy_full_inventory_still_rejects_pure_timestamp_change(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        self.finish("--release")
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            snap = FINISH.revalidate(row)
+            until = time.monotonic() + 10
+            legacy = {"working": FINISH.safety().inventory(snap, FINISH.git, until),
+                      "admin": FINISH.safety().admin_inventory(snap, FINISH.git, until)}
+            with db:
+                db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                           (json.dumps(legacy, sort_keys=True), row["id"]))
+        os.utime(self.wt / "file", (time.time() + 5, time.time() + 5))
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "released-worktree-changed")
+        self.assertTrue(self.wt.exists())
 
     def test_dependency_symlink_is_removed_without_touching_donor(self):
         (self.repo / ".git/info/exclude").write_text("node_modules\n")
@@ -1071,8 +1095,7 @@ class ReleaseTests(unittest.TestCase):
         git(self.wt, "sparse-checkout", "disable")
         git(self.wt, "config", "--worktree", "dotfiles.sparseProfile", "full")
         git(self.wt, "config", "--worktree", "user.fixtureNote", "preserve")
-        with self.assertRaisesRegex(FINISH.Retain, "worktree-config-recovery-required"):
-            self.finish("--release")
+        self.assert_release_blocked("worktree-config-recovery-required")
         self.assertTrue(self.wt.exists())
         git(self.wt, "config", "--worktree", "--unset", "user.fixtureNote")
         self.call("resume")
@@ -1092,8 +1115,7 @@ class ReleaseTests(unittest.TestCase):
     def test_present_skip_worktree_file_is_not_exempt_from_bytes_proof(self):
         git(self.wt, "update-index", "--skip-worktree", "file")
         (self.wt / "file").write_text("must retain\n")
-        with self.assertRaisesRegex(FINISH.Retain, "working-bytes"):
-            self.finish("--release")
+        self.assert_release_blocked("working-bytes")
         self.assertTrue(self.wt.exists())
 
     def test_inventory_supports_more_than_old_32mib_and_bounds_the_actual_next_read(self):
@@ -1156,8 +1178,7 @@ class ReleaseTests(unittest.TestCase):
         old_tip, _ = self.rebased_task()
         tree = git(self.repo, "rev-parse", old_tip + "^{tree}")
         (self.admin / "AUTO_MERGE").write_text(tree + "\n")
-        with self.assertRaisesRegex(FINISH.Retain, "auto-merge-tree-recovery"):
-            self.finish("--release")
+        self.assert_release_blocked("auto-merge-tree-recovery")
         self.assertTrue(self.wt.exists())
 
     def test_corrupt_or_linked_branch_reflog_cannot_attest_recovery(self):
@@ -1167,26 +1188,25 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.finish("--release")[1][0]["reason"], "branch-reflog-proof-invalid")
         self.assertTrue((self.admin / "locked").exists())
         reflog.write_bytes(before)
+        self.call("resume")
         real = reflog.parent
         moved = real.with_name("saved-heads")
         real.rename(moved)
         real.symlink_to(moved, target_is_directory=True)
         try:
-            self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "branch-reflog-parent-unqualified")
+            self.assert_release_blocked("branch-reflog-parent-unqualified")
             self.assertTrue(self.wt.exists())
         finally:
             real.unlink()
             moved.rename(real)
 
-    def test_fetch_head_remains_unknown_for_automatic_release(self):
-        for data in (b"", (self.head + "\t\tbranch 'main' of https://example.test/repo\n").encode()):
-            with self.subTest(data=data):
-                (self.admin / "FETCH_HEAD").write_bytes(data)
-                with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
-                    self.finish("--release")
-                self.assertTrue(self.wt.exists())
-                self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), data)
-                self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+    def test_fetch_head_without_preserved_recovery_holds_owner_release(self):
+        recovery = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "unpreserved")
+        data = (recovery + "\t\tbranch 'other' of https://example.test/repo\n").encode()
+        (self.admin / "FETCH_HEAD").write_bytes(data)
+        self.assert_release_blocked("fetch-head-recovery-required")
+        self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), data)
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
 
     def test_post_remove_branch_reflog_drift_is_unknown(self):
         _, reflog = self.rebased_task()
@@ -1225,14 +1245,12 @@ class ReleaseTests(unittest.TestCase):
         message = self.admin / "COMMIT_EDITMSG"
         original = message.read_bytes()
         message.write_bytes(original + b"substantive uncommitted draft\n")
-        with self.assertRaisesRegex(FINISH.Retain, "commit-message-recovery"):
-            self.finish("--release")
+        self.assert_release_blocked("commit-message-recovery")
         self.assertTrue(message.read_bytes().endswith(b"substantive uncommitted draft\n"))
         message.write_bytes(original)
         git(self.repo, "config", "commit.cleanup", "scissors")
         self.call("resume")
-        with self.assertRaisesRegex(FINISH.Retain, "cleanup-mode-unqualified"):
-            self.finish("--release")
+        self.assert_release_blocked("cleanup-mode-unqualified")
         self.assertTrue(self.wt.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "native no-follow xattr fixture")
@@ -1242,8 +1260,7 @@ class ReleaseTests(unittest.TestCase):
                 subprocess.run(["/usr/bin/xattr", "-w", "com.example.finish-fixture", "synthetic", str(path)], check=True)
                 try:
                     self.call("resume")
-                    with self.assertRaisesRegex(FINISH.Retain, "extended-attributes"):
-                        self.finish("--release")
+                    self.assert_release_blocked("extended-attributes")
                     self.assertTrue(path.exists())
                     self.assertTrue((self.admin / "locked").exists())
                 finally:
@@ -1278,7 +1295,111 @@ class ForegroundCompletionTests(unittest.TestCase):
         result = self.finish()[1][0]
         self.assertEqual(result["reason"], "pr-not-merged")
         self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["automatic_handoff"]["baseline"], "unavailable")
+        self.assertEqual(result["automatic_handoff"]["blocker"], "ignored-roots-require-explicit-disposal")
+        FINISH.qualified_policy.side_effect = None
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "ignored-roots-require-explicit-disposal")
         self.assertEqual((self.wt / "ignored").read_text(), "keep this recovery content\n")
+
+    def pending_fetch_recovery(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        tree = git(self.repo, "rev-parse", "HEAD^{tree}")
+        recovery = git(self.repo, "commit-tree", tree, "-p", self.head, "-m", "recovery")
+        git(self.repo, "update-ref", "refs/heads/released-feature", recovery, self.head)
+        git(self.repo, "update-ref", "refs/heads/released-feature", self.head, recovery)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo), recovery)
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "pr-not-merged")
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        return recovery
+
+    def test_pending_finish_hands_native_index_refresh_and_fetch_recovery_to_same_consumer(self):
+        recovery = self.pending_fetch_recovery()
+        index = (self.admin / "index").read_bytes()
+        os.utime(self.wt / "file", (time.time() + 5, time.time() + 5))
+        mask = os.umask(0o077)
+        try:
+            git(self.wt, "status", "--porcelain")
+        finally:
+            os.umask(mask)
+        self.assertNotEqual((self.admin / "index").read_bytes(), index)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo), self.head)
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual(git(self.repo, "cat-file", "-t", recovery), "commit")
+
+    def test_overwritten_fetch_head_cannot_erase_release_recovery_obligation(self):
+        recovery = self.pending_fetch_recovery()
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo), self.head)
+        git(self.repo, "reflog", "expire", "--expire=now", "refs/heads/released-feature")
+        self.assertEqual(git(self.repo, "rev-list", recovery, "--not", "--all"), recovery)
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["reason"], "admin-recovery-not-preserved", result)
+        self.assertTrue(self.wt.exists())
+
+    def test_ignored_disposal_is_frozen_at_release_and_worker_cannot_approve_new_content(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        (self.wt / "ignored").mkdir()
+        (self.wt / "ignored/proof").write_text("completed task proof\n")
+        result = self.finish("--discard-ignored", "ignored")[1][0]
+        self.assertEqual(result["automatic_handoff"]["baseline"], "ready")
+        (self.wt / "ignored/new").write_text("new recovery data\n")
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        with self.assertRaisesRegex(FINISH.Retain, "requires-owner"):
+            self.call("check", "--apply", "--discard-ignored", "ignored")
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "released-worktree-changed")
+        self.assertTrue((self.wt / "ignored/new").exists())
+
+    def test_same_consumer_removes_unchanged_owner_discarded_content(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        (self.wt / "ignored").write_text("completed proof\n")
+        self.finish("--discard-ignored", "ignored")
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertTrue(self.legacy.exists())
+
+    def pending_target_fetch(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        target = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "target advances")
+        git(self.repo, "update-ref", "refs/heads/main", target, self.head)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo),
+            "refs/heads/main:refs/remotes/origin/main")
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "pr-not-merged", result)
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        return target
+
+    def test_pending_finish_preserves_fetched_target_ahead_of_task(self):
+        target = self.pending_target_fetch()
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), target)
+
+    def test_target_ref_drift_between_admissions_holds_before_native_unlock(self):
+        target = self.pending_target_fetch()
+        successor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", target, "-m", "next target")
+        admission, calls = FINISH.deletion_admission, []
+        def advance(*args):
+            calls.append(None)
+            if len(calls) == 2:
+                git(self.repo, "update-ref", "refs/remotes/origin/main", successor, target)
+            return admission(*args)
+        with mock.patch.object(FINISH, "deletion_admission", side_effect=advance), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["reason"], "removal-preimage-changed", result)
+        self.assertFalse(any("worktree" in call.args[0] and ("unlock" in call.args[0] or "remove" in call.args[0])
+                             for call in children.call_args_list))
+        self.assertTrue(self.wt.exists())
 
     def test_completion_rechecks_owner_signoff_before_removal(self):
         self.call("resume", "--owner", "owner-2")
@@ -1675,6 +1796,7 @@ class FinalizedRemovalTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
     finish = ReleaseTests.finish
+    assert_release_blocked = ReleaseTests.assert_release_blocked
     setUp = ReleaseTests.setUp
     tearDown = ReleaseTests.tearDown
 
@@ -1720,8 +1842,7 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.gitlinks()
         self.head = git(self.wt, "rev-parse", "HEAD")
         self.proofs[self.url] = self.proof(self.url)
-        with self.assertRaisesRegex(FINISH.Retain, "raw-index-flags-or-mode-unsupported"):
-            self.finish("--release")
+        self.assert_release_blocked("raw-index-flags-or-mode-unsupported")
         contents = self.inventory(allow_empty_gitlinks=True)
         self.assertEqual({name: proof["state"] for name, proof in contents["gitlinks"].items()},
                          {"vendor/empty": "empty", "vendor/missing": "absent", "absent/leaf": "absent"})
@@ -2512,12 +2633,14 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertFalse(self.admin.exists())
         self.assertTrue(self.legacy.exists())
 
-    def test_resolve_undo_default_automatic_admission_remains_strict(self):
+    def test_resolve_undo_release_mapping_cannot_disappear_before_automatic_retry(self):
         self.resolve_undo_fixture()
-        before = (self.admin / "index").read_bytes()
-        with self.assertRaisesRegex(FINISH.Retain, "raw-index-extension-unsupported"):
-            self.finish("--release")
-        self.assertEqual((self.admin / "index").read_bytes(), before)
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        result = self.finish("--release")[1][0]
+        self.assertEqual(result["automatic_handoff"]["baseline"], "ready", result)
+        git(self.wt, "update-index", "--clear-resolve-undo")
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "released-worktree-changed")
         self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
         self.assertTrue(self.wt.exists())
 
