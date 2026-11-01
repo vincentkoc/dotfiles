@@ -2278,7 +2278,10 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertEqual(status["cancelled_owners"], cancelled["cancelled_owners"])
 
     def test_finalized_branch_transition_preserves_both_refs_and_enrollment(self):
+        # Keep the checkout available until its PR merges before manual closeout.
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
         self.finish()
+        self.proofs[self.url] = self.proof(self.url)
         with FINISH.ledger(self.state) as db:
             enrolled = dict(FINISH.get_row(db, self.wt))
         git(self.wt, "checkout", "-b", "reviewed-current")
