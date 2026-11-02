@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 CHECK_SCHEMA = "external-tmp-check.v1"
 STORAGE_SCHEMA = "external-worktree-storage.v2"
+FOLDER_SCHEMA = "external-worktree-storage.v3"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
@@ -180,14 +181,23 @@ def run_guard(path):
     configured = value.get("configured") if isinstance(value, dict) else None
     if (
         type(configured) is not bool
-        or value.get("schema_version") != STORAGE_SCHEMA
+        or value.get("schema_version") not in (STORAGE_SCHEMA, FOLDER_SCHEMA)
     ):
         fail("worktree storage guard returned an invalid attestation")
     if configured:
         mount = value.get("mount_point")
         if not isinstance(mount, str) or not os.path.isabs(mount):
             fail("worktree storage guard returned an invalid mount point")
+    if configured and value["schema_version"] == FOLDER_SCHEMA:
+        root = value.get("worktree_root")
+        if (not isinstance(root, str) or not os.path.isabs(root)
+                or pathlib.Path(mount) not in pathlib.Path(root).parents):
+            fail("worktree storage guard returned an invalid folder root")
     return value
+
+
+def storage_root(observed):
+    return observed.get("worktree_root") if observed.get("schema_version") == FOLDER_SCHEMA else observed.get("mount_point")
 
 
 def open_namespace(mount, create):
@@ -219,18 +229,19 @@ def close_namespace(values):
 def check():
     observed = run_guard(guard_path())
     configured = observed["configured"]
-    mount = observed.get("mount_point") if configured else None
+    mount = storage_root(observed) if configured else None
     if configured:
         close_namespace(open_namespace(pathlib.Path(mount), False))
     print(
         json.dumps(
             {
                 "configured": configured,
-                "mount_point": mount,
+                "mount_point": observed.get("mount_point") if configured else None,
+                **({"worktree_root": mount} if observed["schema_version"] == FOLDER_SCHEMA else {}),
                 "ready": configured,
                 "schema_version": CHECK_SCHEMA,
                 "scratch_namespace": ".scratch/tmp",
-                "storage_schema": STORAGE_SCHEMA,
+                "storage_schema": observed["schema_version"],
                 "tmpdir_scope": "invocation",
             },
             sort_keys=True,
@@ -337,7 +348,7 @@ def cleanup(scratch, guard):
     observed = run_guard(guard)
     if (
         observed["configured"] is not True
-        or observed.get("mount_point") != str(scratch.mount)
+        or storage_root(observed) != str(scratch.mount)
     ):
         fail("storage changed; refusing cleanup fallback")
     revalidate(scratch)
@@ -416,7 +427,7 @@ def run_command(command):
     observed = run_guard(guard)
     if observed["configured"] is not True:
         fail("required external worktree storage is not configured")
-    mount = pathlib.Path(observed["mount_point"])
+    mount = pathlib.Path(storage_root(observed))
     scratch = create_scratch(mount)
     status = 78
     wrapper_signal = None
@@ -425,7 +436,7 @@ def run_command(command):
         current = run_guard(guard)
         if (
             current["configured"] is not True
-            or current.get("mount_point") != str(mount)
+            or storage_root(current) != str(mount)
         ):
             fail("storage changed before child execution")
         revalidate(scratch)
