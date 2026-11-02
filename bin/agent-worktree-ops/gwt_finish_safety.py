@@ -105,6 +105,38 @@ def read_file(path, until, limit=LEAF_LIMIT):
         os.close(fd)
 
 
+def tracked_blob(path, until, expected, limit):
+    """Hash a tracked source leaf without buffering it or relaxing admin bounds."""
+    tick(until)
+    named = os.lstat(path)
+    if not stat.S_ISREG(named.st_mode) or not 0 <= named.st_size <= limit:
+        raise Retain("file-type-or-size-unsupported")
+    if file_identity(named) != expected:
+        raise Retain("file-replaced")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if file_identity(os.fstat(fd)) != expected:
+            raise Retain("file-replaced")
+        size = named.st_size
+        digest = hashlib.sha1(b"blob " + str(size).encode() + b"\0")
+        count = 0
+        while True:
+            tick(until)
+            chunk = os.read(fd, min(65536, size + 1 - count))
+            if not chunk:
+                break
+            count += len(chunk)
+            if count > size:
+                raise Retain("file-size-changed")
+            digest.update(chunk)
+        if (count != size or file_identity(os.fstat(fd)) != expected
+                or file_identity(os.lstat(path)) != expected):
+            raise Retain("file-changed")
+        return digest.hexdigest(), size
+    finally:
+        os.close(fd)
+
+
 def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None,
               sudo_monitor=False, deadline=None):
     """Bound one child; sudo cleanup signals only its monitor, never a group."""
@@ -559,15 +591,16 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
                 mode, oid = head[name]
                 if stat.S_ISLNK(details.st_mode) and mode == 0o120000:
                     data = os.fsencode(os.readlink(path))
+                    size = len(data)
+                    digest = hashlib.sha1(b"blob " + str(size).encode() + b"\0" + data).hexdigest()
                 elif stat.S_ISREG(details.st_mode) and mode in (0o100644, 0o100755):
                     if bool(details.st_mode & 0o111) != (mode == 0o100755):
                         raise Retain("working-mode-changed")
-                    data, _ = read_file(path, until, min(LEAF_LIMIT, SOURCE_LIMIT - used))
+                    digest, size = tracked_blob(path, until, file_identity(details), SOURCE_LIMIT - used)
                 else:
                     raise Retain("working-type-changed")
-                used += len(data)
-                if used > SOURCE_LIMIT or hashlib.sha1(
-                        b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
+                used += size
+                if used > SOURCE_LIMIT or digest != oid:
                     raise Retain("working-bytes-changed-or-limit")
         if file_identity(directory.lstat()) != file_identity(before):
             raise Retain("inventory-directory-changed")

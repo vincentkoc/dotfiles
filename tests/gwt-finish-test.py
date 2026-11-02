@@ -1118,9 +1118,24 @@ class ReleaseTests(unittest.TestCase):
         self.assert_release_blocked("working-bytes")
         self.assertTrue(self.wt.exists())
 
+    def test_inventory_verifies_tracked_blob_larger_than_leaf_limit(self):
+        large = self.wt / "large-blob"
+        large.write_bytes(b"source\n" * (9 * 1024 * 1024 // 7))
+        git(self.wt, "add", ".")
+        git(self.wt, "commit", "-m", "large tracked fixture")
+        snap = FINISH.revalidate(self.row())
+        import time
+        proof = FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 10)
+        self.assertIn("large-blob", proof["entries"])
+        with large.open("r+b") as stream:
+            stream.write(b"changed")
+        with self.assertRaisesRegex(FINISH.Retain, "working-bytes"):
+            FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 10)
+        self.assertTrue(self.wt.exists())
+
     def test_inventory_supports_more_than_old_32mib_and_bounds_the_actual_next_read(self):
         # Five distinct, compressible 7MiB blobs exercise the former failure
-        # without a large object store or a real checkout read.
+        # without a large object store.
         for number in range(5):
             (self.wt / f"bulk-{number}").write_bytes(bytes([65 + number]) * (7 * 1024 * 1024))
         git(self.wt, "add", ".")
@@ -1131,10 +1146,13 @@ class ReleaseTests(unittest.TestCase):
         import time
         module = FINISH.safety()
         self.assertGreater(module.SOURCE_LIMIT, module.PASS_LIMIT)
-        with mock.patch.object(module, "PASS_LIMIT", 32 * 1024 * 1024):
+        total = sum((self.wt / name).stat().st_size
+                    for name in git(self.wt, "ls-files").splitlines())
+        with mock.patch.object(module, "PASS_LIMIT", 32 * 1024 * 1024), \
+                mock.patch.object(module, "SOURCE_LIMIT", total):
             contents = module.inventory(snap, FINISH.git, time.monotonic() + 10)
             self.assertTrue(all(f"bulk-{number}" in contents["entries"] for number in range(5)))
-        with mock.patch.object(module, "SOURCE_LIMIT", 32 * 1024 * 1024):
+        with mock.patch.object(module, "SOURCE_LIMIT", total - 1):
             with self.assertRaisesRegex(FINISH.Retain, "size"):
                 module.inventory(snap, FINISH.git, time.monotonic() + 10)
         self.proofs[self.url].update(merged=False, state="open", merge=None)
