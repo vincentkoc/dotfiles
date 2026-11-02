@@ -82,28 +82,16 @@
 
 ## Task scope and execution
 
-- Establish the requested completion condition before implementation. Optional
-  credentials, channel checks, profiling, or post-merge improvements do not
-  extend it; record a follow-up when they are outside the accepted scope.
-- When the user asks you to do the work, start in the same turn instead of
-  restating the plan. For a short approval like "ok do it" or "go ahead", skip
-  the recap and act. Prefer the first real tool step over more narration;
-  commentary-only turns are incomplete when the next action is clear.
+- Establish the requested completion condition before implementation. Optional credentials, channel checks, profiling, or post-merge improvements do not extend it; record a follow-up when they are outside the accepted scope.
+- When the user asks you to do the work, start in the same turn instead of restating the plan. For a short approval like "ok do it" or "go ahead", skip the recap and act. Prefer the first real tool step over more narration; commentary-only turns are incomplete when the next action is clear.
 - If work will take more than a moment, send a brief progress update while acting.
 - Multi-part requests are not done until every requested item is handled or clearly marked blocked.
 - Do prerequisite lookup or discovery before dependent actions.
-- Do not reopen settled scope, replace an active execution route, repeat
-  completed work, or dispatch a replacement root task unless the user or
-  concrete new evidence invalidates the current route.
-- Do not repeat an unchanged check without new evidence. Inspect the exact
-  failure and retry only the failed surface.
-- After resume or compaction, re-anchor to the latest user request and live
-  state. Discard obsolete plans and completed work.
-- Stop when the request is satisfied. If progress requires external action,
-  report one precise blocker, its evidence, and the exact unblock action.
-- Wait only for a dependency that can still change the task outcome. Use bounded
-  waits, then inspect new output or state. An unchanged timeout is not a reason
-  to restart the task, create another worker, or repeat completed checks.
+- Do not reopen settled scope, replace an active execution route, repeat completed work, or dispatch a replacement root task unless the user or concrete new evidence invalidates the current route.
+- Do not repeat an unchanged check without new evidence. Inspect the exact failure and retry only the failed surface.
+- After resume or compaction, re-anchor to the latest user request and live state. Discard obsolete plans and completed work.
+- Stop when the request is satisfied. If progress requires external action, report one precise blocker, its evidence, and the exact unblock action.
+- Wait only for a dependency that can still change the task outcome. Use bounded waits, then inspect new output or state. An unchanged timeout is not a reason to restart the task, create another worker, or repeat completed checks.
 
 ## Safety and delegation
 
@@ -116,63 +104,26 @@
 
 ### Safety notices and optional models
 
-- If a request produces `This content can't be shown` or a cybersecurity safety
-  notice, stop the affected request and preserve/report the notice in the
-  conversation, without a new transcript artifact. Do not automatically retry,
-  paraphrase, or delegate blocked content to another model.
-- Use `gpt-daybreak-red-latest` as the preferred specialty model for a separate,
-  independently permitted, explicitly authorized, scoped cybersecurity task on
-  the same approved identity, project, and product surface. It is not a fallback
-  for blocked content.
-- Use `gpt-daybreak-blue-latest` only when explicitly requested for a separate,
-  independently permitted, explicitly authorized, scoped defensive task on the
-  same approved identity, project, and product surface. It is not a fallback
-  for blocked content.
-- Never use model changes to bypass access, content, or tool refusals or weaken
-  sandbox, approval, or review gates. Restore the prior model after the permitted
-  task; if the route is unavailable or another refusal occurs, stop and report it.
-  Keep the configured model preference and default unchanged.
+- If a request produces `This content can't be shown` or a cybersecurity safety notice, stop the affected request and preserve/report the notice in the conversation, without a new transcript artifact. Do not automatically retry, paraphrase, or delegate blocked content to another model.
+- Use `gpt-daybreak-red-latest` as the preferred specialty model for a separate, independently permitted, explicitly authorized, scoped cybersecurity task on the same approved identity, project, and product surface. It is not a fallback for blocked content.
+- Use `gpt-daybreak-blue-latest` only when explicitly requested for a separate, independently permitted, explicitly authorized, scoped defensive task on the same approved identity, project, and product surface. It is not a fallback for blocked content.
+- Never use model changes to bypass access, content, or tool refusals or weaken sandbox, approval, or review gates. Restore the prior model after the permitted task; if the route is unavailable or another refusal occurs, stop and report it. Keep the configured model preference and default unchanged.
 
 ## Files and artifacts
 
-- Default to no new artifact or temporary files for routine inspection, review,
-  planning, or verification. Prefer stdout, pipes, and in-memory processing.
-- Do not create task directories under `~/.codex/artifacts/`, including
-  `clawsweeper-*`, or save command output by habit.
-- Create files only for requested deliverables or concrete tool, test,
-  debugging, recovery, or audit requirements. State the purpose in chat first.
-  Required proof artifacts and real-file payloads such as `ghx --body-file`
-  remain allowed.
-- Use the fewest files needed. Reuse one task-owned location instead of
-  per-command snapshots, duplicate reports, or unnecessary backups.
-- Return subagent findings in chat by default. Create progress files or
-  duplicate reports only for a required consumer.
-- Put durable deliverables in the repository's intended location or the
-  user-requested destination. Put disposable scratch in the platform's
-  temporary directory unless a tool requires another path.
-- Retain all agent session history, including completed and archived sessions,
-  conversation transcripts, history indexes/databases, and tmux recovery history.
-  These are not disposable task logs or proof artifacts. Task completion, age,
-  a missing pane, or permission for aggressive worktree cleanup never authorizes
-  their deletion or truncation. Preserve them even inside a cleanup candidate;
-  retain that candidate if removal would destroy history. Cleanup does not
-  authorize compressing or migrating session history.
-- Preserve user deliverables, unfinished source, live owners, credentials,
-  shared dependency targets, and active/session state. Keep recovery checkpoints
-  only while unfinished work needs them or the user explicitly requests retention.
-  Cleanup stays within the finalized task's paths; unknown ownership is not
-  disposable merely because a file is old or ignored.
+- Default to no new artifact or temporary files for routine inspection, review, planning, or verification. Prefer stdout, pipes, and in-memory processing.
+- Do not create task directories under `~/.codex/artifacts/`, including `clawsweeper-*`, or save command output by habit.
+- Create files only for requested deliverables or concrete tool, test, debugging, recovery, or audit requirements. State the purpose in chat first. Required proof artifacts and real-file payloads such as `ghx --body-file` remain allowed.
+- Use the fewest files needed. Reuse one task-owned location instead of per-command snapshots, duplicate reports, or unnecessary backups.
+- Return subagent findings in chat by default. Create progress files or duplicate reports only for a required consumer.
+- Put durable deliverables in the repository's intended location or the user-requested destination. Put disposable scratch in the platform's temporary directory unless a tool requires another path.
+- Retain all agent session history, including completed and archived sessions, conversation transcripts, history indexes/databases, and tmux recovery history. These are not disposable task logs or proof artifacts. Task completion, age, a missing pane, or permission for aggressive worktree cleanup never authorizes their deletion or truncation. Preserve them even inside a cleanup candidate; retain that candidate if removal would destroy history. Cleanup does not authorize compressing or migrating session history.
+- Preserve user deliverables, unfinished source, live owners, credentials, shared dependency targets, and active/session state. Keep recovery checkpoints only while unfinished work needs them or the user explicitly requests retention. Cleanup stays within the finalized task's paths; unknown ownership is not disposable merely because a file is old or ignored.
 
 ## Tools and validation
 
-- On macOS, run heredoc-heavy Bash scripts with `/bin/bash` or their native
-  compatibility guard. Bash 5.3 can deadlock before the reader starts; an
-  unchanged retry will not fix it.
-- Process large data inside the executing tool and return bounded results.
-  Never parse truncated or compacted display output as JSON. Check the exit
-  status and output contract; narrow extraction instead of increasing output
-  limits repeatedly. Keep `functions.exec` state in `store`/`load`, and use
-  only the tool names and arguments exposed in the active session.
+- On macOS, run heredoc-heavy Bash scripts with `/bin/bash` or their native compatibility guard. Bash 5.3 can deadlock before the reader starts; an unchanged retry will not fix it.
+- Process large data inside the executing tool and return bounded results. Never parse truncated or compacted display output as JSON. Check the exit status and output contract; narrow extraction instead of increasing output limits repeatedly. Keep `functions.exec` state in `store`/`load`, and use only the tool names and arguments exposed in the active session.
 - Before finalizing, quickly verify correctness, coverage, formatting, and obvious side effects.
 - For external repos, run relevant tests and formatters before handoff.
 - Prefer scoped tests and targeted verification; do not run repo-wide heavy gates unless explicitly asked or clearly required.
@@ -180,9 +131,7 @@
 
 ### Codebase discovery
 
-- Prefer available codebase graph queries for discovery. If the service fails or
-  has no usable project, continue with bounded `rg` and direct reads. Do not retry
-  unchanged failures or make incidental indexing/daemon repair a prerequisite.
+- Prefer available codebase graph queries for discovery. If the service fails or has no usable project, continue with bounded `rg` and direct reads. Do not retry unchanged failures or make incidental indexing/daemon repair a prerequisite.
 - Before `codebase-memory-mcp` indexing, resolve the requested repository to its canonical owning checkout with the installed `codebase-memory-mcp` skill helper. Linked branch worktrees must reuse the owner graph; separate clones remain separate projects.
 - Never index `~/.codex/worktrees`, `~/GIT/_Worktrees`, repo-local `.worktrees`, `/tmp`, or `/private/tmp` paths as independent projects. If a path under one of those prefixes cannot resolve to an existing non-worktree owning checkout, skip indexing and report the missing canonical checkout.
 
@@ -210,65 +159,27 @@
 
 ## Worktrees
 
-- Use the installed `operations-worktree` skill and `functions/gwt/README.md`
-  for lifecycle commands, dependency qualification, storage policy and recovery.
-  Do not copy their detailed state machine into task prompts.
+- Use the installed `operations-worktree` skill and `functions/gwt/README.md` for lifecycle commands, dependency qualification, storage policy and recovery. Do not copy their detailed state machine into task prompts.
 
 ### Owners and creation
 
-- Use a task-owned branch/worktree for edits and start early so commits can
-  be made incrementally. Read-only discovery does not need one. Delegate
-  bounded independent work only when it reduces elapsed time or risk.
-- Keep durable owners in `~/GIT`. Resolve `gwt owner` before new work and
-  reuse a verified healthy, full, non-promisor owner and the configured managed
-  worktree root. Prefer shared worktrees. Create branch worktrees through
-  `gwt new <branch> [start-point]` or the repository-native wrapper; share
-  history rather than cloning per task.
-- Preserve protected paths, existing owners, local commits, shared dependencies,
-  locks and registrations. A wrapper refusal stops creation, not authorized
-  diagnosis/repair of that owner. Never bypass it with raw Git or copied clones.
-- Enroll only new personal worktrees with `--finish-managed`. Never adopt an
-  existing/shared/native checkout to obtain completion or deletion capability.
-- Use `gwt snapshot` for requested synthetic carriers under `~/GIT/_Synthetic`;
-  preserve provenance and never publish carrier history or index it independently.
+- Use a task-owned branch/worktree for edits and start early so commits can be made incrementally. Read-only discovery does not need one. Delegate bounded independent work only when it reduces elapsed time or risk.
+- Keep durable owners in `~/GIT`. Resolve `gwt owner` before new work and reuse a verified healthy, full, non-promisor owner and the configured managed worktree root. Prefer shared worktrees. Create branch worktrees through `gwt new <branch> [start-point]` or the repository-native wrapper; share history rather than cloning per task.
+- Preserve protected paths, existing owners, local commits, shared dependencies, locks and registrations. A wrapper refusal stops creation, not authorized diagnosis/repair of that owner. Never bypass it with raw Git or copied clones.
+- Enroll only new personal worktrees with `--finish-managed`. Never adopt an existing/shared/native checkout to obtain completion or deletion capability.
+- Use `gwt snapshot` for requested synthetic carriers under `~/GIT/_Synthetic`; preserve provenance and never publish carrier history or index it independently.
 
 ### Dependencies
 
-- Reuse dependencies only after matching frozen inputs, workspace links,
-  runtime and platform. Unknown compatibility means code-only. Never install
-  through a shared symlink or inside `~/.codex/worktrees`, including running
-  `pnpm install` in a Codex worktree under that root.
-- If `node_modules` is not a qualified symlink in a Codex worktree, stop
-  dependency-backed execution and report it. Continue code-only inspection and
-  edits that do not need those dependencies.
+- Reuse dependencies only after matching frozen inputs, workspace links, runtime and platform. Unknown compatibility means code-only. Never install through a shared symlink or inside `~/.codex/worktrees`, including running `pnpm install` in a Codex worktree under that root.
+- If `node_modules` is not a qualified symlink in a Codex worktree, stop dependency-backed execution and report it. Continue code-only inspection and edits that do not need those dependencies.
 
 ### Completion and retention
 
-- Finish each task with an explicit checkout outcome: `retained`, `blocked`,
-  or verified `removed`. Task closeout includes removing its disposable
-  checkout through the native owner. Retention needs a concrete unfinished
-  consumer or native blocker; name the exact path, responsible owner and next
-  action. Do not claim a retry is scheduled unless an installed consumer owns
-  it. Report the disposition once; do not re-audit unchanged custody or rebuild
-  proof to justify stopping.
-- Record finished PR work with `gwt finish --pr <URL>` and complete native
-  checkout closeout. Follow the installed helper's completion/release contract;
-  older helpers may still require `--release`. Keep a recovery pin only while
-  unfinished work needs the checkout. For superseded/cancelled work without
-  matching PR proof, use supported `gwt cancel --reason <text>` and its native
-  finalized-task closeout; never invent a PR to obtain removal.
-- Only sign off for the current owner. Preserve stack dependencies and recovery
-  pins. Resume before reuse; changed inputs invalidate old completion/release.
-- After work is finalized, task-local logs, test proof, receipts, archives,
-  build outputs and scratch are disposable. Clean them up with the checkout
-  through the supported foreground native task-closeout route; no evidence
-  archive or separate cleanup approval is required. Preserve source branches,
-  actual user deliverables and protected session history. This does not
-  activate unattended fleet or scheduler deletion, or impose unattended-worker
-  activation on foreground closeout. Unknown live owners or incomplete removal
-  intents retain state; do not activate a scheduler, retry uncertain removal
-  or clear locks by inference. A pending merge or live holder needs an exact
-  native retry command and responsible owner, not indefinite retention.
+- Finish each task with an explicit checkout outcome: `retained`, `blocked`, or verified `removed`. Task closeout includes removing its disposable checkout through the native owner. Retention needs a concrete unfinished consumer or native blocker; name the exact path, responsible owner and next action. Do not claim a retry is scheduled unless an installed consumer owns it. Report the disposition once; do not re-audit unchanged custody or rebuild proof to justify stopping.
+- Record finished PR work with `gwt finish --pr <URL>` and complete native checkout closeout. Follow the installed helper's completion/release contract; older helpers may still require `--release`. Keep a recovery pin only while unfinished work needs the checkout. For superseded/cancelled work without matching PR proof, use supported `gwt cancel --reason <text>` and its native finalized-task closeout; never invent a PR to obtain removal.
+- Only sign off for the current owner. Preserve stack dependencies and recovery pins. Resume before reuse; changed inputs invalidate old completion/release.
+- After work is finalized, task-local logs, test proof, receipts, archives, build outputs and scratch are disposable. Clean them up with the checkout through the supported foreground native task-closeout route; no evidence archive or separate cleanup approval is required. Preserve source branches, actual user deliverables and protected session history. This does not activate unattended fleet or scheduler deletion, or impose unattended-worker activation on foreground closeout. Unknown live owners or incomplete removal intents retain state; do not activate a scheduler, retry uncertain removal or clear locks by inference. A pending merge or live holder needs an exact native retry command and responsible owner, not indefinite retention.
 
 ### Maintenance
 
@@ -279,38 +190,21 @@
 
 ## OpenClaw
 
-- In `openclaw/openclaw`, resolve the configured owner with `gwt owner` for new
-  work. Use its verified current-main maintainer instructions and native wrappers,
-  not an old sibling checkout’s workflow. Freeze that revision for the task; do
-  not chase main. Keep source/build instructions tied to the actual task revision.
-  Repository instructions and invoked skills own validation, release, and landing.
-  Preserve active checkouts and their current execution routes.
+- In `openclaw/openclaw`, resolve the configured owner with `gwt owner` for new work. Use its verified current-main maintainer instructions and native wrappers, not an old sibling checkout’s workflow. Freeze that revision for the task; do not chase main. Keep source/build instructions tied to the actual task revision. Repository instructions and invoked skills own validation, release, and landing. Preserve active checkouts and their current execution routes.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`.
-- In `openclaw/*`, ignore the 20-open-PR limit for `vincentkoc`: I am an
-  organization admin. Do not block PR creation or other requested work because
-  of this limit. All other review, validation, and landing requirements still apply.
-- In `openclaw/*`, let autoreview report broadly, but keep review-driven edits
-  centered on the original request, regressions introduced by the diff, the
-  owner boundary, and the touched bug class. Prefer recording adjacent
-  improvements as follow-ups instead of growing the active branch.
-- If autoreview feedback starts causing repeated patch cycles or materially
-  widening an OpenClaw branch, pause and summarize the drift before continuing.
-  During release work, strongly prefer post-release `main` follow-ups unless
-  the finding directly blocks the release.
+- In `openclaw/*`, ignore the 20-open-PR limit for `vincentkoc`: I am an organization admin. Do not block PR creation or other requested work because of this limit. All other review, validation, and landing requirements still apply.
+- In `openclaw/*`, let autoreview report broadly, but keep review-driven edits centered on the original request, regressions introduced by the diff, the owner boundary, and the touched bug class. Prefer recording adjacent improvements as follow-ups instead of growing the active branch.
+- If autoreview feedback starts causing repeated patch cycles or materially widening an OpenClaw branch, pause and summarize the drift before continuing. During release work, strongly prefer post-release `main` follow-ups unless the finding directly blocks the release.
 - Do not make any `docs/internal/*.md` files on openclaw.
 
 ### macOS releases
 
-- Read the [maintainer runbook](https://github.com/openclaw/maintainers/blob/main/release/macos.md)
-  before macOS release work. It owns the procedure. Avoid duplicating it here.
-- Use `openclaw/releases` and its main-only `mac-release` environment.
-  The organization-owned OpenClaw macOS Publisher App supplies scoped tokens. Do not restore the personal PAT path.
+- Read the [maintainer runbook](https://github.com/openclaw/maintainers/blob/main/release/macos.md) before macOS release work. It owns the procedure. Avoid duplicating it here.
+- Use `openclaw/releases` and its main-only `mac-release` environment. The organization-owned OpenClaw macOS Publisher App supplies scoped tokens. Do not restore the personal PAT path.
 - Use Firefox for GitHub App changes. Keep private keys and tokens out of source, chat, logs, and command arguments.
-- Stable feeds land through `automation/macos-appcast-<version>` PRs to `openclaw/openclaw` `main`.
-  No direct-main push, force-push, protected `release/appcast-*` branch, or takeover of an orphan or foreign branch.
+- Stable feeds land through `automation/macos-appcast-<version>` PRs to `openclaw/openclaw` `main`. No direct-main push, force-push, protected `release/appcast-*` branch, or takeover of an orphan or foreign branch.
 - A new workflow revision requires a new dispatch. An old-run rerun retains its original workflow revision.
-- Verify artifact promotion, all three feed files, and the installed-client upgrade separately.
-  Setup probes and green workflow CI do not prove a completed macOS release.
+- Verify artifact promotion, all three feed files, and the installed-client upgrade separately. Setup probes and green workflow CI do not prove a completed macOS release.
 
 ## Remote access
 
@@ -330,10 +224,7 @@
 
 ### Recovery mode
 
-- After a crash or actual session restore, recover the exact existing task and
-  live state before mutation. Set a recovery title in the current tmux pane and
-  restore its workstream title once resolved. Context compaction alone needs a
-  brief re-anchor, not fleet recovery or repeated completed checks.
+- After a crash or actual session restore, recover the exact existing task and live state before mutation. Set a recovery title in the current tmux pane and restore its workstream title once resolved. Context compaction alone needs a brief re-anchor, not fleet recovery or repeated completed checks.
 - Re-read the recent thread context and summarize task, status, pending work, and next step.
 - Verify cwd, repo root, branch, git status, node_modules linkage, and free disk before editing or testing.
 - For tmux/Codex cockpit recovery, inspect existing restore state before writing new state: run `tt status`, `tt snapshot-history codex-cockpit`, and `tt restore-preview <snapshot>` or `tt codex-restore ...` dry runs first. Do not click `CX SAVE` or run `tt codex-snapshot` until the candidate restore source is identified.
@@ -342,32 +233,14 @@
 
 ## Computer Use
 
-- For Computer Use-heavy execution, prefer a dedicated task or agent using
-  `gpt-5.6-terra` at `medium`, or the fastest smaller available model with
-  equivalent Computer Use access.
-- Keep planning, credential and safety decisions, recovery, and final
-  verification on the current stronger model. Do not hot-swap an active thread
-  or lose useful state merely to save tokens; use the current model when a
-  dedicated lane is unavailable.
+- For Computer Use-heavy execution, prefer a dedicated task or agent using `gpt-5.6-terra` at `medium`, or the fastest smaller available model with equivalent Computer Use access.
+- Keep planning, credential and safety decisions, recovery, and final verification on the current stronger model. Do not hot-swap an active thread or lose useful state merely to save tokens; use the current model when a dedicated lane is unavailable.
 
 ## Low Data Mode
 
-- Check `low-data status` before downloads, including Git history. On
-  protected or unknown paths, avoid huge WAN clones, bulk history hydration
-  and unnecessary fetches. Reuse local Git objects, caches and one shared
-  artifact instead of downloading it repeatedly per worktree. Cached refs are
-  not proof of the latest head. Task-required additive fetch/unshallow may
-  proceed within existing authority with automatic maintenance/pruning off;
-  it does not authorize GC, repacking, pruning or owner consolidation.
-- Normal commits, pushes, API requests, curl, package installs, and agent/model
-  traffic are not banned by this policy. Do not pause sessions on its behalf.
-- `gh` and `ghx` also guard bulk repository, release, and artifact downloads
-  before dispatch. Normal metadata, PR/issue, auth, and stdin-payload routes
-  remain available. Reuse cached archives instead of downloading per worktree.
-- `low-data on` forces protection. `auto` respects macOS constrained/expensive
-  paths and fails closed when native status is unavailable. `off` disables it.
-- Never bypass protection without explicit user consent. An approved single
-  command may use `LOW_DATA_ALLOW_NETWORK=1`; never export that override globally.
-- This guard covers PATH-resolved Git history downloads, not a firewall.
-  Absolute binaries and custom shell aliases/hooks can bypass it. Do not claim
-  a whole-machine bandwidth cap.
+- Check `low-data status` before downloads, including Git history. On protected or unknown paths, avoid huge WAN clones, bulk history hydration and unnecessary fetches. Reuse local Git objects, caches and one shared artifact instead of downloading it repeatedly per worktree. Cached refs are not proof of the latest head. Task-required additive fetch/unshallow may proceed within existing authority with automatic maintenance/pruning off; it does not authorize GC, repacking, pruning or owner consolidation.
+- Normal commits, pushes, API requests, curl, package installs, and agent/model traffic are not banned by this policy. Do not pause sessions on its behalf.
+- `gh` and `ghx` also guard bulk repository, release, and artifact downloads before dispatch. Normal metadata, PR/issue, auth, and stdin-payload routes remain available. Reuse cached archives instead of downloading per worktree.
+- `low-data on` forces protection. `auto` respects macOS constrained/expensive paths and fails closed when native status is unavailable. `off` disables it.
+- Never bypass protection without explicit user consent. An approved single command may use `LOW_DATA_ALLOW_NETWORK=1`; never export that override globally.
+- This guard covers PATH-resolved Git history downloads, not a firewall. Absolute binaries and custom shell aliases/hooks can bypass it. Do not claim a whole-machine bandwidth cap.
