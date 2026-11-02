@@ -1415,7 +1415,7 @@ new_window_tmux() {
 
 create_profile_window() {
   local new_window_tmux_bin="$TMUX_BIN"
-  local new_window_socket="${TMUX:-}" source="${TMUX_PANE:-}" after=0
+  local new_window_socket="${TMUX:-}" source="${TMUX_PANE:-}" position=end
   local TMUX_BIN=new_window_tmux
   local session window pane start_dir profile created
   local -a placement
@@ -1423,13 +1423,17 @@ create_profile_window() {
 
   while (( $# )); do
     case "$1" in
-      --after) after=1; shift ;;
+      --before|--after)
+        [[ "$position" == end || "$position" == "${1#--}" ]] || {
+          echo "tt new-window: --before and --after are mutually exclusive" >&2; return 2;
+        }
+        position="${1#--}"; shift ;;
       --socket|--target)
         [[ $# -ge 2 ]] || { echo "tt new-window: $1 needs a value" >&2; return 2; }
         if [[ "$1" == "--socket" ]]; then new_window_socket="$2"; else source="$2"; fi
         shift 2
         ;;
-      *) echo "usage: tt new-window [--after] [--socket path] [--target pane-id|window-id]" >&2; return 2 ;;
+      *) echo "usage: tt new-window [--before|--after] [--socket path] [--target pane-id|window-id]" >&2; return 2 ;;
     esac
   done
   [[ "$new_window_socket" == /* && "$source" =~ ^[%@][0-9]+$ ]] || {
@@ -1443,7 +1447,10 @@ create_profile_window() {
   require_operator_topology_scope new-window "$new_window_socket:$session:$window" || return $?
 
   placement=(-t "$session:")
-  if (( after )); then placement=(-a -t "$session:$window"); fi
+  case "$position" in
+    before) placement=(-b -t "$session:$window") ;;
+    after) placement=(-a -t "$session:$window") ;;
+  esac
   if [[ "$profile" == "ops" ]]; then placement+=(-c "$start_dir"); fi
   created="$("$TMUX_BIN" new-window -d -P -F '#{window_id}' "${placement[@]}")"
   if [[ "$profile" == "ops" ]]; then
@@ -4762,7 +4769,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|ops [session]|new-window [--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|pane-menu-bind [socket-path]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|new-window [--before|--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|pane-menu-bind [socket-path]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;

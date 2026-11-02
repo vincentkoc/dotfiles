@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise cockpit window bindings on a private real tmux server."""
+"""Check window placement with mocks and cockpit bindings on private tmux."""
 
 import fcntl
+import json
 import os
 import pathlib
 import pty
@@ -10,6 +11,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import time
@@ -17,6 +19,94 @@ import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 TMUX = shutil.which("tmux")
+BASH = shutil.which("bash")
+
+
+class MockPlacementTests(unittest.TestCase):
+    def setUp(self):
+        self.assertIsNotNone(BASH, "bash is required")
+        temporary = tempfile.TemporaryDirectory(prefix="tt-placement-")
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
+        self.socket = self.root / "socket with spaces"
+        self.log = self.root / "calls.jsonl"
+        mock = self.root / "tmux"
+        mock.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+args = sys.argv[1:]
+if args[:3] != ["-N", "-S", os.environ["MOCK_SOCKET"]]:
+    sys.exit(90)
+args = args[3:]
+with open(os.environ["MOCK_LOG"], "a") as stream:
+    stream.write(json.dumps(args) + "\\n")
+if args[0] == "display-message":
+    print("$1 @2 %3" if args[-1] == "#{session_id} #{window_id} #{pane_id}" else "/fixture/work")
+elif args[0] == "show-options":
+    print("plain")
+elif args[0] == "new-window":
+    print("@4")
+elif args[0] != "select-window":
+    sys.exit(91)
+''')
+        mock.chmod(0o700)
+        self.scope = f"new-window:{self.socket}:$1:@2"
+        self.env = {
+            "PATH": "/usr/bin:/bin", "HOME": str(self.root),
+            "TT_TMUX_BIN": str(mock), "CODEX_THREAD_ID": "fixture-agent",
+            "TT_OPERATOR_TMUX_SCOPE": self.scope,
+            "MOCK_SOCKET": str(self.socket), "MOCK_LOG": str(self.log),
+            "TMUX": "/fixture/wrong-socket,1,0", "TMUX_PANE": "%999",
+        }
+
+    def invoke(self, *args, scope=None):
+        self.log.write_text("")
+        env = {**self.env}
+        if scope is not None:
+            env["TT_OPERATOR_TMUX_SCOPE"] = scope
+        result = subprocess.run(
+            [BASH, str(REPO / "bin/tt"), "new-window", "--socket",
+             str(self.socket), "--target", "%3", *args],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return result, calls
+
+    def test_default_after_and_before_use_the_pinned_window(self):
+        for args, placement in (
+            ((), ["-t", "$1:"]),
+            (("--after",), ["-a", "-t", "$1:@2"]),
+            (("--before",), ["-b", "-t", "$1:@2"]),
+        ):
+            with self.subTest(args=args):
+                result, calls = self.invoke(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    [call for call in calls if call[0] == "new-window"],
+                    [["new-window", "-d", "-P", "-F", "#{window_id}", *placement]],
+                )
+                self.assertEqual(calls[-1], ["select-window", "-t", "$1:@4"])
+
+    def test_conflicting_placement_flags_refuse_before_transport(self):
+        for args in (("--before", "--after"), ("--after", "--before")):
+            with self.subTest(args=args):
+                result, calls = self.invoke(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("mutually exclusive", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_before_requires_the_exact_topology_scope(self):
+        for scope in ("", self.scope + "9", "new-window:/fixture/other:$1:@2"):
+            with self.subTest(scope=scope):
+                result, calls = self.invoke("--before", scope=scope)
+                self.assertEqual(result.returncode, 73, result.stderr)
+                self.assertIn("TT_OPERATOR_TMUX_SCOPE=", result.stderr)
+                self.assertFalse(any(call[0] in ("new-window", "select-window") for call in calls))
+
+    def test_invalid_source_identity_refuses_before_transport(self):
+        for args in (("--socket", "relative"), ("--target", "not-a-pane")):
+            with self.subTest(args=args):
+                result, calls = self.invoke("--before", *args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(calls, [])
 
 
 class NewWindowTests(unittest.TestCase):

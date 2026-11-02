@@ -265,8 +265,10 @@ marker-only command. `tt restore` remains the layout helper.
 In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
 and **New At End** create a 3x2 grid with pane titles, starting in the source
 pane's directory. Other sessions get a single pane. These bindings call
-`tt new-window [--after] --socket <socket> --target <pane-id|window-id>`;
-inside tmux, the socket and pane default to the invoking pane. Agent calls need
+`tt new-window [--before|--after] --socket <socket> --target <pane-id|window-id>`.
+Use `--before` to insert before the source window, `--after` to insert after it,
+or neither to append. The two flags are mutually exclusive. Inside tmux, the
+socket and pane default to the invoking pane. Agent calls need
 `TT_OPERATOR_TMUX_SCOPE=new-window:<socket>:<session-id>:<window-id>`.
 Existing windows and raw `tmux new-window` calls keep their current behavior.
 
