@@ -649,14 +649,21 @@ def platform_key():
             "machine": platform.machine()}
 
 
+HOLDER_COVERAGE = "bounded-native"
+
+
+def check_holder_platform():
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise Retain("holder-backend-unqualified-platform")
+    if [C.sizeof(t) for t in (BSD, VStat, VPath, CWD, FDPath, ThreadPath, Region)] != [
+            136, 136, 1176, 2352, 1200, 1288, 1272]:
+        raise Retain("holder-native-ABI-mismatch")
+
+
 class Darwin:
     """Same real/effective UID coverage; selected errors never become absence."""
     def __init__(self, until):
-        if platform.system() != "Darwin" or platform.machine() != "arm64":
-            raise Retain("holder-backend-unqualified-platform")
-        if [C.sizeof(t) for t in (BSD, VStat, VPath, CWD, FDPath, ThreadPath, Region)] != [
-                136, 136, 1176, 2352, 1200, 1288, 1272]:
-            raise Retain("holder-native-ABI-mismatch")
+        check_holder_platform()
         self.until = until
         self.lib = C.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         for name in ("proc_listpids", "proc_pidinfo", "proc_pidfdinfo", "proc_pidfileportinfo"):
@@ -681,8 +688,9 @@ class Darwin:
         value = kind()
         count, error = self.call(self.lib.proc_pidinfo, pid, flavor, arg,
                                  C.byref(value), C.sizeof(value))
-        # REGIONPATHINFO returns EINVAL at the address-space end. ESRCH is
-        # process churn, never a successful end-of-regions observation.
+        # PATHINFO2 uses EINVAL for exhaustion AND vnode acquisition failure.
+        # Accept that bounded native endpoint, never claim complete VM coverage.
+        # Surfaced ESRCH remains process churn, not successful exhaustion.
         if end and count == 0 and error == errno.EINVAL:
             return None
         if count != C.sizeof(value) or error:
@@ -722,7 +730,9 @@ class Darwin:
             descriptors = self.array(pid, flavor, FD, 16384)
             for item in descriptors:
                 if item.kind != 1:  # PROX_FDTYPE_VNODE, independent of access flags.
-                    continue
+                    if item.kind in (0, 2, 3, 4, 5, 6, 7, 9, 10, 11):
+                        continue  # Known non-vnode kinds from Darwin proc_info.h.
+                    raise Retain(f"holder-descriptor-kind-unknown:pid={pid}:kind={item.kind}")
                 value = FDPath()
                 count, error = self.call(method, pid, item.number, 2,
                                          C.byref(value), C.sizeof(value))
@@ -740,23 +750,21 @@ class Darwin:
                 raise Retain("holder-thread-population-changed")
         address = 0
         for _ in range(65536):
-            region = self.info(pid, 8, Region, address, end=True)
+            region = self.info(pid, 22, Region, address, end=True)
             if region is None:
                 break
-            yield "mapping", region.vnode
             next_address = region.address + region.size
-            # XNU vm_map_region_synthesize_guard_object_hole can return an empty
-            # guard at the next real entry. Requery that exact address, not past it.
-            empty_guard = (region.size == 0 and region.address > address
-                           and (region.protection, region.max_protection, region.inheritance,
-                                region.flags, region.offset) == (0, 0, 2, 0, 0)  # VM_INHERIT_NONE
-                           and list(region.counters) == [0, 0, 31, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0]
-                           and not any(bytes(region.vnode)))  # VM_MEMORY_GUARD, SM_EMPTY; no vnode
-            if (not region.size and not empty_guard) or next_address <= address or next_address >= 2**64:
+            if (region.address < address or not region.size
+                    or next_address <= address or next_address >= 2**64):
                 raise Retain(f"holder-region-iteration-invalid:pid={pid}:cursor={address}:"
                              f"address={region.address}:size={region.size}:flags={region.flags}:"
                              f"offset={region.offset}:user_tag={region.counters[2]}:"
                              f"share_mode={region.counters[9]}:depth={region.counters[13]}")
+            # A mapped-vnode result with missing identity is not anonymous VM.
+            # XNU can suppress fill_vnodeinfo errors before copying this ABI out.
+            if not region.vnode.stat.ino or region.vnode.type != 1:
+                raise Retain("holder-region-vnode-unknown")
+            yield "mapping", region.vnode
             address = next_address
         else:
             raise Retain("holder-region-limit")
@@ -787,10 +795,10 @@ class Darwin:
         for pid, birth in births.items():
             if self.birth(self.info(pid, 3, BSD)) != birth:
                 raise Retain("holder-process-changed")
-        # libproc skips submap vnodes and can suppress vnode acquisition errors.
-        # Observed references remain useful; empty output cannot clear mappings.
+        # Complete selected-process enumeration under a bounded cooperative
+        # contract, not proof that libproc exposed every live mapped vnode.
         return {"scope": "real-or-effective-uid-and-known-processes", "processes": len(births),
-                "holders": holders, "mapping_coverage": "unqualified",
+                "holders": holders, "mapping_coverage": HOLDER_COVERAGE,
                 "native_calls": self.calls, "platform": platform_key()}
 
 

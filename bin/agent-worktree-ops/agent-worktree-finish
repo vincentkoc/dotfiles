@@ -393,12 +393,16 @@ def ensure_retirement_schema(db):
             worktree_id TEXT PRIMARY KEY REFERENCES worktrees(id),
             generation INTEGER NOT NULL DEFAULT 0,
             state TEXT NOT NULL DEFAULT 'enrolled', inventory TEXT,
-            intent TEXT, result TEXT);
+            intent TEXT, result TEXT, holder_contract TEXT);
         CREATE TABLE IF NOT EXISTS owner_releases (
             worktree_id TEXT NOT NULL REFERENCES retirement(worktree_id),
             owner TEXT NOT NULL, generation INTEGER NOT NULL,
             PRIMARY KEY(worktree_id, owner));
     """)
+    if "holder_contract" not in {row[1] for row in db.execute("PRAGMA table_info(retirement)")}:
+        # Enrollment alone owns this migration. Existing rows stay NULL; neither
+        # resuming nor releasing can adopt them into a new deletion contract.
+        db.execute("ALTER TABLE retirement ADD COLUMN holder_contract TEXT")
     # These fire for the old client's SQL too. Clearing and later restoring an
     # identical proof must not resurrect a release granted before that resume.
     for table, key, changes in (
@@ -434,6 +438,11 @@ def retirement(db, row):
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retirement'").fetchone():
         return None
     return db.execute("SELECT * FROM retirement WHERE worktree_id=?", (row["id"],)).fetchone()
+
+
+def automatic_holder_contract(item):
+    return (item is not None and "holder_contract" in item.keys()
+            and item["holder_contract"] == safety().HOLDER_COVERAGE)
 
 
 def require_open_retirement(db, row):
@@ -967,6 +976,8 @@ def preserved_refs(snap, branches, until):
 
 
 def deletion_admission(row, item, qualification, until):
+    if not automatic_holder_contract(item):
+        raise Retain("automatic-holder-contract-not-enrolled")
     module = safety()
     snap = revalidate(row)
     if snap["head"] != row["finish_head"]:
@@ -1043,8 +1054,8 @@ def deletion_admission(row, item, qualification, until):
         [snap["path"], snap["gitdir"]], inodes, qualification["known_processes"])
     if observed["holders"]:
         raise Retain("pending-departure")
-    # Qualification files cannot supply missing evidence from the native reader.
-    if observed.get("mapping_coverage") != "complete":
+    # External policy cannot replace the selected native observation contract.
+    if observed.get("mapping_coverage") != module.HOLDER_COVERAGE:
         raise Retain("holder-mapping-coverage-unqualified")
     result = {"snapshot": snap, "boundaries": boundaries, "contents": contents,
               "admin": admin, "holders": observed, "branch_reflog": reflog}
@@ -1054,12 +1065,17 @@ def deletion_admission(row, item, qualification, until):
 
 
 def holder_qualification():
+    try:
+        safety().check_holder_platform()
+        qualified, reason = True, "bounded-native-observation-requires-host-qualification"
+    except Retain as error:
+        qualified, reason = False, str(error)
     return {
         "schema": HOLDER_SCHEMA,
-        "backend": "darwin-libproc-cooperative.v1",
-        "qualified": False,
-        "reason": "holder-mapping-coverage-unqualified",
-        "mapping_coverage": "unqualified",
+        "backend": "darwin-libproc-bounded.v1",
+        "qualified": qualified,
+        "reason": reason,
+        "mapping_coverage": safety().HOLDER_COVERAGE if qualified else "unqualified",
         "platform": safety().platform_key(),
     }
 
@@ -1297,8 +1313,10 @@ def remove_finalized(db, row, args, *, completed=False):
 
 
 def remove_released(db, row, item, qualification, args):
+    if not automatic_holder_contract(item):
+        raise Retain("automatic-holder-contract-not-enrolled")
     capability = holder_qualification()
-    if capability["qualified"] is not True or capability["mapping_coverage"] != "complete":
+    if capability["qualified"] is not True or capability["mapping_coverage"] != safety().HOLDER_COVERAGE:
         raise Retain("holder-mapping-coverage-unqualified")
     global NATIVE_GIT
     prior_git = NATIVE_GIT
@@ -2238,7 +2256,7 @@ def summary(db, row, reason=None):
         # Status does not perform native admission. Capability is separate from
         # a fresh, one-shot removal decision made only by the evaluator.
         "removal_available": False,
-        "automatic_removal_supported": item is not None,
+        "automatic_removal_supported": automatic_holder_contract(item),
         "retirement_state": item["state"] if item is not None else "report-only",
         "generation": item["generation"] if item is not None else None,
         "released_owners": [] if item is None else [r[0] for r in db.execute(
@@ -2262,6 +2280,10 @@ def summary(db, row, reason=None):
             "owner_retry": ("resume-then-finish-from-owning-checkout" if baseline is None or (
                 semantic and baseline["baseline"] is None) else "repeat-finish-from-owning-checkout"),
         }
+        if not automatic_holder_contract(item):
+            result["automatic_handoff"].update(
+                blocker="automatic-holder-contract-not-enrolled",
+                owner_retry="manual-finalized-closeout-from-owning-checkout")
     recovery = missing_recovery_record(db, row)
     if recovery is not None:
         result["missing_recovery"] = {
@@ -2596,7 +2618,8 @@ def main(argv=None):
                     (worktree_id, who),
                 )
                 if args.new_token:
-                    db.execute("INSERT INTO retirement(worktree_id) VALUES (?)", (worktree_id,))
+                    db.execute("INSERT INTO retirement(worktree_id, holder_contract) VALUES (?, ?)",
+                               (worktree_id, safety().HOLDER_COVERAGE))
         try:
             row = get_row(db, args.worktree)
         except Retain:
