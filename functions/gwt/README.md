@@ -686,8 +686,9 @@ coverage retains. `AUTO_MERGE` is disposable only when it names the final HEAD
 tree. Editor-generated `COMMIT_EDITMSG` comments use Git's own cleanup and must
 reduce to the committed message; divergent drafts, unsupported cleanup modes
 and verbose/scissors residue retain.
-Reads are bounded to 8MiB per leaf, 1GiB of verified working bytes per pass and
-131072 source entries including directories. Subprocess and admin reads keep
+Tracked regular source files are hashed in chunks of at most 64KiB, bounded by
+1GiB of verified working bytes per pass and 131072 source entries including
+directories. Other leaf reads retain the 8MiB limit. Subprocess and admin reads keep
 the separate 512MiB bound. A retained owner release captures its baseline once;
 apply uses two fresh admission inventories. Successful foreground closeout does
 not capture an automatic baseline. Neither route expands sparse checkouts or
