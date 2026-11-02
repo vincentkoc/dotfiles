@@ -870,6 +870,33 @@ class SnapshotTests(Fixture):
         self.assertIn("owner exits: 1 exited, 1 failed", result.stdout)
         self.assertIn("work state: 1 waiting, 0 spinning", result.stdout)
 
+    def test_status_reads_full_binding_table_and_matches_exact_mouse_keys(self):
+        stub = self.root / "tmux"
+        stub.write_text('''#!/bin/sh
+if [ "$*" = "list-keys -T root" ]; then
+  cat "$TEST_BINDINGS"
+fi
+''')
+        stub.chmod(0o700)
+        bindings = self.root / "bindings"
+        env = dict(self.env, TT_TMUX_BIN=str(stub), TEST_BINDINGS=str(bindings))
+        for table, expected in (
+            ('bind-key -T root MouseDown1StatusRight run-shell -b "tt codex-snapshot --quiet"\n'
+             'bind-key -T root MouseDown3StatusRight display-menu -T "CX SAVE"\n',
+             "menu: left=bound right=bound"),
+            ('bind-key -T root M-MouseDown1StatusRight run-shell -b "tt codex-snapshot"\n'
+             'bind-key -T root MouseDown3StatusRight display-message "display-menu"\n'
+             'bind-key -T root F1 display-message "MouseDown1StatusRight codex-snapshot"\n',
+             "menu: left=missing right=missing"),
+        ):
+            with self.subTest(expected=expected):
+                bindings.write_text(table)
+                result = subprocess.run(["/bin/bash", str(REPO / "bin/tt"), "status"],
+                                        env=env, text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(expected, result.stdout)
+                self.assertIn("history: 0/unlimited", result.stdout)
+
     def test_exact_metadata_ignores_picker_handles_and_rejects_ambiguity(self):
         job = [writer.Process(100, 1, 100, 100, "S", "pts/1", "codex")]
         opens = {100: {"current", "subagent"}}
@@ -917,6 +944,33 @@ class SnapshotTests(Fixture):
         self.assertEqual(rows[1][3:], ["", ""])
         self.assertNotIn("/bin/sh", output.read_text())
         self.assertNotIn("unsafe", output.read_text())
+
+    def test_snapshot_history_retention_modes(self):
+        for value, retained in ((None, 4), ("-1", 4), ("invalid", 4), ("0", 3), ("2", 2)):
+            with self.subTest(limit=value), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                root = pathlib.Path(directory)
+                history = root / "history"
+                history.mkdir()
+                previous = {}
+                for number in range(3):
+                    path = history / f"old-{number}.tsv"
+                    path.write_text(f"old snapshot {number}\n")
+                    os.utime(path, (number + 1, number + 1))
+                    previous[path] = path.read_bytes()
+                output = root / "current.tsv"
+                output.write_text("current snapshot\n")
+                with patch.dict(os.environ):
+                    os.environ.pop("TT_SNAPSHOT_HISTORY_MAX", None)
+                    if value is not None:
+                        os.environ["TT_SNAPSHOT_HISTORY_MAX"] = value
+                    writer.record_snapshot_history(output, history)
+                self.assertEqual(len(list(history.glob("*.tsv"))), retained)
+                if retained >= 3:
+                    self.assertEqual({path: path.read_bytes() for path in previous}, previous)
+                else:
+                    self.assertEqual((history / "old-2.tsv").read_bytes(), previous[history / "old-2.tsv"])
+                    self.assertFalse((history / "old-0.tsv").exists())
+                    self.assertFalse((history / "old-1.tsv").exists())
 
     def test_unresolved_agent_publication_preserves_prior_evidence(self):
         output = self.root / "agents.tsv"
@@ -1701,6 +1755,18 @@ TMUX_BIN=fake_tmux
 collect_agent_cockpit_state
 """, PANE_ROWS=rows,
         )
+
+    def test_timer_preserves_history_policy(self):
+        for value in (None, "-1", "0", "2"):
+            with self.subTest(limit=value):
+                env = {} if value is None else {"TT_SNAPSHOT_HISTORY_MAX": value}
+                result = self.shell(["shell_quote", "codex_snapshot_timer_launch_command"], """
+tt_self_command() { printf 'tt'; }
+TMUX_BIN=/fixture/tmux
+codex_snapshot_timer_launch_command token 123 456 789 300
+""", **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("TT_SNAPSHOT_HISTORY_MAX=" + (value or "-1"), result.stdout)
 
     def test_menu_exposes_supported_cyan_and_violet_markers(self):
         result = self.shell(["show_pane_menu"], """

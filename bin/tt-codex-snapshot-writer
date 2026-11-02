@@ -190,11 +190,11 @@ def run(args, *, required=True, total_budget=False, input_text=None):
 
 
 def snapshot_history_limit():
-    value = os.environ.get("TT_SNAPSHOT_HISTORY_MAX", "864")
+    value = os.environ.get("TT_SNAPSHOT_HISTORY_MAX", "-1")
     try:
-        return max(0, int(value))
+        return max(-1, int(value))
     except ValueError:
-        return 864
+        return -1
 
 
 def files_match(first, second):
@@ -243,8 +243,9 @@ def record_snapshot_history(output=OUTPUT, history_dir=HISTORY_DIR):
     files = sorted(
         history_dir.glob("*.tsv"), key=lambda path: path.stat().st_mtime, reverse=True
     )
-    for stale in files[max_history:]:
-        stale.unlink(missing_ok=True)
+    if max_history > 0:
+        for stale in files[max_history:]:
+            stale.unlink(missing_ok=True)
 
 
 def records(text):

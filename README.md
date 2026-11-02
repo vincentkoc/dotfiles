@@ -257,6 +257,9 @@ the terminal title when no task title is set. Exited session IDs are retained
 only with matching saved server, pane and process-start evidence. Reaped owners
 without that evidence remain unresolved in the new snapshot; prior recovery
 history is preserved.
+Snapshot history is unlimited by default (`TT_SNAPSHOT_HISTORY_MAX=-1`). Set a
+positive limit to prune older files, or `0` to stop recording new history without
+deleting existing files. The autosave timer inherits the same setting.
 Cold recovery checks every selected session's topology authorization before
 creating the first session, including direct snapshot-helper invocation.
 

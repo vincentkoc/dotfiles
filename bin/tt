@@ -2784,15 +2784,32 @@ popup_view() {
   return "$status"
 }
 
+status_menu_binding_present() {
+  local bindings="$1" key="$2" command="$3" action="${4:-}"
+  printf '%s\n' "$bindings" | awk -v key="$key" -v command="$command" -v action="$action" '
+    $1 == "bind-key" {
+      for (i = 2; i + 3 <= NF; i++) {
+        if ($i == "-T") {
+          if ($(i + 1) == "root" && $(i + 2) == key && $(i + 3) == command &&
+              (action == "" || index($0, action))) found = 1
+          break
+        }
+      }
+    }
+    END { exit !found }
+  '
+}
+
 status_report() {
   local snapshot agent_snapshot timer="stopped" autosave="off"
   local snapshot_age agent_age history_count history_max success_age="missing" identity
   local panes codex claude exact unresolved shell waiting spinning exited failed
-  local menu_left menu_right static_status mouse copy_modes mobile_mode
+  local menu_left menu_right menu_bindings static_status mouse copy_modes mobile_mode
 
   snapshot="$(codex_cockpit_snapshot_file)"
   agent_snapshot="$(agent_cockpit_state_file)"
-  history_max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
+  history_max="${TT_SNAPSHOT_HISTORY_MAX:--1}"
+  [[ "$history_max" != "-1" ]] || history_max="unlimited"
 
   identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
   if [[ -n "$identity" ]]; then
@@ -2840,12 +2857,14 @@ status_report() {
   fi
 
   history_count="$(count_snapshot_history codex-cockpit)"
-  if "$TMUX_BIN" list-keys -T root MouseDown1StatusRight 2>/dev/null | grep -q 'codex-snapshot'; then
+  # Some tmux versions omit mouse bindings from a single-key lookup.
+  menu_bindings="$("$TMUX_BIN" list-keys -T root 2>/dev/null || true)"
+  if status_menu_binding_present "$menu_bindings" MouseDown1StatusRight run-shell codex-snapshot; then
     menu_left="bound"
   else
     menu_left="missing"
   fi
-  if "$TMUX_BIN" list-keys -T root MouseDown3StatusRight 2>/dev/null | grep -q 'display-menu'; then
+  if status_menu_binding_present "$menu_bindings" MouseDown3StatusRight display-menu; then
     menu_right="bound"
   else
     menu_right="missing"
@@ -3825,7 +3844,7 @@ codex_snapshot_timer_launch_command() {
   command+=" TT_CODEX_SNAPSHOT_INTERVAL=$(shell_quote "${TT_CODEX_SNAPSHOT_INTERVAL:-300}")"
   command+=" TT_CODEX_SNAPSHOT_INTERVAL_MIN=$(shell_quote "${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}")"
   command+=" TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=$(shell_quote "${TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES:-65536}")"
-  command+=" TT_SNAPSHOT_HISTORY_MAX=$(shell_quote "${TT_SNAPSHOT_HISTORY_MAX:-864}")"
+  command+=" TT_SNAPSHOT_HISTORY_MAX=$(shell_quote "${TT_SNAPSHOT_HISTORY_MAX:--1}")"
   command+=" TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS=$(shell_quote "${TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS:-5}")"
   command+=" TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS=$(shell_quote "${TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS:-30}")"
   command+=" TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS=$(shell_quote "${TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS:-5}")"
