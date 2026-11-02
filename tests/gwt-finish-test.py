@@ -546,7 +546,7 @@ class WrapperTests(unittest.TestCase):
             self.assertIn("report-policy-requires-check-all", result.stderr)
             self.assertFalse(state.exists())
 
-    def test_holder_qualification_is_explicitly_unavailable_and_probe_free(self):
+    def test_holder_qualification_is_probe_free_and_requires_supported_platform(self):
         from contextlib import redirect_stdout
 
         output = io.StringIO()
@@ -555,10 +555,13 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(FINISH.main(["holder-qualification"]), 0)
         self.assertEqual(json.loads(output.getvalue()), {
             "schema": FINISH.HOLDER_SCHEMA,
-            "backend": "darwin-libproc-cooperative.v1",
-            "qualified": False,
-            "reason": "holder-mapping-coverage-unqualified",
-            "mapping_coverage": "unqualified",
+            "backend": "darwin-libproc-bounded.v1",
+            "qualified": sys.platform == "darwin" and os.uname().machine == "arm64",
+            "reason": ("bounded-native-observation-requires-host-qualification"
+                       if sys.platform == "darwin" and os.uname().machine == "arm64"
+                       else "holder-backend-unqualified-platform"),
+            "mapping_coverage": ("bounded-native" if sys.platform == "darwin"
+                                 and os.uname().machine == "arm64" else "unqualified"),
             "platform": FINISH.safety().platform_key(),
         })
         ledger.assert_not_called()
@@ -686,11 +689,11 @@ class ReleaseTests(unittest.TestCase):
         (self.home / ".codex").mkdir(mode=0o700)
         self.native = mock.patch.object(FINISH.safety(), "Darwin")
         self.observer = self.native.start().return_value
-        # Complete coverage is synthetic lifecycle proof, never native qualification.
+        # Bounded coverage is synthetic lifecycle proof, never host qualification.
         self.observer.observe.return_value = {
-            "holders": [], "processes": 1, "mapping_coverage": "complete"}
+            "holders": [], "processes": 1, "mapping_coverage": "bounded-native"}
         self.capability = mock.patch.object(FINISH, "holder_qualification", return_value={
-            "qualified": True, "mapping_coverage": "complete"})
+            "qualified": True, "mapping_coverage": "bounded-native"})
         self.capability.start()
         self.boundary = mock.patch.object(FINISH.safety(), "access_boundary", return_value=[])
         self.boundary.start()
@@ -734,9 +737,30 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result["checkout"], "removed", result)
         self.assertFalse(self.wt.exists())
 
+    def test_old_private_v2_enrollment_cannot_adopt_bounded_automatic_contract(self):
+        with FINISH.ledger(self.state) as db:
+            db.execute("ALTER TABLE retirement DROP COLUMN holder_contract")
+        self.assertFalse(self.call("status")[1][0]["automatic_removal_supported"])
+        # Enrollment owns schema upgrade, but retrying it cannot adopt an old row.
+        with self.assertRaisesRegex(FINISH.Retain, "already-enrolled"):
+            self.call("enroll", "--new-token", self.token)
+        self.call("resume")
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "automatic-holder-contract-not-enrolled")
+        self.assertFalse(result["automatic_removal_supported"])
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["automatic_handoff"]["owner_retry"],
+                         "manual-finalized-closeout-from-owning-checkout")
+        with FINISH.ledger(self.state) as db:
+            self.assertIsNone(FINISH.retirement(db, FINISH.get_row(db, self.wt))["holder_contract"])
+        # Existing explicit foreground closeout keeps its prior contract.
+        with mock.patch.object(FINISH, "manual_holders"):
+            self.assertEqual(LifecycleTests.finish(self)[1][0]["checkout"], "removed")
+
     def test_unqualified_apply_preserves_release_without_admission_work(self):
-        self.capability.stop()
-        with mock.patch.object(FINISH.safety(), "maintainer_lock") as lock, \
+        with mock.patch.object(FINISH, "holder_qualification", return_value={
+                "qualified": False, "mapping_coverage": "unqualified"}), \
+                mock.patch.object(FINISH.safety(), "maintainer_lock") as lock, \
                 mock.patch.object(FINISH, "completion_checks") as completion, \
                 mock.patch.object(FINISH, "deletion_admission") as admission:
             for result in (self.finish("--release")[1][0], self.call("check", "--apply")[1][0]):
@@ -803,7 +827,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.finish("--release")[1][0]["reason"], "pending-departure")
         self.assertTrue(self.wt.exists())
         self.observer.observe.return_value = {
-            "holders": [], "processes": 2, "mapping_coverage": "complete"}
+            "holders": [], "processes": 2, "mapping_coverage": "bounded-native"}
         self.assertEqual(self.call("check", "--apply")[1][0]["checkout"], "removed")
 
     def test_external_qualification_cannot_override_incomplete_mapping_observation(self):
@@ -851,6 +875,7 @@ class ReleaseTests(unittest.TestCase):
                 for observation, reason in (
                         ({"holders": []}, "holder-mapping-coverage-unqualified"),
                         ({"holders": [], "mapping_coverage": "unqualified"}, "holder-mapping-coverage-unqualified"),
+                        ({"holders": [], "mapping_coverage": "complete"}, "holder-mapping-coverage-unqualified"),
                         ({"holders": [], "mapping_coverage": True}, "holder-mapping-coverage-unqualified"),
                         ({"holders": [{"kind": "fd"}], "mapping_coverage": "unqualified"}, "pending-departure")):
                     with self.subTest(observation=observation):
@@ -1040,7 +1065,7 @@ class ReleaseTests(unittest.TestCase):
             count += 1
             if count == 1:
                 (self.wt / "late-recovery").write_text("retain")
-            return {"holders": [], "mapping_coverage": "complete"}
+            return {"holders": [], "mapping_coverage": "bounded-native"}
         self.observer.observe.side_effect = observe
         result = self.finish("--release")[1][0]
         self.assertEqual(result["checkout"], "unknown")
@@ -4494,6 +4519,103 @@ class FailureDiagnosticTests(unittest.TestCase):
     def test_unhandled_exception_still_propagates(self):
         with self.assertRaisesRegex(RuntimeError, "unexpected"):
             self.call_cli(RuntimeError("unexpected"))
+
+
+@unittest.skipUnless(sys.platform == "darwin" and os.uname().machine == "arm64", "Darwin arm64 native reader")
+class NativePendingConsumerTests(unittest.TestCase):
+    setUp = LifecycleTests.setUp
+    tearDown = LifecycleTests.tearDown
+    call = LifecycleTests.call
+    proof = LifecycleTests.proof
+    finish = LifecycleTests.finish
+
+    def test_native_new_finish_pending_holders_then_consumer_removes(self):
+        (self.home / ".codex").mkdir(mode=0o700)
+        observed = self.base / "storage-observation.json"
+        observed.write_text('{"configured": false}')
+        with mock.patch.dict(os.environ, {
+                "DOTFILES_GWT_FINISH_STATE": str(self.state),
+                "DOTFILES_WORKTREES_ROOT": str(self.root), "TMUX": "",
+                "WORKTREE_STORAGE_GUARD_TESTING": "1",
+                "WORKTREE_STORAGE_CONFIG": str(self.base / "no-storage-config"),
+                "WORKTREE_STORAGE_GUARD_OBSERVED": str(observed)}):
+            created = subprocess.run([
+                "zsh", "-f", "-c", 'source "$1"; _gwt_tmux_sync_context() { return 0; }; '
+                'gwt new native-feature "$2" --full --finish-managed',
+                "fixture", str(ROOT / "functions/gwt/gwt.zsh"), self.head],
+                cwd=self.repo, capture_output=True, text=True, timeout=30)
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+        sibling = self.wt
+        self.wt = Path(next(json.loads(line)[0]["worktree"] for line in created.stdout.splitlines()
+                            if line.startswith('[{')))
+        admin = Path(git(self.wt, "rev-parse", "--absolute-git-dir"))
+        self.assertEqual(self.wt.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(admin.stat().st_mode & 0o777, 0o700)
+        with FINISH.ledger(self.state) as db:
+            identity = json.loads(FINISH.get_row(db, self.wt)["identity"])
+        policy = self.base / "policy.json"
+        policy.write_text(json.dumps({
+            "schema": FINISH.APPLY_POLICY_SCHEMA, "host": "fixture-host", "mode": "explicit-release",
+            "repositories": [{key: identity[key] for key in ("owner", "root", "common_id")}],
+            "qualification": {}}))
+        policy.chmod(0o600)
+        qualification = {"git": {"path": str(Path(shutil.which("git")).resolve())}, "known_processes": []}
+        population = {os.getpid()}
+        module = FINISH.safety()
+
+        def consume():
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(FINISH.main([
+                    "check", "--all", "--apply", "--policy", str(policy),
+                    "--state-dir", str(self.state)]), 0)
+            return next(row for row in json.loads(output.getvalue()) if row["worktree"] == str(self.wt))
+
+        # This is a native selected-population canary, not whole-host qualification.
+        # Only external policy/GitHub/storage facts and census scope are fixtures;
+        # capability, reference reads, admission and native removal stay real.
+        with mock.patch.object(FINISH, "host_key", return_value="fixture-host"), \
+                mock.patch.object(FINISH, "qualified_policy", return_value=qualification), \
+                mock.patch.object(module.Darwin, "population", side_effect=lambda _: set(population), autospec=True):
+            self.proofs[self.url].update(merged=False, state="open", merge=None)
+            pending = self.finish("--policy", str(policy))[1][0]
+            self.assertEqual(pending["reason"], "pr-not-merged", pending)
+            self.assertEqual(pending["released_owners"], ["owner-1"])
+            self.assertEqual(pending["automatic_handoff"]["baseline"], "ready")
+            self.proofs[self.url].update(merged=True, state="closed", merge=self.head)
+            script = ('import mmap,os,sys; mode,path=sys.argv[1:]; '
+                      'fd=os.open(path,os.O_RDONLY) if mode!="cwd" else None; '
+                      'view=mmap.mmap(fd,0,access=mmap.ACCESS_READ) if mode=="mapping" else None; '
+                      'os.close(fd) if mode=="mapping" else None; '
+                      'os.chdir(path) if mode=="cwd" else None; '
+                      'print("ready",flush=True);sys.stdin.buffer.read(1)')
+            for mode, path in (("cwd", self.wt), ("fd", admin / "HEAD"), ("mapping", self.wt / "file")):
+                with self.subTest(holder=mode):
+                    child = subprocess.Popen([sys.executable, "-c", script, mode, str(path)],
+                                             cwd=self.repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE)
+                    try:
+                        self.assertEqual(child.stdout.readline(), b"ready\n")
+                        population.add(child.pid)
+                        result = consume()
+                        self.assertEqual(result["reason"], "pending-departure", result)
+                        self.assertTrue(self.wt.exists())
+                        self.assertTrue((admin / "locked").exists())
+                    finally:
+                        child.communicate(b"x", timeout=5)
+                        population.discard(child.pid)
+                    self.assertEqual(child.returncode, 0)
+            # A surfaced native error cannot be converted into empty coverage.
+            with mock.patch.object(module.Darwin, "references", side_effect=FINISH.Retain("holder-visibility-unknown")):
+                self.assertEqual(consume()["reason"], "holder-visibility-unknown")
+            removed = consume()
+            self.assertEqual(removed["checkout"], "removed", removed)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "native-feature"), self.head)
+        self.assertTrue(sibling.exists())
+        self.assertEqual(git(sibling, "rev-parse", "HEAD"), self.head)
 
 
 if __name__ == "__main__":

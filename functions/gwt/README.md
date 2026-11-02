@@ -776,11 +776,30 @@ one to eight exact owner/root/common-directory identities. Its `qualification`
 binds the exact platform, native Git 2.55.0 path/hash/version, installed lifecycle
 source hashes, known process identities and a private activation receipt.
 
-The current Darwin arm64 backend reports `mapping_coverage: unqualified`.
-Public libproc APIs omit submap vnode details and can hide vnode acquisition
-failures. Unattended Mac deletion therefore remains blocked, even with a valid
-external qualification or activation receipt. Completion and explicit release
-still record their facts.
+The Darwin arm64 backend uses `PROC_PIDREGIONPATHINFO2` (22), its 1272-byte
+ABI, and reports `mapping_coverage: bounded-native`. It observes native CWD,
+FD, thread CWD, fileport and mapped-vnode references, with process identities
+and population checked again. Surfaced errors, short or malformed results,
+unknown descriptor kinds, limits and identity changes retain the checkout.
+
+This is an explicitly bounded cooperative observation, not complete or frozen
+VM coverage. Apple's [native implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+returns `EINVAL` for both enumeration exhaustion and a lost vnode, and can hide
+vnode-info errors. The accepted blind spot is a mapping missed through those
+native omissions, including a still-live mapping after its FD closes. Existing
+two admission observations reduce exposure but do not eliminate that gap or
+prevent a noncooperative later opener. No external receipt can improve the
+reader's actual coverage.
+
+Only newly created `--finish-managed` checkouts record this bounded holder
+contract at enrollment. Existing private v2 rows, older report-only rows,
+shared and application-owned checkouts are not adopted. Schema upgrade leaves
+old contract stamps NULL; resume, finish and release cannot set them. Those
+checkouts keep their existing explicit foreground/manual closeout route.
+Eligible new records still need every owner released, exact merged proof,
+unchanged recoverable source, private access boundaries and qualified host
+activation before unattended removal. Installing this backend enables none
+of those host policies or scheduled jobs.
 Linux, WSL and Windows have no deletion qualification in this change. The private
 `scripts/install-gwt-finish.py` owner already provides the reviewed v2 activation
 route for the existing bounded scheduler. Installed report-only scheduling is
@@ -803,9 +822,11 @@ global holder absence.
 Empty or deny-only ancestry ACLs preserve that boundary; allow/unknown ACLs
 retain. Normal macOS deny-delete home ACLs do not require a permission change.
 
-`holder-qualification` describes this mapping-coverage hold without scanning
-processes. External policy cannot override the native observation. `finish-status`
+`holder-qualification` describes backend platform/ABI support and the bounded
+contract without scanning processes; it does not qualify or activate a host.
+External policy cannot override the native observation. `finish-status`
 never grants fresh removal authority: `automatic_removal_supported` identifies
-a new-format record, while `removal_available` remains false in the report.
+a record enrolled under this holder contract, while `removal_available` remains
+false in the report.
 Always report the recorded `retained`, verified `removed`, or `unknown` checkout
 outcome and its reason.
