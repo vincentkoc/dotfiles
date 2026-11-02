@@ -233,7 +233,7 @@
 
 ## Computer Use
 
-- For Computer Use-heavy execution, prefer a dedicated task or agent using `gpt-5.6-terra` at `medium`, or the fastest smaller available model with equivalent Computer Use access.
+- For Computer Use-heavy execution, prefer a dedicated task or agent using `gpt-6.1-terra` at `medium` in Codex or `claude-sonnet-5-5` at `medium` in Claude Code. If the preferred model is unavailable, use the fastest smaller available model with equivalent Computer Use access.
 - Keep planning, credential and safety decisions, recovery, and final verification on the current stronger model. Do not hot-swap an active thread or lose useful state merely to save tokens; use the current model when a dedicated lane is unavailable.
 
 ## Low Data Mode
