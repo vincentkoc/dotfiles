@@ -454,11 +454,23 @@ _gwt_sparse_register_shell_hook() {
     _gwt_sparse_sync_shell_env
 }
 
+_gwt_worktrees_root() {
+    local guard_path configured_root
+    guard_path=$(_gwt_tool_path worktree-storage-guard) || return 127
+    configured_root=$("$guard_path" --print-worktree-root) || return
+    # Older login shells exported the internal default as though it were an override.
+    if [[ -n "${DOTFILES_WORKTREES_ROOT:-}" && "$DOTFILES_WORKTREES_ROOT" != "$HOME/.codex/worktrees" ]]; then
+        printf '%s\n' "$DOTFILES_WORKTREES_ROOT"
+    else
+        printf '%s\n' "${configured_root:-$HOME/.codex/worktrees}"
+    fi
+}
+
 _gwt_codex_repo_worktree_root() {
     local repo_root="$1"
     local repo_slug root
     repo_slug=$(_gwt_repo_slug "$repo_root") || return 1
-    root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    root=$(_gwt_worktrees_root) || return
     printf '%s/%s\n' "$root" "$repo_slug"
 }
 
@@ -949,7 +961,7 @@ _gwt_shared_install_source() {
         return 0
     fi
 
-    worktrees_root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    worktrees_root=$(_gwt_worktrees_root) || return
     if [[ -d "$repo_root/node_modules" && "$repo_root" != "$worktrees_root/"* ]]; then
         printf '%s\n' "$repo_root"
         return 0
@@ -960,7 +972,8 @@ _gwt_shared_install_source() {
 
 _gwt_find_workspace_node_modules() {
     local repo_root="$1"
-    local worktrees_root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    local worktrees_root
+    worktrees_root=$(_gwt_worktrees_root) || return
 
     if [[ -d "$repo_root/node_modules" ]]; then
         printf '%s\n' "$repo_root/node_modules"
@@ -1330,7 +1343,7 @@ gwt() {
             return $?
             ;;
         root)
-            printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+            _gwt_worktrees_root
             ;;
         finish-status|finish-check|finish-reconcile)
             _gwt_finish_tool "${subcommand#finish-}" "$@"
@@ -1623,7 +1636,7 @@ gwt() {
                 return 1
             fi
 
-            root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+            root=$(_gwt_worktrees_root) || return
             repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             repo_slug=$(_gwt_repo_slug) || return 1
             branch_slug=$(printf '%s' "$branch" | tr '/' '-' | tr -cd '[:alnum:]._-')

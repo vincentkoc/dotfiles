@@ -16,6 +16,7 @@ from typing import Any
 
 
 SCHEMA = "external-worktree-storage.v2"
+FOLDER_SCHEMA = "external-worktree-storage.v3"
 CAPABILITIES = {
     "encryption_attestation": "exact_boolean",
     "encryption_policy": "exact_boolean",
@@ -28,6 +29,7 @@ DEFAULT_CONFIG = (
     / "agent-worktree-ops"
     / "external-worktree-storage.json"
 )
+USER_CONFIG_RELATIVE = pathlib.Path("Library/Application Support/agent-worktree-ops/storage/external-worktree-storage.json")
 MARKER_NAME = ".external-worktree-storage-marker"
 PHYSICAL_EXTERNAL_BUS_PROTOCOLS = frozenset(
     {"FireWire", "NVMe", "SATA", "SCSI", "Thunderbolt", "USB"}
@@ -85,13 +87,14 @@ def path_has_no_symlink_components(path: pathlib.Path) -> bool:
 def load_config(
     path: pathlib.Path, *, production_default: bool
 ) -> dict[str, Any] | None:
-    if not path.exists() and not path.is_symlink():
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
         return None
     if not path_has_no_symlink_components(path):
         raise GuardError(f"runtime config has a symlinked component: {path}")
-    if path.is_symlink() or not path.is_file():
+    if not stat.S_ISREG(metadata.st_mode):
         raise GuardError(f"runtime config is not a regular file: {path}")
-    metadata = path.stat()
     expected_uid = 0 if production_default else os.getuid()
     if metadata.st_uid != expected_uid:
         raise GuardError(f"runtime config has the wrong owner: {path}")
@@ -109,6 +112,15 @@ def load_config(
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise GuardError(f"runtime config is unreadable: {error}") from error
+    if isinstance(value, dict) and value.get("schema_version") == FOLDER_SCHEMA:
+        parent = path.parent.stat()
+        if (metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600
+                or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
+            raise GuardError("folder policy must be private and owned by this user")
+    return validate_config(value)
+
+
+def validate_config(value: Any) -> dict[str, Any]:
     expected_keys = {
         "case_sensitive",
         "backing_directory_mode",
@@ -127,10 +139,14 @@ def load_config(
         "time_machine_excluded",
         "volume_uuid",
     }
+    if isinstance(value, dict) and value.get("schema_version") == FOLDER_SCHEMA:
+        expected_keys -= {"backing_directory_mode", "spotlight", "time_machine_excluded"}
+        expected_keys.add("worktree_root")
     if not isinstance(value, dict) or set(value) != expected_keys:
         raise GuardError("runtime config schema is invalid")
+    folder = value.get("schema_version") == FOLDER_SCHEMA
     if (
-        value.get("schema_version") != SCHEMA
+        value.get("schema_version") not in (SCHEMA, FOLDER_SCHEMA)
         or value.get("required") is not True
         or not children_contract_is_exact(value.get("children"))
         or value.get("filesystem") != "apfs"
@@ -138,9 +154,9 @@ def load_config(
         or value.get("case_sensitive") is not False
         or value.get("owners") is not True
         or value.get("device_location") != "External"
-        or value.get("backing_directory_mode") != "0000"
-        or value.get("spotlight") != "disabled"
-        or value.get("time_machine_excluded") is not True
+        or (not folder and value.get("backing_directory_mode") != "0000")
+        or (not folder and value.get("spotlight") != "disabled")
+        or (not folder and value.get("time_machine_excluded") is not True)
         or value.get("minimum_free_gib") != REQUIRED_MINIMUM_FREE_GIB
         or value.get("minimum_free_percent") != REQUIRED_MINIMUM_FREE_PERCENT
         or not isinstance(value.get("marker_id"), str)
@@ -149,11 +165,71 @@ def load_config(
         or UUID_RE.fullmatch(value["volume_uuid"]) is None
     ):
         raise GuardError("runtime config policy is incomplete or invalid")
+    if folder:
+        mount = value.get("mount_point")
+        root = value.get("worktree_root")
+        if not isinstance(mount, str) or not isinstance(root, str):
+            raise GuardError("folder paths must be absolute")
+        mount_path, root_path = pathlib.Path(mount), pathlib.Path(root)
+        if (not mount_path.is_absolute() or not root_path.is_absolute()
+                or str(mount_path) != os.path.normpath(mount)
+                or str(root_path) != os.path.normpath(root)
+                or mount_path not in root_path.parents):
+            raise GuardError("worktree root must be a proper child of the volume mount")
+        return value
     canonical = pathlib.Path.home() / ".codex" / "worktrees"
     mount_point = pathlib.Path(value["mount_point"])
     if not mount_point.is_absolute() or os.path.normpath(mount_point) != str(canonical):
         raise GuardError(f"runtime config mount point is not canonical: {mount_point}")
     return value
+
+
+def validate_folder_volume(config: dict[str, Any], observed: dict[str, Any]) -> pathlib.Path:
+    """Validate the disk before a producer creates anything beneath its mount."""
+    mount = pathlib.Path(config["mount_point"])
+    if not path_has_no_symlink_components(mount) or os.path.realpath(mount) != str(mount):
+        raise GuardError("volume mount has a symlinked component")
+    if not direct_mount_is_present(mount, observed):
+        raise GuardError("required external folder volume is not mounted")
+    if str(observed.get("volume_uuid") or "").casefold() != config["volume_uuid"].casefold():
+        raise GuardError("mounted external volume UUID does not match policy")
+    if observed.get("filesystem") != "apfs":
+        raise GuardError("folder storage requires APFS; this filesystem lacks the required native semantics")
+    if type(observed.get("encrypted")) is not bool or observed["encrypted"] is not config["encrypted"]:
+        raise GuardError("external volume encryption does not match policy")
+    if observed.get("case_sensitive") is not False or observed.get("ownership_enabled") is not True:
+        raise GuardError("folder storage requires case-insensitive native ownership")
+    if observed.get("device_location") != config["device_location"]:
+        raise GuardError("folder storage is not on the selected external device")
+    st = os.lstat(mount)
+    if not stat.S_ISDIR(st.st_mode) or st.st_dev != observed.get("device"):
+        raise GuardError("volume mount identity changed")
+    for field, threshold in (("free_gib", "minimum_free_gib"), ("free_percent", "minimum_free_percent")):
+        value = observed.get(field)
+        if type(value) not in (int, float) or not value >= config[threshold]:
+            raise GuardError("external volume free space is below " + threshold)
+    return mount
+
+
+def validate_folder_root(config: dict[str, Any], observed: dict[str, Any]) -> pathlib.Path:
+    mount = validate_folder_volume(config, observed)
+    root = pathlib.Path(config["worktree_root"])
+    if mount not in root.parents or not path_has_no_symlink_components(root):
+        raise GuardError("worktree root must be a physical child of the selected volume")
+    current = mount
+    for component in root.relative_to(mount).parts:
+        current /= component
+        st = os.lstat(current)
+        if not stat.S_ISDIR(st.st_mode) or st.st_dev != observed["device"]:
+            raise GuardError("worktree folder crosses a filesystem or is not a directory")
+    st = root.stat()
+    home = pathlib.Path.home().stat()
+    if (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) != (os.getuid(), home.st_gid, 0o700):
+        raise GuardError("worktree folder must be home-owned mode 0700")
+    if read_marker(root) != config["marker_id"]:
+        raise GuardError("worktree folder marker does not match policy")
+    validate_storage_children(config, root)
+    return root
 
 
 def storage_child_paths(
@@ -287,7 +363,7 @@ def normalized_encryption(disk: dict[str, Any]) -> bool | None:
     return legacy if type(legacy) is bool else None
 
 
-def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
+def live_observation(mount_point: pathlib.Path, *, folder: bool = False) -> dict[str, Any]:
     try:
         result = subprocess.run(
             ["/usr/sbin/diskutil", "info", "-plist", str(mount_point)],
@@ -324,10 +400,10 @@ def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
                 free_percent = filesystem.f_bavail * 100.0 / filesystem.f_blocks
         except OSError:
             pass
-    spotlight_code, spotlight_output = run_text(
+    spotlight_code, spotlight_output = (1, "") if folder else run_text(
         ["/usr/bin/mdutil", "-s", str(mount_point)]
     )
-    excluded_code, excluded_output = run_text(
+    excluded_code, excluded_output = (1, "") if folder else run_text(
         ["/usr/bin/tmutil", "isexcluded", str(mount_point)]
     )
     personality = str(
@@ -346,7 +422,7 @@ def live_observation(mount_point: pathlib.Path) -> dict[str, Any]:
         "case_sensitive": "case-sensitive" in personality.casefold(),
         "ownership_enabled": disk.get("GlobalPermissionsEnabled") is True,
         "device_location": normalized_device_location(disk),
-        "marker_id": read_marker(mount_point) if mounted else None,
+        "marker_id": read_marker(mount_point) if mounted and not folder else None,
         "spotlight": (
             "disabled"
             if spotlight_code == 0 and "indexing disabled" in spotlight_output.casefold()
@@ -402,6 +478,8 @@ def require_fallback_closed(
 def validate_observation(
     config: dict[str, Any], observed: dict[str, Any]
 ) -> pathlib.Path:
+    if config["schema_version"] == FOLDER_SCHEMA:
+        return validate_folder_root(config, observed)
     mount_point = pathlib.Path(config["mount_point"])
     if not path_has_no_symlink_components(mount_point):
         raise GuardError(f"mount point has a symlinked component: {mount_point}")
@@ -460,8 +538,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-config", action="store_true")
     parser.add_argument("--print-mount-point", action="store_true")
     parser.add_argument("--capabilities", action="store_true")
+    parser.add_argument("--storage-schema", choices=(SCHEMA, FOLDER_SCHEMA))
+    parser.add_argument("--print-worktree-root", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
+
+
+def policy_present(path: pathlib.Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
 
 
 def main() -> int:
@@ -473,30 +561,48 @@ def main() -> int:
                 or args.config is not None
                 or args.require_config
                 or args.print_mount_point
+                or args.print_worktree_root
             ):
                 raise GuardError(
                     "--capabilities requires --json and cannot be combined with runtime options"
                 )
-            print(json.dumps(CAPABILITIES, sort_keys=True, separators=(",", ":")))
+            capabilities = dict(CAPABILITIES)
+            capabilities["storage_schema"] = args.storage_schema or SCHEMA
+            print(json.dumps(capabilities, sort_keys=True, separators=(",", ":")))
             return 0
+        if args.storage_schema is not None:
+            raise GuardError("--storage-schema requires --capabilities")
         config_override = args.config
         if config_override is None:
             config_override = os.environ.get("WORKTREE_STORAGE_CONFIG")
+        user_config = pathlib.Path.home() / USER_CONFIG_RELATIVE
+        user_present = policy_present(user_config) if config_override is None else False
+        system_present = policy_present(DEFAULT_CONFIG) if config_override is None else False
+        if user_present and system_present:
+            raise GuardError("both user folder and system storage policies are present")
+        user_default = config_override is None and user_present
         config_path = (
             pathlib.Path(config_override).expanduser()
             if config_override
-            else DEFAULT_CONFIG
+            else user_config if user_default else DEFAULT_CONFIG
         )
         if config_override and os.environ.get("WORKTREE_STORAGE_GUARD_TESTING") != "1":
             raise GuardError("runtime config override requires guard test mode")
         config_error = None
         try:
             config = load_config(
-                config_path, production_default=config_override is None
+                config_path, production_default=config_override is None and not user_default
             )
+            if config is not None and config_override is None:
+                if user_default and config["schema_version"] != FOLDER_SCHEMA:
+                    raise GuardError("user storage policy must use the folder schema")
+                if not user_default and config["schema_version"] != SCHEMA:
+                    raise GuardError("system storage policy must use the legacy mount schema")
         except GuardError as error:
             config = None
             config_error = error
+        if config_error is not None:
+            raise GuardError(f"required config missing or invalid: {config_path}: {config_error}")
         if config is None:
             canonical = pathlib.Path.home() / ".codex" / "worktrees"
             observed = test_observation() or live_observation(canonical)
@@ -507,17 +613,21 @@ def main() -> int:
             )
             if managed_state:
                 raise GuardError(f"required config missing or invalid: {config_path}")
-            if config_error is not None:
-                raise config_error
             if args.require_config:
                 raise GuardError(f"required config missing: {config_path}")
             if args.json:
                 print(json.dumps({"configured": False, "schema_version": SCHEMA}, sort_keys=True))
             return 0
-        observed = test_observation() or live_observation(pathlib.Path(config["mount_point"]))
+        observed = test_observation() or live_observation(pathlib.Path(config["mount_point"]), folder=config["schema_version"] == FOLDER_SCHEMA)
         mount_point = validate_observation(config, observed)
-        if args.print_mount_point:
+        if args.print_worktree_root:
             print(mount_point)
+        elif args.print_mount_point:
+            print(config["mount_point"])
+        elif args.json and config["schema_version"] == FOLDER_SCHEMA:
+            value = {key: config[key] for key in ("children", "device_location", "encrypted", "marker_id", "minimum_free_gib", "minimum_free_percent", "mount_point", "owners", "schema_version", "volume_uuid", "worktree_root")}
+            value.update(configured=True, free_gib=observed["free_gib"], free_percent=observed["free_percent"])
+            print(json.dumps(value, sort_keys=True))
         elif args.json:
             print(
                 json.dumps(

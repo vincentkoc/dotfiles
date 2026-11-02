@@ -295,8 +295,8 @@ fi
 export PNPM_STORE_DIR="${PNPM_STORE_DIR:-$PNPM_HOME/store}"
 path_prepend "$PNPM_HOME"
 
-# Worktrees (default root used by gwt)
-export DOTFILES_WORKTREES_ROOT="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+# GWT resolves its default from the storage guard; set DOTFILES_WORKTREES_ROOT
+# explicitly only for a custom override.
 
 # Python
 export PYTHONIOENCODING='UTF-8'

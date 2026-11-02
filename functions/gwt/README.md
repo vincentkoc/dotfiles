@@ -42,7 +42,7 @@ When a server profile requires workspaces outside home directories, provision
 an absolute, account-owned root outside the affected accounts' actual homes.
 Verify its physical path, mount, parent permissions and trust-domain separation
 before use. Root selection is placement policy, not a security boundary or
-proof of those permissions. `gwt root` is informational.
+proof of those permissions. `gwt root` validates any configured external storage before reporting placement.
 
 This setting does not relocate existing worktrees or change their Git owners,
 registrations, dependency links or completion state. Before a migration, identify
@@ -311,7 +311,7 @@ Sparse profile authority and explicit application behavior are documented in
 physically loaded module's checkout; an explicit `DOTFILES_GIT_SPARSE_ROOT`
 override is preserved. Updates do not reapply existing checkouts.
 
-External storage behavior:
+Legacy v2 external storage behavior:
 
 - Configured hosts mount a case-insensitive APFS volume in the policy-selected
   encrypted or unencrypted state directly at canonical `~/.codex/worktrees`;
@@ -326,8 +326,8 @@ External storage behavior:
 - `gwt new`, `add`, `rm`, `audit`, `clean`, and `prune` stop before worktree
   access when the configured volume is absent, wrong, or replaced by a writable
   internal fallback. Missing policy also fails closed when the direct mount or
-  sealed backing directory proves the host is configured. `gwt root` remains
-  informational.
+  sealed backing directory proves the host is configured. Root resolution
+  validates configured storage before returning its path.
 - The guard validates both lexical and resolved containment. A worktree on the
   direct mount still resolves through Git to its canonical owning checkout;
   physical aliases beneath `/Volumes` are never independent indexing roots.
@@ -340,6 +340,31 @@ External storage behavior:
   before child execution, and removes only that exact inode while the same
   mount remains valid. `external-tmp --check --json` performs a non-mutating
   readiness check.
+
+### Shared external-volume folders
+
+Folder placement uses `external-worktree-storage.v3`. The guard reads a private
+user policy at `~/Library/Application Support/agent-worktree-ops/storage/external-worktree-storage.json`.
+Its `mount_point` identifies the actual external volume; `worktree_root` is a
+physical child on that volume. The guard verifies the UUID, APFS semantics,
+ownership, encryption policy and capacity before callers create anything.
+Only the managed folder and its children require private ownership and mode
+`0700`. The shared volume root and existing sibling data remain untouched.
+Missing disks, symlinks, nested mounts and invalid policies refuse allocation;
+there is no internal fallback. Simultaneous user and legacy system policies
+are an error. The root-owned v2 direct-mount contract remains supported.
+
+GWT resolves this guarded root before making directories. A custom
+`DOTFILES_WORKTREES_ROOT` still takes precedence. Its literal
+`$HOME/.codex/worktrees` value is treated as the inherited legacy default and
+does not mask configured folder placement.
+`external-tmp` creates invocation-scoped scratch below `worktree_root`, never
+the shared volume root. No global temporary-directory setting changes.
+
+Codex's supported `desktop.git-worktree-root` setting controls future native
+allocation. Native Codex does not call this guard. Existing Codex, Claude and
+GWT trees retain their original paths and lifecycle owners; this change does
+not migrate them, configure Claude's allocator, or activate cleanup.
 
 Dependency bootstrap:
 
