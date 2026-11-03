@@ -9,10 +9,12 @@ installed `codex-session-recovery` skill and its tt recovery reference.
 - The maintained source is `.local/state/tt/AGENTS.md` in the owning dotfiles
   checkout. `setup_tt_recovery_guidance` in `install.sh` installs this file at
   `${XDG_STATE_HOME:-$HOME/.local/state}/tt/AGENTS.md`.
-- Mackup's tmux profile backs up this instruction file only. Never add snapshot
+- The optional `.mackup/tmux.cfg` definition includes this guide, but requires
+  separate installation and explicit selection in Mackup. The default
+  `portable-tool-preferences` selection does not enable it. Never add snapshot
   TSVs, session IDs, pane markers, logs, locks or timer state to public dotfiles.
-  Its mapping covers the default state root; custom `XDG_STATE_HOME` locations
-  require a matching private backup configuration.
+  The tmux definition covers the default state root; custom `XDG_STATE_HOME`
+  locations require a matching private backup configuration.
 - When the installed guide is missing, install this file alone and verify it
   matches the source. Do not run the full installer or replace the state tree.
 

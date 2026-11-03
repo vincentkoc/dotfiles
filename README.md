@@ -186,8 +186,10 @@ and inherited private cockpit scratch paths avoid another tmux query.
 
 The installer links the maintained `.local/state/tt/AGENTS.md` recovery guide
 beside the snapshots, respecting `XDG_STATE_HOME`. To install only that guide,
-source `install.sh` and run `setup_tt_recovery_guidance`. Mackup's tmux profile
-includes the guide without backing up live snapshot, marker or timer state.
+source `install.sh` and run `setup_tt_recovery_guidance`. The optional
+`.mackup/tmux.cfg` definition includes the guide without live snapshot, marker or
+timer state, but requires separate installation and explicit selection in
+Mackup. The default `portable-tool-preferences` selection does not enable it.
 Read it before restoring: native RGB defaults, pane colors and the native agent
 environment must be ready before Codex starts; six-pane studio windows use
 three columns and two rows.

@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/public-regression.yml"
       - "install.sh"
+      - ".local/state/tt/AGENTS.md"
       - ".exports"
       - ".profile"
       - ".zshenv"
@@ -25,6 +26,7 @@ on:
       - "tests/deepclean-test.sh"
       - "tests/deepclean-test.zsh"
       - "tests/install-foundations-test.sh"
+      - "tests/install-tt-recovery-guidance-test.sh"
       - "tests/linux-server-auth-proof-test.sh"
       - "tests/quickssh-test.py"
       - "tests/agent-worktree-maintain-test.sh"
@@ -57,6 +59,7 @@ jobs:
         run: |
           python3 tests/optional-shell-hooks-test.py
           bash tests/install-foundations-test.sh
+          bash tests/install-tt-recovery-guidance-test.sh
           bash tests/agent-worktree-maintain-test.sh
           python3 tests/gwt-storage-test.py
           python3 tests/gwt-finish-test.py
