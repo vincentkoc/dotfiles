@@ -109,6 +109,52 @@ elif args[0] != "select-window":
                 self.assertEqual(calls, [])
 
 
+class MockWindowBindingsTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="tt-window-bind-")
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
+        self.socket = self.root / "socket with spaces"
+        self.log = self.root / "calls.json"
+        mock = self.root / "tmux"
+        mock.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+with open(os.environ["MOCK_LOG"], "w") as stream:
+    json.dump({"args": sys.argv[1:], "input": sys.stdin.read()}, stream)
+''')
+        mock.chmod(0o700)
+        self.env = {
+            "PATH": "/usr/bin:/bin", "HOME": str(self.root),
+            "TT_TMUX_BIN": str(mock), "MOCK_LOG": str(self.log),
+            "TMUX": "/fixture/wrong-socket,1,0", "TMUX_PANE": "%999",
+        }
+
+    def invoke(self, socket):
+        return subprocess.run(
+            ["/bin/bash", str(REPO / "bin/tt"), "window-menu-bind", str(socket)],
+            env=self.env, capture_output=True, text=True, timeout=5,
+        )
+
+    def test_refresh_uses_exact_socket_and_only_canonical_window_bindings(self):
+        result = self.invoke(self.socket)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = json.loads(self.log.read_text())
+        self.assertEqual(call["args"], ["-N", "-S", str(self.socket), "source-file", "-"])
+        source = (REPO / ".tmux.conf.local").read_text()
+        expected = source.split("# Cockpit windows use", 1)[1].split("\n", 1)[1]
+        expected = expected.split("# Right-click uses", 1)[0]
+        self.assertEqual(call["input"], expected)
+        self.assertEqual(sum(line.startswith("bind ") for line in expected.splitlines()), 3)
+        self.assertNotIn("MouseDown3Pane", expected)
+        self.assertNotIn("MouseDown3StatusRight", expected)
+        self.assertFalse(self.socket.exists())
+
+    def test_relative_socket_refuses_before_transport(self):
+        result = self.invoke("relative")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("socket must be an absolute path", result.stderr)
+        self.assertFalse(self.log.exists())
+
+
 class NewWindowTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(TMUX, "real tmux is required")
@@ -183,6 +229,15 @@ class NewWindowTests(unittest.TestCase):
             timeout=20, check=check,
         )
 
+    def inherit_recovery_agent_environment(self):
+        for name, value in (
+            ("CODEX_THREAD_ID", "fixture-recovery-thread"),
+            ("CODEX_SESSION_ID", "fixture-recovery-session"),
+            ("CLAUDE_AGENT_ID", "fixture-recovery-agent"),
+            ("TT_OPERATOR_TMUX_SCOPE", "recover:cockpit"),
+        ):
+            self.tmux("set-environment", "-g", name, value)
+
     def assert_grid(self, target):
         rows = [row.split("|") for row in self.panes(target)]
         self.assertEqual(len(rows), 6)
@@ -219,6 +274,56 @@ class NewWindowTests(unittest.TestCase):
         self.invoke(env={"TMUX": f"{self.root}/nonexistent,1,0", "TMUX_PANE": "%999"})
         self.assert_grid(self.windows()[-1])
 
+    def test_before_preserves_source_and_inserts_grid(self):
+        before = self.panes(self.window)
+        self.invoke("--before")
+        self.assertEqual(self.windows()[1], self.window)
+        self.assert_grid(self.windows()[0])
+        self.assertEqual(self.panes(self.window), before)
+
+    def test_conflicting_positions_refuse_without_mutation(self):
+        before = self.windows()
+        result = self.invoke("--before", "--after", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.windows(), before)
+
+    def test_restored_session_uses_surviving_grid_without_profile(self):
+        self.invoke()
+        existing = {window: self.panes(window) for window in self.windows()}
+        self.tmux("set-option", "-u", "-t", self.session, "@tt_profile")
+        self.invoke("--after")
+        self.assert_grid(self.windows()[1])
+        self.assertEqual(existing, {window: self.panes(window) for window in existing})
+
+    def test_explicit_plain_profile_does_not_inherit_grid(self):
+        self.invoke()
+        self.tmux("set-option", "-t", self.session, "@tt_profile", "plain")
+        self.invoke()
+        self.assertEqual(self.display(self.windows()[-1], "#{window_panes}"), "1")
+
+    def test_window_menu_bind_repairs_default_bindings(self):
+        self.tmux("bind-key", "c", "new-window")
+        protected = {}
+        for key in ("MouseDown3Pane", "MouseDown1StatusRight", "MouseDown3StatusRight"):
+            self.tmux("bind-key", "-T", "root", key, "display-message", "preserved-" + key)
+            protected[key] = self.tmux("list-keys", "-T", "root", key)
+        before = self.panes(self.window)
+        wrong_socket = self.root / "wrong-socket"
+        subprocess.run(
+            [str(REPO / "bin/tt"), "window-menu-bind", str(self.socket)],
+            env=dict(self.env, TMUX=f"{wrong_socket},1,0"),
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        self.assertFalse(wrong_socket.exists())
+        self.assertEqual(self.panes(self.window), before)
+        for key, binding in protected.items():
+            self.assertEqual(self.tmux("list-keys", "-T", "root", key), binding)
+        self.assertIn("tt", self.tmux("list-keys", "-T", "prefix", "c"))
+        for key in ("MouseDown3Status", "M-MouseDown3Status"):
+            menu = self.tmux("list-keys", "-T", "root", key)
+            self.assertIn("new-window --before --socket", menu)
+            self.assertIn("new-window --after --socket", menu)
+
     def test_non_cockpit_and_raw_new_window_stay_single_pane(self):
         native = self.tmux("new-window", "-d", "-P", "-F", "#{window_id}", "-t", self.session)
         native_cwd = self.display(native, "#{pane_current_path}")
@@ -253,6 +358,10 @@ class NewWindowTests(unittest.TestCase):
         self.assertEqual(self.windows(), before)
 
     def test_status_menu_actions_use_the_clicked_window(self):
+        # A recovered server can retain agent IDs and an unrelated old scope.
+        self.invoke()
+        self.tmux("set-option", "-u", "-t", self.session, "@tt_profile")
+        self.inherit_recovery_agent_environment()
         # Source only the three production binding blocks, as a local deployment would.
         local = (REPO / ".tmux.conf.local").read_text()
         bindings = local.split("# Cockpit windows use", 1)[1].split("# Recover a pane", 1)[0]
@@ -272,7 +381,7 @@ class NewWindowTests(unittest.TestCase):
         try:
             self.wait_terminal(master, b"0:")
             for key in ("MouseDown3Status", "M-MouseDown3Status"):
-                for choice in ("w", "W"):
+                for choice in ("b", "w", "W"):
                     with self.subTest(binding=key, choice=choice):
                         self.tmux("select-window", "-t", other)
                         before = self.windows()
@@ -304,8 +413,9 @@ class NewWindowTests(unittest.TestCase):
                         created = next(window for window in self.windows() if window not in before)
                         while time.monotonic() < deadline and self.display(self.session, "#{window_id}") != created:
                             time.sleep(0.02)
-                        if choice == "w":
-                            self.assertEqual(self.windows()[1], created)
+                        if choice in ("b", "w"):
+                            source_index = self.windows().index(self.window)
+                            self.assertEqual(self.windows()[source_index + (-1 if choice == "b" else 1)], created)
                         else:
                             self.assertEqual(self.windows()[-1], created)
                         self.assert_grid(created)
@@ -329,6 +439,7 @@ class NewWindowTests(unittest.TestCase):
         self.fail(f"fixture terminal never displayed {needle!r}: {output[-500:]!r}")
 
     def test_full_configuration_retains_all_three_bindings(self):
+        self.inherit_recovery_agent_environment()
         home = self.root / "home"
         shutil.copyfile(REPO / ".tmux.conf", home / ".tmux.conf")
         local = (REPO / ".tmux.conf.local").read_text().replace(
@@ -353,7 +464,8 @@ class NewWindowTests(unittest.TestCase):
         self.assertNotIn("new-window -c", keyboard)
         for key in ("MouseDown3Status", "M-MouseDown3Status"):
             menu = self.tmux("list-keys", "-T", "root", key)
-            self.assertEqual(menu.count("new-window"), 2)
+            self.assertEqual(menu.count("new-window --"), 3)
+            self.assertIn("new-window --before --socket", menu)
             self.assertIn("new-window --after --socket", menu)
             self.assertIn("new-window --socket", menu)
             self.assertIn("--target #{pane_id}", menu)
