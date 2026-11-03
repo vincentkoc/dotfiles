@@ -784,11 +784,12 @@ def semantic_inventory(contents, admin):
     return {"working": working, "admin": administrative}
 
 
-def release_refs(snap, target, until):
-    branches = {snap["branch"]}
-    target_ref = "refs/remotes/origin/" + target
-    if target_ref in git(snap["owner"], "for-each-ref", "--format=%(refname)", target_ref).splitlines():
-        branches.add(target_ref)
+def release_refs(snap, target, until, *, branches=()):
+    branches = {snap["branch"], *branches}
+    if target:
+        target_ref = "refs/remotes/origin/" + target
+        if target_ref in git(snap["owner"], "for-each-ref", "--format=%(refname)", target_ref).splitlines():
+            branches.add(target_ref)
     refs = preserved_refs(snap, branches, until)
     roots = {proof["head"] for proof in refs.values()}
     for proof in refs.values():
@@ -1291,7 +1292,9 @@ def remove_finalized(db, row, args, *, completed=False):
     module = safety()
     until = time.monotonic() + 120
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
-        row["finalized_refs"] = preserved_refs(snap, (enrolled_branch, snap["branch"]), until)
+        # A fetched target may retain history absent from either task branch.
+        # Reuse release roots so manual closeout binds that ref to the same drift checks.
+        row["finalized_refs"], _ = release_refs(snap, row["target"], until, branches=(enrolled_branch,))
         def admit():
             if completed:
                 current = get_row(db, snap["path"])

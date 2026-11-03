@@ -516,18 +516,19 @@ rewritten.
 Automatic lifecycle checks do not accept this branch transition.
 
 Manual closeout accepts `FETCH_HEAD` only when every record names a literal
-commit preserved by the captured current or enrolled branch heads or their
-common reflogs, including their reachable ancestors. Annotated tag objects do
-not qualify merely because their peeled commit is retained. Bounded Git queries
-disable replacement objects; unavailable or ambiguous proof blocks closeout.
+commit preserved by the captured current or enrolled branch heads, the recorded
+target's existing `origin` remote-tracking ref, or their common reflogs, including
+their reachable ancestors. Tasks without a recorded target do not infer one.
+Annotated tag objects do not qualify merely because their peeled commit is
+retained. Bounded Git queries disable replacement objects; unavailable or
+ambiguous proof blocks closeout.
 Records must have Git's complete OID, merge-marker, and note/URL fields with LF
 termination. An empty file is also accepted under this explicit manual proof.
 The file's identity, bytes, metadata, and retained refs remain bound through
 admission and removal. Malformed or unanchored records block closeout.
-New automatic release baselines use the same recovery proof, including the
-recorded target's `origin` remote-tracking ref. Release-time OIDs remain required
-even if a later fetch overwrites or removes `FETCH_HEAD`. Legacy full inventories
-continue to reject it.
+New automatic release baselines use the same recovery proof. Release-time OIDs
+remain required even if a later fetch overwrites or removes `FETCH_HEAD`. Legacy
+full inventories continue to reject it.
 
 Manual closeout also accepts a strictly parsed `REUC` resolve-undo index
 extension. Each recorded stage must be a regular-file or symlink blob reachable

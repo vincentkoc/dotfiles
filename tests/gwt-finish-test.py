@@ -1427,6 +1427,16 @@ class ForegroundCompletionTests(unittest.TestCase):
         self.assertEqual(result["checkout"], "removed", result)
         self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), target)
 
+    def test_foreground_release_preserves_fetched_target_ahead_of_task(self):
+        target = self.pending_target_fetch()
+        with mock.patch.object(FINISH, "manual_holders"):
+            result = self.call("release")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), target)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
     def test_target_ref_drift_between_admissions_holds_before_native_unlock(self):
         target = self.pending_target_fetch()
         successor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", target, "-m", "next target")
@@ -2516,6 +2526,91 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.assertEqual(reflogs[branch].read_bytes(), before[branch])
         for oid in old_tips:
             self.assertEqual(git(self.repo, "cat-file", "-t", oid), "commit")
+
+    def fetched_target(self, *, recorded=True):
+        if recorded:
+            self.proofs[self.url].update(merged=False, state="open", merge=None)
+            self.assertEqual(self.finish()[1][0]["reason"], "pr-not-merged")
+        else:
+            self.call("cancel", "--reason", "superseded upstream")
+        target = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "target advances")
+        git(self.repo, "update-ref", "refs/heads/main", target, self.head)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo),
+            "refs/heads/main:refs/remotes/origin/main")
+        self.assertEqual(git(self.repo, "rev-list", target, "--not", "released-feature"), target)
+        return target
+
+    def test_finalized_fetch_head_preserves_recorded_target_and_both_task_branches(self):
+        target = self.fetched_target()
+        successor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", target, "-m", "next target")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", successor, target)
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        branches = ("refs/heads/released-feature", "refs/heads/reviewed-current", "refs/remotes/origin/main")
+        before = {branch: (git(self.repo, "rev-parse", branch),
+                           (self.repo / ".git/logs" / branch).read_bytes()) for branch in branches}
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        for branch, (head, reflog) in before.items():
+            self.assertEqual(git(self.repo, "rev-parse", branch), head)
+            self.assertEqual((self.repo / ".git/logs" / branch).read_bytes(), reflog)
+        self.assertEqual(git(self.repo, "cat-file", "-t", target), "commit")
+
+    def test_finalized_fetch_head_target_ref_drift_retains_before_intent(self):
+        target = self.fetched_target()
+        successor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", target, "-m", "next target")
+        lock = (self.admin / "locked").read_bytes()
+        def advance(*args):
+            git(self.repo, "update-ref", "refs/remotes/origin/main", successor, target)
+        with mock.patch.object(FINISH, "manual_holders", side_effect=advance):
+            with self.assertRaisesRegex(FINISH.Retain, "preserved-refs-changed"):
+                self.call("remove", "--finalized")
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "locked").read_bytes(), lock)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def test_finalized_fetch_head_without_recorded_target_retains(self):
+        self.fetched_target(recorded=False)
+        before = (self.admin / "FETCH_HEAD").read_bytes()
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), before)
+
+    def test_finalized_fetch_head_with_missing_recorded_target_retains(self):
+        self.fetched_target()
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        before = (self.admin / "FETCH_HEAD").read_bytes()
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), before)
+
+    def test_finalized_fetch_head_with_locked_recorded_target_retains(self):
+        self.fetched_target()
+        lock = self.repo / ".git/refs/remotes/origin/main.lock"
+        lock.write_text("concurrent writer\n")
+        with self.assertRaisesRegex(FINISH.Retain, "preserved-branch-lock-present"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(lock.read_text(), "concurrent writer\n")
+
+    def test_finalized_fetch_head_does_not_accept_unrecorded_remote_branch(self):
+        self.fetched_target()
+        unrelated = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "unrelated history")
+        git(self.repo, "update-ref", "refs/remotes/origin/other", unrelated)
+        path = self.admin / "FETCH_HEAD"
+        path.write_text(unrelated + "\t\tunrecorded remote branch\n")
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(path.read_text(), unrelated + "\t\tunrecorded remote branch\n")
 
     def test_empty_fetch_head_requires_explicit_manual_proof(self):
         (self.admin / "FETCH_HEAD").write_bytes(b"")
