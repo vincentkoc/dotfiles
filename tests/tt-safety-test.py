@@ -1799,10 +1799,12 @@ apply_pane_marker_style %7 violet
         result = self.shell(["recovery_server_config"], "recovery_server_config\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(len(result.stdout.encode()), 3063)
+        self.assertIn(r"set -as terminal-overrides ',xterm*:Ms=\E]52;%?%p1%l%t%p1%s%ec%;;%p2%s\007'",
+                      result.stdout)
+        self.assertEqual(len(result.stdout.encode()), 3218)
         # This native recovery config must retain every quote and shell placeholder.
         self.assertEqual(hashlib.sha256(result.stdout.encode()).hexdigest(),
-                         "d2ffc9aaaecf1309b1e9e68723a0a6c8405571afa564122a554c41aac22cf7b4")
+                         "ca0201710fae541976223e3ea04f9722c4977e0f31d261306aa4eb2e4613f990")
 
     def test_collector_preserves_large_rows_empty_fields_and_filters(self):
         title = "worker " + "x" * 4096

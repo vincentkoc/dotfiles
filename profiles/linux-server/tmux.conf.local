@@ -43,6 +43,10 @@ set -ga terminal-overrides ",*:Tc"
 %if "#{==:#{m/r:(^| )linux[*]:AX@($| ),#{terminal-overrides}},0}"
 set -ga terminal-overrides ",linux*:AX@"
 %endif
+# Mosh 1.4 requires selector c; preserve explicit selectors and unrelated overrides.
+%if '#{==:#{m/r:(^| )xterm[*]:Ms=[\\]E[]]52;%[?]%p1%l%t%p1%s%ec%;;%p2%s[\\]007($| ),#{terminal-overrides}},0}'
+set -as terminal-overrides ',xterm*:Ms=\E]52;%?%p1%l%t%p1%s%ec%;;%p2%s\007'
+%endif
 set -g allow-passthrough on
 set -g extended-keys on
 set -g extended-keys-format csi-u

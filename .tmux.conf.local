@@ -59,6 +59,8 @@ set-environment -g TERMINFO_DIRS "$HOME/.terminfo:/usr/share/terminfo"
 # Ghostty and iTerm usually present as xterm-256color; keep RGB, OSC 8, and OSC 52.
 set -g terminal-features "xterm*:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
 set -g terminal-overrides ",*:Tc,linux*:AX@"
+# Mosh 1.4 requires selector c; preserve explicit selectors for other clients.
+set -as terminal-overrides ',xterm*:Ms=\E]52;%?%p1%l%t%p1%s%ec%;;%p2%s\007'
 set -g allow-passthrough on
 set -g set-clipboard on
 
