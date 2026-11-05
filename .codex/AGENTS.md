@@ -25,3 +25,12 @@
 - If merging on my behalf, squash PRs unless I say otherwise.
 - In `openclaw/openclaw`, auto-assign reviewed issues/PRs to `vincentkoc`
 - Use semantic commit messages like `fix(ci):` unless rules say otherwise
+
+## Talks, articles and visual explanations
+
+- Start with audience pain, one argument, and a clear ending. Give each slide one job.
+- Use prior work and named influences as references, not voices to imitate.
+- Prefer sparse layouts, real screenshots, readable code, consistent panels, and speaker notes over explanatory clutter.
+- Give every chart a clear takeaway. Keep dates, units, attribution, and material caveats accurate but unobtrusive.
+- For substantial new talks, prefer Opus drafting and two Fable critique/edit rounds unless I specify otherwise.
+- Preserve original inputs and useful versions. Apply slide feedback precisely and deliver full PDF/PPTX files in the requested order.
