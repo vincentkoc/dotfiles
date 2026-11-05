@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import selectors
 import signal
 import stat
@@ -104,12 +105,45 @@ def read_file(path, until, limit=LEAF_LIMIT):
         os.close(fd)
 
 
-def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None):
-    """Own one process group; bounded failure cleanup never signals other groups."""
+def tracked_blob(path, until, expected, limit):
+    """Hash a tracked source leaf without buffering it or relaxing admin bounds."""
+    tick(until)
+    named = os.lstat(path)
+    if not stat.S_ISREG(named.st_mode) or not 0 <= named.st_size <= limit:
+        raise Retain("file-type-or-size-unsupported")
+    if file_identity(named) != expected:
+        raise Retain("file-replaced")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if file_identity(os.fstat(fd)) != expected:
+            raise Retain("file-replaced")
+        size = named.st_size
+        digest = hashlib.sha1(b"blob " + str(size).encode() + b"\0")
+        count = 0
+        while True:
+            tick(until)
+            chunk = os.read(fd, min(65536, size + 1 - count))
+            if not chunk:
+                break
+            count += len(chunk)
+            if count > size:
+                raise Retain("file-size-changed")
+            digest.update(chunk)
+        if (count != size or file_identity(os.fstat(fd)) != expected
+                or file_identity(os.lstat(path)) != expected):
+            raise Retain("file-changed")
+        return digest.hexdigest(), size
+    finally:
+        os.close(fd)
+
+
+def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None,
+              sudo_monitor=False, deadline=None):
+    """Bound one child; sudo cleanup signals only its monitor, never a group."""
     child = selector = None
     output = [bytearray(), bytearray()]
     started = time.monotonic()
-    until = min(started + timeout, DEADLINE)
+    until = min(started + timeout, DEADLINE, deadline if deadline is not None else float("inf"))
     proof = {"pid": None, "started_monotonic": started, "reaped": False}
     failure = None
     try:
@@ -119,7 +153,7 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
         child = subprocess.Popen(command, cwd=cwd, env=env,
                                  stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                                  stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, start_new_session=True)
+                                 stderr=subprocess.PIPE, start_new_session=not sudo_monitor)
         proof["pid"] = child.pid
         selector = selectors.DefaultSelector()
         for i, stream in enumerate((child.stdout, child.stderr)):
@@ -155,6 +189,10 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
         child.wait(timeout=max(0.001, until - time.monotonic()))
     except Exception as error:
         failure = error
+    except BaseException as error:
+        if sudo_monitor:
+            failure = error
+        raise
     finally:
         if selector is not None:
             try:
@@ -162,9 +200,18 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
             except Exception as error:
                 failure = failure or error
         if child is not None:
-            # A child may exit while one of its descendants retains the pipes.
-            # The fresh process group belongs to this invocation only.
-            if child.returncode is None:
+            if sudo_monitor and failure is not None:
+                # sudo relays TERM; killing its monitor can strand the root child.
+                # Even a reaped monitor cannot prove privileged-child cleanup.
+                proof["privileged_termination"] = "unknown"
+                try:
+                    child.send_signal(signal.SIGTERM)
+                    proof["monitor_term_requested"] = True
+                except OSError as error:
+                    failure = failure or error
+            elif not sudo_monitor and child.returncode is None:
+                # A descendant can retain the pipes after the child exits.
+                # Only the default mode owns a fresh process group.
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -182,15 +229,20 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
                         stream.close()
                 except OSError as error:
                     failure = failure or error
-            try:
-                os.killpg(child.pid, 0)
-                proof["group_absent"] = False
-                failure = failure or Retain("owned-child-group-survives")
-            except ProcessLookupError:
-                proof["group_absent"] = True
-            except OSError as error:
+            if sudo_monitor:
                 proof["group_absent"] = None
-                failure = failure or error
+                proof["privileged_termination"] = (
+                    "unknown" if failure is not None or child.returncode != 0 else "command-returned")
+            else:
+                try:
+                    os.killpg(child.pid, 0)
+                    proof["group_absent"] = False
+                    failure = failure or Retain("owned-child-group-survives")
+                except ProcessLookupError:
+                    proof["group_absent"] = True
+                except OSError as error:
+                    proof["group_absent"] = None
+                    failure = failure or error
             proof["returncode"] = child.returncode
         proof.update(ended_monotonic=time.monotonic(),
                      stdout_sha256=hashlib.sha256(output[0]).hexdigest(),
@@ -202,7 +254,40 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
     return result
 
 
-def index_entries(data):
+def resolve_undo_entries(data):
+    result, cursor = {}, 0
+    while cursor < len(data):
+        tick(DEADLINE)
+        if len(result) >= ENTRY_LIMIT:
+            raise Retain("resolve-undo-entry-limit")
+        fields = []
+        for _ in range(4):
+            end = data.find(b"\0", cursor)
+            if end < 0:
+                raise Retain("resolve-undo-invalid")
+            fields.append(data[cursor:end])
+            cursor = end + 1
+        name = os.fsdecode(fields[0])
+        if (not name or name.startswith("/") or name in result
+                or any(part in ("", ".", "..", ".git") for part in name.split("/"))
+                or any(mode not in (b"0", b"100644", b"100755", b"120000") for mode in fields[1:])):
+            raise Retain("resolve-undo-invalid")
+        stages = []
+        for stage, mode in enumerate(fields[1:], 1):
+            if mode == b"0":
+                continue
+            oid = data[cursor:cursor + 20]
+            if len(oid) != 20 or oid == b"\0" * 20:
+                raise Retain("resolve-undo-invalid")
+            stages.append([stage, int(mode, 8), oid.hex()])
+            cursor += 20
+        if not stages:
+            raise Retain("resolve-undo-invalid")
+        result[name] = stages
+    return result
+
+
+def index_entries(data, *, allow_empty_gitlinks=False, allow_resolve_undo=False):
     """Admit ordinary SHA-1 index v2/v3 before ANY native index consumer."""
     if (len(data) < 32 or data[:4] != b"DIRC"
             or hashlib.sha1(data[:-20]).digest() != data[-20:]):
@@ -221,7 +306,8 @@ def index_entries(data):
         cursor += 62
         # Ordinary non-cone sparse checkout keeps a full v3 index with only
         # SKIP_WORKTREE. Present skipped files still receive full byte checks.
-        if flags & 0xB000 or mode not in (0o100644, 0o100755, 0o120000):
+        if flags & 0xB000 or (mode not in (0o100644, 0o100755, 0o120000)
+                            and not (allow_empty_gitlinks and mode == 0o160000)):
             raise Retain("raw-index-flags-or-mode-unsupported")
         skipped = False
         if flags & 0x4000:
@@ -246,38 +332,171 @@ def index_entries(data):
             raise Retain("raw-index-padding-invalid")
         result[name] = (mode, oid, skipped)
         previous = raw_name
+    resolve_undo = None
     while cursor < len(data) - 20:
         if cursor + 8 > len(data) - 20:
             raise Retain("raw-index-extension-invalid")
         kind = data[cursor:cursor + 4]
         size = struct.unpack_from(">I", data, cursor + 4)[0]
-        cursor += 8 + size
-        if kind != b"TREE" or cursor > len(data) - 20:
+        start = cursor + 8
+        cursor = start + size
+        if cursor > len(data) - 20:
+            raise Retain("raw-index-extension-invalid")
+        if kind == b"REUC" and allow_resolve_undo:
+            if resolve_undo is not None:
+                raise Retain("resolve-undo-duplicate-extension")
+            resolve_undo = resolve_undo_entries(data[start:cursor])
+        elif kind != b"TREE":
             raise Retain("raw-index-extension-unsupported")
-    return result
+    return result, resolve_undo
 
 
-def tree_entries(raw):
+def preserved_resolve_undo(snap, git, until, resolve_undo, preserved_oids):
+    blobs = {oid for stages in resolve_undo.values() for _, _, oid in stages}
+    if not blobs:
+        return
+    if not preserved_oids:
+        raise Retain("resolve-undo-recovery-required")
+    roots = sorted(preserved_oids)
+    objects = [(oid, "commit") for oid in roots] + [(oid, "blob") for oid in sorted(blobs)]
+    tick(until)
+    types = git(snap["path"], "--no-replace-objects", "cat-file",
+                "--batch-check=%(objectname) %(objecttype)",
+                input_data="".join(oid + "\n" for oid, _ in objects).encode(),
+                raw=True, strict=True, deadline=until)
+    if types != "".join(f"{oid} {kind}\n" for oid, kind in objects).encode():
+        raise Retain("resolve-undo-object-type-or-missing")
+    for name, stages in resolve_undo.items():
+        tick(until)
+        # NUL framing binds literal paths even when names contain newlines.
+        raw = git(snap["path"], "--no-replace-objects", "--literal-pathspecs",
+                  "rev-list", "--objects", "-z", "--full-history", "--stdin", "--", name,
+                  input_data="".join(oid + "\n" for oid in roots).encode(),
+                  raw=True, strict=True, deadline=until)
+        fields = raw.split(b"\0")
+        if fields[-1] != b"":
+            raise Retain("resolve-undo-reachability-invalid")
+        matched, oid = set(), None
+        for field in fields[:-1]:
+            if re.fullmatch(rb"[0-9a-f]{40}", field):
+                oid = field.decode()
+            elif oid is not None and field.startswith(b"path="):
+                if field[5:] == os.fsencode(name):
+                    matched.add(oid)
+                oid = None
+            else:
+                raise Retain("resolve-undo-reachability-invalid")
+        if not {item[2] for item in stages}.issubset(matched):
+            raise Retain("resolve-undo-recovery-required")
+
+
+def tree_entries(raw, *, allow_empty_gitlinks=False):
     result = {}
     for item in raw.split("\0"):
         if not item:
             continue
         metadata, name = item.split("\t", 1)
         mode, kind, oid = metadata.split()
-        if kind != "blob" or int(mode, 8) not in (0o100644, 0o100755, 0o120000):
+        if (not (kind == "blob" and int(mode, 8) in (0o100644, 0o100755, 0o120000))
+                and not (allow_empty_gitlinks and kind == "commit" and int(mode, 8) == 0o160000)):
             raise Retain("tree-mode-unsupported")
         result[name] = (int(mode, 8), oid)
     return result
 
 
-def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False):
+def directory_mount_id(fd, until):
+    if platform.system() != "Linux":
+        return None
+    # st_dev alone cannot distinguish a same-filesystem bind mount.
+    data, _ = read_file(Path("/proc/self/fdinfo") / str(fd), until, 4096)
+    values = [line.split()[1:] for line in data.splitlines() if line.startswith(b"mnt_id:")]
+    if len(values) != 1 or len(values[0]) != 1 or not values[0][0].isdigit():
+        raise Retain("gitlink-mount-identity-unavailable")
+    return int(values[0][0])
+
+
+def empty_gitlink(snap, name, until):
+    """Bind every component without following links, including the absent boundary."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with contextlib.ExitStack() as cleanup:
+        path = Path(snap["path"])
+        named = path.lstat()
+        fd = os.open(path, flags)
+        cleanup.callback(os.close, fd)
+        held = file_identity(os.fstat(fd))
+        if list(held[:2]) != snap["path_id"] or held != file_identity(named):
+            raise Retain("gitlink-root-changed")
+        mount = directory_mount_id(fd, until)
+        chain = [(None, str(path), fd, held)]
+        directories = {"": list(held)}
+        missing = None
+        parts = name.split("/")
+        for index, part in enumerate(parts):
+            tick(until)
+            relative = "/".join(parts[:index + 1])
+            try:
+                named = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                missing = (fd, part)
+                result = {"state": "absent", "missing": relative, "directories": directories}
+                break
+            if not stat.S_ISDIR(named.st_mode):
+                raise Retain("gitlink-not-empty-directory")
+            child = os.open(part, flags, dir_fd=fd)
+            cleanup.callback(os.close, child)
+            held = file_identity(os.fstat(child))
+            if held != file_identity(named):
+                raise Retain("gitlink-directory-changed")
+            path /= part
+            if (held[0] != snap["path_id"][0] or os.path.ismount(path)
+                    or directory_mount_id(child, until) != mount):
+                raise Retain("gitlink-nested-mount")
+            chain.append((fd, part, child, held))
+            directories[relative] = list(held)
+            fd = child
+        else:
+            with os.scandir(fd) as children:
+                if next(children, None) is not None:
+                    raise Retain("gitlink-directory-not-empty")
+            result = {"state": "empty", "directories": directories}
+        if missing is not None:
+            try:
+                os.stat(missing[1], dir_fd=missing[0], follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Retain("gitlink-absence-changed")
+        for parent, part, child, held in reversed(chain):
+            tick(until)
+            if (file_identity(os.fstat(child)) != held
+                    or file_identity(os.stat(part, dir_fd=parent, follow_symlinks=False)) != held
+                    or directory_mount_id(child, until) != mount):
+                raise Retain("gitlink-directory-changed")
+        return result
+
+
+def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
+              allow_empty_gitlinks=False, preserved_oids=None, logical_index=False):
     index, index_id = read_file(Path(snap["gitdir"]) / "index", until)
-    entries = index_entries(index)
-    head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"))
+    entries, resolve_undo = index_entries(
+        index, allow_empty_gitlinks=allow_empty_gitlinks, allow_resolve_undo=preserved_oids is not None)
+    if resolve_undo is not None:
+        preserved_resolve_undo(snap, git, until, resolve_undo, preserved_oids)
+    head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"),
+                        allow_empty_gitlinks=allow_empty_gitlinks)
     if any(name == root or name.startswith(root + "/") for name in head for root in discard_ignored):
         raise Retain("discarded-artifact-overlaps-tracked-source")
     if {name: entry[:2] for name, entry in entries.items()} != head:
         raise Retain("staged-or-index-only-changes")
+    gitlinks = {name for name, entry in head.items() if entry[0] == 0o160000}
+    if gitlinks:
+        try:
+            os.lstat(Path(snap["gitdir"]) / "modules")
+        except FileNotFoundError:
+            pass
+        else:
+            raise Retain("submodule-admin-present")
+    gitlink_proof = {name: empty_gitlink(snap, name, until) for name in sorted(gitlinks)}
     expected_dirs = {""}
     for name in head:
         expected_dirs.update(str(p) for p in Path(name).parents if str(p) != ".")
@@ -349,6 +568,10 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False):
                 data, _ = read_file(path, until, 4096)
                 if data != ("gitdir: " + snap["gitdir"] + "\n").encode():
                     raise Retain("worktree-pointer-changed")
+            elif name in gitlinks:
+                proof = gitlink_proof[name]
+                if proof["state"] != "empty" or list(file_identity(details)) != proof["directories"][name]:
+                    raise Retain("gitlink-directory-changed")
             elif stat.S_ISDIR(details.st_mode):
                 if name not in expected_dirs:
                     raise Retain("unclassified-ignored-directory")
@@ -368,22 +591,31 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False):
                 mode, oid = head[name]
                 if stat.S_ISLNK(details.st_mode) and mode == 0o120000:
                     data = os.fsencode(os.readlink(path))
+                    size = len(data)
+                    digest = hashlib.sha1(b"blob " + str(size).encode() + b"\0" + data).hexdigest()
                 elif stat.S_ISREG(details.st_mode) and mode in (0o100644, 0o100755):
                     if bool(details.st_mode & 0o111) != (mode == 0o100755):
                         raise Retain("working-mode-changed")
-                    data, _ = read_file(path, until, min(LEAF_LIMIT, SOURCE_LIMIT - used))
+                    digest, size = tracked_blob(path, until, file_identity(details), SOURCE_LIMIT - used)
                 else:
                     raise Retain("working-type-changed")
-                used += len(data)
-                if used > SOURCE_LIMIT or hashlib.sha1(
-                        b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
+                used += size
+                if used > SOURCE_LIMIT or digest != oid:
                     raise Retain("working-bytes-changed-or-limit")
         if file_identity(directory.lstat()) != file_identity(before):
             raise Retain("inventory-directory-changed")
-    if not {name for name, entry in entries.items() if not entry[2]}.issubset(rows):
+    if not {name for name, entry in entries.items() if not entry[2] and name not in gitlinks}.issubset(rows):
         raise Retain("working-file-missing")
+    if any(empty_gitlink(snap, name, until) != proof for name, proof in gitlink_proof.items()):
+        raise Retain("gitlink-state-changed")
     result = {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest(),
               "entries": rows, "dependency": dependency}
+    if logical_index:
+        result["logical_index"] = {name: list(entry) for name, entry in entries.items()}
+    if resolve_undo is not None:
+        result["resolve_undo"] = resolve_undo
+    if gitlinks:
+        result["gitlinks"] = gitlink_proof
     if discard_ignored:
         result["discarded_links"] = discarded_links
     if compact_discarded:
@@ -450,14 +682,21 @@ def platform_key():
             "machine": platform.machine()}
 
 
+HOLDER_COVERAGE = "bounded-native"
+
+
+def check_holder_platform():
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise Retain("holder-backend-unqualified-platform")
+    if [C.sizeof(t) for t in (BSD, VStat, VPath, CWD, FDPath, ThreadPath, Region)] != [
+            136, 136, 1176, 2352, 1200, 1288, 1272]:
+        raise Retain("holder-native-ABI-mismatch")
+
+
 class Darwin:
     """Same real/effective UID coverage; selected errors never become absence."""
     def __init__(self, until):
-        if platform.system() != "Darwin" or platform.machine() != "arm64":
-            raise Retain("holder-backend-unqualified-platform")
-        if [C.sizeof(t) for t in (BSD, VStat, VPath, CWD, FDPath, ThreadPath, Region)] != [
-                136, 136, 1176, 2352, 1200, 1288, 1272]:
-            raise Retain("holder-native-ABI-mismatch")
+        check_holder_platform()
         self.until = until
         self.lib = C.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         for name in ("proc_listpids", "proc_pidinfo", "proc_pidfdinfo", "proc_pidfileportinfo"):
@@ -482,8 +721,9 @@ class Darwin:
         value = kind()
         count, error = self.call(self.lib.proc_pidinfo, pid, flavor, arg,
                                  C.byref(value), C.sizeof(value))
-        # REGIONPATHINFO returns EINVAL at the address-space end. ESRCH is
-        # process churn, never a successful end-of-regions observation.
+        # PATHINFO2 uses EINVAL for exhaustion AND vnode acquisition failure.
+        # Accept that bounded native endpoint, never claim complete VM coverage.
+        # Surfaced ESRCH remains process churn, not successful exhaustion.
         if end and count == 0 and error == errno.EINVAL:
             return None
         if count != C.sizeof(value) or error:
@@ -523,7 +763,9 @@ class Darwin:
             descriptors = self.array(pid, flavor, FD, 16384)
             for item in descriptors:
                 if item.kind != 1:  # PROX_FDTYPE_VNODE, independent of access flags.
-                    continue
+                    if item.kind in (0, 2, 3, 4, 5, 6, 7, 9, 10, 11):
+                        continue  # Known non-vnode kinds from Darwin proc_info.h.
+                    raise Retain(f"holder-descriptor-kind-unknown:pid={pid}:kind={item.kind}")
                 value = FDPath()
                 count, error = self.call(method, pid, item.number, 2,
                                          C.byref(value), C.sizeof(value))
@@ -541,23 +783,21 @@ class Darwin:
                 raise Retain("holder-thread-population-changed")
         address = 0
         for _ in range(65536):
-            region = self.info(pid, 8, Region, address, end=True)
+            region = self.info(pid, 22, Region, address, end=True)
             if region is None:
                 break
-            yield "mapping", region.vnode
             next_address = region.address + region.size
-            # XNU vm_map_region_synthesize_guard_object_hole can return an empty
-            # guard at the next real entry. Requery that exact address, not past it.
-            empty_guard = (region.size == 0 and region.address > address
-                           and (region.protection, region.max_protection, region.inheritance,
-                                region.flags, region.offset) == (0, 0, 2, 0, 0)  # VM_INHERIT_NONE
-                           and list(region.counters) == [0, 0, 31, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0]
-                           and not any(bytes(region.vnode)))  # VM_MEMORY_GUARD, SM_EMPTY; no vnode
-            if (not region.size and not empty_guard) or next_address <= address or next_address >= 2**64:
+            if (region.address < address or not region.size
+                    or next_address <= address or next_address >= 2**64):
                 raise Retain(f"holder-region-iteration-invalid:pid={pid}:cursor={address}:"
                              f"address={region.address}:size={region.size}:flags={region.flags}:"
                              f"offset={region.offset}:user_tag={region.counters[2]}:"
                              f"share_mode={region.counters[9]}:depth={region.counters[13]}")
+            # A mapped-vnode result with missing identity is not anonymous VM.
+            # XNU can suppress fill_vnodeinfo errors before copying this ABI out.
+            if not region.vnode.stat.ino or region.vnode.type != 1:
+                raise Retain("holder-region-vnode-unknown")
+            yield "mapping", region.vnode
             address = next_address
         else:
             raise Retain("holder-region-limit")
@@ -588,10 +828,10 @@ class Darwin:
         for pid, birth in births.items():
             if self.birth(self.info(pid, 3, BSD)) != birth:
                 raise Retain("holder-process-changed")
-        # libproc skips submap vnodes and can suppress vnode acquisition errors.
-        # Observed references remain useful; empty output cannot clear mappings.
+        # Complete selected-process enumeration under a bounded cooperative
+        # contract, not proof that libproc exposed every live mapped vnode.
         return {"scope": "real-or-effective-uid-and-known-processes", "processes": len(births),
-                "holders": holders, "mapping_coverage": "unqualified",
+                "holders": holders, "mapping_coverage": HOLDER_COVERAGE,
                 "native_calls": self.calls, "platform": platform_key()}
 
 
@@ -676,10 +916,11 @@ def access_boundary(path, until):
     return result
 
 
-def admin_inventory(snap, git, until):
+def admin_inventory(snap, git, until, *, preserved_oids=None):
     root = Path(snap["gitdir"])
     rows = {"": [[*file_identity(root.lstat()), disposable_metadata(root, until)], None]}
     used = 0
+    qualified_fetch_oids = set()
     stack = [root]
     while stack:
         directory = stack.pop()
@@ -704,11 +945,37 @@ def admin_inventory(snap, git, until):
                     raise Retain("admin-recovery-directory-present")
                 stack.append(path)
                 rows[name] = [[*file_identity(s), attrs], None]
-            elif stat.S_ISREG(s.st_mode) and name in (
+            elif stat.S_ISREG(s.st_mode) and (name in (
                     "HEAD", "index", "commondir", "gitdir", "locked", "ORIG_HEAD", "logs/HEAD",
-                    "config.worktree", "info/sparse-checkout", "COMMIT_EDITMSG", "AUTO_MERGE"):
+                    "config.worktree", "info/sparse-checkout", "COMMIT_EDITMSG", "AUTO_MERGE")
+                    or (name == "FETCH_HEAD" and preserved_oids is not None)):
                 data, identity = read_file(path, until, min(LEAF_LIMIT, PASS_LIMIT - used))
                 used += len(data)
+                if name == "FETCH_HEAD":
+                    # Git writes OID, merge marker, and note/URL, terminated by LF.
+                    # The caller supplies refs retained outside this admin directory.
+                    if data and not data.endswith(b"\n"):
+                        raise Retain("fetch-head-recovery-required")
+                    for line in data.split(b"\n")[:-1]:
+                        tick(until)
+                        record = re.fullmatch(
+                            rb"([0-9a-f]{40}(?:[0-9a-f]{24})?)\t(?:not-for-merge)?\t[^\0\n]*", line)
+                        if record is None:
+                            raise Retain("fetch-head-recovery-required")
+                        oid = record[1].decode("ascii")
+                        if oid not in qualified_fetch_oids:
+                            try:
+                                if git(snap["path"], "--no-replace-objects", "cat-file", "-t", oid,
+                                       raw=True, strict=True, deadline=until) != b"commit\n":
+                                    raise Retain("fetch-head-recovery-required")
+                                if oid not in preserved_oids and git(
+                                        snap["path"], "--no-replace-objects", "rev-list", "--max-count=1",
+                                        oid, "--not", *sorted(preserved_oids), "--",
+                                        raw=True, strict=True, deadline=until):
+                                    raise Retain("fetch-head-recovery-required")
+                            except Retain as error:
+                                raise Retain("fetch-head-recovery-required") from error
+                            qualified_fetch_oids.add(oid)
                 if name == "AUTO_MERGE":
                     # Successful ort rebases leave this tree ref. A divergent
                     # conflict snapshot is recovery data, not disposable state.
@@ -743,7 +1010,10 @@ def admin_inventory(snap, git, until):
                         raise Retain("worktree-config-recovery-required")
                     if file_identity(path.lstat()) != identity:
                         raise Retain("worktree-config-changed")
-                if name in ("ORIG_HEAD", "logs/HEAD"):
+                if name == "FETCH_HEAD":
+                    rows[name] = [[*identity, attrs], hashlib.sha256(data).hexdigest(),
+                                  sorted(qualified_fetch_oids)]
+                elif name in ("ORIG_HEAD", "logs/HEAD"):
                     # All referenced commits must remain named by the preserved
                     # branch. The caller checks reachability before removal.
                     refs = data.split() if name == "ORIG_HEAD" else [

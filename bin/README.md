@@ -11,11 +11,15 @@ Top-level wrappers:
 - `codex` - launch the installed CLI, preserving inherited GitHub credentials and filling missing token variables from native `gh` when available; supports opt-in constrained-network and heavy-work admission controls
 - `codex-github-mcp` - start GitHub MCP over stdio with inherited credentials or native `gh` authentication; forwards extra server arguments
 - `codex-hooks` - render the effective hooks file from stable integration fragments while preserving unknown user hooks and concurrent-edit safety
+- `curl` - use enabled macOS HTTP/HTTPS system proxies for the existing curl executable, including installer subprocesses
 - `discrawl` - preserve explicit remote auth or load `openclaw-crawl/remote.env` from the trusted XDG config location before dispatching to a real backend
 - `install-agent-worktree-ops`
 - `retire-agent-worktree-scheduler`
+- `local-ai-setup` - share one pinned Ollama GGUF with LM Studio and Llama; defaults to a file-only check
+- `mac-preferences` - check or apply the small typed macOS preferences profile without restarting apps
 - `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
+- `quickssh` - connect to a saved SSH/Mosh host; restores local tty settings and disables mouse reporting after disconnects
 - `sublime-sync` - verify or restore Sublime User settings and Package Control plugins from a portable bundle
 - `task-runtime` - check configurable disk reserve before new heavy work and atomically update one bounded task phase receipt
 - `tt` - create or attach tmux sessions, including a `mobile` pane-picker profile; agent-driven topology changes require an exact `TT_OPERATOR_TMUX_SCOPE=<action>:<target>`, while interactive use and isolated fixtures remain available
@@ -29,6 +33,101 @@ Tool folders:
 - `zsh-completion/`
   - zsh completion scripts
 
+## Shared local AI model
+
+`local-ai-setup` shares one Qwen3 4B Instruct 2507 Q4_K_M GGUF across native
+Ollama, LM Studio and Llama on macOS. The 2,497,280,480-byte Apache 2.0 model
+stays in Ollama's cache; the other apps use symbolic links to those same bytes.
+The public pins and Llama defaults are in `profiles/local-ai/default.json`.
+
+```sh
+local-ai-setup --check --json
+local-ai-setup --apply
+```
+
+The default check reads files only, including full model SHA-256 verification.
+It does not invoke app CLIs, initialize LM Studio, access the network, or start
+services. Exit status is 0 when all stored links/configuration match, 1 when
+setup is incomplete, and 2 for a conflict or error. Readiness verifies stored
+configuration, not a running inference engine.
+
+Before applying, install the three native apps, initialize LM Studio once, and
+start Ollama bound only to loopback. Apply verifies the pinned registry manifest
+before one native pull when needed, then checks the local manifest, byte count
+and SHA-256 before sharing the model. It creates the friendly link under
+`~/Models/LocalAI/`, runs native `lms import --symbolic-link --yes --dry-run`
+followed by the same symbolic-link import, and adds only
+`[local/qwen3-4b-instruct-2507:Q4_K_M]` to Llama's
+`~/.config/llama/models.user.ini` with context 4096 and temperature 0.7.
+It does not edit generated `models.ini`, select cloud providers, start inference,
+change app defaults, install runtimes, or add startup jobs.
+
+LM Studio's existing home pointer and `settings.json` `downloadsFolder` select
+its native model root; neither is changed. Invalid or ambiguous settings stop
+apply. For a custom Ollama daemon store, pass its absolute path with
+`--ollama-models`; an inherited custom `OLLAMA_MODELS` must match that argument.
+The running daemon must already use that store. A custom `XDG_CONFIG_HOME`
+requires separate Llama setup. Existing files, foreign or dangling links,
+conflicting model sections, and non-loopback Ollama listeners are preserved and
+reported as errors. Matching reruns do not pull, import, or rewrite configuration.
+
+A failed apply stops at that operation and retains any completed download/link;
+there is no automatic retry, rollback, or cleanup. Keep the Ollama blob while
+other apps use its links. The helper and profile can remain in a retained
+checkout: invoking the helper through a symlink still finds its adjacent profile.
+
+Native contracts: [LM Studio symbolic-link import](https://lmstudio.ai/docs/cli/local-models/import),
+[Llama user model overrides](https://github.com/ggml-org/Llama-macOS/blob/5287ef20606c4a69e81b4ddcca918ed4c5df3579/Llama/Server/UserModelOverrides.swift),
+and the [pinned Ollama manifest](https://registry.ollama.ai/v2/library/qwen3/manifests/4b-instruct-2507-q4_K_M).
+
+Run the isolated filesystem and fake-vendor fixtures with
+`python3 -B tests/local-ai-setup-test.py`. They do not download models or contact
+host apps or services.
+
+## Portable macOS preferences
+
+`mac-preferences` defaults to a read-only check. It needs macOS and Python 3.9+.
+
+```sh
+mac-preferences --check --json
+mac-preferences --apply
+```
+
+The profile is `profiles/macos/personal-preferences.json`. `--profile <path>`
+accepts the same strict 70-key allowlist: appearance, scrolling, languages, Finder's
+30-day Trash policy, screenshot thumbnails, window tiling/widgets, and built-in
+U.S./Pinyin input sources, trackpad gestures and force click, and hot corners.
+Trackpad values retain their native boolean/integer types. Device identifiers,
+version markers, UserPreferences blobs and per-host overrides are excluded,
+along with accounts, credentials, TCC permissions, power, network and display
+configuration. The hot-corner profile uses Notification Center, disabled,
+Desktop and Lock Screen in top-left, top-right, bottom-left and bottom-right.
+
+Writes use typed CFPreferences at current-user/any-host scope. The global domain
+uses the native AnyApplication constant. Input switching enables the existing
+Ctrl-Space and Option-Ctrl-Space bindings; a different stored binding stops the
+operation. The hotkey merge preserves unknown IDs and fields. The helper checks
+both built-in input-method bundles and every preimage before writing. It refreshes
+the native domain cache before the full preflight, each key's comparison, and
+final readback; each write is synchronized and its typed value checked.
+Already matching keys are not written. Other preference keys are not imported,
+exported, or replaced.
+
+These checks do not make CFPreferences a transaction: another app can race a
+write. A conflict or failure stops the run and reports any keys already written;
+there is no automatic retry or rollback. Exit status is 0 for matching stored
+preferences, 1 for drift in check mode, and 2 for an error. JSON output omits
+preference values. No app is restarted and no logout is performed, so stored
+preference verification is separate from already-loaded UI state. The Trash
+option enables Finder's normal future cleanup policy; this command does not
+read or remove Trash contents.
+
+Run the focused, fake-storage tests with:
+
+```sh
+python3 -B tests/mac-preferences-test.py
+```
+
 ## Claude managed settings
 
 `claude-managed-settings --tokenjuice-stats-off` changes only
@@ -41,6 +140,25 @@ inspection; do not delete those files or strip metadata to bypass a refusal.
 Without the option, or when statistics are already off, existing settings are
 not rewritten.
 
+## curl and macOS proxies
+
+The `curl` wrapper reads the current manual HTTP/HTTPS proxy settings from
+`scutil --proxy` on each invocation. Shadowrocket's enabled system proxy is used
+without hardcoding its address or port. Disabling the system proxy restores
+direct requests on the next invocation; no shell reload is needed. Other
+platforms keep native curl behavior.
+
+Explicit proxy environment variables, including empty values, take precedence
+over automatic detection. Curl's `--proxy`, `--noproxy`, and configuration files
+keep their native precedence. Automatically proxied requests bypass
+`localhost`, `127.0.0.1`, and `::1` unless a bypass environment variable is
+already set. The wrapper does not write proxy settings or export them into the
+parent shell. Native `codex update` and other PATH-based curl callers use the
+same routing.
+
+Run `python3 -B tests/curl-proxy-test.py` for the focused regressions, including
+real curl requests against an isolated local proxy.
+
 ## Codex MCP
 
 Register the stable launcher path after linking `~/bin`:
@@ -52,10 +170,17 @@ codex mcp add github -- "$HOME/bin/codex-github-mcp"
 Add `env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_PAT_TOKEN"]` to the
 `[mcp_servers.github]` table in `~/.codex/config.toml` so both CLI and desktop
 launches can forward inherited credentials. The helper preserves each nonempty
-value, fills missing values from the canonical token then the legacy token, and
-only queries native `gh auth token` when both are empty. It never uses `ghx` or
-starts an interactive login. Missing authentication fails GitHub MCP clearly but
-does not prevent the general `codex` launcher from starting.
+value and fills missing values from the canonical token then the legacy token.
+Only this explicitly configured MCP launcher queries native `gh auth token
+--hostname github.com` when both are empty. That lookup requires Python 3, has a
+five-second deadline, and never uses `ghx` or starts an interactive login.
+Timeouts report local credential lookup unavailability, not expired credentials.
+Interrupting the helper stops its owned lookup group without starting MCP or
+printing partial credentials; SIGINT/SIGTERM return 130/143 and timeouts return 124.
+The general `codex` launcher only forwards inherited tokens and never retrieves
+credentials, including for ordinary interactive, exec, and resume launches.
+HTTP GitHub MCP configurations must receive their bearer token explicitly from
+the launching environment; use the stdio launcher above for native CLI lookup.
 
 `codex --constrained-network` forwards the natively supported
 `--disable unbounded_connection_retries` flag. It is opt-in and does not promise
@@ -98,16 +223,52 @@ Codex cockpit snapshots retain an exited owner's exact recovery identity and
 record its exit status separately. `tt status` reports exited and failed owners;
 it does not rename, close, or relaunch their panes.
 
+Cold restores set the Tokyo Night foreground and background before launching
+agents. Both colours must be explicit: Codex queries them at startup and caches
+a missing reply, which removes input shading even after a terminal attaches.
+The workstation, server, and marker styles use the same foreground so detached
+launches receive both replies. `tests/tt-palette-live-test.py` checks this on a
+private tmux socket without launching Codex or touching the live cockpit.
+Startup also clears inherited `NO_COLOR` and `TERMINFO` overrides before the
+first process starts. Native restores scrub the child environment even when
+reusing an existing server, without changing that server's other sessions.
+The Linux profile applies the same startup defaults as the workstation profile.
+
+`tt recover` retains the saved windows and pane counts. Unresolved identities
+become labeled shells; they never launch a picker or guess the latest session.
+Six-pane windows use three columns and two rows; four-pane windows use a 2×2
+fallback when historical geometry is unavailable. The complete shell scaffold
+and saved markers are ready before any agent starts. Restores retain validated
+launch flags and native goal state, and hold the snapshot lock while building
+so autosave cannot publish the scaffold. Cold recovery has a separate bounded
+five-minute deadline (`TT_RECOVERY_TOTAL_TIMEOUT_SECONDS`).
+
 `tt marker set <pane> violet|cyan` adds two more pane colours. Markers persist
 through `tt marker sync`; `tt marker clear <pane>` removes one. Restore previews
 show a bucket only when the snapshot header declares it, so current owner and
 exit fields are never mistaken for old bucket columns.
 
+Codex snapshots also embed a complete `# pane-markers` map, bound to each saved
+kind, session UUID and directory. It includes explicit default markers, survives
+the frozen recovery input, and overrides stale position-based marker files on a
+cold start. `tt restore-preview <snapshot>` shows these saved colors. Older
+snapshots still use native marker files; they cannot recover colors absent from
+both sources.
+
+For an already-live cockpit, `tt marker restore <session> <snapshot>` previews
+missing colors by exact UUID and directory even when windows moved. Add
+`--execute` to apply the plan without restarting agents. Current nonempty colors
+win, unmatched sessions are skipped, and shells require the original physical
+process identity. Legacy snapshots without embedded colors are refused by this
+marker-only command. `tt restore` remains the layout helper.
+
 In a cockpit (`@tt_profile=ops`), `Ctrl-b c` and the window menu's **New After**
 and **New At End** create a 3x2 grid with pane titles, starting in the source
 pane's directory. Other sessions get a single pane. These bindings call
-`tt new-window [--after] --socket <socket> --target <pane-id|window-id>`;
-inside tmux, the socket and pane default to the invoking pane. Agent calls need
+`tt new-window [--before|--after] --socket <socket> --target <pane-id|window-id>`.
+Use `--before` to insert before the source window, `--after` to insert after it,
+or neither to append. The two flags are mutually exclusive. Inside tmux, the
+socket and pane default to the invoking pane. Agent calls need
 `TT_OPERATOR_TMUX_SCOPE=new-window:<socket>:<session-id>:<window-id>`.
 Existing windows and raw `tmux new-window` calls keep their current behavior.
 
@@ -271,7 +432,7 @@ private host-local `~/.config/gh-routing/octopool.json` with exactly these keys:
 
 The file is parsed as JSON, not sourced. Unknown keys, relative paths, wrapper
 pins, missing executables, and symlinked configuration files disable activation.
-A valid configuration pins native `gh` for every route, including writes,
+A valid configuration pins native `gh` for every default route, including writes,
 `--no-cache`, and ghx's backend. This avoids PATH selecting another Octopool
 version or a wrapper. Existing `GHX_GH_PATH` and `OCTOPOOL_GH_PATH` cannot override
 the selected backend.
@@ -314,9 +475,49 @@ the wrapper neither retries failures nor performs login.
 
 Use `GH_OCTOPOOL=0` to disable relay routing immediately while retaining valid
 native pins. Remove the activation file (or set `enabled` to `false`) to restore
-legacy PATH discovery as well. `--no-cache` and `GHX_NO_CACHE=1` always bypass
+legacy PATH discovery as well. By default, `--no-cache` and `GHX_NO_CACHE=1` bypass
 Octopool and ghx. `--ttl` never selects Octopool. `OCTOPOOL_FRESH=1` requests
 relay revalidation but is not the native escape hatch for exact-head decisions.
+
+### Protected Maintainer Commands
+
+For a task that requires Octopool's outbound publication guards, explicitly set
+`GH_OCTOPOOL_PROTECTED=1` on that task's command or shell. Ordinary invocations
+keep the routing above. Do not set the mode globally or install a second PATH
+shim to activate it.
+
+First qualify a released Octopool binary at a stable versioned path and update
+the existing activation file's `octopool_path` pin. Version 0.7.1 or later is
+required for the [protected auto-merge shape](https://github.com/openclaw/octopool/pull/179).
+Verify the release checksum and the exact command shape before authorizing a
+write; the runtime version check alone is not capability or permission proof.
+Keep the existing native `gh_path`, host-local login, and rewrite policy.
+
+```sh
+GH_OCTOPOOL_PROTECTED=1 OPENCLAW_GH_BIN="$HOME/bin/ghx" scripts/pr merge 123
+```
+
+The protected mode routes native command dispatch through the pinned Octopool
+binary. Octopool owns command classification, policy checks, and guarded native
+execution. The wrapper does not retry a refused or failed command through raw
+`gh`. A valid activation, saved caller auth, recognized release version, and
+default GitHub host are required. `GH_HOST=github.com` and `GH_REPO` are supported;
+other hosts, `GH_OCTOPOOL=0`, missing prerequisites, and invalid mode values fail
+closed. Only unset, `0`, and `1` are accepted mode values.
+
+Native `auth` and ghx management commands retain their existing routes. Eligible
+structured reads still use the real ghx cache. For `--no-cache` or
+`GHX_NO_CACHE=1`, protected mode skips ghx and forces `OCTOPOOL_FRESH=1`; this asks
+Octopool to revalidate reads while retaining publication guards. Explicit API
+cache conflicts and `--ttl` restrictions remain unchanged. Low-data checks still
+run once at the entrypoint.
+
+Merge arguments, including numeric PR, `--squash --auto`, exact head,
+`--subject`, and `--body-file`, are passed intact to Octopool. Use a real body
+file. Qualification with an inert native child proves dispatch and policy
+handling, not a live GitHub merge or writer permissions. If the pin or router
+must be rolled back, stop protected work first; restoring the old read-only
+route does not qualify it for maintainer writes.
 
 ## Repo Fetch Policy
 

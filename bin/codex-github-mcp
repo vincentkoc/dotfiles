@@ -37,7 +37,78 @@ if [[ -z "$github_token" ]]; then
 
   gh_bin="$(PATH="$lookup_path" command -v gh || true)"
   if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    github_token="$("$gh_bin" auth token </dev/null 2>/dev/null)" || github_token=""
+    command -v python3 >/dev/null || {
+      echo "codex-github-mcp: python3 is required for bounded native credential lookup" >&2
+      exit 127
+    }
+    exec python3 -c '
+import os
+import signal
+import subprocess
+import sys
+import time
+
+interrupted = 0
+process = None
+
+def record_signal(signum, frame):
+    global interrupted
+    if not interrupted:
+        interrupted = signum
+
+for signum in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, record_signal)
+
+status = 1
+output = b""
+try:
+    if not interrupted:
+        process = subprocess.Popen(
+            [sys.argv[1], "auth", "token", "--hostname", "github.com"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 5
+        while not interrupted:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                status = 124
+                break
+            try:
+                output, _ = process.communicate(timeout=min(remaining, 0.1))
+                status = process.returncode
+                break
+            except subprocess.TimeoutExpired:
+                pass
+except OSError:
+    status = 1
+finally:
+    if process is not None and process.returncode is None:
+        # The unreaped lookup owns this new group, including any pipe holders.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.stdout.close()
+        process.wait()
+
+if interrupted or status in (-signal.SIGINT, -signal.SIGTERM):
+    print("codex-github-mcp: native GitHub credential lookup canceled", file=sys.stderr)
+    sys.exit(128 + (interrupted or -status))
+if status == 124:
+    print("codex-github-mcp: native GitHub credential lookup timed out; check local gh/Keychain availability", file=sys.stderr)
+    sys.exit(124)
+token = output.decode().rstrip("\n") if status == 0 else ""
+if not token:
+    print("codex-github-mcp: set GITHUB_PERSONAL_ACCESS_TOKEN or GITHUB_PAT_TOKEN, or authenticate the native GitHub CLI", file=sys.stderr)
+    sys.exit(1)
+for name in ("GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_PAT_TOKEN"):
+    os.environ[name] = os.environ.get(name) or token
+os.execv(sys.argv[2], [sys.argv[2], "stdio", *sys.argv[3:]])
+' "$gh_bin" "$github_mcp_server" "$@"
   fi
 fi
 if [[ -z "$github_token" ]]; then

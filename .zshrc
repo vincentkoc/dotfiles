@@ -22,7 +22,9 @@ if [[ -z "${DOTFILES_EXPORTS_LOADED:-}" && -r ~/.exports ]]; then
 fi
 
 # Load dotfiles .env early (auto-export all vars). Use KEY=VALUE (no "export" needed).
-if [[ "$OSTYPE" == darwin* ]]; then
+if [[ -n "${DOTFILES_ENV_FILE:-}" ]]; then
+	DOTFILES_ENV="$DOTFILES_ENV_FILE"
+elif [[ "$OSTYPE" == darwin* ]]; then
 	DOTFILES_ENV="$HOME/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.env"
 else
 	DOTFILES_ENV="$HOME/.dotfiles/.env"

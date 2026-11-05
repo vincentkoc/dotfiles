@@ -7,15 +7,16 @@ Bins in this folder:
 - `agent-worktree-finish`
   - explicitly enrolls new managed worktrees and tracks owner completion,
     recovery pins, exact PR heads and stack dependencies in a private ledger
-  - plain `finish` records completion; explicit `finish --release` relinquishes
-    that owner's future checkout use and immediately checks eligible removal
+  - plain `finish` records completion and relinquishes that owner's future
+    checkout use for native managed enrollments, then attempts native foreground
+    removal without an unattended policy; `--release` remains an alias
   - `status` and `check` retain; the same `check --all --apply --policy <path>`
     consumer revisits merges and departure only after host-specific activation
   - new private, natively locked enrollments use durable generation/release/
     removal-intent records; old report-only entries cannot be adopted
   - `gwt_finish_safety.py` owns bounded byte/index admission, observed Darwin
     process references and supervised native non-force Git removal
-  - automatic Mac deletion remains blocked by unqualified mapping coverage;
+  - unattended Mac deletion remains blocked by unqualified mapping coverage;
     an external policy or activation receipt cannot override that native hold
   - never expires claims, adopts old worktrees, deletes branches or prunes
     metadata; unknown or partial removal requires read-only reconciliation

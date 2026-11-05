@@ -8,8 +8,16 @@ on:
       - ".exports"
       - ".profile"
       - ".zshenv"
+      - ".mackup.cfg"
+      - ".mackup/portable-tool-preferences.cfg"
+      - "bin/mac-preferences"
+      - "profiles/macos/**"
+      - "tests/mac-preferences-test.py"
       - "tests/optional-shell-hooks-test.py"
       - "bin/linux-server-bootstrap"
+      - "profiles/linux-server/**"
+      - "tests/linux-server-startup-test.py"
+      - "bin/quickssh"
       - "bin/agent-worktree-ops/**"
       - "bin/gwt-storage"
       - "bin/tt"
@@ -25,6 +33,7 @@ on:
       - "tests/deepclean-test.zsh"
       - "tests/install-foundations-test.sh"
       - "tests/linux-server-auth-proof-test.sh"
+      - "tests/quickssh-test.py"
       - "tests/agent-worktree-maintain-test.sh"
       - "tests/tt-safety-test.py"
       - "tests/tt-codex-snapshot-live-test.sh"
@@ -54,6 +63,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 tests/optional-shell-hooks-test.py
+          python3 tests/mac-preferences-test.py
+          python3 tests/linux-server-startup-test.py
           bash tests/install-foundations-test.sh
           bash tests/agent-worktree-maintain-test.sh
           python3 tests/gwt-storage-test.py
@@ -63,5 +74,6 @@ jobs:
           zsh tests/gwt-remove-test.zsh
           bash tests/deepclean-test.sh
           bash tests/linux-server-auth-proof-test.sh
+          python3 tests/quickssh-test.py
           python3 tests/tt-safety-test.py
           bash tests/tt-codex-snapshot-live-test.sh

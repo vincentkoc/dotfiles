@@ -371,10 +371,11 @@ grep -Fq 'Python 3 is required before Claude managed-settings setup' <<<"$minima
 
 setup_home="$fixture/setup-integration/home"
 setup_repo="$(new_repo setup-integration)"
-mkdir -p "$setup_repo/bin"
+mkdir -p "$setup_repo/bin" "$setup_repo/.codex"
+printf 'Shared agent closeout instructions\n' >"$setup_repo/.codex/AGENTS.md"
 cp "$helper" "$setup_repo/bin/claude-managed-settings"
 chmod 0755 "$setup_repo/bin/claude-managed-settings"
-git -C "$setup_repo" add bin/claude-managed-settings
+git -C "$setup_repo" add bin/claude-managed-settings .codex/AGENTS.md
 git -C "$setup_repo" \
   -c user.name=Test \
   -c user.email=test@example.com \
@@ -394,6 +395,30 @@ HOME="$setup_home" PATH="$fake_bin:$PATH" bash -c '
   setup_claude_dotfiles
 ' _ "$root" >/dev/null
 [[ "$(readlink "$setup_home/.claude/settings.json")" == settings.managed.json ]]
+instructions="$setup_home/.claude/CLAUDE.md"
+[[ "$(readlink "$instructions")" == "$setup_home/GIT/_Perso/dotfiles/.codex/AGENTS.md" ]]
+before="$(python3 -c 'import os,sys; print(os.lstat(sys.argv[1]).st_ino)' "$instructions")"
+HOME="$setup_home" PATH="$fake_bin:$PATH" /bin/bash -c '
+  source "$1/install.sh"
+  setup_claude_dotfiles
+' _ "$root" >/dev/null
+[[ "$(python3 -c 'import os,sys; print(os.lstat(sys.argv[1]).st_ino)' "$instructions")" == "$before" ]]
+printf 'External owner instructions\n' >"$setup_home/owner-instructions"
+for existing in file link dangling; do
+  rm "$instructions"
+  case "$existing" in
+    file) printf 'Owner instructions\n' >"$instructions"; chmod 0600 "$instructions" ;;
+    link) ln -s "$setup_home/owner-instructions" "$instructions" ;;
+    dangling) ln -s "$setup_home/missing-instructions" "$instructions" ;;
+  esac
+  before="$(python3 -c 'import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); s=p.lstat(); print((s.st_ino,s.st_mode,os.readlink(p) if p.is_symlink() else p.read_bytes()))' "$instructions")"
+  output="$(HOME="$setup_home" PATH="$fake_bin:$PATH" /bin/bash -c '
+    source "$1/install.sh"
+    setup_claude_dotfiles
+  ' _ "$root")"
+  [[ "$(python3 -c 'import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); s=p.lstat(); print((s.st_ino,s.st_mode,os.readlink(p) if p.is_symlink() else p.read_bytes()))' "$instructions")" == "$before" ]]
+  grep -Fq 'Preserving existing Claude Code instructions' <<<"$output"
+done
 python3 - \
   "$setup_home/GIT/_Perso/dotfiles/.claude/settings.json" \
   "$setup_home/.claude/settings.managed.json" <<'PY'

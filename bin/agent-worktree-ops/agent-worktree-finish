@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import functools
 import hashlib
@@ -84,7 +85,7 @@ def safety():
     return module
 
 
-def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None):
+def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, deadline=None):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("DYLD_", "LD_"))}
     if Path(command[0]).name == "git":
@@ -93,13 +94,14 @@ def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None):
                    GIT_ALLOW_PROTOCOL="")
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
                GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1", LC_ALL="C")
-    result = safety().supervise(command, cwd=cwd, env=env, limit=limit, input_data=input_data)
+    result = safety().supervise(command, cwd=cwd, env=env, limit=limit, input_data=input_data,
+                                deadline=deadline)
     if result.failure or result.returncode not in allowed:
         raise Retain(f"{Path(command[0]).name}-failed")
     return result
 
 
-def git(path, *args, input_data=None, raw=False):
+def git(path, *args, input_data=None, raw=False, strict=False, deadline=None, capture_limit=None):
     result = run([
         NATIVE_GIT or "git",
         "-c", "core.hooksPath=/dev/null",
@@ -110,9 +112,12 @@ def git(path, *args, input_data=None, raw=False):
         "-c", "protocol.allow=never",
         "-C", str(path),
         *args,
-    ], limit=(32 * 1024 * 1024 if args and args[0] == "ls-tree" else
+    ], limit=(capture_limit if capture_limit is not None else
+              32 * 1024 * 1024 if args and args[0] == "ls-tree" else
               safety().LEAF_LIMIT if args and args[0] in ("show", "stripspace") else 1024 * 1024),
-        input_data=input_data)
+        input_data=input_data, deadline=deadline)
+    if strict and result.stderr:
+        raise Retain("git-diagnostic")
     return result.stdout if raw else result.stdout.decode(errors="surrogateescape").rstrip("\n")
 
 
@@ -211,9 +216,11 @@ def immutable(snap):
 
 
 @diagnostic_phase("worktree-identity")
-def revalidate(row, *, allow_device_renumbering=False):
+def revalidate(row, *, allow_device_renumbering=False, allow_branch_change=False):
     recorded = json.loads(row["identity"])
     current = snapshot(row["path"], recorded["root"], recorded.get("lock_reason"))
+    if allow_branch_change:
+        recorded["branch"] = current["branch"]
     if allow_device_renumbering:
         devices = {}
         for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
@@ -386,12 +393,16 @@ def ensure_retirement_schema(db):
             worktree_id TEXT PRIMARY KEY REFERENCES worktrees(id),
             generation INTEGER NOT NULL DEFAULT 0,
             state TEXT NOT NULL DEFAULT 'enrolled', inventory TEXT,
-            intent TEXT, result TEXT);
+            intent TEXT, result TEXT, holder_contract TEXT);
         CREATE TABLE IF NOT EXISTS owner_releases (
             worktree_id TEXT NOT NULL REFERENCES retirement(worktree_id),
             owner TEXT NOT NULL, generation INTEGER NOT NULL,
             PRIMARY KEY(worktree_id, owner));
     """)
+    if "holder_contract" not in {row[1] for row in db.execute("PRAGMA table_info(retirement)")}:
+        # Enrollment alone owns this migration. Existing rows stay NULL; neither
+        # resuming nor releasing can adopt them into a new deletion contract.
+        db.execute("ALTER TABLE retirement ADD COLUMN holder_contract TEXT")
     # These fire for the old client's SQL too. Clearing and later restoring an
     # identical proof must not resurrect a release granted before that resume.
     for table, key, changes in (
@@ -427,6 +438,11 @@ def retirement(db, row):
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retirement'").fetchone():
         return None
     return db.execute("SELECT * FROM retirement WHERE worktree_id=?", (row["id"],)).fetchone()
+
+
+def automatic_holder_contract(item):
+    return (item is not None and "holder_contract" in item.keys()
+            and item["holder_contract"] == safety().HOLDER_COVERAGE)
 
 
 def require_open_retirement(db, row):
@@ -758,6 +774,96 @@ def check(db, row):
     return reason
 
 
+RELEASE_BASELINE_SCHEMA = "gwt-release-baseline.v1"
+
+
+def semantic_inventory(contents, admin):
+    """Compare release semantics; native effect admission keeps the full snapshots."""
+    def metadata(value, *, replaceable=False):
+        # Git replaces its index while refreshing cached state.
+        result = list(value[:6])
+        if replaceable:
+            result[1] = None
+        return [*result, None if stat.S_ISDIR(value[2]) or replaceable else value[6], *value[9:]]
+
+    working = {key: value for key, value in contents.items() if key not in ("index", "index_sha256")}
+    working["entries"] = {name: metadata(value) for name, value in contents["entries"].items()}
+    # Explicitly discarded content has no tracked-blob proof. Its compact hash
+    # and inode evidence remain exact, including timestamps and population.
+    administrative = {
+        name: ([metadata(value[0], replaceable=True), None] if name == "index" else
+               [metadata(value[0]), *value[1:]])
+        for name, value in admin.items() if name != "FETCH_HEAD"
+    }
+    return {"working": working, "admin": administrative}
+
+
+def release_refs(snap, target, until, *, branches=()):
+    branches = {snap["branch"], *branches}
+    if target:
+        target_ref = "refs/remotes/origin/" + target
+        if target_ref in git(snap["owner"], "for-each-ref", "--format=%(refname)", target_ref).splitlines():
+            branches.add(target_ref)
+    refs = preserved_refs(snap, branches, until)
+    roots = {proof["head"] for proof in refs.values()}
+    for proof in refs.values():
+        if proof["reflog"] is not None:
+            roots.update(proof["reflog"]["oids"])
+    return refs, roots
+
+
+def release_inventory(snap, target, until, discarded):
+    module = safety()
+    refs, roots = release_refs(snap, target, until)
+    ignored = {name.rstrip("/") for name in git(
+        snap["path"], "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z").split("\0") if name}
+    dependency = ignored == {"node_modules"} and (Path(snap["path"]) / "node_modules").is_symlink()
+    if set(discarded) != ignored and not (not discarded and dependency):
+        raise Retain("ignored-roots-require-explicit-disposal")
+    contents = module.inventory(snap, git, until, discard_ignored=discarded,
+                                compact_discarded=True, preserved_oids=roots, logical_index=True)
+    admin = module.admin_inventory(snap, git, until, preserved_oids=roots)
+    recovery = sorted({oid for value in admin.values() if len(value) == 3 for oid in value[2]})
+    preserve_release_recovery(snap, recovery, roots, until)
+    if preserved_refs(snap, refs, until) != refs:
+        raise Retain("preserved-refs-changed")
+    return contents, admin, refs, roots, recovery
+
+
+def preserve_release_recovery(snap, recovery, roots, until):
+    if len(recovery) > 128:
+        raise Retain("recovery-proof-limit")
+    for oid in recovery:
+        if not SHA.fullmatch(oid):
+            raise Retain("recovery-reference-invalid")
+        if oid not in roots and git(
+                snap["owner"], "--no-replace-objects", "rev-list", "--max-count=1", oid,
+                "--not", *sorted(roots), "--", raw=True, strict=True, deadline=until):
+            raise Retain("admin-recovery-not-preserved")
+
+
+def capture_release_inventory(db, row, args):
+    item = require_open_retirement(db, row)
+    # Only an authenticated releasing owner can establish the baseline. A
+    # failed capture is durable too; resume/release is required to replace it.
+    if item["inventory"] is not None:
+        return
+    baseline = {"schema": RELEASE_BASELINE_SCHEMA, "discard_ignored": sorted(args.discard_ignored),
+                "baseline": None, "blocker": None}
+    try:
+        snap = revalidate(row)
+        if snap["head"] != row["finish_head"]:
+            raise Retain("head-changed-repeat-finish")
+        contents, admin, _, _, recovery = release_inventory(
+            snap, row["target"], time.monotonic() + 45, args.discard_ignored)
+        baseline.update(baseline=semantic_inventory(contents, admin), recovery_oids=recovery)
+    except (Retain, OSError, ValueError) as error:
+        baseline["blocker"] = str(error) if isinstance(error, Retain) else "release-inventory-unavailable"
+    with db:
+        db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=? AND inventory IS NULL",
+                   (json.dumps(baseline, sort_keys=True), row["id"]))
+
+
 def release(db, row, args):
     item = require_open_retirement(db, row)
     who = owner_id(args)
@@ -767,15 +873,7 @@ def release(db, row, args):
     snap = revalidate(row)
     if snap["head"] != row["finish_head"]:
         raise Retain("head-changed-repeat-finish")
-    until = time.monotonic() + 45
-    contents = {"working": safety().inventory(snap, git, until),
-                "admin": safety().admin_inventory(snap, git, until)}
-    encoded = json.dumps(contents, sort_keys=True)
-    if item["inventory"] is not None and item["inventory"] != encoded:
-        raise Retain("release-inventory-changed-resume-first")
     with db:
-        db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
-                   (encoded, row["id"]))
         db.execute("INSERT INTO owner_releases VALUES (?, ?, ?) "
                    "ON CONFLICT(worktree_id,owner) DO UPDATE SET generation=excluded.generation",
                    (row["id"], who, item["generation"]))
@@ -880,24 +978,58 @@ def preserved_branch_reflog(snap, until):
             "oids": sorted(oids), "parents": parents}
 
 
+def preserved_refs(snap, branches, until):
+    result = {}
+    for branch in sorted(set(branches)):
+        if os.path.lexists(Path(snap["common"]) / (branch + ".lock")):
+            raise Retain("preserved-branch-lock-present")
+        result[branch] = {
+            "head": git(snap["owner"], "rev-parse", "--verify", branch),
+            "reflog": preserved_branch_reflog({**snap, "branch": branch}, until),
+        }
+    return result
+
+
 def deletion_admission(row, item, qualification, until):
+    if not automatic_holder_contract(item):
+        raise Retain("automatic-holder-contract-not-enrolled")
     module = safety()
     snap = revalidate(row)
     if snap["head"] != row["finish_head"]:
         raise Retain("unfinished-or-head-changed")
     boundaries = [module.access_boundary(snap[key], until) for key in ("path", "gitdir")]
-    contents = module.inventory(snap, git, until)
+    if item["inventory"] is None:
+        raise Retain("automatic-release-inventory-required")
     released = json.loads(item["inventory"])
-    if contents != released["working"]:
-        raise Retain("released-worktree-changed")
+    semantic = released.get("schema") == RELEASE_BASELINE_SCHEMA
+    if "schema" in released and not semantic:
+        raise Retain("release-inventory-schema-unsupported-resume-first")
+    refs = None
+    if semantic:
+        if released["baseline"] is None:
+            raise Retain(released["blocker"] or "automatic-release-baseline-unavailable-resume-first")
+        contents, admin, refs, roots, _ = release_inventory(
+            snap, row["target"], until, released["discard_ignored"])
+        preserve_release_recovery(snap, released["recovery_oids"], roots, until)
+        current = semantic_inventory(contents, admin)
+        if current["working"] != released["baseline"]["working"]:
+            raise Retain("released-worktree-changed")
+        if current["admin"] != released["baseline"]["admin"]:
+            raise Retain("released-admin-changed-resume-first")
+    else:
+        # Shipped full inventories retain their exact comparison contract.
+        contents = module.inventory(snap, git, until)
+        if contents != released["working"]:
+            raise Retain("released-worktree-changed")
     # Native remove runs status, whose index refresh can execute clean/process
     # filters. Do not dispatch unqualified external programs during removal.
     keys = git(snap["path"], "config", "--includes", "--null", "--name-only", "--list")
     if any(key.lower().startswith("filter.") for key in keys.split("\0")):
         raise Retain("git-conversion-filter-unqualified")
-    admin = module.admin_inventory(snap, git, until)
-    if admin != released["admin"]:
-        raise Retain("released-admin-changed-resume-first")
+    if not semantic:
+        admin = module.admin_inventory(snap, git, until)
+        if admin != released["admin"]:
+            raise Retain("released-admin-changed-resume-first")
     for directory in (Path(snap["common"]), Path(snap["common"]) / "refs"):
         stack = [directory]
         visited = 0
@@ -915,7 +1047,7 @@ def deletion_admission(row, item, qualification, until):
                    "rebase-merge", "rebase-apply", "sequencer"):
         if any(os.path.lexists(Path(snap[key]) / marker) for key in ("common", "gitdir")):
             raise Retain("git-operation-in-progress")
-    recovery = {oid for value in admin.values() if len(value) == 3 for oid in value[2]}
+    recovery = set() if semantic else {oid for value in admin.values() if len(value) == 3 for oid in value[2]}
     reflog = preserved_branch_reflog(snap, until)
     if len(recovery) > 128:
         raise Retain("recovery-proof-limit")
@@ -931,33 +1063,99 @@ def deletion_admission(row, item, qualification, until):
                 raise Retain("admin-recovery-not-preserved") from error
     inodes = {tuple(snap[key]) for key in ("path_id", "gitdir_id")}
     inodes.update(tuple(value[:2]) for value in contents["entries"].values())
+    inodes.update(tuple(value) for value in contents.get("discarded_inodes", []))
     inodes.update(tuple(value[0][:2]) for value in admin.values())
     observed = module.Darwin(until).observe(
         [snap["path"], snap["gitdir"]], inodes, qualification["known_processes"])
     if observed["holders"]:
         raise Retain("pending-departure")
-    # Qualification files cannot supply missing evidence from the native reader.
-    if observed.get("mapping_coverage") != "complete":
+    # External policy cannot replace the selected native observation contract.
+    if observed.get("mapping_coverage") != module.HOLDER_COVERAGE:
         raise Retain("holder-mapping-coverage-unqualified")
-    return {"snapshot": snap, "boundaries": boundaries, "contents": contents,
-            "admin": admin, "holders": observed, "branch_reflog": reflog}
+    result = {"snapshot": snap, "boundaries": boundaries, "contents": contents,
+              "admin": admin, "holders": observed, "branch_reflog": reflog}
+    if refs is not None:
+        result["preserved_refs"] = refs
+    return result
 
 
 def holder_qualification():
+    try:
+        safety().check_holder_platform()
+        qualified, reason = True, "bounded-native-observation-requires-host-qualification"
+    except Retain as error:
+        qualified, reason = False, str(error)
     return {
         "schema": HOLDER_SCHEMA,
-        "backend": "darwin-libproc-cooperative.v1",
-        "qualified": False,
-        "reason": "holder-mapping-coverage-unqualified",
-        "mapping_coverage": "unqualified",
+        "backend": "darwin-libproc-bounded.v1",
+        "qualified": qualified,
+        "reason": reason,
+        "mapping_coverage": safety().HOLDER_COVERAGE if qualified else "unqualified",
         "platform": safety().platform_key(),
     }
 
 
-def manual_holders(snap, contents, admin, until):
-    executable = shutil.which("lsof")
-    if executable is None:
-        raise Retain("manual-closeout-needs-lsof")
+def trusted_holder_binary(name):
+    selected = shutil.which(name)
+    if not selected or not os.path.isabs(selected):
+        raise Retain("sudo-holder-scan-needs-trusted-binaries")
+    current, pending, links = Path("/"), list(Path(selected).parts[1:]), 0
+    try:
+        root = current.lstat()
+        if root.st_uid != 0 or not stat.S_ISDIR(root.st_mode) or root.st_mode & 0o022:
+            raise Retain("sudo-holder-scan-untrusted-path")
+        # Check symlinks and their traversal, not only the resolved destination.
+        while pending:
+            part = pending.pop(0)
+            if part == "..":
+                current = current.parent
+                continue
+            candidate = current / part
+            details = candidate.lstat()
+            if details.st_uid != 0:
+                raise Retain("sudo-holder-scan-untrusted-path")
+            if stat.S_ISLNK(details.st_mode):
+                links += 1
+                if links > 40:
+                    raise Retain("sudo-holder-scan-untrusted-path")
+                target = Path(os.readlink(candidate))
+                if target.is_absolute():
+                    current = Path("/")
+                    pending = list(target.parts[1:]) + pending
+                else:
+                    pending = list(target.parts) + pending
+                continue
+            if details.st_mode & 0o022 or (pending and not stat.S_ISDIR(details.st_mode)):
+                raise Retain("sudo-holder-scan-untrusted-path")
+            current = candidate
+        details = current.lstat()
+        if (details.st_uid != 0 or details.st_mode & 0o022
+                or not stat.S_ISREG(details.st_mode) or not details.st_mode & 0o111):
+            raise Retain("sudo-holder-scan-untrusted-path")
+    except OSError as error:
+        raise Retain("sudo-holder-scan-untrusted-path") from error
+    return str(current)
+
+
+def sudo_holder_scan(until):
+    if sys.platform != "linux":
+        raise Retain("sudo-holder-scan-requires-linux")
+    safety().tick(until)
+    command = [trusted_holder_binary("sudo"), "-n", "-u", "#0", "--",
+               trusted_holder_binary("lsof"), "-nP", "+w", "-F0pfnDi"]
+    observed = safety().supervise(
+        command, cwd="/", env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"},
+        limit=32 * 1024 * 1024, sudo_monitor=True, deadline=until)
+    if observed.failure:
+        if observed.proof.get("pid") is not None:
+            raise Retain("sudo-holder-scan-termination-unknown")
+        raise Retain("sudo-holder-scan-failed")
+    if observed.returncode != 0:
+        raise Retain("sudo-holder-scan-failed")
+    return observed
+
+
+def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=False):
     paths, inodes = set(), {tuple(item) for item in contents.get("discarded_inodes", ())}
     for key, entries in (("path", contents["entries"]), ("gitdir", admin)):
         for name, entry in entries.items():
@@ -971,7 +1169,13 @@ def manual_holders(snap, contents, admin, until):
     safety().tick(until)
     # One native scan avoids repeating libproc's entire process walk for each
     # filename batch. Inode matching also catches holders through hardlink aliases.
-    observed = run([executable, "-nP", "+w", "-F0pfnDi"], limit=32 * 1024 * 1024)
+    if sudo_holder_scan_enabled:
+        observed = sudo_holder_scan(until)
+    else:
+        executable = shutil.which("lsof")
+        if executable is None:
+            raise Retain("manual-closeout-needs-lsof")
+        observed = run([executable, "-nP", "+w", "-F0pfnDi"], limit=32 * 1024 * 1024)
     if observed.stderr or not observed.stdout.endswith(b"\0\n"):
         raise Retain("manual-holder-visibility-unknown")
     processes = files = 0
@@ -990,6 +1194,7 @@ def manual_holders(snap, contents, admin, until):
         if record.startswith(b"p"):
             if set(fields) != {b"p"} or not re.fullmatch(rb"[1-9][0-9]*", fields[b"p"]):
                 raise Retain("manual-holder-visibility-unknown")
+            pid = fields[b"p"]
             processes += 1
             continue
         if not processes or not record.startswith(b"f") or b"p" in fields:
@@ -998,6 +1203,34 @@ def manual_holders(snap, contents, admin, until):
         device, inode, name = fields.get(b"D"), fields.get(b"i"), fields.get(b"n", b"")
         if ((device is not None and not re.fullmatch(rb"0x[0-9a-fA-F]+", device))
                 or (inode is not None and not re.fullmatch(rb"[0-9]+", inode))):
+            raise Retain("manual-holder-visibility-unknown")
+        descriptor = fields[b"f"]
+        # Linux lsof omits the ENOENT annotation for a root-owned missing exe.
+        # Only this txt record is absent; every sibling still needs validation.
+        if (sys.platform == "linux" and sudo_holder_scan_enabled
+                and fields == {b"f": b"txt", b"n": b"/proc/" + pid + b"/exe"}):
+            continue
+        # Linux lsof reports a procfs FD lookup ENOENT with this exact shape.
+        # Exempt only that record; sibling references still need validation.
+        if (sys.platform == "linux" and sudo_holder_scan_enabled
+                and set(fields) == {b"f", b"n"} and re.fullmatch(rb"0|[1-9][0-9]*", descriptor)
+                and re.fullmatch(rb"/proc/" + pid + rb"(?:/task/[1-9][0-9]*)?/fd/"
+                                 + descriptor + rb" \(readlink: No such file or directory\)", name)):
+            continue
+        ordinary = re.fullmatch(rb"[0-9]+|\*[0-9]{3}|fp\.", descriptor)
+        if not ordinary and (
+                not re.fullmatch(rb"cwd|rtd|pd|tr|txt|ltx|mem|DEL|twd|ctty|jld|v86|m86|mmap"
+                                 rb"|L[0-9]+|M[0-9a-fA-F]+|R[0-9]+", descriptor)
+                or device is None or inode is None):
+            raise Retain("manual-holder-visibility-unknown")
+        # Linux lsof recovers mapping device/inode from maps when stat fails.
+        # Keep that identity and match the pathname without its one ENOENT suffix.
+        missing_mapping = b" (stat: No such file or directory)"
+        if (sys.platform == "linux" and descriptor == b"mem"
+                and name.endswith(missing_mapping) and len(name) > len(missing_mapping)):
+            name = name[:-len(missing_mapping)]
+        # lsof can report visibility failures in NAME with exit 0 and no stderr.
+        if re.search(rb"(?:^| )\((?:opendir|readlink|stat|lstat|fstat|fopen):", name):
             raise Retain("manual-holder-visibility-unknown")
         # Non-files (sockets, pipes, etc.) may legitimately omit device/inode.
         held |= (device is not None and inode is not None
@@ -1009,8 +1242,10 @@ def manual_holders(snap, contents, admin, until):
         raise Retain("pending-departure")
 
 
-def finalized_admission(db, row, args, until):
+def finalized_admission(db, row, args, until, *, completed=False):
     snap = revalidate(row)
+    if snap["head"] != row["finish_head"]:
+        raise Retain("finalized-head-changed")
     if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
         raise Retain("recovery-pin-present")
     if os.path.lexists(Path(snap["common"]) / (snap["branch"] + ".lock")):
@@ -1032,41 +1267,73 @@ def finalized_admission(db, row, args, until):
     ignored = {name.rstrip("/") for name in git(
         snap["path"], "ls-files", "--others", "--ignored", "--exclude-standard",
         "--directory", "-z").split("\0") if name}
-    if set(args.discard_ignored) != ignored:
+    disposable = set(args.discard_ignored)
+    dependency_link = completed and ignored == {"node_modules"} and (Path(snap["path"]) / "node_modules").is_symlink()
+    if disposable != ignored and not dependency_link:
         raise Retain("ignored-content-needs-exact-disposable-roots")
     module = safety()
-    contents = module.inventory(snap, git, until, discard_ignored=ignored, compact_discarded=True)
-    admin = module.admin_inventory(snap, git, until)
-    manual_holders(snap, contents, admin, until)
+    preserved_oids = {proof["head"] for proof in row["finalized_refs"].values()}
+    for proof in row["finalized_refs"].values():
+        if proof["reflog"] is not None:
+            preserved_oids.update(proof["reflog"]["oids"])
+    contents = module.inventory(snap, git, until, discard_ignored=disposable, compact_discarded=True,
+                                allow_empty_gitlinks=True, preserved_oids=preserved_oids)
+    admin = module.admin_inventory(snap, git, until, preserved_oids=preserved_oids)
+    holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
+    manual_holders(snap, contents, admin, until, **holder_options)
+    refs = preserved_refs(snap, row["finalized_refs"], until)
+    if refs != row["finalized_refs"]:
+        raise Retain("preserved-refs-changed")
+    # Holder and ref probes can outlive the empty-directory observation.
+    for name, proof in contents.get("gitlinks", {}).items():
+        if module.empty_gitlink(snap, name, until) != proof:
+            raise Retain("gitlink-state-changed")
     return {"snapshot": snap, "boundaries": [], "contents": contents, "admin": admin,
-            "branch_reflog": preserved_branch_reflog(snap, until)}
+            "branch_reflog": refs[snap["branch"]]["reflog"], "preserved_refs": refs}
 
 
-def remove_finalized(db, row, args):
+def remove_finalized(db, row, args, *, completed=False):
     item = require_open_retirement(db, row)
-    snap = revalidate(row, allow_device_renumbering=True)
+    enrolled_branch = json.loads(row["identity"])["branch"]
+    snap = revalidate(row, allow_device_renumbering=not completed, allow_branch_change=not completed)
     if "lock_reason" not in snap:
         raise Retain("manual-closeout-needs-native-enrollment")
-    # Device numbers can change between enrollment and explicit closeout.
-    # Bind every subsequent check to this current identity without rebinding the
-    # durable enrollment or relaxing automatic lifecycle qualification.
-    row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True)}
+    # Manual closeout may rebind identity; completion keeps its recorded identity.
+    # Keep the durable enrollment and automatic lifecycle qualification unchanged.
+    row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True),
+           "finish_head": snap["head"]}
     storage_guard()
     module = safety()
     until = time.monotonic() + 120
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
-        before = finalized_admission(db, row, args, until)
+        # A fetched target may retain history absent from either task branch.
+        # Reuse release roots so manual closeout binds that ref to the same drift checks.
+        row["finalized_refs"], _ = release_refs(snap, row["target"], until, branches=(enrolled_branch,))
+        def admit():
+            if completed:
+                current = get_row(db, snap["path"])
+                if any(current[key] != row[key] for key in (
+                        "finish_head", "primary_pr", "target", "dependencies")):
+                    raise Retain("completion-proof-changed")
+                completion_checks(db, current, local=False)
+                all_released(db, current, item)
+            options = {"completed": True} if completed else {}
+            return finalized_admission(db, row, args, until, **options)
+
+        before = admit()
         return remove_with_intent(
             db, row, item, before,
-            lambda: finalized_admission(db, row, args, until),
+            admit,
             {"mode": "explicit-finalized-task", "operator": owner_id(args),
              "discard_ignored": sorted(args.discard_ignored)},
             restore_lock=True)
 
 
 def remove_released(db, row, item, qualification, args):
+    if not automatic_holder_contract(item):
+        raise Retain("automatic-holder-contract-not-enrolled")
     capability = holder_qualification()
-    if capability["qualified"] is not True or capability["mapping_coverage"] != "complete":
+    if capability["qualified"] is not True or capability["mapping_coverage"] != safety().HOLDER_COVERAGE:
         raise Retain("holder-mapping-coverage-unqualified")
     global NATIVE_GIT
     prior_git = NATIVE_GIT
@@ -1092,21 +1359,171 @@ def remove_released(db, row, item, qualification, args):
         NATIVE_GIT = prior_git
 
 
-def siblings_preserved(before, after):
-    def by_path(records):
-        result = {}
-        for record in records:
-            path = record.get("worktree")
-            if not path or path in result:
-                return None
-            result[path] = {key: value for key, value in record.items() if key != "HEAD"}
-        return result
+def sibling_rows(rows):
+    result = {}
+    for row in rows:
+        path = row.get("worktree")
+        if not path or path in result:
+            raise Retain("sibling-registration-ambiguous")
+        result[path] = row
+    return result
 
-    old, new = by_path(before), by_path(after)
-    # Other sessions may commit or create a checkout while we remove ours.
-    # Existing registration identities must survive; their HEADs need not freeze.
-    return old is not None and new is not None and all(
-        new.get(path) == record for path, record in old.items())
+
+def sibling_absence(path, until):
+    """ENOENT is known only beneath an unchanged canonical owned ancestor."""
+    module = safety()
+    module.tick(until)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    else:
+        raise Retain("sibling-absence-changed")
+    if str(Path(path).resolve(strict=False)) != str(path):
+        raise Retain("sibling-path-rebound")
+    parent = Path(path).parent
+    while True:
+        module.tick(until)
+        try:
+            parent_id = identity(parent)
+            break
+        except FileNotFoundError:
+            parent = parent.parent
+    if physical(parent) != str(parent):
+        raise Retain("sibling-parent-rebound")
+    return {"state": "absent", "errno": 2, "parent": str(parent), "parent_id": parent_id}
+
+
+def sibling_admin_index(snap, until):
+    """Resolve absent pointers once per pass, never guess an admin basename."""
+    module, result = safety(), {}
+    root = Path(snap["common"]) / "worktrees"
+    root_id = identity(root)
+    if physical(root) != str(root):
+        raise Retain("sibling-admin-root-rebound")
+    with os.scandir(root) as entries:
+        for number, entry in enumerate(entries):
+            module.tick(until)
+            if number >= module.ENTRY_LIMIT:
+                raise Retain("sibling-admin-entry-limit")
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            admin = Path(entry.path)
+            admin_id = identity(admin)
+            raw, details = module.read_file(admin / "gitdir", until, 4096)
+            if not raw.endswith(b"\n") or b"\0" in raw or b"\n" in raw[:-1]:
+                raise Retain("sibling-registration-backlink-invalid")
+            pointer = os.path.normpath(admin / os.fsdecode(raw[:-1]))
+            if pointer in result:
+                raise Retain("sibling-registration-ambiguous")
+            result[pointer] = (str(admin), admin_id, list(details), hashlib.sha256(raw).hexdigest())
+    if identity(root) != root_id:
+        raise Retain("sibling-admin-root-changed")
+    return result
+
+
+def sibling_identity(snap, path, until, admin_index=None):
+    """Bind the registration, not mutable HEAD/index/checkout directory times."""
+    module = safety()
+    module.tick(until)
+    absent = {}
+    try:
+        root_id = identity(path)
+        if physical(path) != path:
+            raise Retain("sibling-path-rebound")
+    except FileNotFoundError:
+        root_id = None
+        absent["path_absence"] = sibling_absence(path, until)
+    common = Path(snap["common"])
+    if physical(common) != str(common) or identity(common) != snap["common_id"]:
+        raise Retain("sibling-common-directory-changed")
+    if path == snap["owner"]:
+        if root_id is None or Path(path) / ".git" != common:
+            raise Retain("sibling-owner-rebound")
+        return {"path_id": root_id, "gitdir": str(common), "gitdir_id": identity(common)}
+    pointer = Path(path) / ".git"
+    mapped = None
+    try:
+        raw, pointer_id = module.read_file(pointer, until, 4096)
+        if not raw.startswith(b"gitdir: ") or not raw.endswith(b"\n"):
+            raise Retain("sibling-pointer-invalid")
+        admin = Path(physical(Path(path) / os.fsdecode(raw[8:-1])))
+        pointer_value = [list(pointer_id), hashlib.sha256(raw).hexdigest()]
+    except FileNotFoundError:
+        pointer_value = None
+        absent["pointer_absence"] = sibling_absence(pointer, until)
+        if admin_index is None:
+            admin_index = {}
+        if "entries" not in admin_index:
+            admin_index["entries"] = sibling_admin_index(snap, until)
+        mapped = admin_index["entries"].get(str(pointer))
+        if mapped is None:
+            raise Retain("sibling-native-admin-unavailable")
+        admin = Path(mapped[0])
+    if admin.parent != common / "worktrees":
+        raise Retain("sibling-common-directory-changed")
+    admin_id = identity(admin)
+    links = {}
+    for name, expected in (("commondir", common), ("gitdir", pointer)):
+        data, details = module.read_file(admin / name, until, 4096)
+        linked = admin / os.fsdecode(data[:-1])
+        resolved = (str(linked.resolve(strict=False)) if name == "gitdir" and absent
+                    else physical(linked))
+        if not data.endswith(b"\n") or resolved != str(expected):
+            raise Retain("sibling-registration-backlink-changed")
+        links[name] = [list(details), hashlib.sha256(data).hexdigest()]
+    if mapped is not None and (admin_id != mapped[1] or links["gitdir"] != list(mapped[2:])):
+        raise Retain("sibling-registration-changed-during-read")
+    try:
+        lock, lock_id = module.read_file(admin / "locked", until, 4096)
+        lock_value = [list(lock_id), hashlib.sha256(lock).hexdigest()]
+    except FileNotFoundError:
+        lock_value = None
+    if (identity(admin) != admin_id or identity(common) != snap["common_id"]
+            or (root_id is not None and identity(path) != root_id)
+            or (pointer_value is not None and module.file_identity(pointer.lstat()) != pointer_id)
+            or any(sibling_absence(path if key == "path_absence" else pointer, until) != value
+                   for key, value in absent.items())):
+        raise Retain("sibling-registration-changed-during-read")
+    return {"path_id": root_id, "gitdir": str(admin), "gitdir_id": admin_id,
+            "pointer": pointer_value, "links": links, "lock": lock_value, **absent}
+
+
+def sibling_identities(snap, rows, until):
+    admin_index = {}
+    return {path: sibling_identity(snap, path, until, admin_index) for path in sorted(sibling_rows(rows))}
+
+
+def sibling_comparison(before, after, before_ids=None, after_ids=None):
+    old, new = sibling_rows(before), sibling_rows(after)
+    changes, preserved = [], True
+    for path in sorted(old.keys() | new.keys()):
+        if path not in old or path not in new:
+            changes.append({"path": path, "kind": "added" if path in new else "missing"})
+            preserved &= path in new
+            continue
+        delta = {key: [old[path].get(key), new[path].get(key)]
+                 for key in sorted(old[path].keys() | new[path].keys())
+                 if old[path].get(key) != new[path].get(key)}
+        # Another owner may commit, detach or switch branches. Only these fields
+        # are operational; lost registrations, locks and physical rebinding fail.
+        if delta:
+            operational = set(delta) <= {"HEAD", "branch", "detached"}
+            changes.append({"path": path, "kind": "operational" if operational else "registration",
+                            "fields": delta})
+            preserved &= operational
+        if before_ids is not None and (after_ids is None or path not in before_ids
+                                      or before_ids[path] != after_ids.get(path)):
+            changes.append({"path": path, "kind": "identity"})
+            preserved = False
+    return {"preserved": preserved, "changes": changes}
+
+
+def siblings_preserved(before, after):
+    try:
+        return sibling_comparison(before, after)["preserved"]
+    except Retain:
+        return False
 
 
 def remove_with_intent(db, row, item, before, recheck, qualification, *, restore_lock=False):
@@ -1117,11 +1534,12 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
             for path in (__file__, module.__file__, native_git)):
         raise Retain("cleanup-executable-inside-deletion-domain")
     siblings = [r for r in records(snap["owner"]) if r.get("worktree") != snap["path"]]
+    sibling_ids = sibling_identities(snap, siblings, module.DEADLINE)
     if git(snap["owner"], "rev-parse", snap["branch"]) != snap["head"]:
         raise Retain("preserved-branch-changed")
     intent = {"id": str(uuid.uuid4()), "generation": item["generation"],
               "head": snap["head"], "branch": snap["branch"], "before": before,
-              "siblings": siblings, "qualification": qualification}
+              "siblings": siblings, "sibling_identities": sibling_ids, "qualification": qualification}
     # Keep ownership durable before unlocking. A partial native result must
     # never become a retryable ordinary checkout, even for older consumers.
     with db:
@@ -1131,10 +1549,13 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         if changed != 1:
             raise Retain("release-generation-changed")
     outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None}
+    if "resolve_undo" in before["contents"]:
+        outcome["resolve_undo"] = before["contents"]["resolve_undo"]
     try:
         final = recheck()
         if any(final[key] != before[key] for key in (
-                "snapshot", "boundaries", "contents", "admin", "branch_reflog")):
+                "snapshot", "boundaries", "contents", "admin", "branch_reflog")) or (
+                final.get("preserved_refs") != before.get("preserved_refs")):
             raise Retain("removal-preimage-changed")
         # Recursive deletion needs its own phase, not admission's remaining time.
         # Keep two seconds to reap and thirty for readbacks inside the owner clock.
@@ -1157,10 +1578,24 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         after = records(snap["owner"])
         outcome.update(path_absent=not os.path.lexists(snap["path"]),
                        admin_absent=not os.path.lexists(snap["gitdir"]),
-                       registration_absent=not any(r.get("worktree") == snap["path"] for r in after),
-                       siblings_unchanged=siblings_preserved(siblings, after),
+                       registration_absent=not any(r.get("worktree") == snap["path"] for r in after))
+        # Persist the actual after rows even if physical readback then fails.
+        outcome["siblings_after"] = after
+        outcome["sibling_comparison"] = sibling_comparison(siblings, after)
+        after_ids = sibling_identities(snap, [r for r in after if r.get("worktree") in sibling_ids],
+                                       module.DEADLINE)
+        outcome["sibling_identities_after"] = after_ids
+        outcome["sibling_comparison"] = sibling_comparison(siblings, after, sibling_ids, after_ids)
+        outcome.update(siblings_preserved=outcome["sibling_comparison"]["preserved"],
                        branch_preserved=git(snap["owner"], "rev-parse", snap["branch"]) == snap["head"],
                        branch_reflog_preserved=preserved_branch_reflog(snap, module.DEADLINE) == before["branch_reflog"])
+        if "preserved_refs" in before:
+            refs = preserved_refs(snap, before["preserved_refs"], module.DEADLINE)
+            outcome["preserved_refs_after"] = refs
+            outcome["branch_preserved"] &= all(
+                refs[branch]["head"] == proof["head"] for branch, proof in before["preserved_refs"].items())
+            outcome["branch_reflog_preserved"] &= all(
+                refs[branch]["reflog"] == proof["reflog"] for branch, proof in before["preserved_refs"].items())
         dependency = before["contents"]["dependency"]
         outcome["dependency_preserved"] = dependency is None or identity(
             dependency["destination"]) == dependency["identity"]
@@ -1169,7 +1604,7 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
             for path, expected in before["contents"].get("discarded_links", {}).items())
         if not result.failure and result.returncode == 0 and all(
                 outcome[key] for key in ("path_absent", "admin_absent", "registration_absent",
-                "siblings_unchanged", "branch_preserved", "branch_reflog_preserved",
+                "siblings_preserved", "branch_preserved", "branch_reflog_preserved",
                 "dependency_preserved", "discarded_link_targets_preserved")):
             outcome.update(checkout="removed", reason=("finalized-task-worktree-removed" if restore_lock
                                                        else "released-merged-worktree-removed"))
@@ -1207,11 +1642,208 @@ def evaluate_release(db, row, args, *, apply):
         if not apply:
             completion_checks(db, row)
             return "released-completion-confirmed-checkout-retained"
+        if args.command in ("finish", "release") and args.policy is None:
+            return remove_finalized(db, row, args, completed=True)
         storage_guard()
         qualification = qualified_policy(args, row)
         return remove_released(db, row, item, qualification, args)
     except (Retain, OSError, ValueError) as error:
         return str(error) if isinstance(error, Retain) else "removal-proof-unavailable"
+
+
+def reconciliation(db, row):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='removal_reconciliations'").fetchone():
+        return None
+    record = db.execute("SELECT fact FROM removal_reconciliations WHERE worktree_id=?",
+                        (row["id"],)).fetchone()
+    return json.loads(record[0]) if record else None
+
+
+def reconcile_external(db, row, args):
+    """Record a completed owner's external removal without inventing native proof."""
+    item = retirement(db, row)
+    who = owner_id(args)
+    if (args.worktree != row["path"] or args.worktree_id != row["id"] or item is None
+            or item["generation"] != args.generation):
+        raise Retain("external-reconciliation-needs-exact-record-and-generation")
+    owners = owner_rows(db, row["id"])
+    if who not in {owner["owner"] for owner in owners}:
+        raise Retain("reconciliation-requires-recorded-owner")
+    if row["state"] != "finished" or not all(owner["completed"] for owner in owners):
+        raise Retain("external-reconciliation-requires-finished-owners")
+    if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
+        raise Retain("recovery-pin-present")
+    previous = json.loads(item["result"]) if item["result"] else None
+    repeated = (item["state"] == "removed" and previous is not None
+                and previous.get("reason") == "external-removal-reconciled"
+                and previous.get("operator") == who
+                and previous.get("operator_reason") == args.reason)
+    if item["intent"] or (not repeated and (item["state"] != "enrolled" or previous is not None)):
+        raise Retain("external-reconciliation-cannot-replace-native-removal-proof")
+    snap = json.loads(row["identity"])
+
+    def observe():
+        for key in ("owner", "common"):
+            if physical(snap[key]) != snap[key] or identity(snap[key]) != snap[key + "_id"]:
+                raise Retain("reconciliation-owner-identity-changed")
+        if (git(snap["owner"], "rev-parse", "--path-format=absolute", "--git-common-dir") != snap["common"]
+                or repository(git(snap["owner"], "remote", "get-url", "origin")) != snap["repo"]):
+            raise Retain("reconciliation-owner-binding-changed")
+        # Only ENOENT proves absence: denied access and dangling links must not qualify.
+        for key in ("path", "gitdir"):
+            try:
+                os.lstat(snap[key])
+            except FileNotFoundError:
+                if str(Path(snap[key]).resolve()) != snap[key]:
+                    raise Retain("reconciliation-target-path-changed")
+                continue
+            raise Retain("reconciliation-target-or-admin-present")
+        if any(record["worktree"] == snap["path"] for record in records(snap["owner"])):
+            raise Retain("reconciliation-target-registered")
+        if (os.path.lexists(Path(snap["common"]) / (snap["branch"] + ".lock"))
+                or git(snap["owner"], "rev-parse", snap["branch"]) != row["finish_head"]):
+            raise Retain("reconciliation-preserved-ref-changed")
+
+    observe()
+    if repeated:
+        return
+    outcome = {"checkout": "removed", "reason": "external-removal-reconciled",
+               "native_attempted": False, "operator": who, "operator_reason": args.reason,
+               "observed_at": int(time.time()), "generation": args.generation,
+               "path_absent": True, "admin_absent": True, "registration_absent": True,
+               "branch_preserved": True, "head": row["finish_head"]}
+    with db:
+        # Existing result fields keep older readers accurate without deleting history.
+        changed = db.execute(
+            "UPDATE retirement SET state='removed', result=? WHERE worktree_id=? "
+            "AND generation=? AND state='enrolled' AND intent IS NULL AND result IS NULL",
+            (json.dumps(outcome, sort_keys=True), row["id"], args.generation)).rowcount
+        if changed != 1:
+            raise Retain("external-reconciliation-record-changed")
+        observe()
+        db.execute("UPDATE worktrees SET reason=?, checked_at=? WHERE id=?",
+                   (outcome["reason"], outcome["observed_at"], row["id"]))
+
+
+def reconcile(db, row, args):
+    """Append current preservation evidence; never retry removal or rewrite history."""
+    item = retirement(db, row)
+    if (args.worktree != row["path"] or item is None or item["state"] != "incomplete"
+            or item["generation"] != args.generation or not item["intent"] or not item["result"]):
+        raise Retain("reconciliation-needs-exact-incomplete-intent")
+    hashes = {name: hashlib.sha256(item[name].encode()).hexdigest() for name in ("intent", "result")}
+    if hashes != {"intent": args.intent_sha256, "result": args.result_sha256}:
+        raise Retain("reconciliation-receipt-hash-mismatch")
+    intent, outcome = json.loads(item["intent"]), json.loads(item["result"])
+    if intent["id"] != args.intent_id or intent["generation"] != args.generation:
+        raise Retain("reconciliation-intent-or-generation-mismatch")
+    if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=?",
+                      (row["id"], owner_id(args))).fetchone():
+        raise Retain("reconciliation-requires-recorded-owner")
+    child = outcome.get("child") or {}
+    required = ("path_absent", "admin_absent", "registration_absent", "branch_preserved",
+                "branch_reflog_preserved", "dependency_preserved", "discarded_link_targets_preserved")
+    # Current receipts use siblings_preserved; older retained receipts used
+    # siblings_unchanged. Admit only sibling failure with a proven target removal.
+    if (outcome.get("checkout") != "unknown" or outcome.get("reason") != "removal-incomplete"
+            or outcome.get("siblings_preserved", outcome.get("siblings_unchanged")) is not False
+            or any(outcome.get(key) is not True for key in required)
+            or type(child.get("returncode")) is not int or child["returncode"] != 0
+            or child.get("reaped") is not True
+            or child.get("group_absent") is not True
+            or type(child.get("pid")) is not int or child["pid"] <= 0):
+        raise Retain("reconciliation-original-removal-not-qualified")
+    for probe in (os.kill, os.killpg):
+        try:
+            probe(child["pid"], 0)
+        except ProcessLookupError:
+            continue
+        raise Retain("reconciliation-child-or-group-present")
+    before = intent["before"]
+    snap, module = before["snapshot"], safety()
+    until = min(time.monotonic() + 120, module.DEADLINE)
+
+    def observe():
+        module.tick(until)
+        for key in ("owner", "common"):
+            if physical(snap[key]) != snap[key] or identity(snap[key]) != snap[key + "_id"]:
+                raise Retain("reconciliation-owner-identity-changed")
+        if (git(snap["owner"], "rev-parse", "--path-format=absolute", "--git-common-dir") != snap["common"]
+                or repository(git(snap["owner"], "remote", "get-url", "origin")) != snap["repo"]):
+            raise Retain("reconciliation-owner-binding-changed")
+        # lexists also hides permission and I/O failures; only ENOENT proves absence.
+        for key in ("path", "gitdir"):
+            try:
+                os.lstat(snap[key])
+            except FileNotFoundError:
+                continue
+            raise Retain("reconciliation-target-or-admin-present")
+        after = records(snap["owner"])
+        if snap["path"] in sibling_rows(after):
+            raise Retain("reconciliation-target-registered")
+        old = sibling_rows(intent["siblings"])
+        comparison = sibling_comparison(intent["siblings"], after)
+        identities, errors, admin_index = {}, [], {}
+        for path in sorted(old.keys() & sibling_rows(after).keys()):
+            try:
+                identities[path] = sibling_identity(snap, path, until, admin_index)
+            except (Retain, OSError, ValueError) as error:
+                if isinstance(error, Retain) and str(error) == "admission-deadline":
+                    raise
+                errors.append({"path": path, "kind": "identity-unavailable",
+                               "reason": str(error) if isinstance(error, Retain) else "identity-read-failed"})
+                if isinstance(error, OSError):
+                    errors[-1]["errno"] = error.errno
+        if "sibling_identities" in intent:
+            comparison = sibling_comparison(intent["siblings"], after, intent["sibling_identities"], identities)
+        comparison["changes"].extend(errors)
+        if errors:
+            comparison["preserved"] = False
+        if (os.path.lexists(Path(snap["common"]) / (snap["branch"] + ".lock"))
+                or git(snap["owner"], "rev-parse", snap["branch"]) != intent["head"]
+                or preserved_branch_reflog(snap, until) != before["branch_reflog"]):
+            raise Retain("reconciliation-preserved-ref-changed")
+        dependency = before["contents"]["dependency"]
+        if dependency is not None and identity(dependency["destination"]) != dependency["identity"]:
+            raise Retain("reconciliation-dependency-changed")
+        for path, expected in before["contents"].get("discarded_links", {}).items():
+            current = list(module.file_identity(os.stat(path))[:2]) if os.path.exists(path) else None
+            if current != expected:
+                raise Retain("reconciliation-external-link-target-changed")
+        return after, identities, comparison
+
+    after, identities, comparison = observe()
+    manual_holders(snap, before["contents"], before["admin"], until)
+    final, final_ids, final_comparison = observe()
+    stability = sibling_comparison([r for r in after if r["worktree"] in identities],
+                                   final, identities, final_ids)
+    # A later sibling closeout or unreadable identity cannot erase independently
+    # proven target removal. Retain the gap as an alert, never preserved=true.
+    final_comparison["during_observation"] = stability
+    if not comparison["preserved"] or not stability["preserved"]:
+        final_comparison["preserved"] = False
+        final_comparison["initial_observation"] = comparison
+    existing = reconciliation(db, row)
+    if existing:
+        if existing["intent_id"] != args.intent_id or existing["receipt_sha256"] != hashes:
+            raise Retain("reconciliation-record-conflict")
+        if existing["sibling_comparison"] != final_comparison:
+            raise Retain("reconciliation-recorded-sibling-observation-changed")
+        return
+    fact = {"checkout": "removed", "observed_at": int(time.time()), "operator": owner_id(args),
+            "intent_id": args.intent_id, "generation": args.generation, "receipt_sha256": hashes,
+            "original_checkout": outcome["checkout"], "historical_sibling_preservation": "unresolved",
+            "historical_sibling_identities": "recorded" if "sibling_identities" in intent else "unavailable",
+            "historical_after_snapshot": "recorded" if "siblings_after" in outcome else "unavailable",
+            "siblings_after": final, "sibling_identities": final_ids, "sibling_comparison": final_comparison}
+    # A distinct, append-only fact leaves old clients fail-closed on the original
+    # incomplete intent. Fresh absence is not historical siblings_unchanged proof.
+    with db:
+        db.execute("CREATE TABLE IF NOT EXISTS removal_reconciliations ("
+                   "worktree_id TEXT PRIMARY KEY REFERENCES worktrees(id), fact TEXT NOT NULL)")
+        db.execute("INSERT INTO removal_reconciliations VALUES (?, ?)",
+                   (row["id"], json.dumps(fact, sort_keys=True)))
 
 
 def owner_rows(db, worktree_id):
@@ -1229,9 +1861,394 @@ def owner_rows(db, worktree_id):
     return [dict(item) for item in db.execute(query, (worktree_id,))]
 
 
+def recovery_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def missing_recovery_record(db, row):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='missing_recoveries'").fetchone():
+        return None
+    result = db.execute("SELECT fact FROM missing_recoveries WHERE worktree_id=?",
+                        (row["id"],)).fetchone()
+    return json.loads(result[0]) if result else None
+
+
+def missing_recovery_preimage(db, row, args, until, *, published=False):
+    module = safety()
+    snap = json.loads(row["identity"])
+    original_identity = json.loads(row["identity"])
+    devices = {}
+    path = Path(snap["path"])
+    if row["id"] != args.worktree_id or row["path"] != str(path):
+        raise Retain("recovery-record-mismatch")
+    if (physical(path.parent) != str(path.parent) or not inside(str(path), snap["root"])
+            or str(path) == snap["root"]):
+        raise Retain("recovery-path-boundary-changed")
+    if not published and os.path.lexists(path):
+        raise Retain("recovery-target-present")
+    for key in ("owner", "common", "gitdir"):
+        current_id = identity(snap[key])
+        recorded_id = snap[key + "_id"]
+        if physical(snap[key]) != snap[key]:
+            raise Retain("recovery-admin-owner-identity-changed")
+        if args.allow_device_renumbering:
+            if (recorded_id[1] != current_id[1]
+                    or devices.setdefault(recorded_id[0], current_id[0]) != current_id[0]):
+                raise Retain("recovery-device-or-inode-changed")
+            snap[key + "_id"] = current_id
+        elif current_id != recorded_id:
+            raise Retain("recovery-admin-owner-identity-changed")
+    if args.allow_device_renumbering:
+        if len(set(devices.values())) != len(devices):
+            raise Retain("recovery-device-map-not-bijective")
+        original_device, original_inode = snap["path_id"]
+        if (original_device not in devices
+                or devices[original_device] != identity(path.parent)[0]):
+            raise Retain("recovery-parent-volume-unmapped-or-changed")
+        snap["path_id"] = [devices[original_device], original_inode]
+    observed_identity = dict(snap)
+    if (git(snap["owner"], "rev-parse", "--path-format=absolute", "--git-common-dir") != snap["common"]
+            or repository(git(snap["owner"], "remote", "get-url", "origin")) != snap["repo"]):
+        raise Retain("recovery-owner-binding-changed")
+    selected = [entry for entry in records(snap["owner"]) if entry.get("worktree") == str(path)]
+    if (len(selected) != 1 or selected[0].get("HEAD") != args.expected_head
+            or selected[0].get("branch") != snap["branch"]
+            or selected[0].get("locked") != snap.get("lock_reason")):
+        raise Retain("recovery-registration-changed")
+    for marker in ("index.lock", "HEAD.lock", "config.lock", "packed-refs.lock", "MERGE_HEAD",
+                   "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge", "rebase-apply", "sequencer"):
+        if any(os.path.lexists(Path(snap[key]) / marker) for key in ("common", "gitdir")):
+            raise Retain("recovery-git-operation-present")
+    snap = {**snap, "head": args.expected_head}
+    admin_path = Path(snap["gitdir"])
+    raw, _ = module.read_file(admin_path / "index", until)
+    if hashlib.sha256(raw).hexdigest() != args.index_sha256:
+        raise Retain("recovery-index-changed")
+    entries, resolve_undo = module.index_entries(raw)
+    if resolve_undo is not None or any(entry[2] for entry in entries.values()):
+        raise Retain("recovery-sparse-or-undo-index")
+    tree = module.tree_entries(git(snap["owner"], "--no-replace-objects", "ls-tree", "-rz",
+                                   args.expected_head, deadline=until))
+    if {name: entry[:2] for name, entry in entries.items()} != tree:
+        raise Retain("recovery-index-not-head")
+    for name, expected in (("HEAD", "ref: " + snap["branch"] + "\n"),
+                           ("gitdir", str(path / ".git") + "\n")):
+        data, _ = module.read_file(admin_path / name, until)
+        if data != os.fsencode(expected):
+            raise Retain("recovery-admin-binding-changed")
+    data, _ = module.read_file(admin_path / "commondir", until)
+    if str((admin_path / os.fsdecode(data).rstrip("\n")).resolve(strict=True)) != snap["common"]:
+        raise Retain("recovery-common-binding-changed")
+    # Checks that need a Git cwd use the unchanged canonical owner while all
+    # inventoried admin paths still belong to this exact missing checkout.
+    admin = module.admin_inventory({**snap, "path": snap["owner"]}, git, until,
+                                   preserved_oids={args.expected_head})
+    refs = preserved_refs(snap, [snap["branch"]], until)
+    if refs[snap["branch"]]["head"] != args.expected_head:
+        raise Retain("recovery-branch-changed")
+    item = retirement(db, row)
+    if item is None or item["generation"] != args.generation:
+        raise Retain("recovery-generation-changed")
+    owners = owner_rows(db, row["id"])
+    if not owners or row["state"] != "active":
+        raise Retain("recovery-needs-existing-active-owners")
+    if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
+        raise Retain("recovery-pin-present")
+    if db.execute("SELECT 1 FROM owner_releases WHERE worktree_id=?", (row["id"],)).fetchone():
+        raise Retain("recovery-release-present")
+    boundaries = [module.access_boundary(str(path.parent), until),
+                  module.access_boundary(snap["gitdir"], until)]
+    manual_holders(snap, {"entries": {}, "discarded_inodes": [snap["path_id"]]}, admin, until)
+    return {"identity": original_identity, "observed_identity": observed_identity,
+            "allow_device_renumbering": args.allow_device_renumbering,
+            "device_mapping": sorted([old, new] for old, new in devices.items()),
+            "head": args.expected_head,
+            "index_sha256": args.index_sha256, "registration": selected[0], "admin": admin,
+            "refs": refs, "boundaries": boundaries, "owners": owners,
+            "generation": item["generation"], "state": row["state"]}, tree
+
+
+RECOVERY_BLOB_LIMIT = 16 * 1024 * 1024
+
+
+def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allow_partial=False):
+    module = safety()
+    root = Path(root)
+    root_id = identity(root)
+    if root.lstat().st_mode & 0o077:
+        raise Retain("recovery-private-staging-required")
+    expected = {**entries, ".git": (0o100600, None)}
+    directories = {""}
+    for name in expected:
+        directories.update(str(p) for p in Path(name).parents if str(p) != ".")
+    present = set()
+    present_bytes = 0
+    if write and allow_partial:
+        verified_id, present, present_bytes = recovery_tree(root, entries, gitdir, until, allow_partial=True)
+        if verified_id != root_id:
+            raise Retain("recovery-staging-rebound")
+    if write:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if list(module.file_identity(os.fstat(root_fd))[:2]) != root_id:
+                raise Retain("recovery-staging-rebound")
+            for name in sorted(directories - {""}, key=lambda p: (p.count("/"), p)):
+                if name in present:
+                    continue
+                with recovery_parent(root_fd, name) as (parent_fd, leaf):
+                    os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
+            total = present_bytes
+            for name, (mode, oid) in expected.items():
+                module.tick(until)
+                if name in present:
+                    continue
+                data = (os.fsencode("gitdir: " + gitdir + "\n") if oid is None else
+                        git(owner, "cat-file", "blob", oid, raw=True, strict=True, deadline=until,
+                            capture_limit=RECOVERY_BLOB_LIMIT))
+                total += len(data)
+                if total > module.PASS_LIMIT:
+                    raise Retain("recovery-source-byte-limit")
+                if oid is not None and hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
+                    raise Retain("recovery-blob-identity-mismatch")
+                with recovery_parent(root_fd, name) as (parent_fd, leaf):
+                    if mode == 0o120000:
+                        os.symlink(os.fsdecode(data), leaf, dir_fd=parent_fd)
+                    else:
+                        fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     mode & 0o777, dir_fd=parent_fd)
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(data)
+                            stream.flush()
+                            os.fchmod(stream.fileno(), mode & 0o777)
+                            os.fsync(stream.fileno())
+        finally:
+            os.close(root_fd)
+    observed = set()
+    total = 0
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        module.tick(until)
+        for name in dirs + files:
+            path = Path(directory) / name
+            relative = str(path.relative_to(root))
+            if relative in observed:
+                raise Retain("recovery-tree-duplicate")
+            observed.add(relative)
+            details = path.lstat()
+            if relative in directories:
+                if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid() or details.st_mode & 0o077:
+                    raise Retain("recovery-directory-changed")
+                continue
+            if relative not in expected or details.st_uid != os.getuid():
+                raise Retain("recovery-tree-unexpected-entry")
+            mode, oid = expected[relative]
+            if mode == 0o120000:
+                if not stat.S_ISLNK(details.st_mode):
+                    raise Retain("recovery-link-changed")
+                data = os.fsencode(os.readlink(path))
+            else:
+                if not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != mode & 0o777:
+                    raise Retain("recovery-file-mode-changed")
+                data, _ = module.read_file(path, until, RECOVERY_BLOB_LIMIT)
+            total += len(data)
+            if total > module.PASS_LIMIT:
+                raise Retain("recovery-source-byte-limit")
+            if oid is None:
+                matched = data == os.fsencode("gitdir: " + gitdir + "\n")
+            else:
+                matched = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() == oid
+            if not matched:
+                raise Retain("recovery-file-content-changed")
+    if ((not (allow_partial and not write) and observed != set(expected) | (directories - {""}))
+            or identity(root) != root_id):
+        raise Retain("recovery-tree-incomplete-or-rebound")
+    if write:
+        for name in sorted(directories, reverse=True):
+            fd = os.open(root / name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    return (root_id, observed, total) if allow_partial and not write else root_id
+
+
+@contextlib.contextmanager
+def recovery_parent(root_fd, name):
+    with contextlib.ExitStack() as close:
+        parent_fd = root_fd
+        parts = Path(name).parts
+        for part in parts[:-1]:
+            parent_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            close.callback(os.close, parent_fd)
+        yield parent_fd, parts[-1]
+
+
+def recovery_publish(source, target):
+    lib = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        function = lib.renamex_np
+        function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        args = (os.fsencode(source), os.fsencode(target), 4)  # RENAME_EXCL
+    elif sys.platform == "linux" and hasattr(lib, "renameat2"):
+        function = lib.renameat2
+        function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        args = (-100, os.fsencode(source), -100, os.fsencode(target), 1)  # RENAME_NOREPLACE
+    else:
+        raise Retain("recovery-no-replace-unavailable")
+    function.restype = ctypes.c_int
+    if function(*args) != 0:
+        raise Retain("recovery-no-replace-refused")
+    fd = os.open(Path(target).parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def recover_missing(db, row, args):
+    until = safety().DEADLINE
+    who = owner_id(args)
+    with safety().maintainer_lock(Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))):
+        record = missing_recovery_record(db, row)
+        if args.continue_partial and (record is None or record.get("result")):
+            raise Retain("recovery-partial-needs-pending-intent")
+        if record is not None:
+            if (not args.intent_id or record["id"] != args.intent_id
+                    or record["digest"] != args.recovery_sha256
+                    or record["preimage"]["generation"] != args.generation
+                    or record["preimage"]["head"] != args.expected_head
+                    or record["preimage"]["index_sha256"] != args.index_sha256
+                    or record["preimage"]["allow_device_renumbering"] != args.allow_device_renumbering):
+                raise Retain("recovery-exact-intent-required")
+            if record.get("result"):
+                current = revalidate(row)
+                if (current["head"] != args.expected_head
+                        or current["path_id"] != record["stage_id"]
+                        or retirement(db, row)["generation"] != args.generation + 1
+                        or owner_rows(db, row["id"]) != record["preimage"]["owners"]):
+                    raise Retain("recovery-successor-changed")
+                successor_args = types.SimpleNamespace(**{**vars(args), "generation": args.generation + 1})
+                original_row = {**dict(row), "identity": json.dumps(record["preimage"]["identity"])}
+                observed, entries = missing_recovery_preimage(db, original_row, successor_args, until, published=True)
+                observed.update(generation=args.generation, registration=record["preimage"]["registration"])
+                if recovery_digest(observed) != record["digest"]:
+                    raise Retain("recovery-successor-admin-changed")
+                recovery_tree(row["path"], entries, current["gitdir"], until)
+                return record["result"]
+        elif args.intent_id:
+            raise Retain("recovery-intent-not-found")
+        item = retirement(db, row)
+        if item is None or (record is None and (item["state"] != "enrolled" or item["intent"] or item["result"])):
+            raise Retain("recovery-pending-lifecycle-action")
+        if record and (item["state"] != "recovery-pending" or json.loads(item["intent"]) != record["intent"]):
+            raise Retain("recovery-intent-state-changed")
+        published = record is not None and os.path.lexists(row["path"])
+        preimage, entries = missing_recovery_preimage(db, row, args, until, published=published)
+        if record is not None:
+            # Only the target's presence changes when the same staged inode was published.
+            preimage["registration"] = record["preimage"]["registration"]
+        digest = recovery_digest(preimage)
+        if record and digest != record["digest"]:
+            raise Retain("recovery-preimage-drift")
+        if args.continue_partial:
+            if (published or record["stage_id"] is None
+                    or identity(record["stage"]) != record["stage_id"]):
+                raise Retain("recovery-partial-stage-changed")
+            recovery_tree(record["stage"], entries, preimage["identity"]["gitdir"], until,
+                          allow_partial=True)
+            inodes = [record["stage_id"]]
+            for directory, dirs, files in os.walk(record["stage"], followlinks=False):
+                for name in dirs + files:
+                    safety().tick(until)
+                    details = (Path(directory) / name).lstat()
+                    if not stat.S_ISLNK(details.st_mode):
+                        inodes.append([details.st_dev, details.st_ino])
+            manual_holders({**preimage["observed_identity"], "path": record["stage"]},
+                           {"entries": {}, "discarded_inodes": inodes}, preimage["admin"], until)
+        if not args.apply:
+            return {"checkout": "unknown" if record else "missing", "recovery_sha256": digest, "entries": len(entries),
+                    "worktree_id": row["id"], "generation": args.generation,
+                    "head": args.expected_head, "index_sha256": args.index_sha256,
+                    "allow_device_renumbering": args.allow_device_renumbering,
+                    "device_mapping": preimage["device_mapping"],
+                    "partial_continuation": args.continue_partial,
+                    "stage_id": record["stage_id"] if record else None,
+                    "untracked_unstaged": "unavailable", "checkout_mutation": False}
+        if args.recovery_sha256 != digest:
+            raise Retain("recovery-reviewed-preimage-required")
+        if record is None:
+            identifier = str(uuid.uuid4())
+            staging = str(Path(row["path"]).parent / (".gwt-recover-" + identifier))
+            intent = {"kind": "recover-missing", "id": identifier, "digest": digest,
+                      "operator": who, "stage": staging}
+            record = {"id": identifier, "intent": intent, "digest": digest, "preimage": preimage,
+                      "stage": staging, "stage_id": None, "result": None}
+            with db:
+                db.execute("CREATE TABLE IF NOT EXISTS missing_recoveries ("
+                           "worktree_id TEXT PRIMARY KEY REFERENCES worktrees(id), fact TEXT NOT NULL)")
+                changed = db.execute("UPDATE retirement SET state='recovery-pending', intent=? "
+                                     "WHERE worktree_id=? AND generation=? AND state='enrolled' AND intent IS NULL",
+                                     (json.dumps(intent, sort_keys=True), row["id"], args.generation)).rowcount
+                if changed != 1:
+                    raise Retain("recovery-generation-cas-failed")
+                db.execute("INSERT INTO missing_recoveries VALUES (?, ?)",
+                           (row["id"], json.dumps(record, sort_keys=True)))
+            Path(staging).mkdir(mode=0o700)
+            record["stage_id"] = identity(staging)
+            with db:
+                db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
+                           (json.dumps(record, sort_keys=True), row["id"]))
+            recovery_tree(staging, entries, preimage["identity"]["gitdir"], until,
+                          write=True, owner=preimage["identity"]["owner"])
+        elif args.continue_partial:
+            recovery_tree(record["stage"], entries, preimage["identity"]["gitdir"], until,
+                          write=True, owner=preimage["identity"]["owner"], allow_partial=True)
+        source = row["path"] if published else record["stage"]
+        if (record["stage_id"] is None or identity(source) != record["stage_id"]
+                or (published and os.path.lexists(record["stage"]))):
+            raise Retain("recovery-staged-inode-unknown")
+        recovery_tree(source, entries, preimage["identity"]["gitdir"], until)
+        final, _ = missing_recovery_preimage(db, row, args, until, published=published)
+        final["registration"] = preimage["registration"]
+        if recovery_digest(final) != digest:
+            raise Retain("recovery-pre-publication-drift")
+        if not published:
+            recovery_publish(source, row["path"])
+        current = snapshot(row["path"], preimage["identity"]["root"], preimage["identity"].get("lock_reason"))
+        if immutable(current) != {**preimage["observed_identity"], "path_id": record["stage_id"]}:
+            raise Retain("recovery-published-identity-changed")
+        recovery_tree(row["path"], entries, preimage["identity"]["gitdir"], until)
+        final, _ = missing_recovery_preimage(db, row, args, until, published=True)
+        final["registration"] = preimage["registration"]
+        if recovery_digest(final) != digest:
+            raise Retain("recovery-post-publication-drift")
+        result = {"checkout": "restored", "intent_id": record["id"], "recovery_sha256": digest,
+                  "generation": args.generation + 1, "head": args.expected_head,
+                  "entries": len(entries), "operator": who, "owners_preserved": True,
+                  "untracked_unstaged": "unavailable", "source": "committed-index-equal"}
+        record["result"] = result
+        with db:
+            changed = db.execute("UPDATE retirement SET state='enrolled', intent=NULL "
+                                 "WHERE worktree_id=? AND generation=? AND state='recovery-pending' AND intent=?",
+                                 (row["id"], args.generation, json.dumps(record["intent"], sort_keys=True))).rowcount
+            if changed != 1:
+                raise Retain("recovery-final-cas-failed")
+            db.execute("UPDATE worktrees SET identity=? WHERE id=? AND identity=?",
+                       (json.dumps(immutable(current), sort_keys=True), row["id"], row["identity"]))
+            if retirement(db, row)["generation"] != args.generation + 1:
+                raise Retain("recovery-successor-generation-invalid")
+            db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
+                       (json.dumps(record, sort_keys=True), row["id"]))
+        return result
+
+
 def summary(db, row, reason=None):
     item = retirement(db, row)
     outcome = json.loads(item["result"]) if item is not None and item["result"] else None
+    # A completed removal owns its status reason; an older retention reason
+    # must not imply that the checkout still needs policy or owner action.
+    if not reason and outcome and outcome["checkout"] == "removed":
+        reason = outcome["reason"]
     owners = owner_rows(db, row["id"])
     cancellations = cancellation_rows(db, row["id"])
     cancelled = {entry["owner"] for entry in cancellations}
@@ -1256,7 +2273,7 @@ def summary(db, row, reason=None):
         # Status does not perform native admission. Capability is separate from
         # a fresh, one-shot removal decision made only by the evaluator.
         "removal_available": False,
-        "automatic_removal_supported": item is not None,
+        "automatic_removal_supported": automatic_holder_contract(item),
         "retirement_state": item["state"] if item is not None else "report-only",
         "generation": item["generation"] if item is not None else None,
         "released_owners": [] if item is None else [r[0] for r in db.execute(
@@ -1265,6 +2282,44 @@ def summary(db, row, reason=None):
     }
     if cancellations:
         result["cancelled_owners"] = cancellations
+    if item is not None and item["state"] == "enrolled":
+        baseline = json.loads(item["inventory"]) if item["inventory"] else None
+        semantic = baseline is not None and baseline.get("schema") == RELEASE_BASELINE_SCHEMA
+        result["automatic_handoff"] = {
+            "baseline": ("unavailable" if baseline is None or (semantic and baseline["baseline"] is None)
+                         else "ready"),
+            "blocker": baseline.get("blocker") if semantic else (
+                "automatic-release-inventory-required" if baseline is None else None),
+            "native_qualification": holder_qualification(),
+            # A release receipt does not attest installation or scheduling.
+            "consumer_eligibility": "not-attested",
+            "scheduled_retry": "not-attested",
+            "owner_retry": ("resume-then-finish-from-owning-checkout" if baseline is None or (
+                semantic and baseline["baseline"] is None) else "repeat-finish-from-owning-checkout"),
+        }
+        if not automatic_holder_contract(item):
+            result["automatic_handoff"].update(
+                blocker="automatic-holder-contract-not-enrolled",
+                owner_retry="manual-finalized-closeout-from-owning-checkout")
+    recovery = missing_recovery_record(db, row)
+    if recovery is not None:
+        result["missing_recovery"] = {
+            "intent_id": recovery["id"], "recovery_sha256": recovery["digest"],
+            "status": "complete" if recovery["result"] else "pending",
+            "operator": recovery["intent"]["operator"], "result": recovery["result"],
+        }
+    if outcome and outcome.get("reason") == "external-removal-reconciled":
+        result["reason"] = outcome["reason"]
+        result["external_removal"] = outcome
+    fact = reconciliation(db, row)
+    if fact:
+        result["current_disposition"] = "reconciled-target-removed"
+        result["reason"] = "target-removal-reconciled-original-proof-retained"
+        if not fact["sibling_comparison"]["preserved"]:
+            result["sibling_alert"] = "current-sibling-preservation-unresolved"
+            result["reason"] = "target-removal-reconciled-sibling-preservation-unresolved"
+        result["reconciliation"] = {key: value for key, value in fact.items()
+                                    if key not in ("siblings_after", "sibling_identities")}
     return result
 
 
@@ -1280,6 +2335,8 @@ def parser():
         "cancel",
         "release",
         "remove",
+        "reconcile",
+        "recover-missing",
         "resume",
         "pin",
         "unpin",
@@ -1314,12 +2371,32 @@ def parser():
     result.add_argument("--release", action="store_true")
     result.add_argument("--new-token")
     result.add_argument("--finalized", action="store_true")
+    result.add_argument("--sudo-holder-scan", action="store_true")
     result.add_argument("--discard-ignored", action="append", default=[])
     result.add_argument("--acknowledge-device-renumbering", action="store_true")
+    result.add_argument("--intent-id")
+    result.add_argument("--generation", type=int)
+    result.add_argument("--intent-sha256")
+    result.add_argument("--result-sha256")
+    result.add_argument("--external-removal", action="store_true")
+    result.add_argument("--worktree-id")
+    result.add_argument("--expected-head")
+    result.add_argument("--index-sha256")
+    result.add_argument("--recovery-sha256")
+    result.add_argument("--allow-device-renumbering", action="store_true")
+    result.add_argument("--continue-partial", action="store_true")
     return result
 
 
 def process_one(db, row, args):
+    if args.command == "recover-missing":
+        return recover_missing(db, row, args)
+    if args.command == "reconcile":
+        if args.external_removal:
+            reconcile_external(db, row, args)
+            return summary(db, row)
+        reconcile(db, row, args)
+        return summary(db, row, reason="target-removal-reconciled-original-proof-retained")
     if args.command == "remove":
         reason = remove_finalized(db, row, args)
         return summary(db, row, reason=reason)
@@ -1379,11 +2456,20 @@ def process_one(db, row, args):
     current = db.execute(
         "SELECT * FROM worktrees WHERE id = ?", (row["id"],)
     ).fetchone()
-    if args.command == "release" or (args.command == "finish" and args.release):
+    if args.command == "release" or (args.command == "finish" and (
+            args.release or retirement(db, current) is not None)):
         release(db, current, args)
+        if args.policy is not None:
+            capture_release_inventory(db, current, args)
     if args.command in ("finish", "release", "check") and retirement(db, current) is not None:
         reason = evaluate_release(db, current, args,
                                   apply=args.command in ("finish", "release") or args.apply)
+        # Foreground closeout has priority and needs no automatic baseline.
+        # Only a retained, still-enrolled owner release hands off to the worker.
+        item = retirement(db, current)
+        if (args.command in ("finish", "release") and args.policy is None
+                and item["state"] == "enrolled"):
+            capture_release_inventory(db, current, args)
         with db:
             db.execute("UPDATE worktrees SET reason=?, checked_at=? WHERE id=?",
                        (reason, int(time.time()), row["id"]))
@@ -1395,12 +2481,54 @@ def process_one(db, row, args):
 def main(argv=None):
     args = parser().parse_args(argv)
     safety().DEADLINE = time.monotonic() + 238
+    # Acknowledgment permits identity selection only; new action options must
+    # never silently inherit permission to mutate an existing enrollment.
     if args.acknowledge_device_renumbering and (
-            args.command != "resume" or args.pr is not None or args.target is not None
-            or args.wait_for or args.reason is not None or args.policy is not None
-            or args.if_enrolled or args.all or args.apply or args.release
-            or args.new_token is not None or args.finalized or args.discard_ignored):
+            args.command != "resume" or any(
+                value is not None and value is not False and value != []
+                for name, value in vars(args).items()
+                if name not in {"command", "worktree", "managed_root", "state_dir", "owner",
+                                "acknowledge_device_renumbering"})):
         raise Retain("device-acknowledgement-requires-one-explicit-resume")
+    if args.sudo_holder_scan and not (args.command == "remove" and args.finalized):
+        raise Retain("sudo-holder-scan-requires-manual-finalized-removal")
+    if args.sudo_holder_scan and sys.platform != "linux":
+        raise Retain("sudo-holder-scan-requires-linux")
+    reconciliation_options = (args.intent_id, args.generation, args.intent_sha256, args.result_sha256,
+                              args.worktree_id)
+    if args.command == "recover-missing":
+        if (args.pr or args.target or args.wait_for or args.policy or args.all or args.release
+                or args.new_token or args.if_enrolled or args.finalized or args.discard_ignored
+                or args.external_removal or args.intent_sha256 or args.result_sha256 or args.reason
+                or args.generation is None or args.generation < 0 or not args.worktree_id
+                or str(uuid.UUID(args.worktree_id)) != args.worktree_id
+                or not args.expected_head or not re.fullmatch(r"[0-9a-f]{40}", args.expected_head)
+                or not args.index_sha256 or not re.fullmatch(r"[0-9a-f]{64}", args.index_sha256)
+                or (args.apply and not args.recovery_sha256)
+                or (args.continue_partial and (not args.intent_id or not args.recovery_sha256))
+                or (args.recovery_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.recovery_sha256))
+                or (args.intent_id and str(uuid.UUID(args.intent_id)) != args.intent_id)):
+            raise Retain("recovery-needs-exact-record-head-index-generation")
+    elif (args.expected_head or args.index_sha256 or args.recovery_sha256
+          or args.allow_device_renumbering or args.continue_partial):
+        raise Retain("recovery-options-require-recover-missing")
+    elif args.command == "reconcile":
+        if (args.pr or args.target or args.wait_for or args.policy or args.all or args.apply
+                or args.release or args.new_token or args.if_enrolled or args.finalized or args.discard_ignored
+                or args.generation is None or args.generation < 0):
+            raise Retain("reconciliation-needs-one-exact-record-and-generation")
+        if args.external_removal:
+            if (args.intent_id or args.intent_sha256 or args.result_sha256
+                    or not args.worktree_id or str(uuid.UUID(args.worktree_id)) != args.worktree_id
+                    or not args.reason or not args.reason.strip() or len(args.reason) > 500):
+                raise Retain("external-reconciliation-needs-record-id-and-bounded-reason")
+        elif (args.worktree_id or args.reason
+                or not args.intent_id or str(uuid.UUID(args.intent_id)) != args.intent_id
+                or any(not value or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for value in (args.intent_sha256, args.result_sha256))):
+            raise Retain("reconciliation-needs-one-exact-intent-and-receipt-hashes")
+    elif args.external_removal or any(value is not None for value in reconciliation_options):
+        raise Retain("reconciliation-options-require-reconcile")
     if args.command == "cancel":
         if (args.pr or args.target or args.wait_for or args.all or args.apply
                 or args.release or args.policy or args.new_token or args.if_enrolled):
@@ -1416,14 +2544,17 @@ def main(argv=None):
         if (args.pr or args.target or args.wait_for or args.all or args.apply
                 or args.release or args.policy or args.new_token or args.if_enrolled):
             raise Retain("finalized-removal-is-one-explicit-worktree")
+    elif args.finalized:
+        raise Retain("finalized-options-require-remove")
+    if args.discard_ignored:
+        if args.command not in ("finish", "release", "remove"):
+            raise Retain("discard-ignored-requires-owner-finish-release-or-finalized-remove")
         if len(args.discard_ignored) != len(set(args.discard_ignored)) or any(
                 not value or value.startswith("/") or any(
                     part in ("", ".", "..", ".git") for part in value.split("/"))
                 for value in args.discard_ignored):
             raise Retain("discard-ignored-needs-literal-relative-roots")
-    elif args.finalized or args.discard_ignored:
-        raise Retain("finalized-options-require-remove")
-    if args.apply and args.command != "check":
+    if args.apply and args.command not in ("check", "recover-missing"):
         raise Retain("apply-is-only-valid-for-check")
     if args.policy and args.command not in ("finish", "release", "check"):
         raise Retain("policy-is-only-valid-for-finish-release-or-check")
@@ -1475,7 +2606,8 @@ def main(argv=None):
                 row = get_row(db, path)
                 result = process_one(db, row, args)
                 output.append(result)
-                if result["checkout"] == "unknown":
+                if (result["checkout"] == "unknown"
+                        and result.get("current_disposition") != "reconciled-target-removed"):
                     break
         print(json.dumps(output, sort_keys=True))
         return 0
@@ -1515,7 +2647,8 @@ def main(argv=None):
                     (worktree_id, who),
                 )
                 if args.new_token:
-                    db.execute("INSERT INTO retirement(worktree_id) VALUES (?)", (worktree_id,))
+                    db.execute("INSERT INTO retirement(worktree_id, holder_contract) VALUES (?, ?)",
+                               (worktree_id, safety().HOLDER_COVERAGE))
         try:
             row = get_row(db, args.worktree)
         except Retain:

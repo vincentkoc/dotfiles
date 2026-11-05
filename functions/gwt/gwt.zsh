@@ -454,11 +454,23 @@ _gwt_sparse_register_shell_hook() {
     _gwt_sparse_sync_shell_env
 }
 
+_gwt_worktrees_root() {
+    local guard_path configured_root
+    guard_path=$(_gwt_tool_path worktree-storage-guard) || return 127
+    configured_root=$("$guard_path" --print-worktree-root) || return
+    # Older login shells exported the internal default as though it were an override.
+    if [[ -n "${DOTFILES_WORKTREES_ROOT:-}" && "$DOTFILES_WORKTREES_ROOT" != "$HOME/.codex/worktrees" ]]; then
+        printf '%s\n' "$DOTFILES_WORKTREES_ROOT"
+    else
+        printf '%s\n' "${configured_root:-$HOME/.codex/worktrees}"
+    fi
+}
+
 _gwt_codex_repo_worktree_root() {
     local repo_root="$1"
     local repo_slug root
     repo_slug=$(_gwt_repo_slug "$repo_root") || return 1
-    root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    root=$(_gwt_worktrees_root) || return
     printf '%s/%s\n' "$root" "$repo_slug"
 }
 
@@ -949,7 +961,7 @@ _gwt_shared_install_source() {
         return 0
     fi
 
-    worktrees_root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    worktrees_root=$(_gwt_worktrees_root) || return
     if [[ -d "$repo_root/node_modules" && "$repo_root" != "$worktrees_root/"* ]]; then
         printf '%s\n' "$repo_root"
         return 0
@@ -960,7 +972,8 @@ _gwt_shared_install_source() {
 
 _gwt_find_workspace_node_modules() {
     local repo_root="$1"
-    local worktrees_root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+    local worktrees_root
+    worktrees_root=$(_gwt_worktrees_root) || return
 
     if [[ -d "$repo_root/node_modules" ]]; then
         printf '%s\n' "$repo_root/node_modules"
@@ -1250,10 +1263,10 @@ Commands:
   gwt clean [agent-worktree-maintain args...]  Run maintenance immediately (--force)
   gwt cd [branch|name|path]         Jump into a worktree (fzf picker when empty)
   gwt rm <branch|name|path> [--force] Remove a worktree safely
-  gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...]
+  gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...] [--sudo-holder-scan]
                                     Manually close one finalized managed task
   gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...] [--release]
-                                    Complete; --release explicitly signs off checkout use
+                                    Complete and sign off this owner's checkout use
   gwt release [--worktree <path>]   Release this already-completed owner
   gwt cancel --reason <text> [--worktree <path>]
                                     End this owner's work without PR proof or removal
@@ -1263,6 +1276,13 @@ Commands:
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all]         Show local completion state
+  gwt recover-missing --worktree <path> --worktree-id <id> --generation <n>
+    --expected-head <sha> --index-sha256 <sha256> [--apply --recovery-sha256 <sha256>]
+                                    Plan or restore an exact missing enrolled checkout
+  gwt finish-reconcile --worktree <path> --intent-id <id> --generation <n>
+      --intent-sha256 <hash> --result-sha256 <hash>  Reconcile removed target; preserve original proof
+  gwt finish-reconcile --external-removal --worktree <path> --worktree-id <id>
+      --generation <n> --reason <text>           Record an already removed, finished checkout
   gwt finish-check [--all] [--policy <path>] [--apply]
                                     Report; --apply requires qualified host activation
   gwt prune                         Prune stale worktree metadata
@@ -1310,16 +1330,29 @@ gwt() {
         esac
     done
 
+    if [[ "$subcommand" != rm && "$subcommand" != remove ]]; then
+        for help_arg in "$@"; do
+            if [[ "$help_arg" == --sudo-holder-scan ]]; then
+                echo "gwt: --sudo-holder-scan requires rm --finalized" >&2
+                return 1
+            fi
+        done
+    fi
+
     case "$subcommand" in
         owner|snapshot|dependencies)
             _gwt_storage "$subcommand" "$@"
             return $?
             ;;
         root)
-            printf '%s\n' "${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+            _gwt_worktrees_root
             ;;
-        finish-status|finish-check)
+        finish-status|finish-check|finish-reconcile)
             _gwt_finish_tool "${subcommand#finish-}" "$@"
+            return $?
+            ;;
+        recover-missing)
+            _gwt_finish_tool recover-missing "$@"
             return $?
             ;;
         finish|release|cancel|resume|finish-pin|finish-unpin)
@@ -1425,10 +1458,9 @@ gwt() {
             local lifecycle_target="$PWD" lifecycle_release=false
             local -a lifecycle_args
             lifecycle_args=("$@")
-            [[ "$subcommand" == release ]] && lifecycle_release=true
+            [[ "$subcommand" == finish || "$subcommand" == release ]] && lifecycle_release=true
             local lifecycle_i
             for (( lifecycle_i=1; lifecycle_i <= ${#lifecycle_args}; lifecycle_i++ )); do
-                [[ "$subcommand" == finish && "${lifecycle_args[$lifecycle_i]}" == --release ]] && lifecycle_release=true
                 if [[ "${lifecycle_args[$lifecycle_i]}" == --worktree ]]; then
                     lifecycle_target="${lifecycle_args[$((lifecycle_i + 1))]}"
                 elif [[ "${lifecycle_args[$lifecycle_i]}" == --worktree=* ]]; then
@@ -1606,7 +1638,7 @@ gwt() {
                 return 1
             fi
 
-            root="${DOTFILES_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+            root=$(_gwt_worktrees_root) || return
             repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
             repo_slug=$(_gwt_repo_slug) || return 1
             branch_slug=$(printf '%s' "$branch" | tr '/' '-' | tr -cd '[:alnum:]._-')
@@ -1774,6 +1806,7 @@ gwt() {
             local target=""
             local force_remove=false
             local finalized_remove=false
+            local sudo_holder_scan=false
             local -a discard_args
             local arg target_path main_worktree repo_root current_path worktree_status
 
@@ -1783,6 +1816,7 @@ gwt() {
                 case "$1" in
                     --force|-f) force_remove=true ;;
                     --finalized) finalized_remove=true ;;
+                    --sudo-holder-scan) sudo_holder_scan=true ;;
                     --discard-ignored)
                         [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
                         discard_args+=(--discard-ignored "$2")
@@ -1803,6 +1837,10 @@ gwt() {
                 }
             elif (( ${#discard_args} )); then
                 echo "gwt: --discard-ignored requires --finalized" >&2
+                return 1
+            fi
+            if $sudo_holder_scan && ! $finalized_remove; then
+                echo "gwt: --sudo-holder-scan requires rm --finalized" >&2
                 return 1
             fi
 
@@ -1838,6 +1876,7 @@ gwt() {
             fi
 
             if $finalized_remove; then
+                $sudo_holder_scan && discard_args+=(--sudo-holder-scan)
                 _gwt_finish_tool remove --worktree "$target_path" --finalized "${discard_args[@]}" || return
                 _gwt_tmux_sync_context
                 return 0

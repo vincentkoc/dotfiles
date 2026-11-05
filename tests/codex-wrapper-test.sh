@@ -8,6 +8,7 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
+export CODEX_TEST_AUTH_LOG="$temporary/auth.log"
 
 wrapper_dir="$temporary/wrapper"
 backend_dir="$temporary/backend"
@@ -23,12 +24,9 @@ EOF
 
 cat >"$backend_dir/gh" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == "auth token" ]]; then
-  [[ -z "${CODEX_TEST_AUTH_LOG:-}" ]] || printf 'auth\n' >>"$CODEX_TEST_AUTH_LOG"
-  printf 'native-token\n'
-  exit 0
-fi
-exit 64
+printf 'auth\n' >>"$CODEX_TEST_AUTH_LOG"
+printf 'ordinary Codex startup must not invoke gh\n' >&2
+exit 65
 EOF
 
 cat >"$backend_dir/ghx" <<'EOF'
@@ -44,7 +42,6 @@ if [[ "${GITHUB_PAT_TOKEN:-}" == "native-token" ]]; then
   printf 'token:injected\n'
 else
   printf 'token:missing\n'
-  [[ "${1:-}" == --version ]] || exit 66
 fi
 EOF
 
@@ -74,7 +71,7 @@ output="$(
 [[ ! -e "$temporary/probe-auth.log" ]]
 output="$(env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN -u CODEX_HOME \
   HOME="$temporary/unused-home" PATH="$long_path" "$symlink_dir/codex" exec fixture)"
-[[ "$output" == *"token:injected"* ]]
+[[ "$output" == *"token:missing"* ]]
 
 darwin_home="$temporary/darwin-home"
 mkdir -p "$darwin_home/.codex/packages/standalone/current/bin"
@@ -132,7 +129,7 @@ mkdir -p "$linux_home/.codex/packages/standalone/current/bin"
 cat >"$linux_home/.codex/packages/standalone/current/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'standalone:%s\n' "$*"
-[[ "${GITHUB_PAT_TOKEN:-}" == "native-token" ]]
+[[ -z "${GITHUB_PAT_TOKEN:-}" ]]
 EOF
 chmod +x "$linux_home/.codex/packages/standalone/current/bin/codex"
 cat >"$backend_dir/uname" <<'EOF'
@@ -175,18 +172,31 @@ catalog_binary="$catalog_home/packages/standalone/current/bin/codex"
 catalog_helper="$catalog_home/model-catalogs/render-cli-catalog"
 native_args="$temporary/native.args"
 helper_args="$temporary/helper.args"
+help_probe_log="$temporary/help-probe.log"
 order_log="$temporary/order.log"
 mkdir -p "$(dirname "$catalog_binary")" "$(dirname "$catalog_helper")"
 cat >"$catalog_binary" <<'EOF'
 #!/usr/bin/env bash
+if [[ $# -eq 1 && "${1:-}" == --help ]]; then
+  [[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" && -z "${GITHUB_PAT_TOKEN:-}" ]] || exit 68
+  [[ "$CODEX_TEST_SENTINEL" == preserved && "$TOKENJUICE_STATS" == off ]]
+  printf 'help\n' >>"$CODEX_TEST_HELP_PROBE_LOG"
+  if [[ "$CODEX_TEST_NO_DAEMON_SUPPORT" == 1 ]]; then
+    printf '      --no-daemon\n'
+  fi
+  if [[ -n "$CODEX_TEST_SWITCH_RELEASE" ]]; then
+    ln -sfn "$CODEX_TEST_SWITCH_RELEASE" "$CODEX_TEST_CURRENT_LINK"
+  fi
+  exit "$CODEX_TEST_HELP_EXIT"
+fi
 printf '%s\0' "$#" "$@" >"$CODEX_TEST_NATIVE_ARGS"
 printf 'native\n' >>"$CODEX_TEST_ORDER_LOG"
 case "${1:-}" in
   -V|--version|-h|--help)
     [[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" && -z "${GITHUB_PAT_TOKEN:-}" ]] || exit 68 ;;
   *)
-    [[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]] || exit 68
-    [[ "$GITHUB_PAT_TOKEN" == native-token ]] || exit 68 ;;
+    [[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]] || exit 68
+    [[ -z "${GITHUB_PAT_TOKEN:-}" ]] || exit 68 ;;
 esac
 [[ "$CODEX_TEST_SENTINEL" == preserved ]]
 [[ "$TOKENJUICE_STATS" == off ]]
@@ -200,6 +210,11 @@ catalog_run() {
   env -u GITHUB_PERSONAL_ACCESS_TOKEN -u GITHUB_PAT_TOKEN \
     HOME="$temporary/unused-home" CODEX_HOME="$catalog_home" PATH="$long_path" \
     CODEX_TEST_NATIVE_ARGS="$native_args" CODEX_TEST_HELPER_ARGS="$helper_args" \
+    CODEX_TEST_HELP_PROBE_LOG="$help_probe_log" \
+    CODEX_TEST_NO_DAEMON_SUPPORT="${CODEX_TEST_NO_DAEMON_SUPPORT:-1}" \
+    CODEX_TEST_HELP_EXIT="${CODEX_TEST_HELP_EXIT:-0}" \
+    CODEX_TEST_SWITCH_RELEASE="${CODEX_TEST_SWITCH_RELEASE:-}" \
+    CODEX_TEST_CURRENT_LINK="$catalog_home/packages/standalone/current" \
     CODEX_TEST_ORDER_LOG="$order_log" CODEX_TEST_SENTINEL=preserved \
     CODEX_TEST_HELPER_EXIT="${CODEX_TEST_HELPER_EXIT:-0}" \
     CODEX_TASK_RUNTIME_BIN="$temporary/catalog-admission" \
@@ -214,17 +229,29 @@ assert_argv() {
 }
 
 assert_catalog_route() {
-  local expected="$1" output
+  local expected="$1" output embedded=0 physical_binary
   shift
+  if [[ "$expected" == helper-tui ]]; then
+    expected=helper
+    embedded=1
+    physical_binary="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$catalog_binary")"
+  fi
   : >"$native_args"
   : >"$helper_args"
+  : >"$help_probe_log"
   : >"$order_log"
   output="$(catalog_run "$@")"
   [[ "$output" == "$expected" ]]
   [[ "$(cat "$order_log")" == "$expected" ]]
   if [[ "$expected" == helper ]]; then
-    assert_argv "$helper_args" --binary "$catalog_binary" \
-      --codex-home "$catalog_home" --exec -- "$@"
+    if (( embedded )); then
+      assert_argv "$helper_args" --binary "$physical_binary" \
+        --codex-home "$catalog_home" --exec -- --no-daemon "$@"
+      [[ "$(cat "$help_probe_log")" == help ]]
+    else
+      assert_argv "$helper_args" --binary "$catalog_binary" \
+        --codex-home "$catalog_home" --exec -- "$@"
+    fi
     [[ ! -s "$native_args" ]]
   else
     assert_argv "$native_args" "$@"
@@ -239,8 +266,8 @@ cat >"$catalog_helper" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\0' "$#" "$@" >"$CODEX_TEST_HELPER_ARGS"
 printf 'helper\n' >>"$CODEX_TEST_ORDER_LOG"
-[[ "$GITHUB_PERSONAL_ACCESS_TOKEN" == native-token ]]
-[[ "$GITHUB_PAT_TOKEN" == native-token ]]
+[[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]]
+[[ -z "${GITHUB_PAT_TOKEN:-}" ]]
 [[ "$CODEX_TEST_SENTINEL" == preserved ]]
 [[ "$TOKENJUICE_STATS" == off ]]
 /bin/bash --noprofile --norc -c '[[ "$TOKENJUICE_STATS" == off ]]' || exit 67
@@ -251,21 +278,47 @@ chmod 644 "$catalog_helper"
 assert_catalog_route native review
 chmod 755 "$catalog_helper"
 
-assert_catalog_route helper
-assert_catalog_route helper "two words"
-for command in exec e review resume fork app-server; do
+assert_catalog_route helper-tui
+assert_catalog_route helper-tui "two words"
+for command in exec e review app-server; do
   assert_catalog_route helper "$command"
+  [[ ! -s "$help_probe_log" ]]
 done
+for command in resume fork; do
+  assert_catalog_route helper-tui "$command"
+done
+assert_catalog_route helper --no-daemon
+[[ ! -s "$help_probe_log" ]]
+assert_catalog_route helper resume --last --no-daemon
+[[ ! -s "$help_probe_log" ]]
+CODEX_TEST_NO_DAEMON_SUPPORT=0 assert_catalog_route helper resume --last
+[[ "$(cat "$help_probe_log")" == help ]]
+CODEX_TEST_HELP_EXIT=72 assert_catalog_route helper
+[[ "$(cat "$help_probe_log")" == help ]]
+
+# A concurrent standalone update cannot change the binary qualified by --help.
+standalone_root="$catalog_home/packages/standalone"
+mkdir -p "$standalone_root/releases/older/bin"
+mv "$standalone_root/current" "$standalone_root/releases/probed"
+ln -s "$standalone_root/releases/probed" "$standalone_root/current"
+printf '#!/bin/sh\nexit 65\n' >"$standalone_root/releases/older/bin/codex"
+chmod +x "$standalone_root/releases/older/bin/codex"
+CODEX_TEST_SWITCH_RELEASE="$standalone_root/releases/older" assert_catalog_route helper-tui
+[[ "$(readlink "$standalone_root/current")" == "$standalone_root/releases/older" ]]
+rm "$standalone_root/current"
+mv "$standalone_root/releases/probed" "$standalone_root/current"
+
 assert_catalog_route helper --no-alt-screen --model test-model exec --json "two words"
 assert_catalog_route helper -m help -C login -i image.png review
 assert_catalog_route helper -c 'model="test-model"' --config features.example=true exec
-assert_catalog_route helper --config=features.example=true -cfeatures.other=false resume --last
+assert_catalog_route helper-tui --config=features.example=true -cfeatures.other=false resume --last
 assert_catalog_route helper app-server --listen unix://example
 assert_catalog_route helper exec "" "two words" $'line\nbreak' '*' -- \
   --profile explicit --config model_catalog_json=explicit --heavy-work
-assert_catalog_route helper -- login --version --ignore-user-config
+assert_catalog_route helper-tui -- login --version --ignore-user-config
 assert_catalog_route helper exec "a prompt mentioning --profile and --config"
 assert_catalog_route helper debug models
+[[ ! -s "$help_probe_log" ]]
 assert_catalog_route helper --config features.example=true debug models
 assert_catalog_route helper debug models -- --bundled
 
@@ -295,6 +348,7 @@ for command in agents login logout mcp plugin mcp-server remote-control app comp
   install update upgrade doctor sandbox debug apply a queue archive delete \
   migrate-rollouts unarchive cloud exec-server features help; do
   assert_catalog_route native --config features.example=true "$command"
+  [[ ! -s "$help_probe_log" ]]
 done
 assert_catalog_route native debug models --bundled
 assert_catalog_route native debug models --help
@@ -376,5 +430,6 @@ if grep -Fq 'gh auth token' "$repo_root/.zshrc"; then
   printf '.zshrc must not fetch GitHub credentials during startup\n' >&2
   exit 1
 fi
+[[ ! -e "$CODEX_TEST_AUTH_LOG" ]]
 
 printf 'codex wrapper tests passed\n'

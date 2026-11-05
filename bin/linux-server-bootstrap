@@ -1154,6 +1154,7 @@ refresh_user_link_manifest() {
   done <<'EOF'
 .aliases .aliases
 .functions .functions
+.hushlogin .hushlogin
 .ripgreprc .ripgreprc
 .tmux.conf .tmux.conf
 profiles/linux-server/profile .profile

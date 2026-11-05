@@ -1060,6 +1060,17 @@ recovery_server_config() {
   # Only native startup settings. The base config's embedded worker is not safe
   # to run during recovery alongside other servers.
   printf '%s\n' 'set -g default-terminal "tmux-256color"
+# Sanitize inherited agent-shell overrides before the first restored process.
+set-environment -gu NO_COLOR
+set-environment -g CLICOLOR 1
+set-environment -g CLICOLOR_FORCE 1
+set-environment -gu FORCE_COLOR
+set-environment -g COLORTERM truecolor
+set-environment -gu TERMINFO
+set-environment -g TERMINFO_DIRS "$HOME/.terminfo:/usr/share/terminfo"
+# Answer OSC 10/11 before a terminal client attaches and before agents start.
+set -g window-style "fg=#c0caf5,bg=#1a1b26"
+set -g window-active-style "fg=#c0caf5,bg=#1a1b26"
 setw -g aggressive-resize off
 set -g window-size latest
 setw -g xterm-keys on
@@ -1166,8 +1177,8 @@ apply_recovery_theme() {
   "$TMUX_BIN" set -g status-position top
   "$TMUX_BIN" set -g status-left-length 32
   "$TMUX_BIN" set -g status-style "fg=#565f89,bg=#1a1b26,none"
-  "$TMUX_BIN" set -g window-style "fg=default,bg=#1a1b26"
-  "$TMUX_BIN" set -g window-active-style "fg=default,bg=#1a1b26"
+  "$TMUX_BIN" set -g window-style "fg=#c0caf5,bg=#1a1b26"
+  "$TMUX_BIN" set -g window-active-style "fg=#c0caf5,bg=#1a1b26"
   "$TMUX_BIN" set -g window-status-style "fg=#565f89,bg=#1a1b26,none"
   "$TMUX_BIN" set -g window-status-current-style "fg=#1a1b26,bg=#7aa2f7,bold"
   "$TMUX_BIN" set -g message-style "fg=#1a1b26,bg=#7aa2f7,bold"
@@ -1404,7 +1415,7 @@ new_window_tmux() {
 
 create_profile_window() {
   local new_window_tmux_bin="$TMUX_BIN"
-  local new_window_socket="${TMUX:-}" source="${TMUX_PANE:-}" after=0
+  local new_window_socket="${TMUX:-}" source="${TMUX_PANE:-}" position=end
   local TMUX_BIN=new_window_tmux
   local session window pane start_dir profile created
   local -a placement
@@ -1412,13 +1423,17 @@ create_profile_window() {
 
   while (( $# )); do
     case "$1" in
-      --after) after=1; shift ;;
+      --before|--after)
+        [[ "$position" == end || "$position" == "${1#--}" ]] || {
+          echo "tt new-window: --before and --after are mutually exclusive" >&2; return 2;
+        }
+        position="${1#--}"; shift ;;
       --socket|--target)
         [[ $# -ge 2 ]] || { echo "tt new-window: $1 needs a value" >&2; return 2; }
         if [[ "$1" == "--socket" ]]; then new_window_socket="$2"; else source="$2"; fi
         shift 2
         ;;
-      *) echo "usage: tt new-window [--after] [--socket path] [--target pane-id|window-id]" >&2; return 2 ;;
+      *) echo "usage: tt new-window [--before|--after] [--socket path] [--target pane-id|window-id]" >&2; return 2 ;;
     esac
   done
   [[ "$new_window_socket" == /* && "$source" =~ ^[%@][0-9]+$ ]] || {
@@ -1432,7 +1447,10 @@ create_profile_window() {
   require_operator_topology_scope new-window "$new_window_socket:$session:$window" || return $?
 
   placement=(-t "$session:")
-  if (( after )); then placement=(-a -t "$session:$window"); fi
+  case "$position" in
+    before) placement=(-b -t "$session:$window") ;;
+    after) placement=(-a -t "$session:$window") ;;
+  esac
   if [[ "$profile" == "ops" ]]; then placement+=(-c "$start_dir"); fi
   created="$("$TMUX_BIN" new-window -d -P -F '#{window_id}' "${placement[@]}")"
   if [[ "$profile" == "ops" ]]; then
@@ -2113,12 +2131,13 @@ pane_marker_color() {
 }
 
 pane_marker_window_style() {
+  # Keep foreground queries answerable even before a client attaches.
   case "${1:-}" in
-    amber) printf 'fg=default,bg=#211d17\n' ;;
-    green) printf 'fg=default,bg=#182318\n' ;;
-    blue) printf 'fg=default,bg=#171f2b\n' ;;
-    violet) printf 'fg=default,bg=#211a2c\n' ;;
-    cyan) printf 'fg=default,bg=#17242a\n' ;;
+    amber) printf 'fg=#c0caf5,bg=#211d17\n' ;;
+    green) printf 'fg=#c0caf5,bg=#182318\n' ;;
+    blue) printf 'fg=#c0caf5,bg=#171f2b\n' ;;
+    violet) printf 'fg=#c0caf5,bg=#211a2c\n' ;;
+    cyan) printf 'fg=#c0caf5,bg=#17242a\n' ;;
     dim) printf 'fg=#565f89,bg=#11121a\n' ;;
     *) printf '\n' ;;
   esac
@@ -2126,11 +2145,11 @@ pane_marker_window_style() {
 
 pane_marker_active_style() {
   case "${1:-}" in
-    amber) printf 'fg=default,bg=#292218\n' ;;
-    green) printf 'fg=default,bg=#1f2a1f\n' ;;
-    blue) printf 'fg=default,bg=#1d2736\n' ;;
-    violet) printf 'fg=default,bg=#2a2139\n' ;;
-    cyan) printf 'fg=default,bg=#1c2e35\n' ;;
+    amber) printf 'fg=#c0caf5,bg=#292218\n' ;;
+    green) printf 'fg=#c0caf5,bg=#1f2a1f\n' ;;
+    blue) printf 'fg=#c0caf5,bg=#1d2736\n' ;;
+    violet) printf 'fg=#c0caf5,bg=#2a2139\n' ;;
+    cyan) printf 'fg=#c0caf5,bg=#1c2e35\n' ;;
     dim) printf 'fg=#565f89,bg=#11121a\n' ;;
     *) printf '\n' ;;
   esac
@@ -2237,6 +2256,24 @@ sync_pane_marker() {
     current="$("$TMUX_BIN" show-option -pt "$target" -qv @tt_marker 2>/dev/null || true)"
     [[ -z "$current" ]] || apply_pane_marker_style "$target" default
   fi
+}
+
+verify_pane_marker() {
+  local target="$1" marker="$2" current file style active
+  current="$("$TMUX_BIN" show-option -pt "$target" -qv @tt_marker)" || return
+  if [[ "$marker" == "default" ]]; then
+    [[ -z "$current" ]] || return 1
+    # A cleared pane must inherit its window's palette, without local overrides.
+    [[ -z "$("$TMUX_BIN" show-options -pt "$target" | awk '/^window-(active-)?style /')" ]]
+    return
+  fi
+  [[ "$current" == "$marker" ]] || return 1
+  file="$("$TMUX_BIN" show-option -pt "$target" -qv @tt_marker_file)" || return
+  [[ -f "$file" && "$(pane_marker_from_file "$file")" == "$marker" ]] || return 1
+  style="$("$TMUX_BIN" show-option -pt "$target" -qv window-style)" || return
+  active="$("$TMUX_BIN" show-option -pt "$target" -qv window-active-style)" || return
+  [[ "$style" == "$(pane_marker_window_style "$marker")" &&
+    "$active" == "$(pane_marker_active_style "$marker")" ]]
 }
 
 sync_pane_markers() {
@@ -2706,6 +2743,9 @@ restore_preview() {
       printf "%-16s %-7s %-10s %-12s %-28s %-38s %s\n", $1, $2, $7, bucket, title, cwd, $8
     }
   ' "$snapshot"
+  if grep -q '^# pane-markers' "$snapshot"; then
+    "$SCRIPT_DIR/tt-codex-snapshot-writer" --preview-markers "$snapshot"
+  fi
 }
 
 popup_view() {
@@ -2744,15 +2784,32 @@ popup_view() {
   return "$status"
 }
 
+status_menu_binding_present() {
+  local bindings="$1" key="$2" command="$3" action="${4:-}"
+  printf '%s\n' "$bindings" | awk -v key="$key" -v command="$command" -v action="$action" '
+    $1 == "bind-key" {
+      for (i = 2; i + 3 <= NF; i++) {
+        if ($i == "-T") {
+          if ($(i + 1) == "root" && $(i + 2) == key && $(i + 3) == command &&
+              (action == "" || index($0, action))) found = 1
+          break
+        }
+      }
+    }
+    END { exit !found }
+  '
+}
+
 status_report() {
   local snapshot agent_snapshot timer="stopped" autosave="off"
   local snapshot_age agent_age history_count history_max success_age="missing" identity
   local panes codex claude exact unresolved shell waiting spinning exited failed
-  local menu_left menu_right static_status mouse copy_modes mobile_mode
+  local menu_left menu_right menu_bindings static_status mouse copy_modes mobile_mode
 
   snapshot="$(codex_cockpit_snapshot_file)"
   agent_snapshot="$(agent_cockpit_state_file)"
-  history_max="${TT_SNAPSHOT_HISTORY_MAX:-864}"
+  history_max="${TT_SNAPSHOT_HISTORY_MAX:--1}"
+  [[ "$history_max" != "-1" ]] || history_max="unlimited"
 
   identity="$(codex_snapshot_timer_read_state 2>/dev/null || true)"
   if [[ -n "$identity" ]]; then
@@ -2800,12 +2857,14 @@ status_report() {
   fi
 
   history_count="$(count_snapshot_history codex-cockpit)"
-  if "$TMUX_BIN" list-keys -T root MouseDown1StatusRight 2>/dev/null | grep -q 'codex-snapshot'; then
+  # Some tmux versions omit mouse bindings from a single-key lookup.
+  menu_bindings="$("$TMUX_BIN" list-keys -T root 2>/dev/null || true)"
+  if status_menu_binding_present "$menu_bindings" MouseDown1StatusRight run-shell codex-snapshot; then
     menu_left="bound"
   else
     menu_left="missing"
   fi
-  if "$TMUX_BIN" list-keys -T root MouseDown3StatusRight 2>/dev/null | grep -q 'display-menu'; then
+  if status_menu_binding_present "$menu_bindings" MouseDown3StatusRight display-menu; then
     menu_right="bound"
   else
     menu_right="missing"
@@ -3288,12 +3347,12 @@ show_pane_menu() {
   local self tmux_cmd
   local -a client_args=()
 
-  [[ -n "$target" ]] || return 0
+  [[ "$target" =~ ^%[0-9]+$ ]] || { echo "tt pane-menu: exact pane ID required" >&2; return 2; }
   self="$(tt_self_command)"
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
   [[ -n "$client" ]] && client_args=(-c "$client")
 
-  "$TMUX_BIN" display-menu "${client_args[@]}" -T "Pane #{pane_index}" -t "$target" -x "$x" -y "$y" \
+  "$TMUX_BIN" -N display-menu "${client_args[@]}" -T "Pane #{pane_index}" -t "$target" -x "$x" -y "$y" \
     "Edit note" e "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 84 -h 24 -E '$self note edit #{pane_id}'" \
     "Show note" v "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 72 -h 16 -E '$self note show #{pane_id} | LESS= less -SR'" \
     "Replace with quick note" n "display-popup -t '#{pane_id}' -T 'quick note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 64 -h 10 -E '$self note prompt #{pane_id}'" \
@@ -3304,6 +3363,8 @@ show_pane_menu() {
     "Marker green" 2 "run-shell -b '$self marker set #{pane_id} green && $tmux_cmd display-message \"pane marker green\"'" \
     "Marker blue" 3 "run-shell -b '$self marker set #{pane_id} blue && $tmux_cmd display-message \"pane marker blue\"'" \
     "Dim pane" 4 "run-shell -b '$self marker set #{pane_id} dim && $tmux_cmd display-message \"pane dimmed\"'" \
+    "Marker cyan" 5 "run-shell -b '$self marker set #{pane_id} cyan && $tmux_cmd display-message \"pane marker cyan\"'" \
+    "Marker violet" 6 "run-shell -b '$self marker set #{pane_id} violet && $tmux_cmd display-message \"pane marker violet\"'" \
     "" "" "" \
     "Sync pane" s "run-shell -b '$self note sync #{pane_id} && $tmux_cmd display-message \"pane note synced\"'" \
     "Sync all notes" a "run-shell -b '$self note sync all && $tmux_cmd display-message \"pane notes synced\"'" \
@@ -3315,18 +3376,29 @@ show_pane_menu() {
     "#{?pane_marked_set,,-}Swap Marked" S "swap-pane" \
     "#{?pane_marked,Unmark,Mark}" m "select-pane -m" \
     "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
-    "Respawn" R "respawn-pane -k" \
-    "Kill" X "kill-pane" 2>/dev/null || true
+    "Respawn" R "confirm-before -t #{q:client_name} -p 'Respawn pane #{pane_id}? (y/n)' 'respawn-pane -k -t #{pane_id}'" \
+    "Kill" X "confirm-before -t #{q:client_name} -p 'Kill pane #{pane_id}? (y/n)' 'kill-pane -t #{pane_id}'"
+}
+
+install_pane_menu_binding() {
+  local socket="${1:-}" self mouse_passthrough_expr
+  local -a socket_args=()
+  if [[ -n "$socket" ]]; then
+    [[ "$socket" == /* ]] || { echo "tt pane-menu-bind: socket must be an absolute path" >&2; return 2; }
+    socket_args=(-S "$socket")
+  fi
+  self="$(tt_self_command)"
+  mouse_passthrough_expr='#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}'
+  "$TMUX_BIN" -N "${socket_args[@]}" bind-key -T root MouseDown3Pane if-shell -t = -F "$mouse_passthrough_expr" "select-pane -t = \\; send-keys -M" "run-shell -b -t = 'TMUX=#{q:socket_path},0,0 $self pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{q:client_name}'"
 }
 
 install_agent_status_menu() {
-  local self tmux_cmd mouse_passthrough_expr
+  local self tmux_cmd
   self="$(tt_self_command)"
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
-  mouse_passthrough_expr='#{||:#{==:#{pane_current_command},mosh-client},#{==:#{pane_current_command},ssh}}'
 
   "$TMUX_BIN" bind-key N display-popup -t "#{pane_id}" -T "note: #{session_name}:#{window_index}.#{pane_index}" -x "#{pane_left}" -y "#{pane_top}" -w 84 -h 24 -E "$self note edit #{pane_id}" 2>/dev/null || true
-  "$TMUX_BIN" bind-key -T root MouseDown3Pane if-shell -F "$mouse_passthrough_expr" "select-pane -t = \\; send-keys -M" "run-shell -b '$self pane-menu #{pane_id} #{mouse_x} #{mouse_y} #{client_name}'" 2>/dev/null || true
+  install_pane_menu_binding 2>/dev/null || true
 
   "$TMUX_BIN" bind-key -T root MouseDown1StatusRight run-shell -b "$self codex-snapshot --quiet && $tmux_cmd display-message 'codex snapshot saved'" 2>/dev/null || true
   "$TMUX_BIN" bind-key -T root MouseDown3StatusRight display-menu -T "CX SAVE" -x M -y W \
@@ -3772,7 +3844,7 @@ codex_snapshot_timer_launch_command() {
   command+=" TT_CODEX_SNAPSHOT_INTERVAL=$(shell_quote "${TT_CODEX_SNAPSHOT_INTERVAL:-300}")"
   command+=" TT_CODEX_SNAPSHOT_INTERVAL_MIN=$(shell_quote "${TT_CODEX_SNAPSHOT_INTERVAL_MIN:-30}")"
   command+=" TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES=$(shell_quote "${TT_CODEX_SNAPSHOT_TIMER_LOG_MAX_BYTES:-65536}")"
-  command+=" TT_SNAPSHOT_HISTORY_MAX=$(shell_quote "${TT_SNAPSHOT_HISTORY_MAX:-864}")"
+  command+=" TT_SNAPSHOT_HISTORY_MAX=$(shell_quote "${TT_SNAPSHOT_HISTORY_MAX:--1}")"
   command+=" TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS=$(shell_quote "${TT_SNAPSHOT_COMMAND_TIMEOUT_SECONDS:-5}")"
   command+=" TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS=$(shell_quote "${TT_SNAPSHOT_TOTAL_TIMEOUT_SECONDS:-30}")"
   command+=" TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS=$(shell_quote "${TT_CODEX_SNAPSHOT_LOCK_RETRY_ATTEMPTS:-5}")"
@@ -4570,6 +4642,10 @@ case "${1:-}" in
   pane-menu)
     show_pane_menu "${2:-${TMUX_PANE:-}}" "${3:-P}" "${4:-P}" "${5:-}"
     ;;
+  pane-menu-bind)
+    [[ $# -le 2 ]] || { echo "usage: tt pane-menu-bind [socket-path]" >&2; exit 2; }
+    install_pane_menu_binding "${2:-}"
+    ;;
   autosave)
     case "${2:-on}" in
       on)
@@ -4640,11 +4716,26 @@ case "${1:-}" in
       sync)
         sync_pane_markers "${3:-all}"
         ;;
+      restore)
+        [[ $# -ge 3 && $# -le 5 ]] || {
+          echo "usage: tt marker restore <session> [snapshot] [--execute]" >&2; exit 2;
+        }
+        snapshot="${4:-}"
+        execute="${5:-}"
+        if [[ "$snapshot" == "--execute" ]]; then execute="$snapshot"; snapshot=""; fi
+        [[ -z "$execute" || "$execute" == "--execute" ]] || exit 2
+        TT_TMUX_BIN="$TMUX_BIN" "$SCRIPT_DIR/tt-codex-snapshot-writer" --restore-markers \
+          "${snapshot:-$(codex_cockpit_snapshot_file)}" "$3" "${execute:---preview}"
+        ;;
+      verify)
+        [[ $# -eq 4 ]] || exit 2
+        verify_pane_marker "$3" "$4"
+        ;;
       list)
         list_pane_markers
         ;;
       *)
-        echo "usage: tt marker [set <pane> default|amber|green|blue|violet|cyan|dim|clear <pane>|sync [pane|all]|list]" >&2
+        echo "usage: tt marker [set <pane> default|amber|green|blue|violet|cyan|dim|clear <pane>|sync [pane|all]|restore <session> [snapshot] [--execute]|list]" >&2
         exit 2
         ;;
     esac
@@ -4697,7 +4788,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|ops [session]|new-window [--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|new-window [--before|--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|pane-menu-bind [socket-path]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;

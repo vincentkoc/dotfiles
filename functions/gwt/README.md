@@ -42,7 +42,7 @@ When a server profile requires workspaces outside home directories, provision
 an absolute, account-owned root outside the affected accounts' actual homes.
 Verify its physical path, mount, parent permissions and trust-domain separation
 before use. Root selection is placement policy, not a security boundary or
-proof of those permissions. `gwt root` is informational.
+proof of those permissions. `gwt root` validates any configured external storage before reporting placement.
 
 This setting does not relocate existing worktrees or change their Git owners,
 registrations, dependency links or completion state. Before a migration, identify
@@ -56,6 +56,25 @@ shell-GWT tasks. For example, OpenClaw's native `worktreeRoot` setting is separa
 from this variable; its workspace owner must update persisted references during
 relocation. Do not make an application invoke shell GWT or enroll its existing
 workspaces in personal managed finish to obtain cleanup authority.
+
+### Allocator ownership and retention
+
+A shared parent directory does not give different allocators the same lifecycle.
+
+| Producer | Placement and retention owner |
+| --- | --- |
+| Shell GWT | `DOTFILES_WORKTREES_ROOT` controls new GWT paths. Use GWT's task closeout and recorded ownership. |
+| Codex CLI | In [0.166.0](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/worktree/src/settings.rs), `--worktree` shares the desktop root setting or defaults to `$CODEX_HOME/worktrees`, but CLI automatic cleanup is disabled. CLI exit does not imply removal. |
+| Codex desktop app | [Codex-managed chats](https://learn.chatgpt.com/docs/environments/git-worktrees#worktree-cleanup) have app-owned cleanup. The default keeps the latest 15 trees; pinned and active chats are protected. Archiving a chat can trigger cleanup. |
+| Claude Code | Native `--worktree` uses `<project>/.claude/worktrees/`. [Interactive exit](https://code.claude.com/docs/en/worktrees#clean-up-worktrees) removes a clean unnamed tree; named or work-bearing trees prompt. Noninteractive `-p` runs leave the tree and creation lock for later owner closeout. |
+
+Claude's [`worktree.location`](https://code.claude.com/docs/en/settings-reference#worktreelocation)
+setting applies only to Desktop SSH sessions. CLI worktrees, `EnterWorktree`,
+isolated subagents and background sessions ignore it. It does not configure GWT.
+
+Identify the producer and its native owner before closing a finished checkout.
+Do not enroll existing app or CLI trees in GWT to obtain deletion authority.
+Changing a shared root is not a retention fix and does not migrate existing trees.
 
 ## Preferred owners
 
@@ -101,6 +120,81 @@ cancellation. A repeated identical cancellation is a no-op.
 
 Once the task is finalized, use the manual closeout route below to retire the
 checkout. Cancellation alone does not run deletion or clear another owner's pin.
+
+## Worktrees removed outside GWT
+
+When an explicitly authorized removal already deleted a finished checkout, use
+`gwt finish-status` to obtain its record ID and generation, then record the
+observed outcome:
+
+```sh
+gwt finish-reconcile --external-removal --worktree /absolute/task/path \
+  --worktree-id <id> --generation <n> --reason 'Removed with explicit operator approval'
+```
+
+This command only updates the lifecycle record. It requires a recorded owner,
+completed owners, no recovery pins or native removal attempt, an absent checkout,
+admin directory and registration, and the unchanged source branch in its original
+repository. A repeated identical request leaves the recorded outcome unchanged.
+Existing native removal attempts keep their separate receipt-based reconciliation.
+The record reports `checkout: removed` and `native_attempted: false`; it does not
+claim historical preservation checks that GWT did not perform. History, branches
+and the path reservation remain intact. This command never removes files.
+
+## Missing enrolled checkout recovery
+
+`gwt recover-missing` restores a missing directory only when its original Git
+registration, native lock, enrollment, owners, branch and index still exist.
+Obtain explicit permission to recover the named checkout first. This operation
+does not recover lost unstaged or untracked files; their disposition stays
+unknown. It is not `gwt new`, adoption, re-enrollment, unlock, reset or pruning.
+
+Plan against exact retained identities, then review the returned preimage hash:
+
+```sh
+gwt recover-missing --worktree /absolute/original/checkout \
+  --worktree-id <enrollment-uuid> --generation <n> \
+  --expected-head <full-commit-sha> --index-sha256 <sha256>
+```
+
+The plan takes native lifecycle and maintenance coordination locks but does not
+create the checkout or a recovery intent. Apply the same operands with
+`--apply --recovery-sha256 <reviewed-plan-hash>`. Both phases require complete
+holder visibility and unchanged admin, branch, lock, index and owner facts.
+Conflicts, sparse/unknown index formats, resolve-undo entries, gitlinks, pending
+Git or lifecycle operations, held paths and appeared destinations refuse.
+
+Device identities are strict by default. After independently establishing a
+device-number change, `--allow-device-renumbering` permits only a bijective map
+with unchanged physical paths, directory ownership and inodes. The missing
+root's recorded device must map to its current parent volume. The plan hash
+binds this map and opt-in; apply and reconciliation require the same option.
+Holder checks include the mapped original root inode. The original identity
+remains in recovery history; only the verified successor identity is normalized.
+
+Only committed blobs whose tree exactly matches the saved index are written.
+The operation runs no checkout filters, hooks, dependency installation or fetch.
+Recovery blob capture and verification are bounded by 16 MiB per file and the
+staging pass by 512 MiB; other native Git/read limits are unchanged.
+the existing 238-second owner deadline is unchanged. A private sibling directory
+is verified before native no-replace publication at the original path. The
+original Git admin files, index, ref, native lock and owner rows remain intact;
+the lifecycle records the actual recovery operator separately and advances the
+root identity/generation once. Extra lifecycle tables are preserved.
+
+An interruption retains a durable pending intent and any staging directory.
+Do not delete that staging directory, clear the intent or rerun blind. Inspect
+the exact checkout with `gwt finish-status`; its `missing_recovery` field provides
+the intent ID and preimage hash. Only the same operands plus `--intent-id <id>`
+can reconcile a complete, verified staging tree or the already-published same
+inode. Partial staging remains held unless a separately reviewed continuation
+adds `--continue-partial` to the exact intent and preimage operands. This mode
+verifies every existing byte, mode and link, refuses extras or corrupt files,
+and admits native holders for the staging inode before writing. It creates only
+missing committed entries with no-follow, exclusive creation; existing files
+are never rewritten. Plan this continuation without `--apply` first. Changed
+identities or later source edits remain held.
+No recovery failure authorizes an alternate checkout or broad maintenance.
 
 ## Scheduled Git maintenance
 
@@ -217,7 +311,7 @@ Sparse profile authority and explicit application behavior are documented in
 physically loaded module's checkout; an explicit `DOTFILES_GIT_SPARSE_ROOT`
 override is preserved. Updates do not reapply existing checkouts.
 
-External storage behavior:
+Legacy v2 external storage behavior:
 
 - Configured hosts mount a case-insensitive APFS volume in the policy-selected
   encrypted or unencrypted state directly at canonical `~/.codex/worktrees`;
@@ -232,8 +326,8 @@ External storage behavior:
 - `gwt new`, `add`, `rm`, `audit`, `clean`, and `prune` stop before worktree
   access when the configured volume is absent, wrong, or replaced by a writable
   internal fallback. Missing policy also fails closed when the direct mount or
-  sealed backing directory proves the host is configured. `gwt root` remains
-  informational.
+  sealed backing directory proves the host is configured. Root resolution
+  validates configured storage before returning its path.
 - The guard validates both lexical and resolved containment. A worktree on the
   direct mount still resolves through Git to its canonical owning checkout;
   physical aliases beneath `/Volumes` are never independent indexing roots.
@@ -246,6 +340,31 @@ External storage behavior:
   before child execution, and removes only that exact inode while the same
   mount remains valid. `external-tmp --check --json` performs a non-mutating
   readiness check.
+
+### Shared external-volume folders
+
+Folder placement uses `external-worktree-storage.v3`. The guard reads a private
+user policy at `~/Library/Application Support/agent-worktree-ops/storage/external-worktree-storage.json`.
+Its `mount_point` identifies the actual external volume; `worktree_root` is a
+physical child on that volume. The guard verifies the UUID, APFS semantics,
+ownership, encryption policy and capacity before callers create anything.
+Only the managed folder and its children require private ownership and mode
+`0700`. The shared volume root and existing sibling data remain untouched.
+Missing disks, symlinks, nested mounts and invalid policies refuse allocation;
+there is no internal fallback. Simultaneous user and legacy system policies
+are an error. The root-owned v2 direct-mount contract remains supported.
+
+GWT resolves this guarded root before making directories. A custom
+`DOTFILES_WORKTREES_ROOT` still takes precedence. Its literal
+`$HOME/.codex/worktrees` value is treated as the inherited legacy default and
+does not mask configured folder placement.
+`external-tmp` creates invocation-scoped scratch below `worktree_root`, never
+the shared volume root. No global temporary-directory setting changes.
+
+Codex's supported `desktop.git-worktree-root` setting controls future native
+allocation. Native Codex does not call this guard. Existing Codex, Claude and
+GWT trees retain their original paths and lifecycle owners; this change does
+not migrate them, configure Claude's allocator, or activate cleanup.
 
 Dependency bootstrap:
 
@@ -357,6 +476,13 @@ Recovery checkpoints remain necessary only for unfinished work or an explicit
 retention request. Historical evidence alone must not keep a finalized task's
 checkout alive.
 
+Agent session history is retained separately from validation evidence. Preserve
+completed and archived conversations, transcripts, history indexes/databases,
+and tmux recovery history. Worktree retirement never authorizes their deletion
+or truncation. If protected history lives inside the checkout, retain it until
+the history is preserved through a separately authorized operation by its
+native owner; never include it in `--discard-ignored`.
+
 ### Manual finalized-task closeout
 
 For a finalized managed task, run the following from its owning checkout:
@@ -368,7 +494,7 @@ gwt rm /absolute/path/to/task --finalized \
 
 Use the task's actual ignored roots; these names are examples. The arguments
 declare those exact ignored roots to be disposable task artifacts. Every other
-ignored root blocks removal, as do dirty or untracked source, submodules, pins,
+ignored root blocks removal, as do dirty or untracked source, populated submodules, pins,
 in-progress Git operations, unrelated locks and live file/CWD holders. Symlink
 targets are never traversed or removed. This is routine task closeout, with no
 evidence archive or additional permission step.
@@ -380,21 +506,118 @@ external dependencies. A partial failure holds the intent and restores the
 matching native lock when its original registration still exists; it never
 replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
 
+An explicit finalized closeout can admit a different named local branch from
+the one recorded at enrollment. Checkout, owner, Git administration and native
+enrollment-marker identities must still match. Admission pins the current
+branch and HEAD for that attempt; later drift blocks removal. Both the enrolled
+and current refs must remain present and unchanged, with unchanged reflog
+existence and contents. The durable enrollment and completion proof are not
+rewritten.
+Automatic lifecycle checks do not accept this branch transition.
+
+Manual closeout accepts `FETCH_HEAD` only when every record names a literal
+commit preserved by the captured current or enrolled branch heads, the recorded
+target's existing `origin` remote-tracking ref, or their common reflogs, including
+their reachable ancestors. Tasks without a recorded target do not infer one.
+Annotated tag objects do not qualify merely because their peeled commit is
+retained. Bounded Git queries disable replacement objects; unavailable or
+ambiguous proof blocks closeout.
+Records must have Git's complete OID, merge-marker, and note/URL fields with LF
+termination. An empty file is also accepted under this explicit manual proof.
+The file's identity, bytes, metadata, and retained refs remain bound through
+admission and removal. Malformed or unanchored records block closeout.
+New automatic release baselines use the same recovery proof. Release-time OIDs
+remain required even if a later fetch overwrites or removes `FETCH_HEAD`. Legacy
+full inventories continue to reject it.
+
+Manual closeout also accepts a strictly parsed `REUC` resolve-undo index
+extension. Each recorded stage must be a regular-file or symlink blob reachable
+at its literal path from those same retained commit roots. Bounded Git queries
+must complete without diagnostics or fetching objects. Duplicate, malformed,
+unsupported, missing, or unanchored records block closeout. Closeout stores the
+decoded path/stage/mode/OID mapping in the removal intent and terminal result.
+The full index and retained refs must match across both admissions.
+New automatic release baselines preserve this decoded mapping and revalidate its
+roots. Legacy full inventories continue to reject `REUC`.
+
+Manual admission also accepts unpopulated gitlinks when index and HEAD paths,
+modes and commit IDs match exactly. It does not resolve or fetch those commits.
+Each gitlink must be absent or a real empty directory. No-follow descriptor
+checks bind directory identities, emptiness and absence through both admissions;
+existing directories remain part of holder checks. Populated or linked paths,
+mounts, unreadable state and a candidate worktree's `modules` admin entry block
+removal. The normal dirty-tree check still applies: missing non-sparse gitlinks
+reported as deletions by Git are not eligible. Automatic inventories continue
+to reject gitlinks.
+
 Manual closeout filters one bounded native `lsof` scan to checkout/admin paths
 and file identities, with the operator's explicit finalized-task declaration.
+An exit-zero scan is not sufficient: error or unrecognized descriptors, missing
+device/inode identity for CWD, text or mapping records, and inline access errors
+retain the checkout as `manual-holder-visibility-unknown`, even with empty
+stderr. Numeric descriptors and fileports can omit identities for non-files
+such as sockets. Unknown visibility never means holder-free; do not exclude an
+unreadable process or suppress warnings to make closeout pass.
+
+On Linux, if the invoking account cannot inspect all holders, manual `--finalized`
+closeout can opt into `--sudo-holder-scan`. Only the read-only holder scan uses
+`sudo -n -u '#0' -- <resolved-lsof> -nP +w -F0pfnDi`. The resolved `sudo` and
+`lsof` executables and their parent directories must be root-owned and not
+group- or world-writable. Root-owned symlinks are checked through their target
+paths. Existing non-interactive sudo authorization for this exact command is
+required; the helper never prompts, refreshes authorization, accepts extra
+arguments or environment settings, or falls back to an unprivileged scan.
+The sudo monitor retains the caller's existing controlling terminal, with
+standard input still connected to `/dev/null`. It creates no terminal and
+does not guarantee that credentials from another terminal or a headless
+context are usable.
+Git, lifecycle state and deletion remain under the original invoking account.
+The flag is rejected outside manual finalized closeout and on non-Linux
+platforms before launch. Without it, the existing unprivileged scan is unchanged.
+
+The Linux privileged scan accepts one missing-executable shape: a `txt` record
+containing only `f` and `n`, with `n` exactly `/proc/<enclosing-pid>/exe`.
+Linux `lsof` suppresses the `ENOENT` annotation for this root-owned absent
+executable. This accepts only that record, not the process's other references.
+The same privileged route accepts a numeric FD with only `f` and `n` when its
+name is exactly `/proc/<enclosing-pid>/fd/<same-fd> (readlink: No such file or directory)`.
+FD numbers must be canonical decimal (`0` or a positive integer without leading
+zeros). This procfs lookup failure exempts only that record, not its siblings.
+The path can include `/task/<tid>` immediately before `/fd/`. The TID must be
+positive decimal without leading zeros.
+Linux `mem` records with valid device/inode fields can carry one terminal
+` (stat: No such file or directory)` annotation. The parser removes that
+annotation for pathname matching and retains the mapping's device/inode.
+Other errors, partial identities, and mismatched executable paths still block
+closeout. These cases do not change macOS or automatic cleanup.
+
+Warnings, incomplete visibility and actual holders still block removal.
+On interruption, scan timeout or output-limit failure, the helper sends
+`SIGTERM` to its task-owned sudo monitor and waits at most two seconds.
+It does not kill the monitor's group or claim that monitor exit proves
+privileged-child cleanup.
+Termination remains unknown and closeout stops, even if the monitor exits.
+An interruption still propagates after the bounded monitor cleanup.
+Do not retry until the privileged scan's termination has been independently
+resolved. This option does not activate unattended removal.
+The scan also respects the current admission deadline.
+
 Explicitly discarded trees are fully scanned under a separate 262144-entry
 limit and the same 120-second admission deadline. Compact metadata digests and
 inode sets bind their preimage and detect holders through external hardlinks;
 symlink targets, nested repositories, mounts and live special files remain
 protected. The 131072-entry source/index limit is unchanged.
 It does not claim complete macOS mapping
-coverage or qualify unattended deletion. Automatic finish checks and host
+coverage or qualify unattended deletion. Unattended checks and host
 activation retain their stronger admission requirements below.
 
 ### Completion and unattended removal
 
-`gwt finish` records completion. `gwt finish --release` additionally signs off
-this owner's future checkout use. Release is deliberate; generic Codex Stop is
+`gwt finish` records completion and signs off this owner's future checkout use
+for native managed enrollments, then attempts native foreground closeout. This
+operator-invoked route does not require an unattended host policy. `--release`
+remains accepted for existing callers.
+Use a recovery pin while the checkout is still needed. Generic Codex Stop is
 turn-scoped attention state and never creates completion or release.
 
 ```sh
@@ -402,11 +625,8 @@ turn-scoped attention state and never creates completion or release.
 export GWT_OWNER_ID=payment-fix
 gwt new fix/payment origin/main --finish-managed
 
-# Implementation is complete, but keep this owner's checkout claim.
+# Finish this owner's work and sign off checkout use in one operation.
 gwt finish --pr https://github.com/example/project/pull/123
-
-# Once the checkout is no longer needed, sign off explicitly.
-gwt finish --pr https://github.com/example/project/pull/123 --release
 ```
 
 Only newly created `--finish-managed` worktrees receive release-capable
@@ -459,12 +679,17 @@ The acknowledgment does not prove historical volume continuity or rewrite the
 recorded enrollment identity. Default resume, finish, release, pin and removal
 admission keep their existing checks; a later strict identity check can still
 refuse. Automatic `gwt cd`/`gwt new` reuse never acknowledges this difference.
-The flag cannot combine with other actions, batch mode or `--if-enrolled`.
+The flag accepts only checkout, state-directory and owner selection. It rejects
+other actions, batch mode, `--if-enrolled`, and all recovery, reconciliation,
+removal and holder-scan options, including explicitly supplied empty values.
 
 The wrapper parks only its own shell before release. It cannot move the parent
 Codex process. An alive parent outside the checkout/admin paths may remain
 alive; any actual CWD, FD, thread CWD, fileport or mapped reference inside those
-domains blocks removal. The pending consumer revisits departure and merges:
+domains blocks removal. If a merge or departure is pending, retry `gwt finish`
+from outside the checkout after that blocker clears. Retained owner releases
+capture a versioned semantic baseline for the existing bounded pending consumer.
+Only explicit installation and qualified activation let that consumer remove trees:
 
 ```sh
 gwt finish-status --all
@@ -476,10 +701,23 @@ gwt finish-check --all --apply --policy /absolute/private/policy.json
 The evaluator removes one exact checkout at a time with native non-force
 `git worktree remove`. It preserves local branches, siblings and external
 dependency targets. It never runs GC, prunes, or selects unenrolled worktrees.
-Ignored content is not assumed disposable: the initial supported exception is
-an exact root `node_modules` symlink to an unchanged owned external directory.
-Unknown files, real ignored directories, unresolved Git recovery data, changed
-bytes/index/modes, pins or locks retain the checkout.
+Ignored content is not assumed disposable. An exact root `node_modules` symlink
+to an unchanged owned external directory is supported. Owners may also name
+literal disposable roots with `gwt finish --discard-ignored <root>` or
+`gwt release --discard-ignored <root>`. That decision and the discarded contents'
+exact inventory are frozen at release; a worker cannot approve later contents.
+Unknown files, unresolved Git recovery data, changed source/index semantics,
+modes, pins or locks retain the checkout.
+
+The release baseline preserves tracked bytes at the recorded HEAD, logical index
+entries, sparse configuration, recovery obligations and ownership. A later Git
+index stat-cache refresh or pure timestamp change does not invalidate it.
+Physical snapshots still match exactly immediately before native removal.
+Legacy full-inventory receipts keep their original exact comparison. Failed
+capture preserves completion and owner release, but cannot authorize automatic
+retry: status reports the blocker and requires that owner to resume then finish
+again. `automatic_handoff` reports baseline readiness and native qualification
+separately; it does not attest consumer installation or a scheduled retry.
 Checkout and admin files, directories and links receive no-follow xattr-name
 checks, including Darwin compression names. Only the OS-created
 `com.apple.provenance` tracking attribute is disposable; resource forks,
@@ -496,16 +734,29 @@ coverage retains. `AUTO_MERGE` is disposable only when it names the final HEAD
 tree. Editor-generated `COMMIT_EDITMSG` comments use Git's own cleanup and must
 reduce to the committed message; divergent drafts, unsupported cleanup modes
 and verbose/scissors residue retain.
-Reads are bounded to 8MiB per leaf, 1GiB of verified working bytes per pass and
-131072 source entries including directories. Subprocess and admin reads keep
-the separate 512MiB bound. Apply uses one release inventory and
-two admission inventories; it does not expand sparse checkouts or install tools.
+Tracked regular source files are hashed in chunks of at most 64KiB, bounded by
+1GiB of verified working bytes per pass and 131072 source entries including
+directories. Other leaf reads retain the 8MiB limit. Subprocess and admin reads keep
+the separate 512MiB bound. A retained owner release captures its baseline once;
+apply uses two fresh admission inventories. Successful foreground closeout does
+not capture an automatic baseline. Neither route expands sparse checkouts or
+installs tools.
 
 Before unlocking its unique native lock, the owner durably commits a removal
 intent. It then repeats admission and observes checkout, admin, registration,
-branch and sibling outcomes independently. Existing sibling
-registration paths, branches and lock fields must survive; unrelated HEAD
-advances, additional registrations and listing order do not invalidate removal.
+branch and sibling outcomes independently. Existing sibling registration paths,
+root/admin inode identities, common-directory backlinks and lock fields must
+survive. Another owner's HEAD advance, branch switch or detached checkout is an
+operational change, recorded separately; it does not invalidate preservation.
+Additional registrations and listing order are also independent. The intent
+stores initial sibling identities; the result retains actual after rows,
+identities and classified deltas, including failed readbacks.
+An already absent sibling root or `.git` pointer is captured as an explicit
+ENOENT state, bound to its canonical existing parent and unique native admin
+backlink. The admin/common identities and lock still have to survive. This
+does not depend on Git marking the registration prunable, and never prunes it.
+New absence, reappearance, replacement, ambiguous backlinks and unknown read
+errors fail preservation; they are not treated as preexisting absence.
 Admission keeps its 120s limit. Recursive deletion has a separate maximum 180s
 phase within the unchanged 238s owner deadline, reserving 2s to reap and 30s for
 postchecks. Ordinary subprocess queries retain their 30s limit.
@@ -513,27 +764,95 @@ Git can delete admin metadata even
 when checkout deletion fails. A crash, timeout, partial result or failed
 readback therefore remains `unknown`/`incomplete`, never an automatic retry.
 Updated manual removal, prune, cleaner and quarantine consumers respect the
-ledger hold even after registration disappears. Inspect and reconcile that
-exact intent read-only before proposing recovery.
+ledger hold even after registration disappears. Never repeat removal to resolve
+an incomplete result.
+
+Current removal receipts report sibling preservation failure as
+`siblings_preserved=false`; older receipts used `siblings_unchanged=false`.
+Reconciliation accepts either format. If the child exited successfully and
+every other preservation predicate passed, the recorded owner can reconcile
+that exact intent after reviewing its original bytes:
+
+```sh
+gwt finish-reconcile --worktree /absolute/removed/checkout \
+  --intent-id <uuid> --generation <number> \
+  --intent-sha256 <original-intent-hash> --result-sha256 <original-result-hash>
+```
+
+Hashes bind the exact stored UTF-8 intent/result text, without reserialization.
+This command never removes files, unlocks a worktree or retries a child. Under
+the lifecycle lock it verifies the recorded child/group is absent, current
+target/admin/registration absence, preserved refs and external targets, and no
+remaining target holder. Wrong target bindings, recreated targets, changed
+target refs, live children or unknown target visibility refuse. It separately
+observes prior siblings: missing or changed registrations, rebound identities
+and identity-read failures remain explicit unresolved observations. These later
+observations do not erase an independently proven target-removal fact and never
+qualify historical sibling preservation. Prospective removal still refuses
+sibling loss, rebinding or changed lock fields.
+
+Reconciliation appends a separate current `removed` observation. Status reports
+`current_disposition=reconciled-target-removed` and a reconciliation reason while
+retaining original `checkout=unknown` and `retirement_state=incomplete` beside
+the reconciliation result; old consumers continue to hold the record. The original
+intent and failed result remain byte-identical. Legacy records lack historical
+sibling inode identities and an after snapshot: those facts remain explicitly
+unavailable, and historical sibling preservation stays unresolved. A repeated
+exact reconciliation revalidates current state and preserves the first fact.
+A changed sibling observation on repeat is an explicit record conflict; it
+neither overwrites the first observation nor reports that stale observation as
+a fresh success.
+When the sibling observation is incomplete, status and check also expose
+`sibling_alert=current-sibling-preservation-unresolved` with the named deltas in
+the reconciliation fact. This is an operator alert, not a clean preservation
+verdict. GWT does not infer a sibling's deletion actor or time from its absence
+or interpret another repository's closeout receipts.
 
 ### Activation and proof limits
 
-Installing source does not activate deletion. Version-1 `report-only` policies
+Installing source does not activate unattended deletion. Native foreground
+`finish` and `release` use the same admission and non-force removal engine as
+explicit finalized closeout, with exact merged proof and every owner's signoff
+rechecked before removal. Unknown ignored content retains the checkout without
+preventing completion or signoff from being recorded. Explicit `--policy` selects
+the unattended evaluator and its frozen release inventory contract; foreground
+signoff alone does not qualify a later unattended removal.
+
+Version-1 `report-only` policies
 and existing enrollments retain their contract. A version-2 policy has schema
 `gwt-finish-policy.v2`, mode `explicit-release`, the stable host identity and
 one to eight exact owner/root/common-directory identities. Its `qualification`
 binds the exact platform, native Git 2.55.0 path/hash/version, installed lifecycle
 source hashes, known process identities and a private activation receipt.
 
-The current Darwin arm64 backend reports `mapping_coverage: unqualified`.
-Public libproc APIs omit submap vnode details and can hide vnode acquisition
-failures. Automatic Mac deletion therefore remains blocked, even with a valid
-external qualification or activation receipt. Completion and explicit release
-still record their facts.
+The Darwin arm64 backend uses `PROC_PIDREGIONPATHINFO2` (22), its 1272-byte
+ABI, and reports `mapping_coverage: bounded-native`. It observes native CWD,
+FD, thread CWD, fileport and mapped-vnode references, with process identities
+and population checked again. Surfaced errors, short or malformed results,
+unknown descriptor kinds, limits and identity changes retain the checkout.
+
+This is an explicitly bounded cooperative observation, not complete or frozen
+VM coverage. Apple's [native implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+returns `EINVAL` for both enumeration exhaustion and a lost vnode, and can hide
+vnode-info errors. The accepted blind spot is a mapping missed through those
+native omissions, including a still-live mapping after its FD closes. Existing
+two admission observations reduce exposure but do not eliminate that gap or
+prevent a noncooperative later opener. No external receipt can improve the
+reader's actual coverage.
+
+Only newly created `--finish-managed` checkouts record this bounded holder
+contract at enrollment. Existing private v2 rows, older report-only rows,
+shared and application-owned checkouts are not adopted. Schema upgrade leaves
+old contract stamps NULL; resume, finish and release cannot set them. Those
+checkouts keep their existing explicit foreground/manual closeout route.
+Eligible new records still need every owner released, exact merged proof,
+unchanged recoverable source, private access boundaries and qualified host
+activation before unattended removal. Installing this backend enables none
+of those host policies or scheduled jobs.
 Linux, WSL and Windows have no deletion qualification in this change. The private
-`scripts/install-gwt-finish.py` owner must gain a reviewed v2 activation route
-before use; its existing report-only scheduler must not be relabelled as ready.
-Reuse that scheduler for the bounded pending consumer, not another daemon.
+`scripts/install-gwt-finish.py` owner already provides the reviewed v2 activation
+route for the existing bounded scheduler. Installed report-only scheduling is
+separate from qualified apply activation; no second daemon is needed.
 
 Activation must qualify every configured automatic cleanup route and actually
 running cleanup job, including loaded callbacks that can run without a new
@@ -552,9 +871,11 @@ global holder absence.
 Empty or deny-only ancestry ACLs preserve that boundary; allow/unknown ACLs
 retain. Normal macOS deny-delete home ACLs do not require a permission change.
 
-`holder-qualification` describes this mapping-coverage hold without scanning
-processes. External policy cannot override the native observation. `finish-status`
+`holder-qualification` describes backend platform/ABI support and the bounded
+contract without scanning processes; it does not qualify or activate a host.
+External policy cannot override the native observation. `finish-status`
 never grants fresh removal authority: `automatic_removal_supported` identifies
-a new-format record, while `removal_available` remains false in the report.
+a record enrolled under this holder contract, while `removal_available` remains
+false in the report.
 Always report the recorded `retained`, verified `removed`, or `unknown` checkout
 outcome and its reason.

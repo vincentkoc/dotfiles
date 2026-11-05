@@ -11,6 +11,7 @@ from pathlib import Path
 import runpy
 import sqlite3
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -132,6 +133,11 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(result["release_available"])
         self.assertFalse(result["removal_available"])
         self.assertEqual(self.check_reason(), "completion-confirmed-checkout-retained")
+        self.assertTrue(self.wt.exists())
+
+    def test_explicit_release_still_rejects_report_only_enrollment(self):
+        with self.assertRaisesRegex(FINISH.Retain, "legacy-enrollment-report-only"):
+            self.finish("--release")
         self.assertTrue(self.wt.exists())
 
     def test_cancel_without_pr_retains_dirty_files_and_pins_without_proof(self):
@@ -502,6 +508,15 @@ class LifecycleTests(unittest.TestCase):
 
 
 class WrapperTests(unittest.TestCase):
+    def test_recover_missing_wrapper_forwards_exact_native_operands(self):
+        wrapper = ROOT / "functions/gwt/gwt.zsh"
+        program = 'source "$1"; _gwt_finish_tool() { printf "%s\\n" "$@"; }; gwt recover-missing --worktree /original/path --generation 0'
+        result = subprocess.run(["zsh", "-f", "-c", program, "fixture", str(wrapper)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ["recover-missing", "--worktree", "/original/path", "--generation", "0"])
+
     def test_unavailable_release_remove_and_apply_need_no_state(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
@@ -531,7 +546,7 @@ class WrapperTests(unittest.TestCase):
             self.assertIn("report-policy-requires-check-all", result.stderr)
             self.assertFalse(state.exists())
 
-    def test_holder_qualification_is_explicitly_unavailable_and_probe_free(self):
+    def test_holder_qualification_is_probe_free_and_requires_supported_platform(self):
         from contextlib import redirect_stdout
 
         output = io.StringIO()
@@ -540,10 +555,13 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(FINISH.main(["holder-qualification"]), 0)
         self.assertEqual(json.loads(output.getvalue()), {
             "schema": FINISH.HOLDER_SCHEMA,
-            "backend": "darwin-libproc-cooperative.v1",
-            "qualified": False,
-            "reason": "holder-mapping-coverage-unqualified",
-            "mapping_coverage": "unqualified",
+            "backend": "darwin-libproc-bounded.v1",
+            "qualified": sys.platform == "darwin" and os.uname().machine == "arm64",
+            "reason": ("bounded-native-observation-requires-host-qualification"
+                       if sys.platform == "darwin" and os.uname().machine == "arm64"
+                       else "holder-backend-unqualified-platform"),
+            "mapping_coverage": ("bounded-native" if sys.platform == "darwin"
+                                 and os.uname().machine == "arm64" else "unqualified"),
             "platform": FINISH.safety().platform_key(),
         })
         ledger.assert_not_called()
@@ -593,6 +611,8 @@ cd "$2"
 gwt new feature main --full --finish-managed || exit
 [[ "$PWD" == "$3" ]] || exit 91
 gwt finish --pr https://github.com/example/repo/pull/1 || exit
+[[ "$PWD" == "$2" ]] || exit 90
+cd "$3"
 gwt resume --acknowledge-device-renumbering --worktree "$3" || exit
 _gwt_finish_tool() { return 1; }
 _gwt_tmux_sync_context() { exit 98; }
@@ -649,8 +669,11 @@ if gwt new feature main --full --finish-managed; then exit 93; fi
 class ReleaseTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
-    finish = LifecycleTests.finish
     check_reason = LifecycleTests.check_reason
+
+    def finish(self, *args):
+        # This suite exercises the activated unattended backend explicitly.
+        return LifecycleTests.finish(self, "--policy", str(self.base / "policy.json"), *args)
 
     def setUp(self):
         LifecycleTests.setUp(self)
@@ -668,11 +691,11 @@ class ReleaseTests(unittest.TestCase):
         (self.home / ".codex").mkdir(mode=0o700)
         self.native = mock.patch.object(FINISH.safety(), "Darwin")
         self.observer = self.native.start().return_value
-        # Complete coverage is synthetic lifecycle proof, never native qualification.
+        # Bounded coverage is synthetic lifecycle proof, never host qualification.
         self.observer.observe.return_value = {
-            "holders": [], "processes": 1, "mapping_coverage": "complete"}
+            "holders": [], "processes": 1, "mapping_coverage": "bounded-native"}
         self.capability = mock.patch.object(FINISH, "holder_qualification", return_value={
-            "qualified": True, "mapping_coverage": "complete"})
+            "qualified": True, "mapping_coverage": "bounded-native"})
         self.capability.start()
         self.boundary = mock.patch.object(FINISH.safety(), "access_boundary", return_value=[])
         self.boundary.start()
@@ -691,6 +714,14 @@ class ReleaseTests(unittest.TestCase):
         with FINISH.ledger(self.state) as db:
             return dict(FINISH.get_row(db, self.wt))
 
+    def assert_release_blocked(self, reason):
+        result = self.finish("--release")[1][0]
+        self.assertEqual(result["checkout"], "retained", result)
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["automatic_handoff"]["baseline"], "unavailable")
+        self.assertRegex(result["automatic_handoff"]["blocker"], reason)
+        return result
+
     def test_explicit_release_removes_fresh_merged_task_and_preserves_branch_and_sibling(self):
         result = self.finish("--release")[1][0]
         self.assertEqual(result["checkout"], "removed", result)
@@ -702,15 +733,36 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(FINISH.Retain, "intent"):
             self.call("resume")
 
-    def test_plain_finish_retains_until_owner_explicitly_releases(self):
+    def test_plain_finish_releases_completed_owner_and_removes_eligible_checkout(self):
         result = self.finish()[1][0]
-        self.assertEqual(result["reason"], "awaiting-owner-release")
-        self.assertTrue(self.wt.exists())
-        self.assertEqual(self.call("release")[1][0]["checkout"], "removed")
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+
+    def test_old_private_v2_enrollment_cannot_adopt_bounded_automatic_contract(self):
+        with FINISH.ledger(self.state) as db:
+            db.execute("ALTER TABLE retirement DROP COLUMN holder_contract")
+        self.assertFalse(self.call("status")[1][0]["automatic_removal_supported"])
+        # Enrollment owns schema upgrade, but retrying it cannot adopt an old row.
+        with self.assertRaisesRegex(FINISH.Retain, "already-enrolled"):
+            self.call("enroll", "--new-token", self.token)
+        self.call("resume")
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "automatic-holder-contract-not-enrolled")
+        self.assertFalse(result["automatic_removal_supported"])
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["automatic_handoff"]["owner_retry"],
+                         "manual-finalized-closeout-from-owning-checkout")
+        with FINISH.ledger(self.state) as db:
+            self.assertIsNone(FINISH.retirement(db, FINISH.get_row(db, self.wt))["holder_contract"])
+        # Existing explicit foreground closeout keeps its prior contract.
+        with mock.patch.object(FINISH, "manual_holders"):
+            self.assertEqual(LifecycleTests.finish(self)[1][0]["checkout"], "removed")
 
     def test_unqualified_apply_preserves_release_without_admission_work(self):
-        self.capability.stop()
-        with mock.patch.object(FINISH.safety(), "maintainer_lock") as lock, \
+        with mock.patch.object(FINISH, "holder_qualification", return_value={
+                "qualified": False, "mapping_coverage": "unqualified"}), \
+                mock.patch.object(FINISH.safety(), "maintainer_lock") as lock, \
                 mock.patch.object(FINISH, "completion_checks") as completion, \
                 mock.patch.object(FINISH, "deletion_admission") as admission:
             for result in (self.finish("--release")[1][0], self.call("check", "--apply")[1][0]):
@@ -777,7 +829,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.finish("--release")[1][0]["reason"], "pending-departure")
         self.assertTrue(self.wt.exists())
         self.observer.observe.return_value = {
-            "holders": [], "processes": 2, "mapping_coverage": "complete"}
+            "holders": [], "processes": 2, "mapping_coverage": "bounded-native"}
         self.assertEqual(self.call("check", "--apply")[1][0]["checkout"], "removed")
 
     def test_external_qualification_cannot_override_incomplete_mapping_observation(self):
@@ -825,6 +877,7 @@ class ReleaseTests(unittest.TestCase):
                 for observation, reason in (
                         ({"holders": []}, "holder-mapping-coverage-unqualified"),
                         ({"holders": [], "mapping_coverage": "unqualified"}, "holder-mapping-coverage-unqualified"),
+                        ({"holders": [], "mapping_coverage": "complete"}, "holder-mapping-coverage-unqualified"),
                         ({"holders": [], "mapping_coverage": True}, "holder-mapping-coverage-unqualified"),
                         ({"holders": [{"kind": "fd"}], "mapping_coverage": "unqualified"}, "pending-departure")):
                     with self.subTest(observation=observation):
@@ -846,13 +899,12 @@ class ReleaseTests(unittest.TestCase):
         self.call("resume", "--owner", "owner-2")
         self.assertEqual(self.finish("--release")[1][0]["checkout"], "retained")
         second = self.finish("--owner", "owner-2")[1][0]
-        self.assertEqual(second["released_owners"], ["owner-1"])
-        self.assertEqual(self.call("release", "--owner", "owner-2")[1][0]["checkout"], "removed")
+        self.assertEqual(second["released_owners"], ["owner-1", "owner-2"])
+        self.assertEqual(second["checkout"], "removed")
 
     def test_unclassified_ignored_payload_is_never_deleted(self):
         (self.wt / "ignored").write_text("synthetic recovery")
-        with self.assertRaisesRegex(FINISH.Retain, "unclassified"):
-            self.finish("--release")
+        self.assert_release_blocked("ignored-roots-require-explicit-disposal")
         self.assertEqual((self.wt / "ignored").read_text(), "synthetic recovery")
 
     def test_released_inventory_change_requires_new_signoff(self):
@@ -862,6 +914,23 @@ class ReleaseTests(unittest.TestCase):
         self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
         self.assertEqual(self.call("check", "--apply")[1][0]["checkout"], "retained")
         self.assertTrue((self.wt / "late").exists())
+
+    def test_legacy_full_inventory_still_rejects_pure_timestamp_change(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        self.finish("--release")
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            snap = FINISH.revalidate(row)
+            until = time.monotonic() + 10
+            legacy = {"working": FINISH.safety().inventory(snap, FINISH.git, until),
+                      "admin": FINISH.safety().admin_inventory(snap, FINISH.git, until)}
+            with db:
+                db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                           (json.dumps(legacy, sort_keys=True), row["id"]))
+        os.utime(self.wt / "file", (time.time() + 5, time.time() + 5))
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "released-worktree-changed")
+        self.assertTrue(self.wt.exists())
 
     def test_dependency_symlink_is_removed_without_touching_donor(self):
         (self.repo / ".git/info/exclude").write_text("node_modules\n")
@@ -998,7 +1067,7 @@ class ReleaseTests(unittest.TestCase):
             count += 1
             if count == 1:
                 (self.wt / "late-recovery").write_text("retain")
-            return {"holders": [], "mapping_coverage": "complete"}
+            return {"holders": [], "mapping_coverage": "bounded-native"}
         self.observer.observe.side_effect = observe
         result = self.finish("--release")[1][0]
         self.assertEqual(result["checkout"], "unknown")
@@ -1053,8 +1122,7 @@ class ReleaseTests(unittest.TestCase):
         git(self.wt, "sparse-checkout", "disable")
         git(self.wt, "config", "--worktree", "dotfiles.sparseProfile", "full")
         git(self.wt, "config", "--worktree", "user.fixtureNote", "preserve")
-        with self.assertRaisesRegex(FINISH.Retain, "worktree-config-recovery-required"):
-            self.finish("--release")
+        self.assert_release_blocked("worktree-config-recovery-required")
         self.assertTrue(self.wt.exists())
         git(self.wt, "config", "--worktree", "--unset", "user.fixtureNote")
         self.call("resume")
@@ -1074,13 +1142,27 @@ class ReleaseTests(unittest.TestCase):
     def test_present_skip_worktree_file_is_not_exempt_from_bytes_proof(self):
         git(self.wt, "update-index", "--skip-worktree", "file")
         (self.wt / "file").write_text("must retain\n")
+        self.assert_release_blocked("working-bytes")
+        self.assertTrue(self.wt.exists())
+
+    def test_inventory_verifies_tracked_blob_larger_than_leaf_limit(self):
+        large = self.wt / "large-blob"
+        large.write_bytes(b"source\n" * (9 * 1024 * 1024 // 7))
+        git(self.wt, "add", ".")
+        git(self.wt, "commit", "-m", "large tracked fixture")
+        snap = FINISH.revalidate(self.row())
+        import time
+        proof = FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 10)
+        self.assertIn("large-blob", proof["entries"])
+        with large.open("r+b") as stream:
+            stream.write(b"changed")
         with self.assertRaisesRegex(FINISH.Retain, "working-bytes"):
-            self.finish("--release")
+            FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 10)
         self.assertTrue(self.wt.exists())
 
     def test_inventory_supports_more_than_old_32mib_and_bounds_the_actual_next_read(self):
         # Five distinct, compressible 7MiB blobs exercise the former failure
-        # without a large object store or a real checkout read.
+        # without a large object store.
         for number in range(5):
             (self.wt / f"bulk-{number}").write_bytes(bytes([65 + number]) * (7 * 1024 * 1024))
         git(self.wt, "add", ".")
@@ -1091,10 +1173,13 @@ class ReleaseTests(unittest.TestCase):
         import time
         module = FINISH.safety()
         self.assertGreater(module.SOURCE_LIMIT, module.PASS_LIMIT)
-        with mock.patch.object(module, "PASS_LIMIT", 32 * 1024 * 1024):
+        total = sum((self.wt / name).stat().st_size
+                    for name in git(self.wt, "ls-files").splitlines())
+        with mock.patch.object(module, "PASS_LIMIT", 32 * 1024 * 1024), \
+                mock.patch.object(module, "SOURCE_LIMIT", total):
             contents = module.inventory(snap, FINISH.git, time.monotonic() + 10)
             self.assertTrue(all(f"bulk-{number}" in contents["entries"] for number in range(5)))
-        with mock.patch.object(module, "SOURCE_LIMIT", 32 * 1024 * 1024):
+        with mock.patch.object(module, "SOURCE_LIMIT", total - 1):
             with self.assertRaisesRegex(FINISH.Retain, "size"):
                 module.inventory(snap, FINISH.git, time.monotonic() + 10)
         self.proofs[self.url].update(merged=False, state="open", merge=None)
@@ -1138,8 +1223,7 @@ class ReleaseTests(unittest.TestCase):
         old_tip, _ = self.rebased_task()
         tree = git(self.repo, "rev-parse", old_tip + "^{tree}")
         (self.admin / "AUTO_MERGE").write_text(tree + "\n")
-        with self.assertRaisesRegex(FINISH.Retain, "auto-merge-tree-recovery"):
-            self.finish("--release")
+        self.assert_release_blocked("auto-merge-tree-recovery")
         self.assertTrue(self.wt.exists())
 
     def test_corrupt_or_linked_branch_reflog_cannot_attest_recovery(self):
@@ -1149,16 +1233,25 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.finish("--release")[1][0]["reason"], "branch-reflog-proof-invalid")
         self.assertTrue((self.admin / "locked").exists())
         reflog.write_bytes(before)
+        self.call("resume")
         real = reflog.parent
         moved = real.with_name("saved-heads")
         real.rename(moved)
         real.symlink_to(moved, target_is_directory=True)
         try:
-            self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "branch-reflog-parent-unqualified")
+            self.assert_release_blocked("branch-reflog-parent-unqualified")
             self.assertTrue(self.wt.exists())
         finally:
             real.unlink()
             moved.rename(real)
+
+    def test_fetch_head_without_preserved_recovery_holds_owner_release(self):
+        recovery = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "unpreserved")
+        data = (recovery + "\t\tbranch 'other' of https://example.test/repo\n").encode()
+        (self.admin / "FETCH_HEAD").write_bytes(data)
+        self.assert_release_blocked("fetch-head-recovery-required")
+        self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), data)
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
 
     def test_post_remove_branch_reflog_drift_is_unknown(self):
         _, reflog = self.rebased_task()
@@ -1197,14 +1290,12 @@ class ReleaseTests(unittest.TestCase):
         message = self.admin / "COMMIT_EDITMSG"
         original = message.read_bytes()
         message.write_bytes(original + b"substantive uncommitted draft\n")
-        with self.assertRaisesRegex(FINISH.Retain, "commit-message-recovery"):
-            self.finish("--release")
+        self.assert_release_blocked("commit-message-recovery")
         self.assertTrue(message.read_bytes().endswith(b"substantive uncommitted draft\n"))
         message.write_bytes(original)
         git(self.repo, "config", "commit.cleanup", "scissors")
         self.call("resume")
-        with self.assertRaisesRegex(FINISH.Retain, "cleanup-mode-unqualified"):
-            self.finish("--release")
+        self.assert_release_blocked("cleanup-mode-unqualified")
         self.assertTrue(self.wt.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "native no-follow xattr fixture")
@@ -1214,8 +1305,7 @@ class ReleaseTests(unittest.TestCase):
                 subprocess.run(["/usr/bin/xattr", "-w", "com.example.finish-fixture", "synthetic", str(path)], check=True)
                 try:
                     self.call("resume")
-                    with self.assertRaisesRegex(FINISH.Retain, "extended-attributes"):
-                        self.finish("--release")
+                    self.assert_release_blocked("extended-attributes")
                     self.assertTrue(path.exists())
                     self.assertTrue((self.admin / "locked").exists())
                 finally:
@@ -1223,10 +1313,545 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(self.wt.exists())
 
 
-class FinalizedRemovalTests(unittest.TestCase):
+class ForegroundCompletionTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
     finish = LifecycleTests.finish
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        FINISH.qualified_policy.side_effect = FINISH.Retain("foreground-must-not-need-automatic-policy")
+
+    tearDown = ReleaseTests.tearDown
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_plain_finish_removes_merged_checkout_without_activation(self):
+        result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        FINISH.qualified_policy.assert_not_called()
+
+    def test_pending_merge_records_signoff_even_with_ignored_recovery_content(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        (self.wt / "ignored").write_text("keep this recovery content\n")
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "pr-not-merged")
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        self.assertEqual(result["automatic_handoff"]["baseline"], "unavailable")
+        self.assertEqual(result["automatic_handoff"]["blocker"], "ignored-roots-require-explicit-disposal")
+        FINISH.qualified_policy.side_effect = None
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "ignored-roots-require-explicit-disposal")
+        self.assertEqual((self.wt / "ignored").read_text(), "keep this recovery content\n")
+
+    def pending_fetch_recovery(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        tree = git(self.repo, "rev-parse", "HEAD^{tree}")
+        recovery = git(self.repo, "commit-tree", tree, "-p", self.head, "-m", "recovery")
+        git(self.repo, "update-ref", "refs/heads/released-feature", recovery, self.head)
+        git(self.repo, "update-ref", "refs/heads/released-feature", self.head, recovery)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo), recovery)
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "pr-not-merged")
+        self.assertEqual(result["released_owners"], ["owner-1"])
+        return recovery
+
+    def test_pending_finish_hands_native_index_refresh_and_fetch_recovery_to_same_consumer(self):
+        recovery = self.pending_fetch_recovery()
+        index = (self.admin / "index").read_bytes()
+        os.utime(self.wt / "file", (time.time() + 5, time.time() + 5))
+        mask = os.umask(0o077)
+        try:
+            git(self.wt, "status", "--porcelain")
+        finally:
+            os.umask(mask)
+        self.assertNotEqual((self.admin / "index").read_bytes(), index)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo), self.head)
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual(git(self.repo, "cat-file", "-t", recovery), "commit")
+
+    def test_overwritten_fetch_head_cannot_erase_release_recovery_obligation(self):
+        recovery = self.pending_fetch_recovery()
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo), self.head)
+        git(self.repo, "reflog", "expire", "--expire=now", "refs/heads/released-feature")
+        self.assertEqual(git(self.repo, "rev-list", recovery, "--not", "--all"), recovery)
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["reason"], "admin-recovery-not-preserved", result)
+        self.assertTrue(self.wt.exists())
+
+    def test_ignored_disposal_is_frozen_at_release_and_worker_cannot_approve_new_content(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        (self.wt / "ignored").mkdir()
+        (self.wt / "ignored/proof").write_text("completed task proof\n")
+        result = self.finish("--discard-ignored", "ignored")[1][0]
+        self.assertEqual(result["automatic_handoff"]["baseline"], "ready")
+        (self.wt / "ignored/new").write_text("new recovery data\n")
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        with self.assertRaisesRegex(FINISH.Retain, "requires-owner"):
+            self.call("check", "--apply", "--discard-ignored", "ignored")
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "released-worktree-changed")
+        self.assertTrue((self.wt / "ignored/new").exists())
+
+    def test_same_consumer_removes_unchanged_owner_discarded_content(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        (self.wt / "ignored").write_text("completed proof\n")
+        self.finish("--discard-ignored", "ignored")
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertTrue(self.legacy.exists())
+
+    def pending_target_fetch(self):
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        target = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "target advances")
+        git(self.repo, "update-ref", "refs/heads/main", target, self.head)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo),
+            "refs/heads/main:refs/remotes/origin/main")
+        result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "pr-not-merged", result)
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        FINISH.qualified_policy.side_effect = None
+        return target
+
+    def test_pending_finish_preserves_fetched_target_ahead_of_task(self):
+        target = self.pending_target_fetch()
+        result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), target)
+
+    def test_foreground_release_preserves_fetched_target_ahead_of_task(self):
+        target = self.pending_target_fetch()
+        with mock.patch.object(FINISH, "manual_holders"):
+            result = self.call("release")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), target)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
+    def test_target_ref_drift_between_admissions_holds_before_native_unlock(self):
+        target = self.pending_target_fetch()
+        successor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", target, "-m", "next target")
+        admission, calls = FINISH.deletion_admission, []
+        def advance(*args):
+            calls.append(None)
+            if len(calls) == 2:
+                git(self.repo, "update-ref", "refs/remotes/origin/main", successor, target)
+            return admission(*args)
+        with mock.patch.object(FINISH, "deletion_admission", side_effect=advance), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["reason"], "removal-preimage-changed", result)
+        self.assertFalse(any("worktree" in call.args[0] and ("unlock" in call.args[0] or "remove" in call.args[0])
+                             for call in children.call_args_list))
+        self.assertTrue(self.wt.exists())
+
+    def test_completion_rechecks_owner_signoff_before_removal(self):
+        self.call("resume", "--owner", "owner-2")
+        self.assertEqual(self.finish()[1][0]["reason"], "awaiting-owner-release")
+        admission = FINISH.finalized_admission
+        calls = []
+
+        def revoke(db, row, args, until, **options):
+            result = admission(db, row, args, until, **options)
+            calls.append(result)
+            if len(calls) == 1:
+                with db:
+                    db.execute("DELETE FROM owner_releases WHERE worktree_id=? AND owner=?",
+                               (row["id"], "owner-1"))
+            return result
+
+        with mock.patch.object(FINISH, "manual_holders"), \
+                mock.patch.object(FINISH, "finalized_admission", side_effect=revoke):
+            result = self.finish("--owner", "owner-2")[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(result["reason"], "awaiting-owner-release")
+        self.assertTrue(self.wt.exists())
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_foreground_dependency_link_preserves_external_donor(self):
+        (self.repo / ".git/info/exclude").write_text("node_modules\n")
+        donor = self.base / "dependency-donor"
+        donor.mkdir()
+        (donor / "keep").write_text("shared dependency\n")
+        (self.wt / "node_modules").symlink_to(donor, target_is_directory=True)
+        with mock.patch.object(FINISH, "manual_holders"):
+            result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual((donor / "keep").read_text(), "shared dependency\n")
+
+
+class MissingRecoveryTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    tearDown = ReleaseTests.tearDown
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        (self.wt / "nested").mkdir()
+        (self.wt / "nested/command").write_bytes(b"#!/bin/sh\nexit 0\n")
+        (self.wt / "nested/command").chmod(0o755)
+        self.external = self.base / "external"
+        self.external.write_text("untouched\n")
+        (self.wt / "external-link").symlink_to(self.external)
+        git(self.wt, "add", ".")
+        git(self.wt, "commit", "-m", "recovery fixture")
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.original = ReleaseTests.row(self)
+        self.before_index = (self.admin / "index").read_bytes()
+        self.before_lock = (self.admin / "locked").read_bytes()
+        self.index_sha = hashlib.sha256(self.before_index).hexdigest()
+        shutil.rmtree(self.wt)
+        self.holders = mock.patch.object(FINISH, "manual_holders")
+        self.holders_mock = self.holders.start()
+        self.addCleanup(self.holders.stop)
+
+    def recover(self, *args):
+        return self.call("recover-missing", "--worktree-id", self.original["id"],
+                         "--generation", "0", "--expected-head", self.head,
+                         "--index-sha256", self.index_sha, *args)[1][0]
+
+    def plan(self):
+        return self.recover()["recovery_sha256"]
+
+    def record(self):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            return FINISH.missing_recovery_record(db, row), dict(FINISH.retirement(db, row))
+
+    def recorded_device_change(self, transform=None):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            snap = json.loads(row["identity"])
+            for key in ("path_id", "owner_id", "common_id", "gitdir_id"):
+                snap[key][0] += 100
+            if transform:
+                transform(snap)
+            with db:
+                db.execute("UPDATE worktrees SET identity=? WHERE id=?", (json.dumps(snap), row["id"]))
+                db.execute("UPDATE retirement SET generation=0 WHERE worktree_id=?", (row["id"],))
+        return snap
+
+    def test_device_change_requires_opt_in_and_preserves_original_history(self):
+        original = self.recorded_device_change()
+        with self.assertRaisesRegex(FINISH.Retain, "admin-owner-identity-changed"):
+            self.recover()
+        plan = self.recover("--allow-device-renumbering")
+        mapped_root = [self.wt.parent.stat().st_dev, original["path_id"][1]]
+        self.assertEqual(plan["device_mapping"], [[original["path_id"][0], mapped_root[0]]])
+        holder_args = self.holders_mock.call_args.args
+        self.assertEqual(holder_args[0]["path_id"], mapped_root)
+        self.assertEqual(holder_args[1]["discarded_inodes"], [mapped_root])
+        self.assertEqual(holder_args[0]["gitdir_id"], FINISH.identity(self.admin))
+        digest = plan["recovery_sha256"]
+        result = self.recover("--allow-device-renumbering", "--apply", "--recovery-sha256", digest)
+        record, retirement = self.record()
+        self.assertEqual(record["preimage"]["identity"], original)
+        self.assertEqual(retirement["generation"], 1)
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            FINISH.revalidate(row)
+            self.assertEqual(FINISH.owner_rows(db, row["id"]), [{"owner": "owner-1", "completed": 0}])
+        self.assertEqual(self.recover("--allow-device-renumbering", "--apply", "--recovery-sha256", digest,
+                                      "--intent-id", result["intent_id"]), result)
+        with self.assertRaisesRegex(FINISH.Retain, "exact-intent-required"):
+            self.recover("--apply", "--recovery-sha256", digest, "--intent-id", result["intent_id"])
+
+    def test_device_opt_in_changes_plan_digest(self):
+        strict = self.recover()
+        opted_in = self.recover("--allow-device-renumbering")
+        self.assertNotEqual(strict["recovery_sha256"], opted_in["recovery_sha256"])
+
+    def test_device_normalization_refuses_changed_inode(self):
+        self.recorded_device_change(lambda snap: snap["gitdir_id"].__setitem__(1, snap["gitdir_id"][1] + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "device-or-inode-changed"):
+            self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_device_normalization_refuses_nonbijective_map(self):
+        self.recorded_device_change(lambda snap: snap["gitdir_id"].__setitem__(0, snap["gitdir_id"][0] + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "device-map-not-bijective"):
+            self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_device_normalization_refuses_unmapped_root(self):
+        self.recorded_device_change(lambda snap: snap["path_id"].__setitem__(0, snap["path_id"][0] + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "parent-volume-unmapped-or-changed"):
+            self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_device_normalization_refuses_parent_volume_change(self):
+        self.recorded_device_change()
+        identity = FINISH.identity
+        def changed_parent(path):
+            dev, inode = identity(path)
+            return [dev + 1, inode] if Path(path) == self.wt.parent else [dev, inode]
+        with mock.patch.object(FINISH, "identity", side_effect=changed_parent):
+            with self.assertRaisesRegex(FINISH.Retain, "parent-volume-unmapped-or-changed"):
+                self.recover("--allow-device-renumbering")
+        self.assertIsNone(self.record()[0])
+
+    def test_plan_does_not_create_root_or_recovery_intent(self):
+        result = self.recover()
+        self.assertFalse(result["checkout_mutation"])
+        self.assertEqual(result["untracked_unstaged"], "unavailable")
+        self.assertFalse(self.wt.exists())
+        record, retirement = self.record()
+        self.assertIsNone(record)
+        self.assertEqual(retirement["state"], "enrolled")
+
+    def test_success_preserves_index_admin_branch_and_original_owner(self):
+        digest = self.plan()
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "recovery-operator"}):
+            result = self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(result["operator"], "recovery-operator")
+        self.assertEqual((self.wt / "file").read_text(), "original\n")
+        self.assertEqual(stat_mode(self.wt / "nested/command"), 0o755)
+        self.assertTrue((self.wt / "external-link").is_symlink())
+        self.assertEqual(os.readlink(self.wt / "external-link"), str(self.external))
+        self.assertEqual(self.external.read_text(), "untouched\n")
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual(FINISH.owner_rows(db, row["id"]), [{"owner": "owner-1", "completed": 0}])
+            self.assertEqual(row["state"], "active")
+            FINISH.revalidate(row)
+        replay = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", result["intent_id"])
+        self.assertEqual(replay, result)
+
+    def test_appeared_target_is_not_overwritten(self):
+        digest = self.plan()
+        self.wt.mkdir()
+        (self.wt / "keep").write_text("other owner\n")
+        with self.assertRaisesRegex(FINISH.Retain, "target-present"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual((self.wt / "keep").read_text(), "other owner\n")
+
+    def test_native_publication_does_not_replace_even_empty_directory(self):
+        source, target = self.base / "stage", self.base / "target"
+        source.mkdir()
+        target.mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "no-replace-refused"):
+            FINISH.recovery_publish(source, target)
+        self.assertTrue(source.is_dir())
+        self.assertTrue(target.is_dir())
+
+    def test_index_drift_refuses_before_intent(self):
+        digest = self.plan()
+        (self.admin / "index").write_bytes(self.before_index + b"changed")
+        with self.assertRaisesRegex(FINISH.Retain, "index-changed"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        self.assertIsNone(self.record()[0])
+
+    def test_completed_receipt_cannot_cover_later_source_edit(self):
+        digest = self.plan()
+        result = self.recover("--apply", "--recovery-sha256", digest)
+        (self.wt / "file").write_text("later unfinished edit\n")
+        with self.assertRaisesRegex(FINISH.Retain, "file-content-changed"):
+            self.recover("--apply", "--recovery-sha256", digest, "--intent-id", result["intent_id"])
+        self.assertEqual((self.wt / "file").read_text(), "later unfinished edit\n")
+
+    def test_unknown_index_extension_refuses(self):
+        raw = self.before_index[:-20] + b"TEST" + struct.pack(">I", 0)
+        raw += hashlib.sha1(raw).digest()
+        (self.admin / "index").write_bytes(raw)
+        self.index_sha = hashlib.sha256(raw).hexdigest()
+        with self.assertRaisesRegex(FINISH.Retain, "extension-unsupported"):
+            self.recover()
+
+    def test_index_not_head_refuses(self):
+        original = bytes.fromhex(git(self.repo, "rev-parse", "released-feature:file"))
+        changed = bytes.fromhex(git(self.repo, "rev-parse", "released-feature:nested/command"))
+        body = self.before_index[:-20].replace(original, changed, 1)
+        data = body + hashlib.sha1(body).digest()
+        (self.admin / "index").write_bytes(data)
+        self.index_sha = hashlib.sha256(data).hexdigest()
+        with self.assertRaisesRegex(FINISH.Retain, "index-not-head"):
+            self.recover()
+
+    def test_holder_unknown_and_maintenance_lock_refuse(self):
+        self.holders_mock.side_effect = FINISH.Retain("manual-holder-visibility-unknown")
+        with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+            self.recover()
+        self.holders_mock.side_effect = None
+        with FINISH.safety().maintainer_lock(self.home / ".codex"):
+            with self.assertRaisesRegex(FINISH.Retain, "maintainer-lock-present"):
+                self.recover()
+        self.assertIsNone(self.record()[0])
+
+    def test_lifecycle_lock_contention_refuses(self):
+        with FINISH.ledger(self.state):
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                self.recover()
+
+    def test_partial_staging_is_retained_not_rebuilt(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=RuntimeError("during materialization")):
+            with self.assertRaisesRegex(RuntimeError, "during materialization"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        stage = Path(record["stage"])
+        self.assertTrue(stage.is_dir())
+        with self.assertRaisesRegex(FINISH.Retain, "incomplete-or-rebound"):
+            self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertTrue(stage.is_dir())
+        self.assertFalse(self.wt.exists())
+
+    def partial_stage(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=RuntimeError("during materialization")):
+            with self.assertRaisesRegex(RuntimeError, "during materialization"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        stage = Path(record["stage"])
+        (stage / "file").write_text("original\n")
+        (stage / "file").chmod(0o644)
+        return stage, digest, record["id"]
+
+    def test_explicit_partial_continuation_preserves_existing_file_and_stage(self):
+        stage, digest, intent = self.partial_stage()
+        before = FINISH.identity(stage)
+        file_inode = (stage / "file").stat().st_ino
+        plan = self.recover("--continue-partial", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertTrue(plan["partial_continuation"])
+        self.assertEqual(plan["recovery_sha256"], digest)
+        self.assertEqual(self.holders_mock.call_args.args[0]["path"], str(stage))
+        self.assertIn(before, self.holders_mock.call_args.args[1]["discarded_inodes"])
+        result = self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(FINISH.identity(self.wt), before)
+        self.assertEqual((self.wt / "file").stat().st_ino, file_inode)
+        self.assertEqual(self.record()[0]["id"], intent)
+
+    def test_partial_continuation_refuses_corrupt_existing_bytes(self):
+        stage, digest, intent = self.partial_stage()
+        (stage / "file").write_text("corrupt\n")
+        with self.assertRaisesRegex(FINISH.Retain, "file-content-changed"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual((stage / "file").read_text(), "corrupt\n")
+        self.assertFalse((stage / "nested").exists())
+        self.assertEqual(self.record()[1]["state"], "recovery-pending")
+
+    def test_partial_continuation_refuses_extra_entry(self):
+        stage, digest, intent = self.partial_stage()
+        (stage / "extra").write_text("preserve\n")
+        with self.assertRaisesRegex(FINISH.Retain, "tree-unexpected-entry"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual((stage / "extra").read_text(), "preserve\n")
+        self.assertFalse((stage / "nested").exists())
+
+    def test_partial_continuation_does_not_overwrite_appeared_file(self):
+        stage, digest, intent = self.partial_stage()
+        native_git = FINISH.git
+        def appeared(path, *args, **kwargs):
+            result = native_git(path, *args, **kwargs)
+            if args[:2] == ("cat-file", "blob") and not (stage / "nested/command").exists():
+                (stage / "nested/command").write_text("appeared\n")
+            return result
+        with mock.patch.object(FINISH, "git", side_effect=appeared):
+            with self.assertRaises(FileExistsError):
+                self.recover("--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", intent)
+        self.assertEqual((stage / "nested/command").read_text(), "appeared\n")
+        self.assertFalse(self.wt.exists())
+
+    def test_recovery_blob_above_eight_mib_uses_scoped_capture_and_verification(self):
+        data = b"x" * (9 * 1024 * 1024)
+        oid = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                             input=data, stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+        stage = self.base / "large-stage"
+        stage.mkdir(mode=0o700)
+        entries = {"large": (0o100644, oid)}
+        FINISH.recovery_tree(stage, entries, str(self.admin), FINISH.safety().DEADLINE,
+                             write=True, owner=str(self.repo))
+        FINISH.recovery_tree(stage, entries, str(self.admin), FINISH.safety().DEADLINE)
+        self.assertEqual((stage / "large").read_bytes(), data)
+
+    def test_replaced_staging_parent_symlink_is_not_followed(self):
+        stage = self.base / "stage"
+        stage.mkdir(mode=0o700)
+        (stage / "nested").symlink_to(self.base, target_is_directory=True)
+        fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaises(OSError):
+                with FINISH.recovery_parent(fd, "nested/should-not-write"):
+                    self.fail("followed staging symlink")
+        finally:
+            os.close(fd)
+        self.assertFalse((self.base / "should-not-write").exists())
+
+    def test_crash_before_publish_retains_intent_and_requires_exact_reconciliation(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=RuntimeError("interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, retirement = self.record()
+        self.assertEqual(retirement["state"], "recovery-pending")
+        status = self.call("status")[1][0]["missing_recovery"]
+        self.assertEqual(status["status"], "pending")
+        self.assertEqual(status["intent_id"], record["id"])
+        self.assertFalse(self.wt.exists())
+        self.assertTrue(Path(record["stage"]).is_dir())
+        with self.assertRaisesRegex(FINISH.Retain, "exact-intent-required"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        with self.assertRaisesRegex(FINISH.Retain, "intent"):
+            self.call("resume")
+        result = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertEqual(result["checkout"], "restored")
+
+    def test_crash_after_publish_reconciles_same_inode_once(self):
+        digest = self.plan()
+        publish = FINISH.recovery_publish
+        def interrupted(source, target):
+            publish(source, target)
+            raise RuntimeError("interrupted after publication")
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, "interrupted after"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, retirement = self.record()
+        before = FINISH.identity(self.wt)
+        self.assertEqual(retirement["generation"], 0)
+        result = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(FINISH.identity(self.wt), before)
+
+    def test_post_publish_admin_drift_retains_pending_intent(self):
+        digest = self.plan()
+        publish = FINISH.recovery_publish
+        def changed(source, target):
+            publish(source, target)
+            (self.admin / "locked").write_text("changed-owner\n")
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=changed):
+            with self.assertRaisesRegex(FINISH.Retain, "registration-missing-or-locked"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(self.record()[1]["state"], "recovery-pending")
+
+
+def stat_mode(path):
+    return path.stat().st_mode & 0o777
+
+
+class FinalizedRemovalTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = ReleaseTests.finish
+    assert_release_blocked = ReleaseTests.assert_release_blocked
     setUp = ReleaseTests.setUp
     tearDown = ReleaseTests.tearDown
 
@@ -1245,12 +1870,198 @@ class FinalizedRemovalTests(unittest.TestCase):
         (evidence / "test.log").write_text("finalized test output\n")
         return evidence
 
-    def inventory(self, *roots, compact=True, until=None):
+    def gitlinks(self):
+        oid = "1" * 40
+        names = ("vendor/empty", "vendor/missing", "absent/leaf")
+        (self.wt / ".gitmodules").write_text("".join(
+            f'[submodule "{name}"]\n\tpath = {name}\n\turl = https://github.com/example/submodule.git\n'
+            for name in names))
+        git(self.wt, "add", ".gitmodules")
+        for name in names:
+            git(self.wt, "update-index", "--add", "--cacheinfo", f"160000,{oid},{name}")
+        git(self.wt, "commit", "-m", "unpopulated gitlinks")
+        (self.wt / "vendor/empty").mkdir(parents=True)
+        git(self.wt, "update-index", "--skip-worktree", "vendor/missing", "absent/leaf")
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.wt, "cat-file", "-e", oid)
+        return oid
+
+    def inventory(self, *roots, compact=True, until=None, allow_empty_gitlinks=False):
         with FINISH.ledger(self.state) as db:
             snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
         return FINISH.safety().inventory(
             snap, FINISH.git, time.monotonic() + 120 if until is None else until,
-            discard_ignored=roots, compact_discarded=compact)
+            discard_ignored=roots, compact_discarded=compact, allow_empty_gitlinks=allow_empty_gitlinks)
+
+    def test_empty_gitlinks_are_manual_only_and_existing_directories_have_holder_proof(self):
+        self.gitlinks()
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.proofs[self.url] = self.proof(self.url)
+        self.assert_release_blocked("raw-index-flags-or-mode-unsupported")
+        contents = self.inventory(allow_empty_gitlinks=True)
+        self.assertEqual({name: proof["state"] for name, proof in contents["gitlinks"].items()},
+                         {"vendor/empty": "empty", "vendor/missing": "absent", "absent/leaf": "absent"})
+        self.assertIn("vendor/empty", contents["entries"])
+        self.assertNotIn("vendor/missing", contents["entries"])
+        device, inode = contents["entries"]["vendor/empty"][:2]
+        observed = types.SimpleNamespace(
+            stdout=f"p7\0\nf3\0D0x{device:x}\0i{inode}\0n/other/alias\0\n".encode(), stderr=b"")
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        with mock.patch.object(FINISH.shutil, "which", return_value="/fixture/lsof"), \
+                mock.patch.object(FINISH, "run", return_value=observed):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                FINISH.manual_holders(snap, contents, {}, time.monotonic() + 10)
+
+    def test_empty_gitlinks_reject_populated_linked_admin_and_mismatched_state(self):
+        oid = self.gitlinks()
+        empty = self.wt / "vendor/empty"
+        donor = self.base / "donor"
+        donor.mkdir()
+        (donor / "keep").write_text("external content\n")
+        cases = ((empty / "source", "file"), (empty / ".git", "file"),
+                 (empty / ".git", "directory"), (empty, "symlink"), (empty, "file"),
+                 (self.admin / "modules", "directory"), (self.admin / "modules", "symlink"))
+        for path, kind in cases:
+            with self.subTest(path=path.name, kind=kind):
+                if path == empty:
+                    empty.rmdir()
+                if kind == "directory":
+                    path.mkdir()
+                elif kind == "symlink":
+                    path.symlink_to(donor)
+                else:
+                    path.write_text("must retain\n")
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "gitlink|submodule-admin"):
+                        self.inventory(allow_empty_gitlinks=True)
+                finally:
+                    path.rmdir() if kind == "directory" else path.unlink()
+                    if path == empty:
+                        empty.mkdir()
+        self.assertEqual((donor / "keep").read_text(), "external content\n")
+        git(self.wt, "update-index", "--cacheinfo", f"160000,{'2' * 40},vendor/empty")
+        with self.assertRaisesRegex(FINISH.Retain, "staged-or-index-only"):
+            self.inventory(allow_empty_gitlinks=True)
+        git(self.wt, "update-index", "--cacheinfo", f"160000,{oid},vendor/empty")
+        (self.wt / "file").unlink()
+        with self.assertRaisesRegex(FINISH.Retain, "working-file-missing"):
+            self.inventory(allow_empty_gitlinks=True)
+        (self.wt / "file").write_text("original\n")
+        empty.chmod(0)
+        try:
+            with self.assertRaises(PermissionError):
+                self.inventory(allow_empty_gitlinks=True)
+        finally:
+            empty.chmod(0o700)
+        with mock.patch.object(FINISH.safety(), "directory_mount_id", side_effect=[1, 1, 1, 2]):
+            with self.assertRaisesRegex(FINISH.Retain, "gitlink-nested-mount|gitlink-directory-changed"):
+                self.inventory(allow_empty_gitlinks=True)
+
+    def test_gitlink_descriptor_scan_rejects_population_and_replacement(self):
+        self.gitlinks()
+        empty = self.wt / "vendor/empty"
+        moved = self.base / "original-gitlink"
+        native = os.scandir
+        for change in ("populate", "replace"):
+            identity = (empty.stat().st_dev, empty.stat().st_ino)
+
+            @contextlib.contextmanager
+            def scan(target):
+                with native(target) as children:
+                    yield children
+                if isinstance(target, int) and tuple(FINISH.safety().file_identity(os.fstat(target))[:2]) == identity:
+                    if change == "populate":
+                        (empty / "late").write_text("must retain\n")
+                    else:
+                        empty.rename(moved)
+                        empty.mkdir()
+
+            with self.subTest(change=change), mock.patch.object(FINISH.safety().os, "scandir", side_effect=scan):
+                with self.assertRaisesRegex(FINISH.Retain, "gitlink-directory-changed"):
+                    self.inventory(allow_empty_gitlinks=True)
+            if change == "populate":
+                (empty / "late").unlink()
+            else:
+                empty.rmdir()
+                moved.rename(empty)
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_gitlink_open_and_absence_checks_reject_races_without_following_links(self):
+        self.gitlinks()
+        empty, missing = self.wt / "vendor/empty", self.wt / "vendor/missing"
+        donor = self.base / "external"
+        donor.mkdir()
+        (donor / "keep").write_text("external content\n")
+        native_open, native_stat = os.open, os.stat
+
+        def replace(part, flags, *args, **kwargs):
+            if part == "empty" and "dir_fd" in kwargs:
+                empty.rmdir()
+                empty.symlink_to(donor)
+            return native_open(part, flags, *args, **kwargs)
+
+        with mock.patch.object(FINISH.safety().os, "open", side_effect=replace):
+            with self.assertRaises(OSError):
+                self.inventory(allow_empty_gitlinks=True)
+        self.assertEqual((donor / "keep").read_text(), "external content\n")
+        empty.unlink()
+        empty.mkdir()
+
+        def appear(part, *args, **kwargs):
+            try:
+                return native_stat(part, *args, **kwargs)
+            except FileNotFoundError:
+                if part == "missing" and "dir_fd" in kwargs:
+                    missing.mkdir()
+                raise
+
+        with mock.patch.object(FINISH.safety().os, "stat", side_effect=appear):
+            with self.assertRaisesRegex(FINISH.Retain, "gitlink-absence-changed"):
+                self.inventory(allow_empty_gitlinks=True)
+        self.assertTrue(missing.is_dir())
+
+    def test_gitlink_replacement_between_admissions_never_dispatches_removal(self):
+        self.gitlinks()
+        empty = self.wt / "vendor/empty"
+        admission, calls = FINISH.finalized_admission, []
+
+        def replace(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                empty.rename(self.base / "original-gitlink")
+                empty.mkdir()
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=replace), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+        self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+
+    def test_gitlink_population_during_second_holder_scan_never_dispatches_removal(self):
+        self.gitlinks()
+        late = self.wt / "vendor/empty/late"
+        scans = []
+
+        def populate(*args):
+            scans.append(args)
+            if len(scans) == 2:
+                late.write_text("must retain\n")
+
+        with mock.patch.object(FINISH, "manual_holders", side_effect=populate), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.call("remove", "--finalized")
+        self.assertEqual(len(scans), 2)
+        self.assertFalse(any("worktree" in call.args[0] and
+                             ("remove" in call.args[0] or "unlock" in call.args[0])
+                             for call in children.call_args_list),
+                         "native removal dispatched after the second holder scan populated a gitlink")
+        self.assertEqual(rows[0]["reason"], "gitlink-directory-not-empty")
+        self.assertEqual(late.read_text(), "must retain\n")
+        self.assert_incomplete_locked(code, rows)
 
     def test_real_dependency_tree_above_source_limit_removes_with_compact_holder_proof(self):
         (self.repo / ".git/info/exclude").write_text("node_modules\n")
@@ -1356,6 +2167,234 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertTrue(new.exists())
         self.assertNotEqual(git(self.legacy, "rev-parse", "HEAD"), self.head)
 
+    def test_real_sibling_detach_and_branch_checkout_preserve_physical_identity(self):
+        native = FINISH.safety().supervise
+        transitions = []
+
+        def concurrent_checkout(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                git(self.legacy, "checkout", "--detach")
+                transitions.append(FINISH.records(str(self.repo)))
+                git(self.legacy, "checkout", "-b", "sibling-progress")
+                transitions.append(FINISH.records(str(self.repo)))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=concurrent_checkout):
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(len(transitions), 2)
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertTrue(result["siblings_preserved"])
+        self.assertTrue(result["siblings_after"])
+        self.assertTrue(result["sibling_identities_after"])
+        self.assertEqual(result["sibling_comparison"]["changes"][0]["kind"], "operational")
+
+    def test_known_absent_sibling_root_preserves_locked_native_registration(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        git(self.repo, "worktree", "lock", "--reason", "other owner", str(self.legacy))
+        admin_id = FINISH.identity(admin)
+        lock = (admin / "locked").read_bytes()
+        shutil.rmtree(self.legacy)
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        initial = FINISH.sibling_identity(snap, str(self.legacy), time.monotonic() + 30)
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.legacy.exists())
+        self.assertEqual(FINISH.identity(admin), admin_id)
+        self.assertEqual((admin / "locked").read_bytes(), lock)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            final = json.loads(item["result"])["sibling_identities_after"][str(self.legacy)]
+        self.assertEqual(initial, final)
+        self.assertEqual(initial["path_absence"]["errno"], errno.ENOENT)
+        self.assertEqual(initial["pointer_absence"]["errno"], errno.ENOENT)
+
+    def test_known_absent_sibling_pointer_preserves_existing_root_and_admin(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        root_id, admin_id = FINISH.identity(self.legacy), FINISH.identity(admin)
+        (self.legacy / ".git").unlink()
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(FINISH.identity(self.legacy), root_id)
+        self.assertEqual(FINISH.identity(admin), admin_id)
+        self.assertFalse((self.legacy / ".git").exists())
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        saved = result["sibling_identities_after"][str(self.legacy)]
+        self.assertNotIn("path_absence", saved)
+        self.assertEqual(saved["pointer_absence"]["parent_id"], root_id)
+        self.assertTrue(result["siblings_preserved"])
+
+    def test_known_absent_sibling_admin_index_is_shared_once_per_pass(self):
+        second = self.root / "second-absent"
+        git(self.repo, "worktree", "add", "-b", "second", str(second))
+        shutil.rmtree(self.legacy)
+        (second / ".git").unlink()
+        with mock.patch.object(FINISH, "sibling_admin_index", wraps=FINISH.sibling_admin_index) as index:
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(index.call_count, 2)
+
+    def test_known_absent_sibling_appearance_is_not_preservation(self):
+        original = self.base / "absent-source"
+        self.legacy.rename(original)
+        native = FINISH.safety().supervise
+
+        def reappear(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                original.rename(self.legacy)
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=reappear):
+            code, rows = self.remove()
+        self.assertEqual(code, 1, rows)
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertFalse(result["siblings_preserved"])
+        self.assertIn({"path": str(self.legacy), "kind": "identity"}, result["sibling_comparison"]["changes"])
+
+    def test_new_sibling_pointer_loss_is_not_known_prior_absence(self):
+        native = FINISH.safety().supervise
+
+        def lose_pointer(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                (self.legacy / ".git").unlink()
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=lose_pointer):
+            code, rows = self.remove()
+        self.assertEqual(code, 1, rows)
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertFalse(result["siblings_preserved"])
+
+    def test_known_absent_sibling_rejects_ambiguous_admin_and_permission_unknown(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        pointer = self.legacy / ".git"
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        read = FINISH.safety().read_file
+
+        def denied(path, *args):
+            if path == pointer:
+                raise PermissionError(errno.EACCES, "fixture permission")
+            return read(path, *args)
+
+        with mock.patch.object(FINISH.safety(), "read_file", side_effect=denied):
+            with self.assertRaises(PermissionError):
+                FINISH.sibling_identity(snap, str(self.legacy), time.monotonic() + 30)
+        pointer.unlink()
+        shutil.copytree(admin, admin.parent / "ambiguous")
+        with self.assertRaisesRegex(FINISH.Retain, "registration-ambiguous"):
+            self.remove()
+        with FINISH.ledger(self.state) as db:
+            self.assertIsNone(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+        self.assertTrue(self.wt.exists())
+
+    def test_known_absent_sibling_parent_admin_and_backlink_drift_are_not_preserved(self):
+        admin = Path(git(self.legacy, "rev-parse", "--absolute-git-dir"))
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        pointer = self.legacy / ".git"
+        pointer.unlink()
+
+        def capture():
+            return FINISH.sibling_identity(snap, str(self.legacy), time.monotonic() + 30)
+
+        initial = capture()
+        prior = self.base / "prior-admin"
+        admin.rename(prior)
+        shutil.copytree(prior, admin)
+        self.assertNotEqual(capture(), initial)
+        (admin / "commondir").write_text(str(self.base) + "\n")
+        with self.assertRaisesRegex(FINISH.Retain, "backlink-changed"):
+            capture()
+        (admin / "commondir").write_bytes((prior / "commondir").read_bytes())
+        original_root = self.base / "prior-root"
+        self.legacy.rename(original_root)
+        self.legacy.symlink_to(original_root, target_is_directory=True)
+        with self.assertRaises(FINISH.Retain):
+            capture()
+
+    def test_known_absent_sibling_parent_replacement_and_lock_replacement_change_identity(self):
+        parent = self.root / "nested"
+        parent.mkdir()
+        sibling = parent / "absent"
+        git(self.repo, "worktree", "add", "--lock", "--reason", "other owner", "-b", "absent", str(sibling))
+        admin = Path(git(sibling, "rev-parse", "--absolute-git-dir"))
+        shutil.rmtree(sibling)
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+
+        def capture():
+            return FINISH.sibling_identity(snap, str(sibling), time.monotonic() + 30)
+
+        initial = capture()
+        parent.rename(self.base / "prior-parent")
+        parent.mkdir()
+        changed_parent = capture()
+        self.assertNotEqual(changed_parent, initial)
+        lock = admin / "locked"
+        lock.rename(admin / "prior-lock")
+        lock.write_bytes((admin / "prior-lock").read_bytes())
+        self.assertNotEqual(capture(), changed_parent)
+
+    def test_sibling_physical_replacement_retains_unknown_with_actual_delta(self):
+        native = FINISH.safety().supervise
+
+        def replace_sibling(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                prior = self.base / "preserved-sibling"
+                self.legacy.rename(prior)
+                shutil.copytree(prior, self.legacy)
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=replace_sibling):
+            code, rows = self.remove()
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0]["checkout"], "unknown")
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            intent, result = json.loads(item["intent"]), json.loads(item["result"])
+        self.assertFalse(result["siblings_preserved"])
+        self.assertIn({"path": str(self.legacy), "kind": "identity"}, result["sibling_comparison"]["changes"])
+        self.assertNotEqual(intent["sibling_identities"][str(self.legacy)]["path_id"],
+                            result["sibling_identities_after"][str(self.legacy)]["path_id"])
+
+    def test_failed_sibling_readback_keeps_successful_child_and_target_absence_facts(self):
+        capture = FINISH.sibling_identities
+        calls = []
+
+        def unavailable_after(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                raise FINISH.Retain("sibling-readback-unavailable")
+            return capture(*args)
+
+        with mock.patch.object(FINISH, "sibling_identities", side_effect=unavailable_after):
+            code, rows = self.remove()
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0]["checkout"], "unknown")
+        status = self.call("status")[1][0]
+        self.assertEqual(status["checkout"], "unknown")
+        self.assertEqual(status["retirement_state"], "incomplete")
+        self.assertNotEqual(status["reason"], "finalized-task-worktree-removed")
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertEqual(result["reason"], "sibling-readback-unavailable")
+        self.assertEqual(result["child"]["returncode"], 0)
+        self.assertTrue(all(result[key] for key in ("path_absent", "admin_absent", "registration_absent")))
+        self.assertTrue(result["siblings_after"])
+        self.assertNotIn("sibling_identities_after", result)
+
     def test_finalized_evidence_disposal_preserves_branch_and_skips_automatic_policy(self):
         self.artifacts()
         with mock.patch.object(FINISH, "qualified_policy") as policy, \
@@ -1374,6 +2413,638 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.assertIsNone(row["intent"])
             self.assertIsNone(row["inventory"])
             self.assertEqual(row["state"], "removed")
+
+    def test_status_keeps_removed_reason_after_prior_policy_retention(self):
+        with mock.patch.object(FINISH, "qualified_policy", side_effect=FINISH.Retain(
+                "explicit-release-policy-not-installed")):
+            retained = self.finish("--release")[1][0]
+        self.assertEqual(retained["reason"], "explicit-release-policy-not-installed")
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        removed = rows[0]
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            original = dict(row), dict(FINISH.retirement(db, row))
+            self.assertEqual(FINISH.summary(db, row, reason="explicit-refusal")["reason"],
+                             "explicit-refusal")
+        with mock.patch.object(FINISH, "evaluate_release") as evaluate, \
+                mock.patch.object(FINISH, "remove_with_intent") as remove:
+            for options in ((), ("--all",)):
+                with self.subTest(options=options):
+                    code, records = self.call("status", *options)
+                    self.assertEqual(code, 0)
+                    status = next(row for row in records if row["worktree"] == str(self.wt))
+                    self.assertEqual(status["checkout"], "removed")
+                    self.assertEqual(status["reason"], removed["reason"])
+                    self.assertFalse(status["removal_available"])
+        evaluate.assert_not_called()
+        remove.assert_not_called()
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual((dict(row), dict(FINISH.retirement(db, row))), original)
+
+    def test_removed_status_preserves_owner_cancellation(self):
+        cancelled = self.call("cancel", "--reason", "superseded upstream")[1][0]
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        status = self.call("status")[1][0]
+        self.assertEqual(status["checkout"], "removed")
+        self.assertEqual(status["reason"], rows[0]["reason"])
+        self.assertEqual(status["state"], "cancelled")
+        self.assertEqual(status["cancelled_owners"], cancelled["cancelled_owners"])
+
+    def test_finalized_branch_transition_preserves_both_refs_and_enrollment(self):
+        # Keep the checkout available until its PR merges before manual closeout.
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        self.finish()
+        self.proofs[self.url] = self.proof(self.url)
+        with FINISH.ledger(self.state) as db:
+            enrolled = dict(FINISH.get_row(db, self.wt))
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        self.gitlinks()
+        current_head = git(self.wt, "rev-parse", "HEAD")
+        branches = {"released-feature": self.head, "reviewed-current": current_head}
+        reflogs = {branch: self.repo / ".git/logs/refs/heads" / branch for branch in branches}
+        before = {branch: path.read_bytes() for branch, path in reflogs.items()}
+        with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+            self.call("resume")
+        self.artifacts()
+        with mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove(".crabbox")
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        removals = [call.args[0] for call in children.call_args_list
+                    if "worktree" in call.args[0] and "remove" in call.args[0]]
+        self.assertEqual(len(removals), 1)
+        self.assertFalse({"--force", "-f"} & set(removals[0]))
+        for branch, head in branches.items():
+            self.assertEqual(git(self.repo, "rev-parse", branch), head)
+            self.assertEqual(reflogs[branch].read_bytes(), before[branch])
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            for key in ("identity", "finish_head", "primary_pr", "target", "dependencies"):
+                self.assertEqual(row[key], enrolled[key])
+            result = json.loads(FINISH.retirement(db, row)["result"])
+            self.assertEqual(result["child"]["returncode"], 0)
+            self.assertTrue(result["branch_preserved"])
+            self.assertTrue(result["branch_reflog_preserved"])
+            self.assertEqual({branch: proof["head"] for branch, proof in result["preserved_refs_after"].items()},
+                             {"refs/heads/" + branch: head for branch, head in branches.items()})
+
+    def test_fetch_head_removal_preserves_current_and_enrolled_recovery(self):
+        heads, old_tips = {}, []
+        for branch in ("released-feature", "reviewed-current"):
+            if branch == "reviewed-current":
+                git(self.wt, "checkout", "-b", branch)
+            git(self.wt, "commit", "--allow-empty", "-m", "intermediate " + branch)
+            old_tips.append(git(self.wt, "rev-parse", "HEAD"))
+            git(self.wt, "commit", "--amend", "--allow-empty", "-m", "final " + branch)
+            heads[branch] = git(self.wt, "rev-parse", "HEAD")
+        reflogs = {branch: self.repo / ".git/logs/refs/heads" / branch for branch in heads}
+        before = {branch: path.read_bytes() for branch, path in reflogs.items()}
+        for oid in old_tips:
+            self.assertEqual(git(self.repo, "rev-list", oid, "--not", "--all"), oid)
+        (self.admin / "FETCH_HEAD").write_text(
+            heads["released-feature"] + "\t\tbranch 'original' of https://example.test/repo\n"
+            + old_tips[0] + "\tnot-for-merge\tbranch 'old-original' of https://example.test/repo\n"
+            + heads["reviewed-current"] + "\tnot-for-merge\thttps://example.test/repo\\nname\n"
+            + old_tips[1] + "\t\tbranch 'old-current' of https://example.test/repo\tname\rpart\n")
+        with mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        removals = [call.args[0] for call in children.call_args_list
+                    if "worktree" in call.args[0] and "remove" in call.args[0]]
+        self.assertEqual(len(removals), 1)
+        self.assertFalse({"--force", "-f"} & set(removals[0]))
+        for branch, head in heads.items():
+            self.assertEqual(git(self.repo, "rev-parse", branch), head)
+            self.assertEqual(reflogs[branch].read_bytes(), before[branch])
+        for oid in old_tips:
+            self.assertEqual(git(self.repo, "cat-file", "-t", oid), "commit")
+
+    def fetched_target(self, *, recorded=True):
+        if recorded:
+            self.proofs[self.url].update(merged=False, state="open", merge=None)
+            self.assertEqual(self.finish()[1][0]["reason"], "pr-not-merged")
+        else:
+            self.call("cancel", "--reason", "superseded upstream")
+        target = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "target advances")
+        git(self.repo, "update-ref", "refs/heads/main", target, self.head)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo),
+            "refs/heads/main:refs/remotes/origin/main")
+        self.assertEqual(git(self.repo, "rev-list", target, "--not", "released-feature"), target)
+        return target
+
+    def test_finalized_fetch_head_preserves_recorded_target_and_both_task_branches(self):
+        target = self.fetched_target()
+        successor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", target, "-m", "next target")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", successor, target)
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        branches = ("refs/heads/released-feature", "refs/heads/reviewed-current", "refs/remotes/origin/main")
+        before = {branch: (git(self.repo, "rev-parse", branch),
+                           (self.repo / ".git/logs" / branch).read_bytes()) for branch in branches}
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        for branch, (head, reflog) in before.items():
+            self.assertEqual(git(self.repo, "rev-parse", branch), head)
+            self.assertEqual((self.repo / ".git/logs" / branch).read_bytes(), reflog)
+        self.assertEqual(git(self.repo, "cat-file", "-t", target), "commit")
+
+    def test_finalized_fetch_head_target_ref_drift_retains_before_intent(self):
+        target = self.fetched_target()
+        successor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", target, "-m", "next target")
+        lock = (self.admin / "locked").read_bytes()
+        def advance(*args):
+            git(self.repo, "update-ref", "refs/remotes/origin/main", successor, target)
+        with mock.patch.object(FINISH, "manual_holders", side_effect=advance):
+            with self.assertRaisesRegex(FINISH.Retain, "preserved-refs-changed"):
+                self.call("remove", "--finalized")
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "locked").read_bytes(), lock)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def test_finalized_fetch_head_without_recorded_target_retains(self):
+        self.fetched_target(recorded=False)
+        before = (self.admin / "FETCH_HEAD").read_bytes()
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), before)
+
+    def test_finalized_fetch_head_with_missing_recorded_target_retains(self):
+        self.fetched_target()
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        before = (self.admin / "FETCH_HEAD").read_bytes()
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), before)
+
+    def test_finalized_fetch_head_with_locked_recorded_target_retains(self):
+        self.fetched_target()
+        lock = self.repo / ".git/refs/remotes/origin/main.lock"
+        lock.write_text("concurrent writer\n")
+        with self.assertRaisesRegex(FINISH.Retain, "preserved-branch-lock-present"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(lock.read_text(), "concurrent writer\n")
+
+    def test_finalized_fetch_head_does_not_accept_unrecorded_remote_branch(self):
+        self.fetched_target()
+        unrelated = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "unrelated history")
+        git(self.repo, "update-ref", "refs/remotes/origin/other", unrelated)
+        path = self.admin / "FETCH_HEAD"
+        path.write_text(unrelated + "\t\tunrecorded remote branch\n")
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(path.read_text(), unrelated + "\t\tunrecorded remote branch\n")
+
+    def test_empty_fetch_head_requires_explicit_manual_proof(self):
+        (self.admin / "FETCH_HEAD").write_bytes(b"")
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        for kwargs in ({}, {"preserved_oids": None}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
+                    FINISH.safety().admin_inventory(snap, FINISH.git, time.monotonic() + 10, **kwargs)
+        result = FINISH.safety().admin_inventory(
+            snap, FINISH.git, time.monotonic() + 10, preserved_oids=set())
+        self.assertEqual(result["FETCH_HEAD"][1], hashlib.sha256(b"").hexdigest())
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+
+    def test_fetch_head_ancestor_survives_without_direct_reflog_entry(self):
+        ancestor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "ancestor")
+        tip = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", ancestor, "-m", "descendant")
+        git(self.wt, "merge", "--ff-only", tip)
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+        before = reflog.read_bytes()
+        self.assertNotIn(ancestor.encode(), before)
+        (self.admin / "FETCH_HEAD").write_text(ancestor + "\t\tretained ancestor\n")
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), tip)
+        self.assertEqual(reflog.read_bytes(), before)
+        self.assertEqual(git(self.repo, "cat-file", "-t", ancestor), "commit")
+
+    def test_fetch_head_rejects_tag_object_even_when_peeled_commit_is_retained(self):
+        git(self.repo, "tag", "-a", "fetched-tag", self.head, "-m", "tag fixture")
+        tag = git(self.repo, "rev-parse", "fetched-tag")
+        self.assertEqual(git(self.repo, "rev-parse", "fetched-tag^{}"), self.head)
+        path = self.admin / "FETCH_HEAD"
+        data = tag + "\t\tannotated tag\n"
+        path.write_text(data)
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(path.read_text(), data)
+
+    def test_fetch_head_mixed_ancestor_and_unretained_commit_keeps_checkout(self):
+        ancestor = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "ancestor")
+        tip = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", ancestor, "-m", "descendant")
+        unretained = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "unretained")
+        git(self.wt, "merge", "--ff-only", tip)
+        path = self.admin / "FETCH_HEAD"
+        data = ancestor + "\t\tretained ancestor\n" + unretained + "\tnot-for-merge\tunretained\n"
+        path.write_text(data)
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(path.read_text(), data)
+
+    def test_malformed_or_unanchored_fetch_head_preserves_checkout_and_lock(self):
+        unanchored = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "fetched-only recovery")
+        self.assertEqual(git(self.repo, "cat-file", "-t", unanchored), "commit")
+        oid = self.head.encode()
+        valid = oid + b"\t\tbranch 'main' of https://example.test/repo\n"
+        path = self.admin / "FETCH_HEAD"
+        lock = (self.admin / "locked").read_bytes()
+        for data in (
+                unanchored.encode() + b"\t\tunretained commit\n",
+                valid + unanchored.encode() + b"\tnot-for-merge\tunretained commit\n",
+                b"0" * 40 + b"\t\tzero oid\n", oid.upper() + b"\t\tuppercase oid\n",
+                oid[:-1] + b"\t\tshort oid\n", oid + b"\tmerge\tnote\n",
+                oid + b"\tnot-for-merge \tnote\n", oid + b"\t\n",
+                oid + b"  note\n", oid + b"\t\tunterminated", valid + b"\n",
+                oid + b"\t\tnote\0url\n", valid + b"partial"):
+            with self.subTest(data=data):
+                path.write_bytes(data)
+                with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+                    self.remove()
+                self.assertEqual(path.read_bytes(), data)
+                self.assertEqual((self.admin / "locked").read_bytes(), lock)
+                self.assertTrue(self.wt.exists())
+                self.assertTrue(self.legacy.exists())
+                with FINISH.ledger(self.state) as db:
+                    item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                    self.assertEqual(item["state"], "enrolled")
+                    self.assertIsNone(item["intent"])
+
+    def test_fetch_head_drift_after_intent_never_dispatches_removal(self):
+        path = self.admin / "FETCH_HEAD"
+        path.write_text(self.head + "\t\toriginal note\n")
+        admission, calls = FINISH.finalized_admission, []
+
+        def drift(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                path.write_text(self.head + "\t\tchanged note\n")
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+        self.assertFalse(any("worktree" in call.args[0] and ("remove" in call.args[0] or "unlock" in call.args[0])
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+        self.assertEqual(path.read_text(), self.head + "\t\tchanged note\n")
+
+    def resolve_undo_fixture(self):
+        base = git(self.wt, "rev-parse", "HEAD:file")
+        (self.wt / "file").write_text("our change\n")
+        git(self.wt, "commit", "-am", "our change")
+        ours = git(self.wt, "rev-parse", "HEAD:file")
+        (self.repo / "file").write_text("their change\n")
+        git(self.repo, "commit", "-am", "their change")
+        theirs = git(self.repo, "rev-parse", "HEAD:file")
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.wt, "merge", "--no-edit", "main")
+        (self.wt / "file").write_text("resolved change\n")
+        git(self.wt, "add", "file")
+        git(self.wt, "commit", "-m", "resolve conflict")
+        # Keep the native REUC index, but make its stage history reflog-only.
+        squashed = git(self.wt, "commit-tree", "HEAD^{tree}", "-m", "resolve conflict")
+        git(self.wt, "update-ref", "refs/heads/released-feature", squashed)
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.proofs[self.url] = self.proof(self.url)
+        return {"file": [[stage, 0o100644, oid] for stage, oid in enumerate((base, ours, theirs), 1)]}
+
+    def test_resolve_undo_native_removal_records_mapping_and_preserves_blob_roots(self):
+        expected = self.resolve_undo_fixture()
+        current_objects = set(git(self.wt, "rev-list", "--objects", "--no-object-names", self.head).splitlines())
+        self.assertTrue(all(oid not in current_objects for _, _, oid in expected["file"]))
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+        before = reflog.read_bytes()
+        (self.admin / "FETCH_HEAD").write_text(self.head + "\t\tretained resolution\n")
+        intent = []
+        native = FINISH.safety().supervise
+
+        def observe(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                self.assertFalse({"--force", "-f"} & set(command))
+                with contextlib.closing(sqlite3.connect(
+                        (self.state / "lifecycle.sqlite").as_uri() + "?mode=ro", uri=True)) as db:
+                    intent.append(json.loads(db.execute("SELECT intent FROM retirement").fetchone()[0]))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+            code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(len(intent), 1)
+        self.assertEqual(intent[0]["before"]["contents"]["resolve_undo"], expected)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertIsNone(item["intent"])
+            self.assertEqual(json.loads(item["result"])["resolve_undo"], expected)
+        self.assertEqual(reflog.read_bytes(), before)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        for _, _, oid in expected["file"]:
+            self.assertEqual(git(self.repo, "cat-file", "-t", oid), "blob")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+
+    def test_resolve_undo_release_mapping_cannot_disappear_before_automatic_retry(self):
+        self.resolve_undo_fixture()
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        result = self.finish("--release")[1][0]
+        self.assertEqual(result["automatic_handoff"]["baseline"], "ready", result)
+        git(self.wt, "update-index", "--clear-resolve-undo")
+        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+        self.assertEqual(self.call("check", "--apply")[1][0]["reason"], "released-worktree-changed")
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        self.assertTrue(self.wt.exists())
+
+    def write_resolve_undo(self, entries):
+        git(self.wt, "update-index", "--clear-resolve-undo")
+        path = self.admin / "index"
+        payload = b""
+        for name, stages in entries.items():
+            by_stage = {stage: (mode, oid) for stage, mode, oid in stages}
+            payload += os.fsencode(name) + b"\0"
+            payload += b"".join(format(by_stage.get(stage, (0, None))[0], "o").encode() + b"\0"
+                                for stage in (1, 2, 3))
+            payload += b"".join(bytes.fromhex(by_stage[stage][1]) for stage in (1, 2, 3) if stage in by_stage)
+        body = path.read_bytes()[:-20] + b"REUC" + struct.pack(">I", len(payload)) + payload
+        path.write_bytes(body + hashlib.sha1(body).digest())
+
+    def test_resolve_undo_requires_blobs_at_exact_literal_path_from_commit_roots(self):
+        blob = git(self.wt, "rev-parse", "HEAD:file")
+        tree = git(self.wt, "rev-parse", "HEAD^{tree}")
+        unanchored = FINISH.git(self.wt, "hash-object", "-w", "--stdin", input_data=b"unanchored recovery\n")
+        (self.wt / "nested").mkdir()
+        (self.wt / "nested/file").write_text("only below directory\n")
+        git(self.wt, "add", "nested/file")
+        git(self.wt, "commit", "-m", "nested history")
+        nested = git(self.wt, "rev-parse", "HEAD:nested/file")
+        head = git(self.wt, "rev-parse", "HEAD")
+        lock = (self.admin / "locked").read_bytes()
+        for name, oid, reason in (
+                ("file", self.head, "object-type-or-missing"),
+                ("file", tree, "object-type-or-missing"),
+                ("file", "a1" * 20, "object-type-or-missing"),
+                ("file", unanchored, "recovery-required"),
+                ("[f]ile", blob, "recovery-required"),
+                ("nested", nested, "recovery-required"),
+                ("other", blob, "recovery-required")):
+            self.write_resolve_undo({name: [[2, 0o100644, oid]]})
+            before = (self.admin / "index").read_bytes()
+            with self.subTest(name=name, oid=oid), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.remove()
+            self.assertEqual((self.admin / "index").read_bytes(), before)
+            self.assertEqual((self.admin / "locked").read_bytes(), lock)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
+        self.write_resolve_undo({"file": [[2, 0o100644, blob]]})
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        for roots in ({blob}, set(), {head, tree}):
+            with self.subTest(roots=roots), self.assertRaisesRegex(
+                    FINISH.Retain, "resolve-undo-object-type-or-missing|resolve-undo-recovery-required"):
+                FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 10, preserved_oids=roots)
+
+    def test_resolve_undo_missing_stages_and_literal_unusual_path_survive_native_removal(self):
+        name = "[literal]\nname"
+        (self.wt / name).write_text("retained stage\n")
+        (self.wt / "executable").write_text("retained executable\n")
+        (self.wt / "executable").chmod(0o755)
+        (self.wt / "link").symlink_to(name)
+        git(self.wt, "add", name, "executable", "link")
+        git(self.wt, "commit", "-m", "literal path and modes")
+        expected = {path: [[2, mode, git(self.wt, "rev-parse", "HEAD:" + path)]]
+                    for path, mode in ((name, 0o100644), ("executable", 0o100755), ("link", 0o120000))}
+        self.write_resolve_undo(expected)
+        code, rows = self.remove()
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        for stages in expected.values():
+            self.assertEqual(git(self.repo, "cat-file", "-t", stages[0][2]), "blob")
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(json.loads(item["result"])["resolve_undo"], expected)
+
+    def test_resolve_undo_index_drift_after_intent_never_unlocks(self):
+        expected = self.resolve_undo_fixture()
+        admission, calls = FINISH.finalized_admission, []
+
+        def drift(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                self.write_resolve_undo({"file": expected["file"][:1]})
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+        self.assertFalse(any("worktree" in call.args[0] and ("remove" in call.args[0] or "unlock" in call.args[0])
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+        with FINISH.ledger(self.state) as db:
+            intent = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+            self.assertEqual(intent["before"]["contents"]["resolve_undo"], expected)
+
+    def test_resolve_undo_reflog_drift_during_admission_retains_before_intent(self):
+        self.resolve_undo_fixture()
+        index = (self.admin / "index").read_bytes()
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+
+        def drift(*args):
+            reflog.write_bytes(reflog.read_bytes() + reflog.read_bytes().splitlines(keepends=True)[-1])
+
+        with mock.patch.object(FINISH, "manual_holders", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "preserved-refs-changed"):
+                self.call("remove", "--finalized")
+        self.assertEqual((self.admin / "index").read_bytes(), index)
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def test_resolve_undo_git_diagnostics_failed_or_malformed_proofs_retain(self):
+        self.resolve_undo_fixture()
+        before = (self.admin / "index").read_bytes()
+        native = FINISH.safety().supervise
+        for query in ("cat-file", "rev-list"):
+            for fault in ("warning", "nonzero", "partial"):
+                def faulty(command, **kwargs):
+                    result = native(command, **kwargs)
+                    if query in command and "--no-replace-objects" in command:
+                        if fault == "warning":
+                            result.stderr = b"warning: incomplete object evidence\n"
+                        elif fault == "nonzero":
+                            result.returncode = 1
+                        else:
+                            result.stdout = result.stdout[:-1]
+                    return result
+
+                with self.subTest(query=query, fault=fault), \
+                        mock.patch.object(FINISH.safety(), "supervise", side_effect=faulty):
+                    with self.assertRaisesRegex(FINISH.Retain, "git-diagnostic|git-failed|resolve-undo"):
+                        self.remove()
+                self.assertEqual((self.admin / "index").read_bytes(), before)
+                self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+                with FINISH.ledger(self.state) as db:
+                    item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                    self.assertEqual(item["state"], "enrolled")
+                    self.assertIsNone(item["intent"])
+
+    def test_resolve_undo_git_deadline_and_output_limit_reap_owned_probe(self):
+        self.resolve_undo_fixture()
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        roots = {self.head, git(self.wt, "rev-parse", "released-feature@{1}")}
+        native = FINISH.safety().supervise
+        before = (self.admin / "index").read_bytes()
+        for query in ("cat-file", "rev-list"):
+            for fault, script in (
+                    ("deadline", "import sys, time; sys.stdin.buffer.read(); time.sleep(30)"),
+                    ("output", "import sys; sys.stdin.buffer.read(); sys.stdout.write('x' * (2 * 1024 * 1024))")):
+                probes = []
+
+                def oversized(command, **kwargs):
+                    if query in command and "--no-replace-objects" in command:
+                        result = native([sys.executable, "-I", "-c", script], **kwargs)
+                        probes.append(result)
+                        return result
+                    return native(command, **kwargs)
+
+                started = time.monotonic()
+                with self.subTest(query=query, fault=fault), \
+                        mock.patch.object(FINISH.safety(), "supervise", side_effect=oversized):
+                    with self.assertRaisesRegex(FINISH.Retain, "git-failed"):
+                        FINISH.safety().inventory(snap, FINISH.git, started + 0.5, preserved_oids=roots)
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertEqual(len(probes), 1)
+                self.assertIsNotNone(probes[0].failure)
+                self.assertTrue(probes[0].proof["reaped"])
+                self.assertTrue(probes[0].proof["group_absent"])
+                self.assertEqual((self.admin / "index").read_bytes(), before)
+                self.assertTrue((self.admin / "locked").exists())
+
+    def test_branch_or_head_drift_after_manual_binding_retains_before_intent(self):
+        for change in ("branch", "head"):
+            git(self.wt, "checkout", "-b", "reviewed-" + change)
+
+            def drift():
+                if change == "branch":
+                    git(self.wt, "checkout", "-b", "unexpected-branch")
+                else:
+                    git(self.wt, "commit", "--allow-empty", "-m", "unexpected work")
+
+            with self.subTest(change=change), mock.patch.object(FINISH, "storage_guard", side_effect=drift):
+                with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed|finalized-head-changed"):
+                    self.remove()
+            self.assertTrue(self.wt.exists())
+            self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
+
+    def test_head_drift_after_intent_never_dispatches_removal(self):
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        admission, calls = FINISH.finalized_admission, []
+
+        def drift(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                git(self.wt, "commit", "--allow-empty", "-m", "unexpected work")
+            return admission(*args)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "finalized-head-changed")
+        self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+        with FINISH.ledger(self.state) as db:
+            intent = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+        self.assertEqual(set(intent["before"]["preserved_refs"]),
+                         {"refs/heads/released-feature", "refs/heads/reviewed-current"})
+
+    def test_original_ref_drift_during_admission_retains_before_intent(self):
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        git(self.wt, "commit", "--allow-empty", "-m", "reviewed work")
+        head = git(self.wt, "rev-parse", "HEAD")
+        (self.admin / "FETCH_HEAD").write_text(self.head + "\t\toriginal ref\n")
+        with mock.patch.object(FINISH, "manual_holders", side_effect=lambda *args:
+                               git(self.repo, "update-ref", "refs/heads/released-feature", head)):
+            with self.assertRaisesRegex(FINISH.Retain, "preserved-refs-changed"):
+                self.call("remove", "--finalized")
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+
+    def original_ref_drift_after_removal(self, change):
+        native = FINISH.safety().supervise
+        enrolled_branch = git(self.wt, "symbolic-ref", "HEAD")
+        git(self.wt, "checkout", "-b", "reviewed-current")
+        git(self.wt, "commit", "--allow-empty", "-m", "reviewed work")
+        head = git(self.wt, "rev-parse", "HEAD")
+        reflog = self.repo / ".git/logs" / enrolled_branch
+
+        def drift(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                if change == "ref":
+                    git(self.repo, "update-ref", enrolled_branch, head)
+                else:
+                    with reflog.open("ab") as stream:
+                        stream.write(reflog.read_bytes().splitlines(keepends=True)[-1])
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=drift):
+            code, rows = self.remove()
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0]["checkout"], "unknown")
+        self.assertEqual(rows[0]["retirement_state"], "incomplete")
+        self.assertFalse(self.wt.exists())
+        with FINISH.ledger(self.state) as db:
+            result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertFalse(result["branch_preserved" if change == "ref" else "branch_reflog_preserved"])
+
+    def test_original_ref_drift_after_removal_is_unknown(self):
+        self.original_ref_drift_after_removal("ref")
+
+    def test_original_reflog_drift_after_removal_is_unknown(self):
+        self.original_ref_drift_after_removal("reflog")
 
     def test_finalized_device_renumbering_removes_artifacts_without_rebinding_ledger(self):
         self.artifacts()
@@ -1406,10 +3077,14 @@ class FinalizedRemovalTests(unittest.TestCase):
         changes += [{key: value + "-changed"} for key, value in current.items()
                     if key not in (*identities, "head")]
         changes.append({"gitdir_id": [current["gitdir_id"][0] + 2, current["gitdir_id"][1]]})
-        for change in changes:
-            with self.subTest(change=change), mock.patch.object(FINISH, "snapshot", return_value={**current, **change}):
-                with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
-                    FINISH.revalidate(row, allow_device_renumbering=True)
+        for allow_branch_change in (False, True):
+            for change in changes:
+                if allow_branch_change and "branch" in change:
+                    continue
+                with self.subTest(change=change, branch=allow_branch_change), \
+                        mock.patch.object(FINISH, "snapshot", return_value={**current, **change}):
+                    with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+                        FINISH.revalidate(row, allow_device_renumbering=True, allow_branch_change=allow_branch_change)
         recorded["gitdir_id"][0] += 1  # Distinct old devices cannot collapse onto one current device.
         row["identity"] = json.dumps(recorded)
         with mock.patch.object(FINISH, "snapshot", return_value=current):
@@ -1514,6 +3189,53 @@ class FinalizedRemovalTests(unittest.TestCase):
             with self.assertRaisesRegex(FINISH.Retain, "intent"):
                 self.remove()
         self.assertEqual(len(attempts), 1)
+
+    def test_inline_holder_errors_and_linux_records_preserve_intent_and_lock(self):
+        native = FINISH.safety().supervise
+        lookup = shutil.which
+        lock = (self.admin / "locked").read_bytes()
+        for record, sudo, reason in (
+                (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", False, "visibility-unknown"),
+                (b"fcwd\0n/proc/7/cwd (readlink: Permission denied)", False, "visibility-unknown"),
+                (b"fmem\0n/proc/7/maps (fopen: Permission denied)", False, "visibility-unknown"),
+                (b"ftxt\0n/proc/7/exe\0\n"
+                 b"f0\0n/proc/7/fd/0 (readlink: No such file or directory)\0\n"
+                 b"fmem\0D0x8\0i22\0n/elsewhere (stat: No such file or directory)\0\n"
+                 b"p8\0\nf3\0n" + os.fsencode(self.wt / "file"), True, "pending-departure"),
+                (b"ftxt\0n/proc/7/exe\0\n"
+                 b"f3\0n/proc/7/task/11/fd/3 (readlink: No such file or directory)\0\n"
+                 b"fmem\0D0x8\0i22\0n" + os.fsencode(self.admin)
+                 + b" (stat: No such file or directory)", True, "pending-departure"),
+                (b"ftxt\0n/proc/7/exe\0\n"
+                 b"f3\0n/proc/7/fd/3 (readlink: No such file or directory)\0\n"
+                 b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", True, "visibility-unknown")):
+            def observe(command, **kwargs):
+                if command[0] in ("/fixture/lsof", "/fixture/sudo"):
+                    return types.SimpleNamespace(
+                        stdout=b"p7\0\n" + record + b"\0\n", stderr=b"",
+                        returncode=0, failure=None)
+                return native(command, **kwargs)
+
+            with self.subTest(record=record), \
+                    mock.patch.object(FINISH.sys, "platform", "linux"), \
+                    mock.patch.object(FINISH, "trusted_holder_binary",
+                                      side_effect=lambda name: "/fixture/" + name), \
+                    mock.patch.object(FINISH.shutil, "which", side_effect=lambda name:
+                                      "/fixture/lsof" if name == "lsof" else lookup(name)), \
+                    mock.patch.object(FINISH.safety(), "supervise", side_effect=observe) as child:
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.call("remove", "--finalized", *(["--sudo-holder-scan"] if sudo else []))
+                self.assertFalse(any("worktree" in call.args[0]
+                                     and ("remove" in call.args[0] or "unlock" in call.args[0])
+                                     for call in child.call_args_list))
+            self.assertEqual((self.admin / "locked").read_bytes(), lock)
+            self.assertEqual((self.wt / "file").read_text(), "original\n")
+            self.assertTrue(self.legacy.exists())
+            self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
 
     def assert_incomplete_locked(self, code, rows):
         self.assertEqual(code, 1, rows)
@@ -1662,6 +3384,96 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
         self.assertFalse(self.wt.exists())
 
+    def test_wrapper_forwards_sudo_only_to_finalized_helper(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; '
+                  'gwt "$4" "$3" "$5" --sudo-holder-scan')
+        command = ["zsh", "-f", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"),
+                   str(self.repo), str(self.wt)]
+        for action, option in (("rm", ""), ("rm", "--force"), ("finish", "--finalized"),
+                               ("root", "--finalized")):
+            result = subprocess.run([*command, action, option], env=env, capture_output=True,
+                                    text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0, (action, option, result.stdout))
+            self.assertNotIn("remove\n", result.stdout)
+        result = subprocess.run([*command, "rm", "--finalized"], env=env, capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "remove", "--worktree", str(self.wt), "--finalized", "--sudo-holder-scan"])
+        self.assertTrue(self.wt.exists())
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_sudo_scan_does_not_elevate_git_or_lifecycle_and_preserves_admission_guards(self):
+        native = FINISH.safety().supervise
+        commands, scans = [], []
+        uid = os.geteuid()
+
+        def observe(command, **kwargs):
+            self.assertEqual(os.geteuid(), uid)
+            commands.append(command)
+            if command[0] == "/fixture/sudo":
+                scans.append((command, kwargs))
+                return types.SimpleNamespace(
+                    stdout=b"p7\0\nf3\0D0x8\0i22\0n/elsewhere\0\n", stderr=b"",
+                    returncode=0, failure=None, proof={"pid": 123})
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.sys, "platform", "linux"), \
+                mock.patch.object(FINISH, "trusted_holder_binary", side_effect=lambda name: "/fixture/" + name), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+            (self.wt / "file").write_text("unfinished\n")
+            with self.assertRaisesRegex(FINISH.Retain, "dirty-or-untracked"):
+                self.call("remove", "--finalized", "--sudo-holder-scan")
+            self.assertFalse(scans)
+            git(self.wt, "restore", "file")
+            code, rows = self.call("remove", "--finalized", "--sudo-holder-scan")
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(rows[0]["checkout"], "removed")
+        self.assertEqual(len(scans), 2)
+        for command, kwargs in scans:
+            self.assertEqual(command, [
+                "/fixture/sudo", "-n", "-u", "#0", "--", "/fixture/lsof", "-nP", "+w", "-F0pfnDi"])
+            self.assertTrue(kwargs["sudo_monitor"])
+            self.assertLessEqual(kwargs["deadline"], FINISH.safety().DEADLINE)
+        self.assertTrue(any("worktree" in command and "remove" in command
+                            and command[0] != "/fixture/sudo" for command in commands))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
+    def test_sudo_failure_or_incomplete_visibility_stops_before_intent_or_unlock(self):
+        native = FINISH.safety().supervise
+        for code, failure, stdout, reason in (
+                (1, None, b"", "sudo-holder-scan-failed"),
+                (0, "TimeoutExpired", b"", "sudo-holder-scan-termination-unknown"),
+                (0, None, b"p7\0\nfNOFD\0n/proc/7/fd (opendir: Permission denied)\0\n",
+                 "manual-holder-visibility-unknown")):
+            commands = []
+
+            def observe(command, **kwargs):
+                commands.append(command)
+                if command[0] == "/fixture/sudo":
+                    return types.SimpleNamespace(stdout=stdout, stderr=b"", returncode=code,
+                                                 failure=failure, proof={"pid": 123})
+                return native(command, **kwargs)
+
+            with self.subTest(reason=reason), \
+                    mock.patch.object(FINISH.sys, "platform", "linux"), \
+                    mock.patch.object(FINISH, "trusted_holder_binary",
+                                      side_effect=lambda name: "/fixture/" + name), \
+                    mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.call("remove", "--finalized", "--sudo-holder-scan")
+            self.assertEqual(sum(command[0] == "/fixture/sudo" for command in commands), 1)
+            self.assertFalse(any("worktree" in command and ("unlock" in command or "remove" in command)
+                                 for command in commands))
+            self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+            with FINISH.ledger(self.state) as db:
+                item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+                self.assertEqual(item["state"], "enrolled")
+                self.assertIsNone(item["intent"])
+
     @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
     def test_native_holder_scan_detects_an_open_file(self):
         snap = {"path": str(self.wt), "gitdir": str(self.admin)}
@@ -1678,26 +3490,182 @@ class ManualHolderTests(unittest.TestCase):
                                      "node_modules": [9, 24, FINISH.stat.S_IFLNK]}}
         self.admin = {"index": [[9, 23, FINISH.stat.S_IFREG], None]}
 
-    def observe(self, output, *, errors=b"", code=0, failure=None):
+    def observe(self, output, *, errors=b"", code=0, failure=None, sudo=False, platform="linux"):
         result = types.SimpleNamespace(stdout=output, stderr=errors, returncode=code, failure=failure)
-        with mock.patch.object(FINISH.shutil, "which", return_value="/usr/sbin/lsof"), \
+        with mock.patch.object(FINISH.sys, "platform", platform), \
+                mock.patch.object(FINISH, "trusted_holder_binary",
+                                  side_effect=["/usr/bin/sudo", "/usr/sbin/lsof"]), \
+                mock.patch.object(FINISH.shutil, "which", return_value="/usr/sbin/lsof"), \
                 mock.patch.object(FINISH.safety(), "supervise", return_value=result) as child:
             try:
-                FINISH.manual_holders(self.snap, self.contents, self.admin, float("inf"))
+                FINISH.manual_holders(self.snap, self.contents, self.admin, float("inf"),
+                                      sudo_holder_scan_enabled=sudo)
             finally:
                 self.assertEqual(child.call_count, 1)
-                self.assertEqual(child.call_args.args[0], ["/usr/sbin/lsof", "-nP", "+w", "-F0pfnDi"])
+                prefix = ["/usr/bin/sudo", "-n", "-u", "#0", "--"] if sudo else []
+                self.assertEqual(child.call_args.args[0], prefix + ["/usr/sbin/lsof", "-nP", "+w", "-F0pfnDi"])
                 self.assertEqual(child.call_args.kwargs["limit"], 32 * 1024 * 1024)
+
+    def test_linux_root_absence_is_one_record_not_process_clearance(self):
+        for absent in (b"ftxt\0n/proc/7/exe",
+                       b"f0\0n/proc/7/fd/0 (readlink: No such file or directory)",
+                       b"f3\0n/proc/7/fd/3 (readlink: No such file or directory)",
+                       b"f12345\0n/proc/7/fd/12345 (readlink: No such file or directory)",
+                       b"f27\0n/proc/7/task/11/fd/27 (readlink: No such file or directory)",
+                       b"f0\0n/proc/7/task/12345/fd/0 (readlink: No such file or directory)"):
+            output = b"p7\0\n" + absent + b"\0\n"
+            with self.subTest(absent=absent):
+                self.observe(output, sudo=True)
+            for record, reason in (
+                    (b"f3\0D0x9\0i22\0n/external/hardlink", "pending-departure"),
+                    (b"fcwd\0D0x8\0i22\0n/fixture/admin", "pending-departure"),
+                    (b"fmem\0D0x9\0i23\0n/external/admin-alias", "pending-departure"),
+                    (b"p8\0\nf3\0n/fixture/worktree/file", "pending-departure"),
+                    (b"fNOFD\0n/proc/7/fd (opendir: Permission denied)", "visibility-unknown"),
+                    (b"f3\0n/elsewhere (stat: Permission denied)", "visibility-unknown")):
+                with self.subTest(absent=absent, record=record):
+                    with self.assertRaisesRegex(FINISH.Retain, reason):
+                        self.observe(output + record + b"\0\n", sudo=True)
+
+    def test_linux_root_absence_requires_exact_record_and_privilege(self):
+        records = [
+                b"ftxt\0n/proc/8/exe", b"ftxt\0n/proc/07/exe", b"ftxt\0n/proc/7/exe/other",
+                b"ftxt\0n/proc/7/../7/exe", b"ftxt\0n/elsewhere/exe",
+                b"ftxt\0D0x8\0n/proc/7/exe", b"ftxt\0i22\0n/proc/7/exe",
+                b"ftxt\0n/proc/7/exe (readlink: No such file or directory)",
+                b"ftxt\0n/proc/7/exe (stat: Permission denied)",
+                b"ftxt\0n/proc/7/exe\0xextra", b"ftxt\0n/proc/7/exe\0n/proc/7/exe",
+                b"fcwd\0n/proc/7/exe", b"fmem\0n/proc/7/exe",
+                b"p8\0\nftxt\0n/proc/7/exe"]
+        missing = b" (readlink: No such file or directory)"
+        valid_fd = b"f3\0n/proc/7/fd/3" + missing
+        records += [b"f3\0n" + path + missing for path in (
+            b"/proc/8/fd/3", b"/proc/07/fd/3", b"/proc/7/fd/4", b"/proc/7/fd/03",
+            b"/proc/7/fd/3/other", b"/proc/7/fd/../fd/3", b"/elsewhere/3")]
+        records += [b"f" + fd + b"\0n/proc/7/fd/" + fd + missing
+                    for fd in (b"00", b"03", b"+3", b"-1", b"3u", b"*003", b"fp.")]
+        records += [b"f3\0" + fields + b"n/proc/7/fd/3" + missing for fields in (
+            b"D0x8\0", b"i22\0", b"D0x8\0i22\0", b"Dinvalid\0", b"iinvalid\0", b"D\0")]
+        records += [b"f3\0n/proc/7/fd/3" + error for error in (
+            b" (readlink: Permission denied)", b" (readlink: Input/output error)",
+            b" (stat: No such file or directory)", missing + b" extra", missing + missing)]
+        records += [valid_fd + b"\0xextra", valid_fd + b"\0n/proc/7/fd/3" + missing,
+                    b"p8\0\n" + valid_fd]
+        records += [record.replace(b"/fd/", b"/task/11/fd/") for record in records if b"/fd/" in record]
+        records += [b"f3\0n/proc/7/task/" + tid + b"/fd/3" + missing
+                    for tid in (b"0", b"01", b"+11", b"-11", b"", b"11/extra", b"11/task/12")]
+        for record in records:
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\n" + record + b"\0\n", sudo=True)
+        for platform, sudo in (("linux", False), ("darwin", False), ("freebsd14", False)):
+            for record in (b"ftxt\0n/proc/7/exe", valid_fd, b"f0\0n/proc/7/fd/0" + missing,
+                           b"f3\0n/proc/7/task/11/fd/3" + missing):
+                with self.subTest(platform=platform, sudo=sudo, record=record):
+                    with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                        self.observe(b"p7\0\n" + record + b"\0\n", platform=platform, sudo=sudo)
+
+    def test_linux_mem_enoent_retains_inode_and_deannotated_path_matching(self):
+        self.contents["discarded_inodes"] = [[9, 25]]
+        for sudo in (False, True):
+            prefix = b"p7\0\n" + (b"ftxt\0n/proc/7/exe\0\n" if sudo else b"")
+            with self.subTest(sudo=sudo):
+                self.observe(prefix + b"fmem\0D0x8\0i22\0n/elsewhere"
+                             b" (stat: No such file or directory)\0\n", sudo=sudo)
+            for identity, name in (
+                    (b"D0x9\0i22", b"/external/checkout-alias"),
+                    (b"D0x9\0i23", b"/external/admin-alias"),
+                    (b"D0x9\0i25", b"/external/discarded-alias"),
+                    (b"D0x8\0i22", b"/fixture/worktree"),
+                    (b"D0x8\0i22", b"/fixture/worktree/file"),
+                    (b"D0x8\0i22", b"/fixture/admin"),
+                    (b"D0x8\0i22", b"/fixture/admin/index")):
+                with self.subTest(sudo=sudo, identity=identity, name=name):
+                    with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                        self.observe(prefix + b"fmem\0" + identity + b"\0n" + name
+                                     + b" (stat: No such file or directory)\0\n", sudo=sudo)
+
+    def test_mem_enoent_requires_linux_complete_identity_and_single_terminal_error(self):
+        for descriptor, identity, name in (
+                (b"mem", b"", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"Dinvalid\0i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0iinvalid\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"txt", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"3", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (stat: Permission denied)"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory) extra"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (stat: No such file or directory)"
+                 b" (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0i22\0", b"/elsewhere (readlink: Permission denied)"
+                 b" (stat: No such file or directory)"),
+                (b"mem", b"D0x8\0i22\0", b" (stat: No such file or directory)")):
+            with self.subTest(descriptor=descriptor, identity=identity, name=name):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\nf" + descriptor + b"\0" + identity + b"n" + name + b"\0\n",
+                                 sudo=True)
+        for platform in ("darwin", "freebsd14"):
+            with self.subTest(platform=platform):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\nfmem\0D0x8\0i22\0n/elsewhere"
+                                 b" (stat: No such file or directory)\0\n", platform=platform)
 
     def test_no_matching_holders_accepts_optional_fields_and_preserves_symlink_targets(self):
         self.observe(b"p7\0\nf3\0D0x9\0i24\0n/shared/dependencies\0\n"
                      b"f4\0n/fixture/worktree-other/file\0\nf5\0nTCP localhost:80\0\n"
                      b"f6\0D0x8\0i22\0n/elsewhere/name\nwith-newline\0\nf7\0n\0\n")
 
+    def test_known_descriptors_with_file_identity_and_optional_names_are_accepted(self):
+        for descriptor in (b"0", b"12345", b"*001", b"cwd", b"rtd", b"twd", b"txt", b"ltx",
+                           b"mem", b"mmap", b"DEL", b"ctty", b"jld", b"pd",
+                           b"m86", b"v86", b"fp.", b"L12", b"M1a", b"R12", b"tr"):
+            with self.subTest(descriptor=descriptor):
+                self.observe(b"p7\0\nf" + descriptor + b"\0D0x8\0i22\0\n")
+
+    def test_numeric_and_fileport_non_files_can_omit_identity(self):
+        for descriptor in (b"0", b"*001", b"fp."):
+            with self.subTest(descriptor=descriptor):
+                self.observe(b"p7\0\nf" + descriptor + b"\0n\0\n")
+
+    def test_zero_exit_error_and_unrecognized_descriptors_remain_unknown(self):
+        for descriptor in (b"NOFD", b"err", b"unk", b"unknown", b"arbitrary", b"-1",
+                           b"3u", b"*01", b"fp.3", b"Mxx", b"Rxx"):
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\nf3\0D0x8\0i22\0n/elsewhere\0\n"
+                                 b"f" + descriptor + b"\0D0x8\0i23\0n/elsewhere\0\n")
+
+    def test_zero_exit_inline_visibility_errors_remain_unknown(self):
+        for record in (
+                b"fNOFD\0n/proc/7/fd (opendir: Permission denied)",
+                b"fcwd\0n/proc/7/cwd (readlink: Permission denied)",
+                b"frtd\0n/proc/7/root (readlink: Permission denied)",
+                b"ftxt\0n/proc/7/exe (readlink: Permission denied)",
+                b"fmem\0n/proc/7/maps (fopen: Permission denied)",
+                b"f3\0n/proc/7/fd/3 (readlink: Permission denied)",
+                b"f3\0n/elsewhere (stat: Permission denied)",
+                b"fmem\0D0x8\0i22\0n/elsewhere (stat: Permission denied)"):
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                    self.observe(b"p7\0\n" + record + b"\0\n")
+
+    def test_name_only_or_partial_pseudo_descriptor_identity_remains_unknown(self):
+        for descriptor in (b"cwd", b"rtd", b"txt", b"mem", b"DEL", b"M1a", b"tr"):
+            for identity in (b"", b"D0x8\0", b"i22\0"):
+                with self.subTest(descriptor=descriptor, identity=identity):
+                    with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                        self.observe(b"p7\0\nf" + descriptor + b"\0" + identity
+                                     + b"n/elsewhere\0\n")
+
     def test_inode_aliases_checkout_and_admin_cwd_and_fd_names_block(self):
         for record in (b"f3\0D0x9\0i22\0n/elsewhere/hardlink",
                        b"f4\0D0x9\0i23\0n/elsewhere/admin-alias",
-                       b"fcwd\0n/fixture/worktree", b"fcwd\0n/fixture/admin",
+                       b"fcwd\0D0x8\0i22\0n/fixture/worktree",
+                       b"fcwd\0D0x8\0i23\0n/fixture/admin",
+                       b"fmem\0D0x9\0i22\0n/elsewhere/mapping-alias",
+                       b"ftr\0D0x9\0i22\0n/elsewhere/trace-alias",
+                       b"ftxt\0D0x8\0i22\0n/fixture/worktree/file",
                        b"f5\0n/fixture/worktree/file", b"f6\0n/fixture/admin/index",
                        b"f7\0n/fixture/worktree/nested/name\nwith-newline"):
             with self.subTest(record=record):
@@ -1731,6 +3699,270 @@ class ManualHolderTests(unittest.TestCase):
                     self.observe(output)
 
 
+class SudoHolderTests(unittest.TestCase):
+    def setUp(self):
+        platform = mock.patch.object(FINISH.sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+
+    def result(self, *, code=0, failure=None, pid=123, output=None, errors=b""):
+        return types.SimpleNamespace(
+            returncode=code, failure=failure, proof={"pid": pid},
+            stdout=b"p7\0\nf3\0D0x8\0i22\0n/elsewhere\0\n" if output is None else output,
+            stderr=errors)
+
+    def test_fixed_argv_minimal_environment_and_scoped_supervision(self):
+        with mock.patch.object(FINISH, "trusted_holder_binary",
+                               side_effect=["/usr/bin/sudo", "/usr/bin/lsof"]) as trust, \
+                mock.patch.object(FINISH.safety(), "supervise", return_value=self.result()) as child, \
+                mock.patch.object(FINISH, "run") as ordinary:
+            FINISH.sudo_holder_scan(float("inf"))
+        self.assertEqual(trust.call_args_list, [mock.call("sudo"), mock.call("lsof")])
+        child.assert_called_once_with(
+            ["/usr/bin/sudo", "-n", "-u", "#0", "--", "/usr/bin/lsof", "-nP", "+w", "-F0pfnDi"],
+            cwd="/", env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"},
+            limit=32 * 1024 * 1024, sudo_monitor=True, deadline=float("inf"))
+        ordinary.assert_not_called()
+
+    def test_auth_failure_spawn_failure_and_uncertain_termination_never_fall_back(self):
+        for result, reason in (
+                (self.result(code=1, errors=b"sudo: a password is required\n"), "scan-failed"),
+                (self.result(code=None, failure="OSError", pid=None), "scan-failed"),
+                (self.result(code=0, failure="TimeoutExpired"), "termination-unknown"),
+                (self.result(code=0, failure="Retain"), "termination-unknown")):
+            with self.subTest(reason=reason, result=result), \
+                    mock.patch.object(FINISH, "trusted_holder_binary", return_value="/usr/bin/tool"), \
+                    mock.patch.object(FINISH.safety(), "supervise", return_value=result) as child, \
+                    mock.patch.object(FINISH, "run") as ordinary:
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    FINISH.sudo_holder_scan(float("inf"))
+                child.assert_called_once()
+                ordinary.assert_not_called()
+
+    def test_trust_failure_precedes_any_process(self):
+        with mock.patch.object(FINISH, "trusted_holder_binary",
+                               side_effect=FINISH.Retain("sudo-holder-scan-untrusted-path")), \
+                mock.patch.object(FINISH.safety(), "supervise") as child:
+            with self.assertRaisesRegex(FINISH.Retain, "untrusted-path"):
+                FINISH.sudo_holder_scan(float("inf"))
+        child.assert_not_called()
+
+    def test_non_linux_rejects_before_trust_ledger_or_process_access(self):
+        for platform in ("darwin", "win32", "freebsd14"):
+            with self.subTest(platform=platform), mock.patch.object(FINISH.sys, "platform", platform), \
+                    mock.patch.object(FINISH, "trusted_holder_binary") as trust, \
+                    mock.patch.object(FINISH, "ledger") as ledger, \
+                    mock.patch.object(FINISH.safety(), "supervise") as child:
+                with self.assertRaisesRegex(FINISH.Retain, "requires-linux"):
+                    FINISH.sudo_holder_scan(float("inf"))
+                with self.assertRaisesRegex(FINISH.Retain, "requires-linux"):
+                    FINISH.main(["remove", "--finalized", "--sudo-holder-scan"])
+                trust.assert_not_called()
+                ledger.assert_not_called()
+                child.assert_not_called()
+
+    def test_flag_misuse_refuses_before_ledger_or_process_access(self):
+        for args in (["remove"], ["finish"], ["release"], ["cancel"], ["check", "--apply"],
+                     ["status"], ["guard"], ["reconcile"], ["enroll"], ["creation-token"],
+                     ["holder-qualification"], ["resume"], ["remove", "--finalized", "--all"]):
+            with self.subTest(args=args), mock.patch.object(FINISH, "ledger") as ledger, \
+                    mock.patch.object(FINISH.safety(), "supervise") as child:
+                with self.assertRaisesRegex(FINISH.Retain, "requires-manual-finalized|one-explicit"):
+                    FINISH.main([*args, "--sudo-holder-scan"])
+                ledger.assert_not_called()
+                child.assert_not_called()
+
+    def test_elevated_scan_keeps_all_visibility_and_holder_rejections(self):
+        snap = {"path": "/fixture/worktree", "gitdir": "/fixture/admin"}
+        contents = {"entries": {"file": [9, 22, FINISH.stat.S_IFREG]}}
+        cases = [
+            (self.result(errors=b"visibility warning\n"), "visibility-unknown"),
+            (self.result(output=b"p7\0\nfNOFD\0n/proc/7/fd (opendir: Permission denied)\0\n"),
+             "visibility-unknown"),
+            (self.result(output=b"p7\0\nfcwd\0n/elsewhere\0\n"), "visibility-unknown"),
+            (self.result(output=b"p7\0\nfmem\0D0x8\0i22\0n/elsewhere (stat: Permission denied)\0\n"),
+             "visibility-unknown"),
+            (self.result(output=b"p7\0\nf3\0D0x9\0i22\0n/external/hardlink\0\n"), "pending-departure"),
+            (self.result(output=b"p7\0\nf3\0n/fixture/admin/index\0\n"), "pending-departure"),
+            (self.result(output=b"p7\0\nf3\0D0x9\0i22"), "visibility-unknown"),
+        ]
+        for result, reason in cases:
+            with self.subTest(reason=reason, output=result.stdout), \
+                    mock.patch.object(FINISH, "sudo_holder_scan", return_value=result) as elevated, \
+                    mock.patch.object(FINISH, "run") as ordinary:
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    FINISH.manual_holders(snap, contents, {}, float("inf"),
+                                          sudo_holder_scan_enabled=True)
+                elevated.assert_called_once()
+                ordinary.assert_not_called()
+        with mock.patch.object(FINISH, "sudo_holder_scan", return_value=self.result()):
+            FINISH.manual_holders(snap, contents, {}, float("inf"), sudo_holder_scan_enabled=True)
+
+    def test_manual_scan_forwards_its_absolute_admission_deadline(self):
+        until = time.monotonic() + 5
+        with mock.patch.object(FINISH, "sudo_holder_scan", return_value=self.result()) as elevated:
+            FINISH.manual_holders({"path": "/fixture/worktree", "gitdir": "/fixture/admin"},
+                                  {"entries": {}}, {}, until, sudo_holder_scan_enabled=True)
+        elevated.assert_called_once_with(until)
+
+    def resolve(self, selected, *, changed=None, links=None):
+        modes = {
+            "/": (0, FINISH.stat.S_IFDIR | 0o755),
+            "/usr": (0, FINISH.stat.S_IFDIR | 0o755),
+            "/usr/bin": (0, FINISH.stat.S_IFDIR | 0o755),
+            "/usr/bin/sudo": (0, FINISH.stat.S_IFREG | 0o4755),
+            "/usr/bin/lsof": (0, FINISH.stat.S_IFREG | 0o755),
+        }
+        links = links or {}
+        for path in links:
+            modes[path] = (0, FINISH.stat.S_IFLNK | 0o777)
+        modes.update(changed or {})
+
+        def details(path):
+            try:
+                uid, mode = modes[str(path)]
+            except KeyError:
+                raise FileNotFoundError(str(path))
+            return types.SimpleNamespace(st_uid=uid, st_mode=mode)
+
+        with mock.patch.object(FINISH.shutil, "which", return_value=selected), \
+                mock.patch.object(Path, "lstat", details), \
+                mock.patch.object(FINISH.os, "readlink", side_effect=lambda path: links[str(path)]):
+            return FINISH.trusted_holder_binary("sudo")
+
+    def test_root_owned_canonical_binaries_and_verified_symlink_chains(self):
+        self.assertEqual(self.resolve("/usr/bin/sudo"), "/usr/bin/sudo")
+        self.assertEqual(self.resolve("/bin/sudo", links={"/bin": "usr/bin"}), "/usr/bin/sudo")
+        self.assertEqual(self.resolve("/bin/sudo", links={
+            "/bin": "/usr/bin", "/usr/bin/sudo": "../bin/actual",
+        }, changed={"/usr/bin/actual": (0, FINISH.stat.S_IFREG | 0o755)}), "/usr/bin/actual")
+
+    def test_untrusted_binary_parent_symlink_and_invalid_resolution_refuse(self):
+        for selected, changed, links in (
+                (None, {}, {}),
+                ("relative/sudo", {}, {}),
+                ("/missing/sudo", {}, {}),
+                ("/usr/bin/sudo", {"/": (0, FINISH.stat.S_IFDIR | 0o777)}, {}),
+                ("/usr/bin/sudo", {"/usr": (1000, FINISH.stat.S_IFDIR | 0o755)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin": (0, FINISH.stat.S_IFDIR | 0o775)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (1000, FINISH.stat.S_IFREG | 0o755)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (0, FINISH.stat.S_IFREG | 0o757)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (0, FINISH.stat.S_IFREG | 0o644)}, {}),
+                ("/usr/bin/sudo", {"/usr/bin/sudo": (0, FINISH.stat.S_IFDIR | 0o755)}, {}),
+                ("/bin/sudo", {"/bin": (1000, FINISH.stat.S_IFLNK | 0o777)}, {"/bin": "/usr/bin"}),
+                ("/bin/sudo", {}, {"/bin": "/missing"}),
+                ("/bin/sudo", {}, {"/bin": "/bin"}),
+                ("/bin/sudo", {"/untrusted": (1000, FINISH.stat.S_IFDIR | 0o755)},
+                 {"/bin": "/untrusted/../usr/bin"})):
+            with self.subTest(selected=selected, changed=changed, links=links):
+                with self.assertRaisesRegex(FINISH.Retain, "trusted-binaries|untrusted-path"):
+                    self.resolve(selected, changed=changed, links=links)
+
+
+class SudoMonitorTests(unittest.TestCase):
+    def supervise(self, *, failure=None, sudo_monitor=True, reaps=True, signal_denied=False,
+                  interrupt=None):
+        module = FINISH.safety()
+        child = mock.Mock(pid=123, returncode=None, stdin=None)
+        child.stdout.fileno.return_value = 10
+        child.stderr.fileno.return_value = 11
+        selector = mock.Mock()
+        selector.get_map.return_value = failure == "output-limit" or interrupt is not None
+        selector.select.return_value = [(types.SimpleNamespace(fd=10, data=0), None)]
+        selector.select.side_effect = interrupt
+        waits = []
+
+        def wait(timeout):
+            waits.append(timeout)
+            if not reaps or (failure == "timeout" and len(waits) == 1):
+                raise subprocess.TimeoutExpired("fixture monitor", timeout)
+            child.returncode = 0
+            return 0
+
+        child.wait.side_effect = wait
+        if signal_denied:
+            child.send_signal.side_effect = PermissionError()
+
+        def signal_group(pid, signal):
+            if signal == 0:
+                raise ProcessLookupError()
+
+        with mock.patch.object(module, "DEADLINE", time.monotonic() + 30), \
+                mock.patch.object(module.subprocess, "Popen", return_value=child) as spawn, \
+                mock.patch.object(module.selectors, "DefaultSelector", return_value=selector), \
+                mock.patch.object(module.os, "set_blocking"), \
+                mock.patch.object(module.os, "read", return_value=b"too much output"), \
+                mock.patch.object(module.os, "killpg", side_effect=signal_group) as group:
+            if interrupt is not None:
+                with self.assertRaises(type(interrupt)) as raised:
+                    module.supervise(["/fixture/sudo"], cwd="/", env={}, limit=1,
+                                     sudo_monitor=sudo_monitor)
+                self.assertIs(raised.exception, interrupt)
+                result = None
+            else:
+                result = module.supervise(["/fixture/sudo"], cwd="/", env={}, limit=1,
+                                          sudo_monitor=sudo_monitor)
+        return result, child, group, spawn
+
+    def test_normal_completion_does_not_signal_or_infer_root_group_absence(self):
+        result, child, group, spawn = self.supervise()
+        self.assertIsNone(result.failure)
+        self.assertTrue(result.proof["reaped"])
+        self.assertEqual(result.proof["privileged_termination"], "command-returned")
+        self.assertIsNone(result.proof["group_absent"])
+        child.send_signal.assert_not_called()
+        group.assert_not_called()
+        self.assertFalse(spawn.call_args.kwargs["start_new_session"])
+        self.assertEqual(spawn.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_timeout_and_output_limit_remain_uncertain_after_monitor_is_reaped(self):
+        for failure in ("timeout", "output-limit"):
+            with self.subTest(failure=failure):
+                result, child, group, _ = self.supervise(failure=failure)
+                self.assertIsNotNone(result.failure)
+                self.assertEqual(result.proof["privileged_termination"], "unknown")
+                self.assertTrue(result.proof["reaped"])
+                self.assertIsNone(result.proof["group_absent"])
+                child.send_signal.assert_called_once_with(FINISH.safety().signal.SIGTERM)
+                self.assertEqual(child.wait.call_args, mock.call(timeout=2))
+                group.assert_not_called()
+
+    def test_unreaped_or_unsignalable_monitor_never_escalates_to_kill(self):
+        result, child, group, _ = self.supervise(failure="timeout", reaps=False, signal_denied=True)
+        self.assertIsNotNone(result.failure)
+        self.assertFalse(result.proof["reaped"])
+        self.assertEqual(result.proof["privileged_termination"], "unknown")
+        child.send_signal.assert_called_once_with(FINISH.safety().signal.SIGTERM)
+        group.assert_not_called()
+
+    def test_keyboard_interrupt_and_system_exit_propagate_after_monitor_term_and_wait(self):
+        for interrupt in (KeyboardInterrupt(), SystemExit(17)):
+            with self.subTest(interrupt=type(interrupt).__name__):
+                _, child, group, _ = self.supervise(interrupt=interrupt)
+                child.send_signal.assert_called_once_with(FINISH.safety().signal.SIGTERM)
+                child.wait.assert_called_once_with(timeout=2)
+                group.assert_not_called()
+
+    def test_default_supervisor_cleanup_is_unchanged(self):
+        result, child, group, spawn = self.supervise(failure="timeout", sudo_monitor=False)
+        child.send_signal.assert_not_called()
+        self.assertEqual(group.call_args_list, [
+            mock.call(123, FINISH.safety().signal.SIGKILL), mock.call(123, 0)])
+        self.assertTrue(result.proof["group_absent"])
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        self.assertNotIn("privileged_termination", result.proof)
+
+    def test_expired_admission_deadline_prevents_monitor_spawn(self):
+        module = FINISH.safety()
+        with mock.patch.object(module, "DEADLINE", time.monotonic() + 238), \
+                mock.patch.object(module.subprocess, "Popen") as spawn:
+            result = module.supervise(["/fixture/sudo"], cwd="/", env={},
+                                      sudo_monitor=True, deadline=time.monotonic() - 1)
+        spawn.assert_not_called()
+        self.assertIsNotNone(result.failure)
+        self.assertIsNone(result.proof["pid"])
+
+
 class SiblingRegistrationTests(unittest.TestCase):
     def setUp(self):
         self.before = [{"worktree": "/owner", "HEAD": "a", "branch": "refs/heads/main"},
@@ -1742,14 +3974,514 @@ class SiblingRegistrationTests(unittest.TestCase):
         after.append({"worktree": "/new", "HEAD": "c", "detached": ""})
         self.assertTrue(FINISH.siblings_preserved(self.before, after))
 
-    def test_loss_retarget_lock_change_prunable_and_duplicate_remain_unknown(self):
-        changes = [{"branch": "refs/heads/other"}, {"locked": "changed"}, {"prunable": "missing"}]
+    def test_branch_and_detached_transitions_are_reported_operationally(self):
+        after = [self.before[0], {"worktree": "/sibling", "HEAD": "new", "detached": "",
+                                  "locked": "another-owner"}]
+        report = FINISH.sibling_comparison(self.before, after)
+        self.assertTrue(report["preserved"])
+        self.assertEqual(report["changes"][0]["kind"], "operational")
+        self.assertEqual(set(report["changes"][0]["fields"]), {"HEAD", "branch", "detached"})
+
+    def test_loss_lock_change_prunable_and_duplicate_remain_unknown(self):
+        changes = [{"locked": "changed"}, {"prunable": "missing"}]
         cases = [self.before[:1], self.before + [self.before[0]], [{"HEAD": "missing-path"}]]
         cases.extend([self.before[0], {**self.before[1], **change}] for change in changes)
         for after in cases:
             with self.subTest(after=after):
                 self.assertFalse(FINISH.siblings_preserved(self.before, after))
         self.assertFalse(FINISH.siblings_preserved(self.before + [self.before[0]], self.before))
+
+    def test_replaced_or_rebound_identity_is_not_an_operational_change(self):
+        identities = {row["worktree"]: {"path_id": [1, number], "gitdir": row["worktree"] + "/.git"}
+                      for number, row in enumerate(self.before)}
+        for changed in ({"path_id": [1, 99]}, {"gitdir": "/different/admin"}):
+            after_ids = {**identities, "/sibling": {**identities["/sibling"], **changed}}
+            report = FINISH.sibling_comparison(self.before, self.before, identities, after_ids)
+            self.assertFalse(report["preserved"])
+            self.assertEqual(report["changes"], [{"path": "/sibling", "kind": "identity"}])
+
+
+class ExternalRemovalTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    tearDown = ReleaseTests.tearDown
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        # Keep this finished checkout pending so the external-removal owner
+        # can exercise its own closeout instead of the normal finish route.
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+
+    def arguments(self):
+        status = self.call("status")[1][0]
+        return ["--external-removal", "--worktree-id", status["id"],
+                "--generation", str(status["generation"]),
+                "--reason", "Operator removed this finished task"]
+
+    def test_external_removal_records_truth_and_preserves_completion_history(self):
+        self.finish()
+        args = self.arguments()
+        with FINISH.ledger(self.state) as db:
+            original = dict(FINISH.get_row(db, self.wt))
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        self.assertEqual(self.call("status")[1][0]["checkout"], "retained")
+        code, rows = self.call("reconcile", *args)
+        result = rows[0]
+        self.assertEqual(code, 0)
+        self.assertEqual(result["checkout"], "removed")
+        self.assertEqual(result["retirement_state"], "removed")
+        self.assertFalse(result["release_available"])
+        self.assertFalse(result["external_removal"]["native_attempted"])
+        self.assertEqual(self.call("reconcile", *args)[1][0], result)
+        self.assertEqual(self.call("status")[1][0], result)
+        with FINISH.ledger(self.state) as db:
+            current = dict(FINISH.get_row(db, self.wt))
+            retirement = FINISH.retirement(db, current)
+            self.assertIsNone(retirement["intent"])
+        for key in original.keys() - {"reason", "checked_at"}:
+            self.assertEqual(current[key], original[key])
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+
+    def test_present_checkout_admin_and_registration_never_count_as_removed(self):
+        self.finish()
+        args = self.arguments()
+        with self.assertRaisesRegex(FINISH.Retain, "target-or-admin-present"):
+            self.call("reconcile", *args)
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        for path in (self.wt, self.admin):
+            with self.subTest(path=path.name):
+                path.symlink_to(self.base / "missing")
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "target-or-admin-present"):
+                        self.call("reconcile", *args)
+                finally:
+                    path.unlink()
+        self.admin.mkdir()
+        (self.admin / "gitdir").write_text(str(self.wt / ".git") + "\n")
+        # Retained registration is independently disqualifying when its recorded
+        # admin path is absent (Git may register the same path under another name).
+        other = self.admin.with_name("other-registration")
+        self.admin.rename(other)
+        (other / "HEAD").write_text("ref: refs/heads/released-feature\n")
+        (other / "commondir").write_text("../..\n")
+        with self.assertRaisesRegex(FINISH.Retain, "target-registered"):
+            self.call("reconcile", *args)
+        self.assertEqual(self.call("status")[1][0]["checkout"], "retained")
+
+    def test_exact_owner_generation_and_retained_branch_are_required(self):
+        self.finish()
+        args = self.arguments()
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        for extra, reason in [(["--owner", "other"], "recorded-owner"),
+                              (["--generation", "999"], "exact-record-and-generation"),
+                              (["--worktree-id", str(uuid.uuid4())], "exact-record-and-generation")]:
+            with self.subTest(extra=extra), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.call("reconcile", *args, *extra)
+        git(self.repo, "branch", "-D", "released-feature")
+        with self.assertRaises(FINISH.Retain):
+            self.call("reconcile", *args)
+        self.assertEqual(self.call("status")[1][0]["checkout"], "retained")
+
+    def test_unfinished_owners_and_recovery_pins_prevent_reconciliation(self):
+        self.finish()
+        self.call("pin", "--reason", "still needed")
+        args = self.arguments()
+        with self.assertRaisesRegex(FINISH.Retain, "finished-owners"):
+            self.call("reconcile", *args)
+        self.finish()
+        args = self.arguments()
+        with self.assertRaisesRegex(FINISH.Retain, "recovery-pin-present"):
+            self.call("reconcile", *args)
+
+    def test_native_attempt_evidence_cannot_be_overwritten(self):
+        self.finish()
+        args = self.arguments()
+        with FINISH.ledger(self.state) as db, db:
+            row = FINISH.get_row(db, self.wt)
+            db.execute("UPDATE retirement SET state='incomplete', intent=? WHERE worktree_id=?",
+                       ('{"original":"native-attempt"}', row["id"]))
+        with self.assertRaisesRegex(FINISH.Retain, "cannot-replace-native-removal-proof"):
+            self.call("reconcile", *args)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual(FINISH.retirement(db, row)["intent"], '{"original":"native-attempt"}')
+
+    def test_observation_failure_rolls_back_the_record(self):
+        self.finish()
+        args = self.arguments()
+        git(self.repo, "worktree", "remove", "--force", "--force", str(self.wt))
+        original = FINISH.records
+        checks = 0
+
+        def denied_on_recheck(owner):
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                raise PermissionError(errno.EACCES, "fixture denied")
+            return original(owner)
+
+        with mock.patch.object(FINISH, "records", side_effect=denied_on_recheck):
+            with self.assertRaises(PermissionError):
+                self.call("reconcile", *args)
+        result = self.call("status")[1][0]
+        self.assertEqual(result["checkout"], "retained")
+        self.assertEqual(result["retirement_state"], "enrolled")
+        self.assertNotIn("external_removal", result)
+
+
+class ReconciliationTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    setUp = ReleaseTests.setUp
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+
+    def current_removal(self):
+        native = FINISH.safety().supervise
+
+        def concurrent_closeout(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                git(self.repo, "worktree", "remove", str(self.legacy))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=concurrent_closeout):
+            self.assertEqual(self.remove()[1][0]["checkout"], "unknown")
+        self.refresh_binding()
+
+    def legacy_removal(self):
+        native = FINISH.safety().supervise
+        comparison = FINISH.sibling_comparison
+
+        def concurrent_checkout(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                git(self.legacy, "checkout", "--detach")
+            return native(command, **kwargs)
+
+        def old_comparator(*args):
+            report = comparison(*args)
+            if report["changes"]:
+                report["preserved"] = False
+            return report
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=concurrent_checkout), \
+                mock.patch.object(FINISH, "sibling_comparison", side_effect=old_comparator):
+            self.assertEqual(self.remove()[1][0]["checkout"], "unknown")
+        # Model the exact older wire format: the native child really ran, but
+        # that producer retained only a Boolean, never after rows or inode proof.
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            item = FINISH.retirement(db, row)
+            intent, result = json.loads(item["intent"]), json.loads(item["result"])
+            intent.pop("sibling_identities")
+            result["siblings_unchanged"] = result.pop("siblings_preserved")
+            for key in ("siblings_after", "sibling_identities_after", "sibling_comparison"):
+                result.pop(key)
+            with db:
+                db.execute("UPDATE retirement SET intent=?, result=? WHERE worktree_id=?",
+                           (json.dumps(intent, sort_keys=True), json.dumps(result, sort_keys=True), row["id"]))
+        self.refresh_binding()
+
+    def refresh_binding(self):
+        with FINISH.ledger(self.state) as db:
+            self.original = dict(FINISH.retirement(db, FINISH.get_row(db, self.wt)))
+        self.arguments = ["--intent-id", json.loads(self.original["intent"])["id"],
+                          "--generation", str(self.original["generation"])]
+        for name in ("intent", "result"):
+            self.arguments += ["--" + name + "-sha256", hashlib.sha256(self.original[name].encode()).hexdigest()]
+
+    def reconcile(self, *extra):
+        with mock.patch.object(FINISH, "manual_holders"):
+            return self.call("reconcile", *self.arguments, *extra)
+
+    def assert_receipts_unchanged(self):
+        with FINISH.ledger(self.state) as db:
+            current = dict(FINISH.retirement(db, FINISH.get_row(db, self.wt)))
+        self.assertEqual(current, self.original)
+
+    def test_current_producer_receipt_reconciles_missing_sibling_without_retrying(self):
+        self.current_removal()
+        original = json.loads(self.original["result"])
+        self.assertIs(original["siblings_preserved"], False)
+        self.assertNotIn("siblings_unchanged", original)
+        self.assert_sibling_alert("missing")
+        fact = self.call("status")[1][0]["reconciliation"]
+        self.assertEqual(fact["historical_sibling_identities"], "recorded")
+        self.assertEqual(fact["historical_after_snapshot"], "recorded")
+
+    def test_current_sibling_flag_cannot_fall_back_to_legacy_failure(self):
+        self.legacy_removal()
+        original_result = self.original["result"]
+        for value in (True, None, 0, "false"):
+            with self.subTest(value=value):
+                with FINISH.ledger(self.state) as db:
+                    row = FINISH.get_row(db, self.wt)
+                    result = json.loads(original_result)
+                    result["siblings_preserved"] = value
+                    with db:
+                        db.execute("UPDATE retirement SET result=? WHERE worktree_id=?",
+                                   (json.dumps(result, sort_keys=True), row["id"]))
+                self.refresh_binding()
+                with self.assertRaisesRegex(FINISH.Retain, "original-removal-not-qualified"):
+                    self.reconcile()
+                self.assert_receipts_unchanged()
+
+    def test_current_receipt_still_requires_successful_child_and_target_preservation(self):
+        self.current_removal()
+        original_result = self.original["result"]
+        changes = [
+            ("child", key, value) for key, value in
+            (("returncode", 1), ("reaped", False), ("group_absent", False), ("pid", None))
+        ]
+        changes += [(None, key, False) for key in (
+            "path_absent", "admin_absent", "registration_absent", "branch_preserved",
+            "branch_reflog_preserved", "dependency_preserved", "discarded_link_targets_preserved")]
+        for section, key, value in changes:
+            with self.subTest(section=section, key=key):
+                with FINISH.ledger(self.state) as db:
+                    row = FINISH.get_row(db, self.wt)
+                    result = json.loads(original_result)
+                    (result[section] if section else result)[key] = value
+                    with db:
+                        db.execute("UPDATE retirement SET result=? WHERE worktree_id=?",
+                                   (json.dumps(result, sort_keys=True), row["id"]))
+                self.refresh_binding()
+                with self.assertRaisesRegex(FINISH.Retain, "original-removal-not-qualified"):
+                    self.reconcile()
+                self.assert_receipts_unchanged()
+
+    def test_reconciles_current_absence_without_rewriting_original_failure_or_retrying(self):
+        self.call("cancel", "--reason", "incorporated preparation")
+        self.legacy_removal()
+        native = FINISH.safety().supervise
+
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and any(a in command for a in ("remove", "unlock", "prune")))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+            code, rows = self.reconcile()
+            again = self.reconcile()[1][0]
+        self.assertEqual(code, 0)
+        result = rows[0]
+        self.assertEqual(result, again)
+        self.assertEqual(result["checkout"], "unknown")
+        self.assertEqual(result["retirement_state"], "incomplete")
+        self.assertEqual(result["current_disposition"], "reconciled-target-removed")
+        fact = result["reconciliation"]
+        self.assertEqual(fact["checkout"], "removed")
+        self.assertEqual(fact["historical_sibling_preservation"], "unresolved")
+        self.assertEqual(fact["historical_sibling_identities"], "unavailable")
+        self.assertEqual(fact["historical_after_snapshot"], "unavailable")
+        self.assertEqual(fact["sibling_comparison"]["changes"][0]["kind"], "operational")
+        self.assert_receipts_unchanged()
+        status = self.call("status")[1][0]
+        self.assertEqual(status["reconciliation"], fact)
+        self.assertEqual(status["current_disposition"], "reconciled-target-removed")
+        self.assertEqual(status["reason"], "target-removal-reconciled-original-proof-retained")
+        with mock.patch.object(FINISH, "remove_with_intent") as remove:
+            for command, options in (("status", ("--all",)), ("check", ()),
+                                     ("check", ("--all",)), ("check", ("--apply",))):
+                with self.subTest(command=command, options=options):
+                    records = self.call(command, *options)[1]
+                    projected = next(record for record in records if record["worktree"] == str(self.wt))
+                    self.assertEqual(projected["current_disposition"], "reconciled-target-removed")
+                    self.assertEqual(projected["reason"], "target-removal-reconciled-original-proof-retained")
+                    if "--all" in options:
+                        self.assertEqual(len(records), 2)  # Historical unknown does not stop the batch.
+            remove.assert_not_called()
+        self.assert_receipts_unchanged()
+        with self.assertRaisesRegex(FINISH.Retain, "intent"):
+            self.call("resume")
+
+    def test_wrong_exact_binding_and_options_refuse(self):
+        self.legacy_removal()
+        for flag, value in (("--intent-id", str(uuid.uuid4())), ("--generation", "99"),
+                            ("--intent-sha256", "0" * 64), ("--result-sha256", "0" * 64),
+                            ("--owner", "other-owner")):
+            with self.subTest(flag=flag), self.assertRaises(FINISH.Retain):
+                self.reconcile(flag, value)
+        for extra in (("--all",), ("--apply",), ("--finalized",), ("--discard-ignored", "node_modules")):
+            with self.subTest(extra=extra), self.assertRaises(FINISH.Retain):
+                self.reconcile(*extra)
+        self.assert_receipts_unchanged()
+
+    def test_recreated_target_and_admin_refuse(self):
+        self.legacy_removal()
+        for path in (self.wt, self.admin):
+            path.mkdir()
+            try:
+                with self.assertRaisesRegex(FINISH.Retain, "target-or-admin-present"):
+                    self.reconcile()
+            finally:
+                path.rmdir()
+        self.assert_receipts_unchanged()
+
+    def test_target_visibility_errors_refuse_in_both_observations_without_recording_a_fact(self):
+        self.legacy_removal()
+        native_lstat, native_supervise = os.lstat, FINISH.safety().supervise
+
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and any(a in command for a in ("remove", "unlock", "prune")))
+            return native_supervise(command, **kwargs)
+
+        for target, path in (("checkout", self.wt), ("admin", self.admin)):
+            for error in (errno.EACCES, errno.EIO):
+                for failure_pass in (1, 2):
+                    with self.subTest(target=target, error=error, observation=failure_pass):
+                        observation, failed_probes = 1, []
+
+                        def unavailable(name, *args, **kwargs):
+                            if Path(name) == path and observation == failure_pass:
+                                failed_probes.append(name)
+                                raise OSError(error, "fixture target visibility unavailable")
+                            return native_lstat(name, *args, **kwargs)
+
+                        def next_observation(*args):
+                            nonlocal observation
+                            observation = 2
+
+                        with mock.patch.object(os, "lstat", side_effect=unavailable), \
+                                mock.patch.object(FINISH, "manual_holders", side_effect=next_observation), \
+                                mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+                            with self.assertRaises(OSError) as caught:
+                                self.call("reconcile", *self.arguments)
+                        self.assertEqual(caught.exception.errno, error)
+                        self.assertEqual(len(failed_probes), 1)
+                        self.assert_receipts_unchanged()
+                        with FINISH.ledger(self.state) as db:
+                            self.assertIsNone(FINISH.reconciliation(db, FINISH.get_row(db, self.wt)))
+
+    def test_failed_or_unjoined_original_child_cannot_be_reconciled(self):
+        self.legacy_removal()
+        original_result = self.original["result"]
+        for change in ({"returncode": 1}, {"reaped": False}, {"group_absent": False}, {"pid": None}):
+            with FINISH.ledger(self.state) as db:
+                row = FINISH.get_row(db, self.wt)
+                result = json.loads(original_result)
+                result["child"].update(change)
+                with db:
+                    db.execute("UPDATE retirement SET result=? WHERE worktree_id=?",
+                               (json.dumps(result, sort_keys=True), row["id"]))
+            self.refresh_binding()
+            with self.assertRaisesRegex(FINISH.Retain, "original-removal-not-qualified"):
+                self.reconcile()
+
+    def test_live_child_holder_and_target_ref_changes_refuse(self):
+        self.legacy_removal()
+        with mock.patch.object(FINISH.os, "kill", return_value=None):
+            with self.assertRaisesRegex(FINISH.Retain, "child-or-group-present"):
+                self.reconcile()
+        with mock.patch.object(FINISH, "manual_holders", side_effect=FINISH.Retain("pending-departure")):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                self.call("reconcile", *self.arguments)
+        lock = self.repo / ".git/refs/heads/released-feature.lock"
+        lock.write_text("writer\n")
+        with self.assertRaisesRegex(FINISH.Retain, "preserved-ref-changed"):
+            self.reconcile()
+        lock.unlink()
+        git(self.repo, "update-ref", "refs/heads/released-feature", "0" * 40)
+        with self.assertRaises(FINISH.Retain):
+            self.reconcile()
+        self.assert_receipts_unchanged()
+
+    def assert_sibling_alert(self, kind):
+        native = FINISH.safety().supervise
+
+        def no_removal(command, **kwargs):
+            self.assertFalse("worktree" in command and any(a in command for a in ("remove", "unlock", "prune")))
+            return native(command, **kwargs)
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=no_removal):
+            code, rows = self.reconcile()
+            self.assertEqual(code, 0)
+            result = rows[0]
+            self.assertEqual(result["current_disposition"], "reconciled-target-removed")
+            self.assertEqual(result["sibling_alert"], "current-sibling-preservation-unresolved")
+            self.assertEqual(result["checkout"], "unknown")
+            self.assertEqual(result["retirement_state"], "incomplete")
+            report = result["reconciliation"]["sibling_comparison"]
+            self.assertFalse(report["preserved"])
+            self.assertTrue(any(change["path"] == str(self.legacy) and change["kind"] == kind
+                                for change in report["changes"]))
+            for command, options in (("status", ()), ("check", ()),
+                                     ("check", ("--all",)), ("check", ("--apply",))):
+                record = next(row for row in self.call(command, *options)[1]
+                              if row["worktree"] == str(self.wt))
+                self.assertEqual(record["sibling_alert"], result["sibling_alert"])
+                self.assertEqual(record["reason"], "target-removal-reconciled-sibling-preservation-unresolved")
+        self.assert_receipts_unchanged()
+
+    def test_later_sibling_closeout_records_missing_observation_without_false_preservation(self):
+        self.legacy_removal()
+        git(self.repo, "worktree", "remove", str(self.legacy))
+        self.assert_sibling_alert("missing")
+
+    def test_later_sibling_lock_change_is_an_explicit_observation(self):
+        self.legacy_removal()
+        git(self.repo, "worktree", "lock", "--reason", "new owner", str(self.legacy))
+        self.assert_sibling_alert("registration")
+
+    def test_rebound_sibling_identity_stays_unresolved(self):
+        self.legacy_removal()
+        pointer = self.legacy / ".git"
+        pointer.write_text("gitdir: " + str(self.repo / ".git") + "\n")
+        self.assert_sibling_alert("identity-unavailable")
+
+    def test_sibling_read_failure_is_observed_but_global_deadline_still_refuses(self):
+        self.legacy_removal()
+        capture = FINISH.sibling_identity
+
+        def unreadable(snap, path, until, admin_index=None):
+            if path == str(self.legacy):
+                raise PermissionError(errno.EACCES, "fixture sibling unavailable")
+            return capture(snap, path, until, admin_index)
+
+        with mock.patch.object(FINISH, "sibling_identity", side_effect=FINISH.Retain("admission-deadline")):
+            with self.assertRaisesRegex(FINISH.Retain, "admission-deadline"):
+                self.reconcile()
+        with mock.patch.object(FINISH, "sibling_identity", side_effect=unreadable):
+            self.assert_sibling_alert("identity-unavailable")
+        with FINISH.ledger(self.state) as db:
+            fact = FINISH.reconciliation(db, FINISH.get_row(db, self.wt))
+        error = next(item for item in fact["sibling_comparison"]["changes"]
+                     if item["kind"] == "identity-unavailable")
+        self.assertEqual(error["errno"], errno.EACCES)
+
+    def test_cross_pass_sibling_replacement_records_alert_without_erasing_target_fact(self):
+        self.legacy_removal()
+
+        def replace_during_holder_check(*args):
+            prior = self.base / "prior-sibling"
+            self.legacy.rename(prior)
+            shutil.copytree(prior, self.legacy)
+
+        with mock.patch.object(FINISH, "manual_holders", side_effect=replace_during_holder_check):
+            code, rows = self.call("reconcile", *self.arguments)
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["current_disposition"], "reconciled-target-removed")
+        self.assertEqual(rows[0]["sibling_alert"], "current-sibling-preservation-unresolved")
+        comparison = rows[0]["reconciliation"]["sibling_comparison"]
+        self.assertFalse(comparison["preserved"])
+        self.assertFalse(comparison["during_observation"]["preserved"])
+        self.assertIn({"path": str(self.legacy), "kind": "identity"}, comparison["during_observation"]["changes"])
+        self.assert_receipts_unchanged()
+
+    def test_repeat_with_new_sibling_gap_retains_first_fact_and_reports_observation_conflict(self):
+        self.legacy_removal()
+        first = self.reconcile()[1][0]["reconciliation"]
+        with mock.patch.object(FINISH, "sibling_identity", side_effect=OSError("fixture unavailable")):
+            with self.assertRaisesRegex(FINISH.Retain, "recorded-sibling-observation-changed"):
+                self.reconcile()
+        git(self.repo, "worktree", "remove", str(self.legacy))
+        with self.assertRaisesRegex(FINISH.Retain, "recorded-sibling-observation-changed"):
+            self.reconcile()
+        self.assertEqual(self.call("status")[1][0]["reconciliation"], first)
+        self.assert_receipts_unchanged()
 
 
 class FailureDiagnosticTests(unittest.TestCase):
@@ -1908,7 +4640,7 @@ class ResumeAcknowledgementTests(unittest.TestCase):
     tearDown = ReleaseTests.tearDown
     proof = LifecycleTests.proof
     call = LifecycleTests.call
-    finish = LifecycleTests.finish
+    finish = ReleaseTests.finish
     row = ReleaseTests.row
     flag = "--acknowledge-device-renumbering"
 
@@ -2050,18 +4782,41 @@ class ResumeAcknowledgementTests(unittest.TestCase):
 
     def test_flag_rejects_other_actions_and_automatic_or_combined_resume(self):
         commands = ("enroll", "finish", "cancel", "release", "remove", "pin", "unpin",
-                    "status", "check", "holder-qualification", "creation-token", "guard")
-        options = (("--if-enrolled",), ("--all",), ("--apply",), ("--release",),
-                   ("--pr", self.url), ("--target", "main"), ("--wait-for", self.url),
-                   ("--reason", "recovery"), ("--policy", "policy"), ("--new-token", self.token),
-                   ("--finalized",), ("--discard-ignored", "ignored"),
-                   *((option, "") for option in ("--pr", "--target", "--reason", "--policy", "--new-token")))
+                    "status", "check", "holder-qualification", "creation-token", "guard",
+                    "reconcile", "recover-missing")
+        value_options = ("--pr", "--target", "--wait-for", "--reason", "--policy", "--new-token",
+                         "--discard-ignored", "--intent-id", "--intent-sha256", "--result-sha256",
+                         "--worktree-id", "--expected-head", "--index-sha256", "--recovery-sha256")
+        options = (*((option,) for option in (
+                       "--if-enrolled", "--all", "--apply", "--release", "--finalized",
+                       "--sudo-holder-scan", "--external-removal", "--allow-device-renumbering",
+                       "--continue-partial")),
+                   *((option, value) for option in value_options for value in ("fixture", "")),
+                   ("--generation", "0"), ("--generation", "1"))
         for command, extra in [*((command, ()) for command in commands),
                                *(("resume", option) for option in options)]:
             with self.subTest(command=command, extra=extra), mock.patch.object(FINISH, "ledger") as ledger:
                 with self.assertRaisesRegex(FINISH.Retain, "one-explicit-resume"):
                     self.call(command, self.flag, *extra)
                 ledger.assert_not_called()
+
+    def test_failed_claim_rolls_back_owner_completion_and_release_invalidation(self):
+        self.observer.observe.return_value["holders"] = [{"fixture": "present"}]
+        self.finish("--release")
+        with FINISH.ledger(self.state) as db:
+            db.executescript("""
+                CREATE TRIGGER reject_resumed_worktree BEFORE UPDATE ON worktrees
+                WHEN NEW.reason = 'owner-resumed'
+                BEGIN SELECT RAISE(ABORT, 'fixture claim failure'); END;
+            """)
+        before = self.ledger_state()
+        lock = (self.admin / "locked").read_bytes()
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed), \
+                self.assertRaisesRegex(sqlite3.IntegrityError, "fixture claim failure"):
+            self.call("resume", self.flag)
+        self.assertEqual(self.ledger_state(), before)
+        self.assertEqual((self.admin / "locked").read_bytes(), lock)
+        self.assertTrue(self.wt.exists())
 
     def test_identity_error_explains_the_explicit_resume_route_without_paths(self):
         errors = io.StringIO()
@@ -2071,6 +4826,103 @@ class ResumeAcknowledgementTests(unittest.TestCase):
         self.assertIn("inspect recorded/current identities first", errors.getvalue())
         self.assertIn("gwt resume " + self.flag, errors.getvalue())
         self.assertNotIn(str(self.wt), errors.getvalue())
+
+
+@unittest.skipUnless(sys.platform == "darwin" and os.uname().machine == "arm64", "Darwin arm64 native reader")
+class NativePendingConsumerTests(unittest.TestCase):
+    setUp = LifecycleTests.setUp
+    tearDown = LifecycleTests.tearDown
+    call = LifecycleTests.call
+    proof = LifecycleTests.proof
+    finish = LifecycleTests.finish
+
+    def test_native_new_finish_pending_holders_then_consumer_removes(self):
+        (self.home / ".codex").mkdir(mode=0o700)
+        observed = self.base / "storage-observation.json"
+        observed.write_text('{"configured": false}')
+        with mock.patch.dict(os.environ, {
+                "DOTFILES_GWT_FINISH_STATE": str(self.state),
+                "DOTFILES_WORKTREES_ROOT": str(self.root), "TMUX": "",
+                "WORKTREE_STORAGE_GUARD_TESTING": "1",
+                "WORKTREE_STORAGE_CONFIG": str(self.base / "no-storage-config"),
+                "WORKTREE_STORAGE_GUARD_OBSERVED": str(observed)}):
+            created = subprocess.run([
+                "zsh", "-f", "-c", 'source "$1"; _gwt_tmux_sync_context() { return 0; }; '
+                'gwt new native-feature "$2" --full --finish-managed',
+                "fixture", str(ROOT / "functions/gwt/gwt.zsh"), self.head],
+                cwd=self.repo, capture_output=True, text=True, timeout=30)
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+        sibling = self.wt
+        self.wt = Path(next(json.loads(line)[0]["worktree"] for line in created.stdout.splitlines()
+                            if line.startswith('[{')))
+        admin = Path(git(self.wt, "rev-parse", "--absolute-git-dir"))
+        self.assertEqual(self.wt.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(admin.stat().st_mode & 0o777, 0o700)
+        with FINISH.ledger(self.state) as db:
+            identity = json.loads(FINISH.get_row(db, self.wt)["identity"])
+        policy = self.base / "policy.json"
+        policy.write_text(json.dumps({
+            "schema": FINISH.APPLY_POLICY_SCHEMA, "host": "fixture-host", "mode": "explicit-release",
+            "repositories": [{key: identity[key] for key in ("owner", "root", "common_id")}],
+            "qualification": {}}))
+        policy.chmod(0o600)
+        qualification = {"git": {"path": str(Path(shutil.which("git")).resolve())}, "known_processes": []}
+        population = {os.getpid()}
+        module = FINISH.safety()
+
+        def consume():
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(FINISH.main([
+                    "check", "--all", "--apply", "--policy", str(policy),
+                    "--state-dir", str(self.state)]), 0)
+            return next(row for row in json.loads(output.getvalue()) if row["worktree"] == str(self.wt))
+
+        # This is a native selected-population canary, not whole-host qualification.
+        # Only external policy/GitHub/storage facts and census scope are fixtures;
+        # capability, reference reads, admission and native removal stay real.
+        with mock.patch.object(FINISH, "host_key", return_value="fixture-host"), \
+                mock.patch.object(FINISH, "qualified_policy", return_value=qualification), \
+                mock.patch.object(module.Darwin, "population", side_effect=lambda _: set(population), autospec=True):
+            self.proofs[self.url].update(merged=False, state="open", merge=None)
+            pending = self.finish("--policy", str(policy))[1][0]
+            self.assertEqual(pending["reason"], "pr-not-merged", pending)
+            self.assertEqual(pending["released_owners"], ["owner-1"])
+            self.assertEqual(pending["automatic_handoff"]["baseline"], "ready")
+            self.proofs[self.url].update(merged=True, state="closed", merge=self.head)
+            script = ('import mmap,os,sys; mode,path=sys.argv[1:]; '
+                      'fd=os.open(path,os.O_RDONLY) if mode!="cwd" else None; '
+                      'view=mmap.mmap(fd,0,access=mmap.ACCESS_READ) if mode=="mapping" else None; '
+                      'os.close(fd) if mode=="mapping" else None; '
+                      'os.chdir(path) if mode=="cwd" else None; '
+                      'print("ready",flush=True);sys.stdin.buffer.read(1)')
+            for mode, path in (("cwd", self.wt), ("fd", admin / "HEAD"), ("mapping", self.wt / "file")):
+                with self.subTest(holder=mode):
+                    child = subprocess.Popen([sys.executable, "-c", script, mode, str(path)],
+                                             cwd=self.repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE)
+                    try:
+                        self.assertEqual(child.stdout.readline(), b"ready\n")
+                        population.add(child.pid)
+                        result = consume()
+                        self.assertEqual(result["reason"], "pending-departure", result)
+                        self.assertTrue(self.wt.exists())
+                        self.assertTrue((admin / "locked").exists())
+                    finally:
+                        child.communicate(b"x", timeout=5)
+                        population.discard(child.pid)
+                    self.assertEqual(child.returncode, 0)
+            # A surfaced native error cannot be converted into empty coverage.
+            with mock.patch.object(module.Darwin, "references", side_effect=FINISH.Retain("holder-visibility-unknown")):
+                self.assertEqual(consume()["reason"], "holder-visibility-unknown")
+            removed = consume()
+            self.assertEqual(removed["checkout"], "removed", removed)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "native-feature"), self.head)
+        self.assertTrue(sibling.exists())
+        self.assertEqual(git(sibling, "rev-parse", "HEAD"), self.head)
 
 
 if __name__ == "__main__":

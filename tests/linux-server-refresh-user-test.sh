@@ -18,6 +18,7 @@ create_test_repo() {
     tar -cf - \
       .aliases \
       .functions \
+      .hushlogin \
       .ripgreprc \
       .tmux.conf \
       profiles/linux-server \
@@ -208,6 +209,7 @@ HOME="$home" \
 [[ "$(mode "$test_repo/bin/task-runtime")" == 755 ]]
 [[ "$(readlink "$home/.local/bin/task-runtime")" == "$test_repo/bin/task-runtime" ]]
 [[ -x "$home/.local/bin/task-runtime" ]]
+[[ "$(readlink "$home/.hushlogin")" == "$test_repo/.hushlogin" ]]
 
 run_refresh_component_case() {
   local name="$1"

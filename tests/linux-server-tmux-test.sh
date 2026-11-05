@@ -68,8 +68,8 @@ set -g status-position top
 set -g status-left-length 32
 set -g status-right-length 120
 set -g status-style "fg=#565f89,bg=#1a1b26,none"
-setw -g window-style "fg=default,bg=#1a1b26"
-setw -g window-active-style "fg=default,bg=#1a1b26"
+setw -g window-style "fg=#c0caf5,bg=#1a1b26"
+setw -g window-active-style "fg=#c0caf5,bg=#1a1b26"
 setw -g window-status-separator ""
 setw -g window-status-style "fg=#565f89,bg=#1a1b26,none"
 setw -g window-status-current-style "fg=#1a1b26,bg=#7aa2f7,bold"

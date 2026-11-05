@@ -14,6 +14,12 @@ It prefers the canonical checkout, then an existing `~/.dotfiles`, before the
 platform default. A Git-based fzf install downloads and verifies the executable;
 shared shell exports add its binary directory without replacing fzf shell files.
 
+Codex and Claude Code share the instructions in [`.codex/AGENTS.md`](.codex/AGENTS.md).
+Claude setup links that owner to the native
+[`~/.claude/CLAUDE.md` user file](https://code.claude.com/docs/en/memory#choose-where-to-put-claudemd-files)
+only when no file or symlink exists. Existing files and links, including dangling
+links, remain user overrides and are reported without replacement.
+
 Git uses the dedicated SSH signing-only key at
 `~/.ssh/git_signing_vincentkoc_ieee`. Keep a local `.ssh/allowed_signers` file
 in the dotfiles root. It is intentionally ignored from git, and the installer
@@ -49,13 +55,66 @@ If the file already contains unrelated signer entries, preserve them and
 replace only the entry for `vincentkoc@ieee.org` and the key above. The private
 fleet bootstrap performs that normalization atomically.
 
-Optional: restore additional app configs managed via Mackup.
+Mackup is opt-in and selects only the custom `portable-tool-preferences`
+application. Install its definition from `.mackup/portable-tool-preferences.cfg`
+to `~/.mackup/portable-tool-preferences.cfg` explicitly before using the tracked
+configuration. It includes only `.ripgreprc`, `.config/gh/config.yml`, and
+Sublime's `Packages/User/Preferences.sublime-settings`; it does not select entire
+app directories, authentication, browser profiles, or sessions.
 
-```bash
-mackup restore
-```
+The tracked storage policy still uses iCloud's `dotfiles` directory. Mackup 0.10
+uses copy mode; the obsolete `[sync] symlink = true` setting is removed. This
+explicit application list replaces Mackup's all-app default. For a one-time
+migration, review a separate local-filesystem configuration and private custom
+definition directory instead of running a global or iCloud restore. No Mackup
+backup or restore runs as part of installing these dotfiles.
 
 > For full macOS setup (apps, system prefs, Homebrew), see [natilius](https://github.com/vincentkoc/natilius).
+
+The tracked [`.natiliusrc`](.natiliusrc) is the personal daily-driver package
+inventory, including applications, developer CLIs, archive tools, fonts and
+global packages. It excludes Kubernetes, Spark/Scala and the retired desktop
+utilities. Package-only reruns should select Natilius's application modules;
+they must not change Time Machine policy or trigger storage cleanup. Keep
+credentials, archive migration, Git owner selection, scheduled maintenance and
+pnpm dependency qualification in the private Mac bootstrap workflow.
+
+## One shared local AI model
+
+After installing Ollama, LM Studio and Llama, use the pinned small-model helper:
+
+```sh
+~/.dotfiles/bin/local-ai-setup --check --json
+~/.dotfiles/bin/local-ai-setup --apply
+```
+
+Check mode only inspects files. Apply requires an initialized LM Studio and an
+already-running loopback-only Ollama server. It downloads the 2.5 GB Qwen3 4B
+Instruct 2507 GGUF once into Ollama's cache, verifies its pinned manifest and
+SHA-256, and shares those bytes through symbolic links. It preserves other
+models and settings. See [setup requirements and failure behavior](bin/README.md#shared-local-ai-model).
+
+## Portable macOS preferences
+
+Check the small personal preferences profile before applying it:
+
+```sh
+~/.dotfiles/bin/mac-preferences --check --json
+~/.dotfiles/bin/mac-preferences --apply
+```
+
+The default command only checks. Apply changes individual typed keys, including
+portable trackpad gestures, force click and hot corners. It merges the managed
+input-switching shortcuts while preserving other preferences.
+It never restarts apps, logs out, copies whole preference files, or changes
+accounts, credentials, privacy permissions, network or hardware identity settings.
+Verification covers stored values; the current UI may need a later login to
+adopt them. See [the command's scope and exit codes](bin/README.md#portable-macos-preferences).
+
+Keep machine-specific shell paths in `~/.exports.local` and Git overrides in
+`~/.gitconfig.local`; both load after the tracked defaults. Set `DOTFILES_ENV_FILE`
+in the local exports file to choose a persistent local dotenv path. The core
+dotfiles can stay symlinked to this checkout without losing local overrides.
 
 ## Windows and WSL2
 
@@ -94,6 +153,14 @@ source dimensions. `mtt` opens a metadata-only picker; `mtt --check %12`
 prints the resolved ID and dimensions without capturing or sending input.
 Use `--socket /path/to/socket` for an explicit existing server.
 Python 3.9+ with curses and a UTF-8 terminal are required.
+
+`mttc -p mobile -s cockpit:2.1 host` (or `-s %12`) starts the same viewer
+over mosh. Omit `-s` for the pane picker. Bare session names are rejected:
+they do not select one pane. Mobile requires remote `mtt` and fails without it;
+it never falls back to attaching or creating a full tmux window.
+The shell/ai profiles retain their `tt`, tmux and interactive-shell fallbacks.
+QuickSSH aliases retain their configured SSH port; explicit `-P` takes priority,
+including when `MOSH_TMUX_SSH` supplies custom SSH options.
 
 For a full-phone single-pane view, run from plain SSH or a local terminal outside
 tmux. Detach the old mobile tmux client first, without closing any panes. Inside
@@ -150,6 +217,19 @@ separately reviewed tailnet UDP policy before opting into Mosh. `prepare` does
 not install, write, validate, or reload the SSH server; the Ubuntu host must
 already have a working `sshd`.
 
+The Linux profile also reads `~/.profile.local` when it is a regular,
+current-user-owned, single-link file at mode `0600`, with no symlink at that
+path. The bootstrap leaves this optional host configuration untouched. Use it
+for reviewed tool-specific storage settings, preserving explicit task overrides;
+qualify the destination mount before setting a path there. It runs in login and
+non-interactive zsh children, so keep it silent and avoid installing tools or
+starting services from it. Existing processes keep their current environment.
+
+For an approved Mosh host, add its alias to `quickssh_mosh_hosts` in the private
+`quickssh_hosts.sh`. Set `quickssh_mosh_ports_<alias>='60000:60010'` to match
+the allowed UDP range, replacing hyphens in the alias with underscores.
+Hosts without that setting keep Mosh's default range. Forwarding still uses SSH.
+
 The Linux tmux profile keeps the desktop status/tab colors, powerline separators,
 indicators, and `tt` note/pane menus without macOS clipboard helpers or GUI setup.
 On an existing server, parse it with `tmux source-file -n ~/.tmux.conf.local`,
@@ -177,6 +257,9 @@ the terminal title when no task title is set. Exited session IDs are retained
 only with matching saved server, pane and process-start evidence. Reaped owners
 without that evidence remain unresolved in the new snapshot; prior recovery
 history is preserved.
+Snapshot history is unlimited by default (`TT_SNAPSHOT_HISTORY_MAX=-1`). Set a
+positive limit to prune older files, or `0` to stop recording new history without
+deleting existing files. The autosave timer inherits the same setting.
 Cold recovery checks every selected session's topology authorization before
 creating the first session, including direct snapshot-helper invocation.
 
@@ -196,6 +279,16 @@ directories to an unlinked mode-`0755` binary beneath the standalone
 private `~/.codex` surface remains host-local; no hooks, global instructions,
 model catalog, credentials, QuickSSH, Mosh, or OpenClaw launcher configuration
 is linked.
+
+The server profile links the tracked `.hushlogin` to `~/.hushlogin` to suppress
+the login MOTD and last-login display. This does not change a configured
+pre-authentication SSH banner, package support, or health checks.
+
+Run `up --system-only` for interactive Debian/Ubuntu package updates without
+updating global tools or running cleanup. APT may add required dependencies but
+cannot remove packages; needrestart lists pending restarts. Package scripts may
+still restart their own services. The command reports a required reboot without
+performing it. Use `up --updates-only` when global tool updates are also wanted.
 
 Obtain the SHA256 fingerprint of the designated recovery public key through an
 independent trusted path, then explicitly enable the temporary proof phase:
@@ -241,6 +334,16 @@ report the locked values, including `ssh:expose_auth_info=no` and
 `ssh:user_auth_file=absent`. Override the interface or ports with the documented
 `DOTFILES_SERVER_*` environment variables.
 
+## Tmux Menus
+
+Pane and window mouse menus ask for confirmation before kill or respawn.
+Confirmation keeps the original pane/window ID; changing focus cannot redirect
+it, and a removed target is never replaced by the current pane or window.
+Right-click uses the clicked pane, socket and client. SSH/mosh panes still
+receive the mouse event. Alt-right-click keeps the native copy/search menu.
+`tt pane-menu-bind /absolute/socket` installs only the ordinary pane mouse binding
+on an existing server; it does not reload configuration or change CX SAVE bindings.
+
 ## Structure
 
 ```
@@ -258,6 +361,19 @@ git-sparse/                                 # Per-repo sparse-checkout profiles
 userscripts/                                # UserMonkey userscripts source
 install.sh                                  # Dependency installer
 ```
+
+## Linked Tmux Snapshots
+
+Snapshots retain every session/window context of a linked physical pane.
+An existing-server restore validates all selected contexts and resumes each
+physical agent once. Shared UUIDs alone do not prove a link: conflicting records,
+pane/window/process identities, and legacy duplicate UUIDs are refused.
+Failed collection preserves the last good snapshot and history.
+
+Cold recovery can select one session from a cross-session link. It refuses a
+selection containing multiple contexts of the same physical pane before creating
+anything; rebuilding linked-window topology is not supported. Snapshot columns,
+identity version, content deduplication and history retention are unchanged.
 
 ## Credits
 

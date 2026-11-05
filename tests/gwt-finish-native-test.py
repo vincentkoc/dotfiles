@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -60,10 +61,100 @@ class ReaderTests(unittest.TestCase):
                 NATIVE.read_file(self.file, time.monotonic() + 10)
             opened.assert_not_called()
 
+    def test_tracked_blob_streams_with_exact_size_and_chunk_bound(self):
+        for data in (b"", b"source" * 32768):
+            with self.subTest(size=len(data)):
+                self.file.write_bytes(data)
+                expected = NATIVE.file_identity(self.file.lstat())
+                read = os.read
+                def bounded_read(fd, size):
+                    self.assertLessEqual(size, 65536)
+                    return read(fd, size)
+                with mock.patch.object(NATIVE.os, "read", side_effect=bounded_read):
+                    digest, size = NATIVE.tracked_blob(self.file, time.monotonic() + 2,
+                                                     expected, len(data))
+                self.assertEqual(size, len(data))
+                self.assertEqual(digest, hashlib.sha1(
+                    b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest())
+
+    def test_tracked_blob_budget_and_nonregular_leaves_refuse_before_open(self):
+        link = self.root / "link"
+        link.symlink_to(self.file)
+        fifo = self.root / "fifo"
+        os.mkfifo(fifo)
+        for path, limit in ((self.file, 5), (link, 100), (fifo, 100), (self.root, 100)):
+            with self.subTest(path=path.name), mock.patch.object(NATIVE.os, "open") as opened:
+                with self.assertRaisesRegex(NATIVE.Retain, "file-type-or-size"):
+                    NATIVE.tracked_blob(path, time.monotonic() + 2,
+                                        NATIVE.file_identity(path.lstat()), limit)
+                opened.assert_not_called()
+
+    def test_tracked_blob_replacement_before_or_during_open_refuses(self):
+        for during_open in (False, True):
+            with self.subTest(during_open=during_open):
+                expected = NATIVE.file_identity(self.file.lstat())
+                replacement = self.root / "replacement"
+                replacement.write_bytes(b"source")
+                opened = os.open
+                def replace_then_open(path, flags):
+                    replacement.replace(path)
+                    return opened(path, flags)
+                if not during_open:
+                    replacement.replace(self.file)
+                with mock.patch.object(NATIVE.os, "open", side_effect=replace_then_open):
+                    with self.assertRaisesRegex(NATIVE.Retain, "file-replaced"):
+                        NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 6)
+
+    def test_tracked_blob_changes_during_read_refuse(self):
+        for change in ("replace", "grow", "truncate", "rewrite"):
+            with self.subTest(change=change):
+                self.file.write_bytes(b"source")
+                expected = NATIVE.file_identity(self.file.lstat())
+                read = os.read
+                changed = False
+                def read_then_change(fd, size):
+                    nonlocal changed
+                    chunk = read(fd, size)
+                    if not changed:
+                        changed = True
+                        if change == "replace":
+                            replacement = self.root / "replacement"
+                            replacement.write_bytes(b"source")
+                            replacement.replace(self.file)
+                        elif change == "grow":
+                            with self.file.open("ab") as stream:
+                                stream.write(b"extra")
+                        elif change == "truncate":
+                            self.file.write_bytes(b"")
+                        else:
+                            self.file.write_bytes(b"edited")
+                    return chunk
+                with mock.patch.object(NATIVE.os, "read", side_effect=read_then_change):
+                    with self.assertRaisesRegex(NATIVE.Retain, "file-(size-)?changed"):
+                        NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 6)
+
+    def test_tracked_blob_short_read_and_deadline_refuse(self):
+        expected = NATIVE.file_identity(self.file.lstat())
+        with mock.patch.object(NATIVE.os, "read", return_value=b""):
+            with self.assertRaisesRegex(NATIVE.Retain, "file-changed"):
+                NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 6)
+        read = os.read
+        def expire_during_read(fd, size):
+            chunk = read(fd, size)
+            NATIVE.DEADLINE = time.monotonic() - 1
+            return chunk
+        with mock.patch.object(NATIVE.os, "read", side_effect=expire_during_read):
+            with self.assertRaisesRegex(NATIVE.Retain, "deadline"):
+                NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 6)
+        with mock.patch.object(NATIVE.os, "open") as opened:
+            with self.assertRaisesRegex(NATIVE.Retain, "deadline"):
+                NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 6)
+            opened.assert_not_called()
+
     def test_split_and_unknown_index_extensions_refuse_without_git(self):
         import struct
         base = b"DIRC" + struct.pack(">II", 2, 0)
-        for extension in (b"link", b"sdir", b"FSMN", b"nope"):
+        for extension in (b"link", b"sdir", b"FSMN", b"nope", b"REUC"):
             body = base + extension + struct.pack(">I", 0)
             with self.subTest(extension=extension), self.assertRaisesRegex(NATIVE.Retain, "extension"):
                 NATIVE.index_entries(body + hashlib.sha1(body).digest())
@@ -71,6 +162,57 @@ class ReaderTests(unittest.TestCase):
     def test_invalid_index_checksum_refuses(self):
         with self.assertRaisesRegex(NATIVE.Retain, "raw-index-invalid"):
             NATIVE.index_entries(b"DIRC" + b"\0" * 40)
+
+    def resolve_undo_index(self, *payloads):
+        body = b"DIRC" + struct.pack(">II", 2, 0)
+        for payload in payloads:
+            body += b"REUC" + struct.pack(">I", len(payload)) + payload
+        return body + hashlib.sha1(body).digest()
+
+    def test_resolve_undo_decodes_modes_missing_stages_and_path_bytes(self):
+        first, second = bytes.fromhex("12" * 20), bytes.fromhex("34" * 20)
+        for modes, stages in (
+                (b"100644\0000\000120000\0", [[1, 0o100644, first.hex()], [3, 0o120000, second.hex()]]),
+                (b"0\000100755\000120000\0", [[2, 0o100755, first.hex()], [3, 0o120000, second.hex()]]),
+                (b"100644\000100755\0000\0", [[1, 0o100644, first.hex()], [2, 0o100755, second.hex()]])):
+            with self.subTest(modes=modes):
+                name = b"dir/[literal]\nname\xff"
+                data = self.resolve_undo_index(name + b"\0" + modes + first + second)
+                self.assertEqual(NATIVE.index_entries(data, allow_resolve_undo=True),
+                                 ({}, {os.fsdecode(name): stages}))
+        data = self.resolve_undo_index(b"a\0000\000100644\0000\0" + first
+                                      + b"b\000100755\0000\0000\0" + second)
+        self.assertEqual(NATIVE.index_entries(data, allow_resolve_undo=True)[1],
+                         {"a": [[2, 0o100644, first.hex()]], "b": [[1, 0o100755, second.hex()]]})
+
+    def test_resolve_undo_rejects_unsafe_duplicate_malformed_and_truncated_records(self):
+        oid = bytes.fromhex("12" * 20)
+        record = b"file\000100644\0000\0000\0" + oid
+        malformed = [record + record, record + b"trailing", record + b"\0", b"file\0000\0000\0000\0",
+                     b"file\000100644\0000\0000\0" + b"\0" * 20]
+        malformed += [record[:end] for end in range(1, len(record))]
+        malformed += [name + b"\000100644\0000\0000\0" + oid
+                      for name in (b"", b"/root", b"dir/", b"dir//file", b".",
+                                   b"..", b"dir/../file", b"dir/./file", b".git/file")]
+        malformed += [b"file\0" + mode + b"\0000\0000\0" + oid
+                      for mode in (b"", b"00", b"0100644", b"100664", b"160000",
+                                   b"40000", b"-1", b"100648", b"100644 ")]
+        for payload in malformed:
+            with self.subTest(payload=payload), self.assertRaisesRegex(NATIVE.Retain, "resolve-undo"):
+                NATIVE.index_entries(self.resolve_undo_index(payload), allow_resolve_undo=True)
+        for payloads in ((record, record), (b"", record), (b"", b"")):
+            with self.subTest(payloads=payloads), self.assertRaisesRegex(NATIVE.Retain, "duplicate-extension"):
+                NATIVE.index_entries(self.resolve_undo_index(*payloads), allow_resolve_undo=True)
+
+    def test_resolve_undo_declared_length_and_entry_bound_are_enforced(self):
+        record = b"file\000100644\0000\0000\0" + bytes.fromhex("12" * 20)
+        for size in (len(record) - 1, len(record) + 1, 0xffffffff):
+            body = b"DIRC" + struct.pack(">II", 2, 0) + b"REUC" + struct.pack(">I", size) + record
+            with self.subTest(size=size), self.assertRaises(NATIVE.Retain):
+                NATIVE.index_entries(body + hashlib.sha1(body).digest(), allow_resolve_undo=True)
+        with mock.patch.object(NATIVE, "ENTRY_LIMIT", 1), self.assertRaisesRegex(NATIVE.Retain, "entry-limit"):
+            NATIVE.index_entries(self.resolve_undo_index(record + record.replace(b"file", b"next")),
+                                 allow_resolve_undo=True)
 
     def test_raw_index_limit_is_not_the_discarded_tree_limit(self):
         import struct
@@ -115,7 +257,7 @@ class ReaderTests(unittest.TestCase):
                         yield types.SimpleNamespace(name=str(n), path=str(self.root / str(n)))
                 with mock.patch.object(NATIVE.os, "scandir", return_value=contextlib.nullcontext(population())), \
                         mock.patch.object(NATIVE, "read_file", return_value=(b"", (1,))), \
-                        mock.patch.object(NATIVE, "index_entries", return_value={}), \
+                        mock.patch.object(NATIVE, "index_entries", return_value=({}, None)), \
                         mock.patch.object(NATIVE, "disposable_metadata", return_value=[]), \
                         mock.patch.object(NATIVE, "ENTRY_LIMIT", 4):
                     call = NATIVE.admin_inventory if admin else NATIVE.inventory
@@ -129,7 +271,7 @@ class ReaderTests(unittest.TestCase):
         snap = {"path": str(self.root), "gitdir": str(self.root),
                 "path_id": [self.root.stat().st_dev, self.root.stat().st_ino]}
         with mock.patch.object(NATIVE, "read_file", return_value=(b"", (1,))), \
-                mock.patch.object(NATIVE, "index_entries", return_value={}), \
+                mock.patch.object(NATIVE, "index_entries", return_value=({}, None)), \
                 mock.patch.object(NATIVE, "ENTRY_LIMIT", 3):
             with self.assertRaisesRegex(NATIVE.Retain, "inventory-entry-limit"):
                 NATIVE.inventory(snap, mock.Mock(return_value=""), time.monotonic() + 2)
@@ -222,12 +364,12 @@ class ObserverTests(unittest.TestCase):
         result.references = mock.Mock(return_value=[])
         return result
 
-    def test_outside_alive_process_observed_without_exit_but_mapping_unqualified(self):
+    def test_outside_alive_process_observed_under_bounded_contract(self):
         observer = self.observer()
         proof = observer.observe(["/fixture/task", "/fixture/admin"], {(1, 2)})
         self.assertEqual(proof["holders"], [])
         self.assertEqual(proof["processes"], 1)
-        self.assertEqual(proof["mapping_coverage"], "unqualified")
+        self.assertEqual(proof["mapping_coverage"], "bounded-native")
 
     def test_checkout_and_admin_references_block_by_path_or_inode(self):
         for kind, path, inode in (("cwd", b"/fixture/task", (3, 4)),
@@ -242,7 +384,7 @@ class ObserverTests(unittest.TestCase):
                 observer.references.return_value = [(kind, vnode)]
                 proof = observer.observe(["/fixture/task", "/fixture/admin"], {(1, 2)})
                 self.assertEqual(proof["holders"][0]["kind"], kind)
-                self.assertEqual(proof["mapping_coverage"], "unqualified")
+                self.assertEqual(proof["mapping_coverage"], "bounded-native")
 
     def test_selected_visibility_error_never_becomes_absence(self):
         observer = self.observer()
@@ -282,113 +424,77 @@ class RegionCursorTests(unittest.TestCase):
         def info(pid, flavor, kind, address=0, *, end=False):
             if flavor == 9:
                 return NATIVE.CWD()
-            self.assertEqual((pid, flavor, kind, end), (123, 8, NATIVE.Region, True))
+            self.assertEqual((pid, flavor, kind, end), (123, 22, NATIVE.Region, True))
             return next(rows)
         observer.info = mock.Mock(side_effect=info)
         return observer, NATIVE.Darwin.references(observer, 123, NATIVE.BSD())
 
-    def region(self, address, size, flags=0):
+    def region(self, address, size):
         value = NATIVE.Region()
-        value.address, value.size, value.flags = address, size, flags
+        value.address, value.size = address, size
+        value.vnode.type = 1
+        value.vnode.stat.dev, value.vnode.stat.ino = 7, 42
         return value
-
-    def empty_guard(self, address):
-        value = self.region(address, 0)
-        value.inheritance = 2
-        value.counters[2], value.counters[9] = 31, 3
-        return value
-
-    def test_forward_empty_guard_requeries_exact_address_and_observes_mapping(self):
-        mapped = self.region(0x5000, 0x1000)
-        mapped.vnode.path = b"/fixture/task/mapped"
-        mapped.vnode.stat.dev, mapped.vnode.stat.ino = 7, 42
-        observer, references = self.references([
-            self.region(0x1000, 0x1000), self.empty_guard(0x5000), mapped, None])
-        observed = list(references)
-        self.assertEqual([call.args[3] for call in observer.info.call_args_list if call.args[1] == 8],
-                         [0, 0x2000, 0x5000, 0x6000])
-        self.assertEqual([(kind, vnode.stat.dev, vnode.stat.ino, bytes(vnode.path))
-                          for kind, vnode in observed if vnode.stat.ino],
-                         [("mapping", 7, 42, b"/fixture/task/mapped")])
-
-    def test_repeated_or_nonforward_empty_guard_retains_without_another_query(self):
-        for regions in ([self.empty_guard(0)],
-                        [self.region(0x1000, 0x2000), self.empty_guard(0x2000)],
-                        [self.empty_guard(0x5000), self.empty_guard(0x5000)]):
-            with self.subTest(addresses=[value.address for value in regions]):
-                observer, references = self.references(regions)
-                with self.assertRaisesRegex(NATIVE.Retain, "holder-region-iteration-invalid"):
-                    list(references)
-                self.assertEqual(sum(call.args[1] == 8 for call in observer.info.call_args_list),
-                                 len(regions))
-
-    def test_zero_sized_guard_requires_complete_empty_envelope(self):
-        cases = [(field, None) for field in
-                 ("protection", "max_protection", "inheritance", "flags", "offset")]
-        cases += [("counters", index) for index in range(14)]
-        cases += [("vnode", index) for index in (0, ctypes.sizeof(NATIVE.VPath) - 1)]
-        for field, index in cases:
-            with self.subTest(field=field, index=index):
-                guard = self.empty_guard(0x5000)
-                if field == "counters":
-                    guard.counters[index] += 1
-                elif field == "vnode":
-                    data = (ctypes.c_ubyte * ctypes.sizeof(NATIVE.VPath)).from_buffer(guard.vnode)
-                    data[index] = 1
-                else:
-                    setattr(guard, field, getattr(guard, field) + 1)
-                observer, references = self.references([guard])
-                with self.assertRaisesRegex(NATIVE.Retain, "holder-region-iteration-invalid"):
-                    list(references)
-                self.assertEqual(sum(call.args[1] == 8 for call in observer.info.call_args_list), 1)
 
     def test_cursor_uses_returned_end_and_preserves_gaps(self):
         observer, references = self.references([
             self.region(0x1000, 0x2000), self.region(0x5000, 0x1000), None])
         self.assertEqual([kind for kind, _ in references], ["cwd", "root", "mapping", "mapping"])
-        self.assertEqual([call.args[3] for call in observer.info.call_args_list if call.args[1] == 8],
+        self.assertEqual([call.args[3] for call in observer.info.call_args_list if call.args[1] == 22],
                          [0, 0x3000, 0x6000])
 
-    def test_invalid_cursor_reports_exact_native_fields_without_advancing(self):
-        for regions, cursor, address, size, flags in (
-                ([self.region(0x1000, 0, 1)], 0, 0x1000, 0, 1),
-                ([self.region(0x1000, 0x1000), self.region(0x1000, 0x1000, 2)],
-                 0x2000, 0x1000, 0x1000, 2),
-                ([self.region(2**64 - 2, 2, 3)], 0, 2**64 - 2, 2, 3)):
-            with self.subTest(cursor=cursor, address=address, size=size):
-                observer, references = self.references(regions)
-                with self.assertRaises(NATIVE.Retain) as raised:
+    def test_nonforward_zero_and_overflow_regions_retain(self):
+        for regions in ([self.region(0x1000, 0)],
+                        [self.region(0x1000, 0x1000), self.region(0x1000, 0x2000)],
+                        [self.region(2**64 - 2, 2)]):
+            with self.subTest(regions=regions):
+                _, references = self.references(regions)
+                with self.assertRaisesRegex(NATIVE.Retain, "holder-region-iteration-invalid"):
                     list(references)
-                self.assertEqual(str(raised.exception),
-                                 f"holder-region-iteration-invalid:pid=123:cursor={cursor}:"
-                                 f"address={address}:size={size}:flags={flags}:"
-                                 "offset=0:user_tag=0:share_mode=0:depth=0")
-                self.assertEqual(sum(call.args[1] == 8 for call in observer.info.call_args_list),
-                                 len(regions))
 
-    def test_final_footprint_fields_are_preserved_without_special_case(self):
-        footprint = self.region(0x2000, 0x1000)
-        footprint.offset = footprint.address
-        footprint.counters[2], footprint.counters[9] = 2**32 - 1, 2
-        observer, references = self.references([footprint, None])
-        self.assertEqual([kind for kind, _ in references], ["cwd", "root", "mapping"])
-        self.assertEqual(observer.info.call_args.args[3], 0x3000)
-        footprint.size = 0
-        _, references = self.references([footprint])
-        with self.assertRaisesRegex(NATIVE.Retain, "offset=8192:user_tag=4294967295:share_mode=2:depth=0"):
-            list(references)
+    def test_mapped_vnode_missing_identity_or_unknown_kind_retains(self):
+        for field, value in (("ino", 0), ("type", 0), ("type", 99)):
+            with self.subTest(field=field, value=value):
+                region = self.region(0x1000, 0x1000)
+                setattr(region.vnode.stat if field == "ino" else region.vnode, field, value)
+                _, references = self.references([region])
+                with self.assertRaisesRegex(NATIVE.Retain, "holder-region-vnode-unknown"):
+                    list(references)
 
-    def test_only_canonical_end_errno_is_end_of_regions(self):
+    def test_only_canonical_end_errno_is_accepted_native_endpoint(self):
         observer = object.__new__(NATIVE.Darwin)
         observer.lib = mock.Mock()
         observer.call = mock.Mock(return_value=(0, errno.EINVAL))
-        self.assertIsNone(observer.info(123, 8, NATIVE.Region, 0x1000, end=True))
+        self.assertIsNone(observer.info(123, 22, NATIVE.Region, 0x1000, end=True))
         for result in ((0, errno.ESRCH), (0, errno.EPERM), (0, 0),
                        (ctypes.sizeof(NATIVE.Region) - 1, 0)):
             with self.subTest(result=result):
                 observer.call.return_value = result
                 with self.assertRaisesRegex(NATIVE.Retain, "holder-visibility-unknown"):
-                    observer.info(123, 8, NATIVE.Region, 0x1000, end=True)
+                    observer.info(123, 22, NATIVE.Region, 0x1000, end=True)
+
+    def test_native_call_budget_retains_instead_of_truncating(self):
+        observer = object.__new__(NATIVE.Darwin)
+        observer.until = time.monotonic() + 1
+        observer.calls = 200000
+        call = mock.Mock()
+        with self.assertRaisesRegex(NATIVE.Retain, "holder-native-call-limit"):
+            observer.call(call)
+        call.assert_not_called()
+
+    def test_unknown_fd_or_fileport_kind_retains_known_nonvnode_kinds_do_not(self):
+        for flavor in (1, 14):
+            for kind in (0, 2, 3, 4, 5, 6, 7, 9, 10, 11, 8, 99):
+                with self.subTest(flavor=flavor, kind=kind):
+                    observer, references = self.references([None])
+                    descriptor = NATIVE.FD()
+                    descriptor.kind = kind
+                    observer.array.side_effect = lambda pid, selected, *_: [descriptor] if selected == flavor else []
+                    if kind in (8, 99):
+                        with self.assertRaisesRegex(NATIVE.Retain, "holder-descriptor-kind-unknown"):
+                            list(references)
+                    else:
+                        self.assertEqual([label for label, _ in references], ["cwd", "root"])
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Darwin ACL fixture")

@@ -21,7 +21,8 @@ EOF
 cat >"$backend_dir/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ $# -eq 2 && "$1" == auth && "$2" == token ]]
+[[ $# -eq 4 && "$1" == auth && "$2" == token && "$3" == --hostname && "$4" == github.com ]]
+[[ "$GH_PROMPT_DISABLED" == 1 ]]
 printf 'lookup\n' >>"$TEST_LOOKUP_LOG"
 if IFS= read -r input; then
   printf 'authentication consumed stdin\n' >&2
@@ -35,6 +36,16 @@ case "$TEST_AUTH_MODE" in
     exit 1
     ;;
   empty) ;;
+  hang)
+    printf 'synthetic-native-secret\n'
+    exec /bin/sleep 60
+    ;;
+  pipe-holder)
+    printf 'synthetic-native-secret\n'
+    /bin/sleep 60 &
+    exit 0
+    ;;
+  cancel) exec "$TEST_PYTHON" "$TEST_NATIVE_FIXTURE" ;;
   *) exit 65 ;;
 esac
 EOF
@@ -53,6 +64,7 @@ set -euo pipefail
 [[ "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" == "$TEST_EXPECTED_MODERN" ]]
 [[ "${GITHUB_PAT_TOKEN:-}" == "$TEST_EXPECTED_LEGACY" ]]
 if [[ "$TEST_LAUNCHER" == codex-github-mcp ]]; then
+  [[ -z "${TEST_MCP_LOG:-}" ]] || printf 'launch\n' >>"$TEST_MCP_LOG"
   [[ "$1" == stdio ]]
   shift
 fi
@@ -100,6 +112,8 @@ run_case() {
   if [[ "$launcher" == codex-github-mcp ]]; then
     if [[ "${TEST_NO_SERVER:-0}" == 1 ]]; then
       expected_status=127
+    elif [[ "$auth_mode" == hang || "$auth_mode" == pipe-holder ]]; then
+      expected_status=124
     elif [[ -z "$modern" ]]; then
       expected_status=1
     fi
@@ -131,6 +145,8 @@ run_case() {
     [[ ! -s "$temporary/stdout" ]]
     if [[ "$expected_status" -eq 127 ]]; then
       grep -Fx 'codex-github-mcp: install github-mcp-server with Homebrew' "$temporary/stderr" >/dev/null
+    elif [[ "$expected_status" -eq 124 ]]; then
+      grep -Fx 'codex-github-mcp: native GitHub credential lookup timed out; check local gh/Keychain availability' "$temporary/stderr" >/dev/null
     else
       grep -Fx 'codex-github-mcp: set GITHUB_PERSONAL_ACCESS_TOKEN or GITHUB_PAT_TOKEN, or authenticate the native GitHub CLI' "$temporary/stderr" >/dev/null
     fi
@@ -148,14 +164,30 @@ for launcher in codex codex-github-mcp; do
     GITHUB_PERSONAL_ACCESS_TOKEN= GITHUB_PAT_TOKEN=synthetic-legacy-secret
   run_case empty-legacy synthetic-modern-secret synthetic-modern-secret 0 failed \
     GITHUB_PERSONAL_ACCESS_TOKEN=synthetic-modern-secret GITHUB_PAT_TOKEN=
-  run_case empty-both synthetic-native-secret synthetic-native-secret 1 success \
-    GITHUB_PERSONAL_ACCESS_TOKEN= GITHUB_PAT_TOKEN=
-  run_case native synthetic-native-secret synthetic-native-secret 1 success
+  if [[ "$launcher" == codex-github-mcp ]]; then
+    run_case empty-both synthetic-native-secret synthetic-native-secret 1 success \
+      GITHUB_PERSONAL_ACCESS_TOKEN= GITHUB_PAT_TOKEN=
+    run_case native synthetic-native-secret synthetic-native-secret 1 success
+    run_case failed-lookup "" "" 1 failed
+    run_case empty-lookup "" "" 1 empty
+    for mode in hang pipe-holder; do
+      started=$SECONDS
+      run_case "$mode" "" "" 1 "$mode"
+      [[ $((SECONDS - started)) -lt 12 ]]
+    done
+  else
+    run_case empty-both "" "" 0 success \
+      GITHUB_PERSONAL_ACCESS_TOKEN= GITHUB_PAT_TOKEN=
+    for mode in success failed empty hang; do
+      run_case "no-implicit-lookup-$mode" "" "" 0 "$mode"
+    done
+  fi
   TEST_NO_GH=1 run_case no-gh "" "" 0 success
-  run_case failed-lookup "" "" 1 failed
-  run_case empty-lookup "" "" 1 empty
   TEST_NO_SERVER=1 run_case missing-mcp synthetic-modern-secret synthetic-modern-secret 0 failed \
     GITHUB_PERSONAL_ACCESS_TOKEN=synthetic-modern-secret
 done
+
+python3 "$repo_root/tests/codex-github-mcp-cancel-test.py" \
+  "$temporary" "$test_home" "$backend_dir"
 
 printf 'codex GitHub MCP authentication tests passed\n'

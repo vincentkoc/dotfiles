@@ -135,20 +135,16 @@ if (( constrained_network )); then
 fi
 
 token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_PAT_TOKEN:-}}"
-if [[ -z "$token" ]]; then
-  gh_bin="$(PATH="$lookup_path" command -v gh || true)"
-  if [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    token="$("$gh_bin" auth token </dev/null 2>/dev/null)" || token=""
-  fi
-fi
+# Credential lookup belongs to the explicitly configured GitHub MCP launcher.
 if [[ -n "$token" ]]; then
   export GITHUB_PERSONAL_ACCESS_TOKEN="${GITHUB_PERSONAL_ACCESS_TOKEN:-$token}"
   export GITHUB_PAT_TOKEN="${GITHUB_PAT_TOKEN:-$token}"
 fi
-unset gh_bin token
+unset token
 
 cli_catalog_eligible() {
   local command_seen=0 value key
+  catalog_embedded_tui=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --)
@@ -158,6 +154,11 @@ cli_catalog_eligible() {
       -h|--help|-V|--version|--bundled|--oss|--local-provider|--local-provider=*|\
       --remote|--remote=*)
         return 1
+        ;;
+      --no-daemon)
+        catalog_embedded_tui=0
+        shift
+        continue
         ;;
       -c|--config)
         [[ $# -ge 2 ]] || return 1
@@ -193,8 +194,9 @@ cli_catalog_eligible() {
             migrate-rollouts|unarchive|cloud|exec-server|features|help)
               return 1
               ;;
-            app-server) command_seen=2 ;;
-            debug) command_seen=3 ;;
+            app-server) command_seen=2; catalog_embedded_tui=0 ;;
+            debug) command_seen=3; catalog_embedded_tui=0 ;;
+            exec|e|review) command_seen=1; catalog_embedded_tui=0 ;;
             *) command_seen=1 ;;
           esac
         elif (( command_seen == 2 )); then
@@ -227,6 +229,16 @@ cli_catalog_eligible() {
 
 catalog_helper="$codex_home/model-catalogs/render-cli-catalog"
 if [[ -x "$catalog_helper" ]] && cli_catalog_eligible ${forwarded[@]+"${forwarded[@]}"}; then
+  # The catalog already requires embedded mode. Select it explicitly to avoid
+  # the daemon fallback warning, but preserve older CLIs' supported arguments.
+  # Pin the probe and exec together if the installer's current link moves.
+  if (( catalog_embedded_tui )) && catalog_binary="$(python3 -c \
+    'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' \
+    "$real_codex" 2>/dev/null)" && catalog_help="$("$catalog_binary" --help 2>/dev/null)" &&
+    [[ "$catalog_help" == *"--no-daemon"* ]]; then
+    real_codex="$catalog_binary"
+    forwarded=(--no-daemon ${forwarded[@]+"${forwarded[@]}"})
+  fi
   exec "$catalog_helper" --binary "$real_codex" --codex-home "$codex_home" \
     --exec -- ${forwarded[@]+"${forwarded[@]}"}
 fi

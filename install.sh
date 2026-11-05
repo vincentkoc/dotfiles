@@ -706,6 +706,12 @@ setup_claude_dotfiles() {
     fi
     success "$claude_settings_output"
 
+    if [[ ! -e "$claude_dir/CLAUDE.md" && ! -L "$claude_dir/CLAUDE.md" ]]; then
+        link_dotfile "$df_dir/.codex/AGENTS.md" "$claude_dir/CLAUDE.md"
+    else
+        info "Preserving existing Claude Code instructions: $claude_dir/CLAUDE.md"
+    fi
+
     if [[ "$(uname)" == "Darwin" ]] && command -v jq >/dev/null 2>&1; then
         mkdir -p "$(dirname "$claude_desktop_dest")"
         if [[ ! -s "$claude_desktop_dest" ]]; then
