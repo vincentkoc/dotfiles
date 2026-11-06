@@ -441,6 +441,116 @@ class ParserTests(Fixture):
             run.assert_not_called()
 
 
+class ColdHostTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.platform = patch.object(writer.sys, "platform", "darwin")
+        self.platform.start()
+        self.addCleanup(self.platform.stop)
+        self.uname = patch.object(writer.os, "uname", return_value=os.uname_result(
+            ("Darwin", "dynamic.example", "", "", "")
+        ))
+        self.uname.start()
+        self.addCleanup(self.uname.stop)
+
+    def test_exact_host_does_not_need_scutil(self):
+        self.server["host"] = "dynamic.example"
+        self.document()
+        with patch.object(writer, "run") as run:
+            writer.freeze_recovery("codex", self.source, "cockpit")
+        run.assert_not_called()
+
+    def test_stable_mac_host_freezes_without_changing_source(self):
+        self.server["host"] = "Fixture-Mac.local"
+        original = self.document()
+        with patch.object(writer, "run", return_value="Fixture-Mac\n") as run:
+            frozen = pathlib.Path(writer.freeze_recovery("codex", self.source, "cockpit"))
+        run.assert_called_once_with(["/usr/sbin/scutil", "--get", "LocalHostName"])
+        self.assertEqual(self.source.read_text(), original)
+        self.assertIn(f"codex resume --no-alt-screen {SID}", frozen.read_text())
+        self.assertEqual(frozen.stat().st_mode & 0o777, 0o400)
+
+    def test_different_host_or_user_refuses_before_freezing(self):
+        for host, uid in (("Other-Mac.local", os.getuid()),
+                          ("Fixture-Mac.local", os.getuid() + 1),
+                          ("dynamic.example", os.getuid() + 1)):
+            self.server.update(host=host, uid=uid)
+            self.document()
+            with self.subTest(host=host, uid=uid), patch.object(
+                writer, "run", return_value="Fixture-Mac\n"
+            ) as run, self.assertRaises(writer.SnapshotError):
+                writer.freeze_recovery("codex", self.source, "cockpit")
+            if uid != os.getuid():
+                run.assert_not_called()
+            self.assertFalse(self.state.exists())
+
+    def test_invalid_stable_name_refuses_before_freezing(self):
+        for name in ("", "\n", "Fixture-Mac.local", " Fixture-Mac", "Fixture Mac",
+                     "Fixture\nMac", "-Fixture", "Fixture-", "a" * 64, "Fïxture"):
+            self.server["host"] = name.rstrip("\n") + ".local"
+            self.document()
+            with self.subTest(name=name), patch.object(
+                writer, "run", return_value=name
+            ), self.assertRaises(writer.SnapshotError):
+                writer.freeze_recovery("codex", self.source, "cockpit")
+            self.assertFalse(self.state.exists())
+
+    def test_missing_scutil_refuses_before_freezing(self):
+        self.server["host"] = "Fixture-Mac.local"
+        self.document()
+        with patch.object(writer.subprocess, "Popen", side_effect=FileNotFoundError), self.assertRaises(
+            writer.SnapshotError
+        ):
+            writer.freeze_recovery("codex", self.source, "cockpit")
+        self.assertFalse(self.state.exists())
+
+    def test_scutil_error_and_timeout_refuse_before_freezing(self):
+        self.server["host"] = "Fixture-Mac.local"
+        self.document()
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), patch.object(writer.subprocess, "Popen") as popen:
+                process = popen.return_value
+                process.returncode = 1
+                process.communicate.return_value = ("Fixture-Mac\n", None)
+                if timeout:
+                    process.communicate.side_effect = subprocess.TimeoutExpired("scutil", 5)
+                with self.assertRaises(writer.SnapshotError):
+                    writer.freeze_recovery("codex", self.source, "cockpit")
+                self.assertLessEqual(process.communicate.call_args.kwargs["timeout"],
+                                     writer.COMMAND_TIMEOUT_SECONDS)
+            self.assertFalse(self.state.exists())
+
+    def test_linux_does_not_accept_mac_alias(self):
+        self.server["host"] = "Fixture-Mac.local"
+        self.document()
+        with patch.object(writer.sys, "platform", "linux"), patch.object(
+            writer, "run"
+        ) as run, self.assertRaises(writer.SnapshotError):
+            writer.freeze_recovery("codex", self.source, "cockpit")
+        run.assert_not_called()
+        self.assertFalse(self.state.exists())
+
+    def test_linux_exact_host_keeps_existing_disk_check(self):
+        self.server["host"] = "dynamic.example"
+        self.document()
+        with patch.object(writer.sys, "platform", "linux"), patch.object(
+            writer, "run", return_value="ext2/ext3\n"
+        ) as run:
+            writer.freeze_recovery("codex", self.source, "cockpit")
+        run.assert_called_once_with(["stat", "-f", "-c", "%T", str(self.state / "tt/recovery-inputs")])
+
+    def test_live_restore_keeps_exact_host_identity(self):
+        self.server["host"] = "Fixture-Mac.local"
+        self.document()
+        current = copy.deepcopy(self.identity)
+        current["server"]["host"] = "dynamic.example"
+        with patch.object(writer, "restore_identity", return_value=current), patch.object(
+            writer, "run"
+        ) as run, self.assertRaises(writer.SnapshotError):
+            writer.restore_dead(self.source, "all", "")
+        run.assert_not_called()
+
+
 class RecoveryTests(Fixture):
     def setUp(self):
         super().setUp()
