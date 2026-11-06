@@ -984,7 +984,7 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                         raise Retain("auto-merge-tree-recovery-required")
                 if name == "COMMIT_EDITMSG":
                     message = git(snap["path"], "--no-replace-objects", "show", "-s", "--format=%B%x00",
-                                  snap["head"], strict=True, deadline=until)
+                                  snap["head"], strict=True, deadline=until, capture_limit=LEAF_LIMIT)
                     if not message.endswith("\0"):
                         raise Retain("commit-message-proof-invalid")
                     expected = os.fsencode(message[:-1])
@@ -1007,7 +1007,8 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                                 raise Retain("commit-message-proof-limit")
                             for oid in sorted(candidates):
                                 message = git(snap["path"], "--no-replace-objects", "show", "-s",
-                                              "--format=%B%x00", oid, strict=True, deadline=until)
+                                              "--format=%B%x00", oid, strict=True, deadline=until,
+                                              capture_limit=LEAF_LIMIT)
                                 if not message.endswith("\0"):
                                     raise Retain("commit-message-proof-invalid")
                                 if cleaned == os.fsencode(message[:-1]):

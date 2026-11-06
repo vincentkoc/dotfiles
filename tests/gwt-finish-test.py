@@ -1279,9 +1279,14 @@ class ReleaseTests(unittest.TestCase):
         self.proofs[self.url] = self.proof(self.url)
         self.assertIn(b"#", (self.admin / "COMMIT_EDITMSG").read_bytes())
 
-    def fast_forwarded_task(self):
+    def fast_forwarded_task(self, authored_message=None):
         (self.wt / "file").write_text("authored change\n")
-        git(self.wt, "commit", "-am", "authored message")
+        if authored_message is None:
+            git(self.wt, "commit", "-am", "authored message")
+        else:
+            message_file = self.base / "authored-message"
+            message_file.write_bytes(authored_message)
+            git(self.wt, "commit", "-a", "-F", str(message_file))
         authored = git(self.wt, "rev-parse", "HEAD")
         message = (self.admin / "COMMIT_EDITMSG").read_bytes()
         git(self.repo, "merge", "--ff-only", authored)
@@ -1319,6 +1324,31 @@ class ReleaseTests(unittest.TestCase):
             FINISH.safety().admin_inventory(
                 snap, FINISH.git, time.monotonic() + 10,
                 preserved_oids={f"{number:040x}" for number in range(129)})
+
+    def test_large_head_message_keeps_metadata_capture_limit(self):
+        message = self.base / "large-message"
+        message.write_bytes(b"large message\n\n" + b"body\n" * (1024 * 1024 // 5 + 1))
+        git(self.wt, "commit", "--allow-empty", "-F", str(message))
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.proofs[self.url] = self.proof(self.url)
+        self.assertEqual(self.finish()[1][0]["checkout"], "removed")
+
+    def test_large_preserved_message_keeps_metadata_capture_limit(self):
+        self.fast_forwarded_task(b"large message\n\n" + b"body\n" * (1024 * 1024 // 5 + 1))
+        self.assertEqual(self.finish()[1][0]["checkout"], "removed")
+
+    def test_oversized_preserved_message_retains_saved_draft(self):
+        message = self.base / "oversized-message"
+        message.write_bytes(b"oversized message\n\n" + b"body\n" * (FINISH.safety().LEAF_LIMIT // 5 + 1))
+        recovery = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-F", str(message))
+        draft = b"uncommitted draft\n"
+        (self.admin / "COMMIT_EDITMSG").write_bytes(draft)
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        with self.assertRaisesRegex(FINISH.Retain, "git-failed"):
+            FINISH.safety().admin_inventory(
+                snap, FINISH.git, time.monotonic() + 10, preserved_oids={recovery})
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), draft)
 
     def test_editor_commit_uses_canonical_cleanup_before_release(self):
         self.editor_commit()
