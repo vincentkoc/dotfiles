@@ -983,7 +983,8 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                     if data != os.fsencode(tree + "\n"):
                         raise Retain("auto-merge-tree-recovery-required")
                 if name == "COMMIT_EDITMSG":
-                    message = git(snap["path"], "show", "-s", "--format=%B%x00", snap["head"])
+                    message = git(snap["path"], "--no-replace-objects", "show", "-s", "--format=%B%x00",
+                                  snap["head"], strict=True, deadline=until)
                     if not message.endswith("\0"):
                         raise Retain("commit-message-proof-invalid")
                     expected = os.fsencode(message[:-1])
@@ -998,7 +999,21 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                         options = () if mode == "whitespace" else ("--strip-comments",)
                         cleaned = git(snap["path"], "stripspace", *options, input_data=data, raw=True)
                         if cleaned != expected:
-                            raise Retain("commit-message-recovery-required")
+                            # Fast-forwards leave the last authored message behind.
+                            # Only commit roots bound by the surviving refs/reflogs
+                            # can prove those bytes remain recoverable after removal.
+                            candidates = (preserved_oids or set()) - {snap["head"]}
+                            if len(candidates) > 128:
+                                raise Retain("commit-message-proof-limit")
+                            for oid in sorted(candidates):
+                                message = git(snap["path"], "--no-replace-objects", "show", "-s",
+                                              "--format=%B%x00", oid, strict=True, deadline=until)
+                                if not message.endswith("\0"):
+                                    raise Retain("commit-message-proof-invalid")
+                                if cleaned == os.fsencode(message[:-1]):
+                                    break
+                            else:
+                                raise Retain("commit-message-recovery-required")
                     if file_identity(path.lstat()) != identity:
                         raise Retain("commit-message-recovery-required")
                 if name == "config.worktree":

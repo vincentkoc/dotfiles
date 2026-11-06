@@ -1279,6 +1279,47 @@ class ReleaseTests(unittest.TestCase):
         self.proofs[self.url] = self.proof(self.url)
         self.assertIn(b"#", (self.admin / "COMMIT_EDITMSG").read_bytes())
 
+    def fast_forwarded_task(self):
+        (self.wt / "file").write_text("authored change\n")
+        git(self.wt, "commit", "-am", "authored message")
+        authored = git(self.wt, "rev-parse", "HEAD")
+        message = (self.admin / "COMMIT_EDITMSG").read_bytes()
+        git(self.repo, "merge", "--ff-only", authored)
+        (self.repo / "integrated").write_text("sibling change\n")
+        git(self.repo, "add", "integrated")
+        git(self.repo, "commit", "-m", "integrated message")
+        git(self.wt, "merge", "--ff-only", "main")
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.proofs[self.url] = self.proof(self.url)
+        self.assertNotEqual(authored, self.head)
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
+        return authored, message
+
+    def test_fast_forwarded_committed_message_allows_automatic_release(self):
+        authored, _ = self.fast_forwarded_task()
+        result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertEqual(git(self.repo, "show", "-s", "--format=%B", authored), "authored message")
+        self.assertTrue(self.legacy.exists())
+
+    def test_matching_unpreserved_commit_does_not_attest_message(self):
+        recovery = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "unpreserved message")
+        message = b"unpreserved message\n"
+        (self.admin / "COMMIT_EDITMSG").write_bytes(message)
+        self.assert_release_blocked("commit-message-recovery-required")
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
+        self.assertEqual(git(self.repo, "show", "-s", "--format=%B", recovery), "unpreserved message")
+
+    def test_committed_message_proof_candidates_remain_bounded(self):
+        self.fast_forwarded_task()
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        with self.assertRaisesRegex(FINISH.Retain, "commit-message-proof-limit"):
+            FINISH.safety().admin_inventory(
+                snap, FINISH.git, time.monotonic() + 10,
+                preserved_oids={f"{number:040x}" for number in range(129)})
+
     def test_editor_commit_uses_canonical_cleanup_before_release(self):
         self.editor_commit()
         result = self.finish("--release")[1][0]
@@ -1854,6 +1895,7 @@ class FinalizedRemovalTests(unittest.TestCase):
     assert_release_blocked = ReleaseTests.assert_release_blocked
     setUp = ReleaseTests.setUp
     tearDown = ReleaseTests.tearDown
+    fast_forwarded_task = ReleaseTests.fast_forwarded_task
 
     def remove(self, *roots):
         args = ["--finalized"]
@@ -1869,6 +1911,54 @@ class FinalizedRemovalTests(unittest.TestCase):
         (evidence / "proof.json").write_text('{"result":"passed"}\n')
         (evidence / "test.log").write_text("finalized test output\n")
         return evidence
+
+    def test_fast_forwarded_committed_message_allows_finalized_removal(self):
+        authored, _ = self.fast_forwarded_task()
+        self.artifacts()
+        donor = self.base / "dependency-donor"
+        donor.mkdir()
+        (donor / "keep").write_text("shared dependency\n")
+        (self.wt / "node_modules").symlink_to(donor, target_is_directory=True)
+        result = self.remove(".crabbox", "node_modules")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertEqual(git(self.repo, "show", "-s", "--format=%B", authored), "authored message")
+        self.assertTrue(self.legacy.exists())
+        self.assertEqual((donor / "keep").read_text(), "shared dependency\n")
+
+    def test_fast_forwarded_divergent_draft_is_preserved(self):
+        _, message = self.fast_forwarded_task()
+        draft = message + b"uncommitted draft\n"
+        (self.admin / "COMMIT_EDITMSG").write_bytes(draft)
+        with self.assertRaisesRegex(FINISH.Retain, "commit-message-recovery-required"):
+            self.remove()
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), draft)
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_committed_message_drift_between_admissions_keeps_native_lock(self):
+        _, message = self.fast_forwarded_task()
+        admit = FINISH.finalized_admission
+        calls = []
+        draft = message + b"later draft\n"
+
+        def change_after_admission(*args, **kwargs):
+            result = admit(*args, **kwargs)
+            calls.append(None)
+            if len(calls) == 1:
+                (self.admin / "COMMIT_EDITMSG").write_bytes(draft)
+            return result
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=change_after_admission), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(result["reason"], "commit-message-recovery-required", result)
+        self.assertFalse(any("worktree" in call.args[0] and ("unlock" in call.args[0] or "remove" in call.args[0])
+                             for call in children.call_args_list))
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), draft)
+        self.assertTrue((self.admin / "locked").exists())
 
     def gitlinks(self):
         oid = "1" * 40
