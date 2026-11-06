@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Probe OSC 10/11 on a private, detached tmux server; never launch an agent."""
+"""Probe palette and clipboard bytes on private tmux; never launch an agent."""
 
+import base64
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
 import os
 from pathlib import Path
+import pty
 import re
 import select
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -56,7 +60,21 @@ def probe(root):
     wait_for(root / "stop", 30)
 
 
-class PaletteTest(unittest.TestCase):
+def clipboard_probe(root):
+    (root / "ready").touch()
+    previous = None
+    while not (root / "stop").exists():
+        request = root / "clipboard-request.json"
+        if request.exists():
+            current = json.loads(request.read_text())
+            if current != previous:
+                previous = current
+                os.write(1, b"\x1b]52;" + current["selector"].encode() + b";" +
+                         current["payload"].encode() + b"\x07")
+        time.sleep(0.01)
+
+
+class PrivateTmuxTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="tt-palette-")
         self.addCleanup(self.temporary.cleanup)
@@ -84,6 +102,12 @@ class PaletteTest(unittest.TestCase):
                               env=self.env, capture_output=True, text=True,
                               check=check, timeout=5)
 
+    def recovery_config(self):
+        return subprocess.run([str(REPO / "bin/tt"), "recovery-config"], env=self.env,
+                              capture_output=True, text=True, check=True, timeout=5).stdout
+
+
+class PaletteTest(PrivateTmuxTest):
     def start(self, config):
         config_path = self.root / "tmux.conf"
         config_path.write_text(config)
@@ -108,10 +132,6 @@ class PaletteTest(unittest.TestCase):
         wait_for(root / "reply.json")
         data = json.loads((root / "reply.json").read_text())
         return dict(re.findall(r"\x1b\](10|11);rgb:([0-9a-f/]+)", data))
-
-    def recovery_config(self):
-        return subprocess.run([str(REPO / "bin/tt"), "recovery-config"], env=self.env,
-                              capture_output=True, text=True, check=True, timeout=5).stdout
 
     def assert_palette(self, replies, background="1a1a/1b1b/2626"):
         self.assertEqual(replies, {"10": "c0c0/caca/f5f5", "11": background})
@@ -311,8 +331,143 @@ class PaletteTest(unittest.TestCase):
         self.check_profile("profiles/linux-server/tmux.conf.local")
 
 
+class ClipboardTest(PrivateTmuxTest):
+    override = r"xterm*:Ms=\E]52;%?%p1%l%t%p1%s%ec%;;%p2%s\007"
+    payload = b"clipboard fixture\x00\n"
+
+    def setUp(self):
+        super().setUp()
+        for name in COLOR_ENV:
+            self.env.pop(name, None)
+        self.clients = []
+        self.addCleanup(self.stop)
+        config = self.root / "empty.conf"
+        config.write_text("set -g status off\nset -g set-clipboard on\n")
+        self.run_tmux("-f", str(config), "new-session", "-d", "-s", "clipboard",
+                      sys.executable, str(Path(__file__).resolve()), "--clipboard-probe",
+                      str(self.root))
+        wait_for(self.root / "ready")
+        self.identity = self.run_tmux("display-message", "-p", "-t", "clipboard",
+                                     "#{window_id} #{pane_id} #{pane_pid}").stdout
+
+    def stop(self):
+        (self.root / "stop").touch()
+        for client, master in self.clients:
+            try:
+                client.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                client.terminate()
+                client.wait(timeout=2)
+            finally:
+                os.close(master)
+        deadline = time.monotonic() + 5
+        while self.run_tmux("has-session", "-t", "clipboard", check=False).returncode == 0:
+            self.assertLess(time.monotonic(), deadline, "private clipboard pane did not stop")
+            time.sleep(0.01)
+
+    def profile_config(self, relative):
+        # Parse the production terminal block, without running the base config's worker.
+        source = (REPO / relative).read_text()
+        start = source.index('set -g default-terminal "tmux-256color"')
+        end = source.index("set -g allow-passthrough on", start)
+        return source[start:end]
+
+    def source(self, config):
+        path = self.root / "clipboard.conf"
+        path.write_text(config)
+        self.run_tmux("source-file", str(path))
+        self.assertEqual(self.run_tmux("display-message", "-p", "-t", "clipboard",
+                                      "#{window_id} #{pane_id} #{pane_pid}").stdout,
+                         self.identity)
+
+    def attach(self, terminal):
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        try:
+            client = subprocess.Popen(
+                [self.tmux, "-N", "-S", str(self.socket), "attach-session", "-t", "clipboard"],
+                env=dict(self.env, TERM=terminal), stdin=slave, stdout=slave, stderr=slave,
+                start_new_session=True,
+            )
+        except BaseException:
+            os.close(master)
+            raise
+        finally:
+            os.close(slave)
+        self.clients.append((client, master))
+        deadline = time.monotonic() + 5
+        while True:
+            self.assertIsNone(client.poll(), "private terminal client exited")
+            rows = self.run_tmux("list-clients", "-F", "#{client_name}|#{client_termname}").stdout
+            names = [row.split("|", 1)[0] for row in rows.splitlines()
+                     if row.endswith("|" + terminal)]
+            if names:
+                return master, names[0]
+            self.assertLess(time.monotonic(), deadline, "private terminal did not attach")
+            time.sleep(0.01)
+
+    def expect_clipboard(self, master, selector):
+        expected = selector.encode() + b";" + base64.b64encode(self.payload)
+        output = bytearray()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.05)[0]:
+                output.extend(os.read(master, 65536))
+                self.assertLess(len(output), 128 * 1024)
+                sequences = re.findall(rb"\x1b\]52;([^\x07]*)\x07", output)
+                if sequences:
+                    self.assertEqual(sequences, [expected])
+                    return
+        self.fail("private terminal emitted no clipboard sequence")
+
+    def check_config(self, config, preserve_custom=False, reload=True):
+        custom = "custom-term:Tc"
+        near_match = "not-" + self.override
+        self.run_tmux("set-option", "-s", "terminal-overrides", custom + "," + near_match)
+        self.source(config)
+        if reload:
+            self.source(config)
+        entries = self.run_tmux("show-options", "-sv", "terminal-overrides").stdout.splitlines()
+        self.assertEqual(entries.count(self.override), 1, entries)
+        if preserve_custom:
+            self.assertIn(custom, entries)
+            self.assertIn(near_match, entries)
+        # A known non-xterm capability must retain its empty selector.
+        self.run_tmux("set-option", "-as", "terminal-overrides",
+                      r",vt100:Ms=\E]52;%p1%s;%p2%s\007")
+        buffer = self.root / "clipboard-payload"
+        buffer.write_bytes(self.payload)
+        master, client = self.attach("xterm-256color")
+        self.run_tmux("load-buffer", "-w", "-t", client, str(buffer))
+        self.expect_clipboard(master, "c")
+        for selector in ("c", "p", "s"):
+            request = self.root / "clipboard-request.tmp"
+            request.write_text(json.dumps({"selector": selector,
+                                           "payload": base64.b64encode(self.payload).decode()}))
+            request.replace(self.root / "clipboard-request.json")
+            self.expect_clipboard(master, selector)
+        other, client = self.attach("vt100")
+        self.run_tmux("load-buffer", "-w", "-t", client, str(buffer))
+        self.expect_clipboard(other, "")
+        self.assertEqual(self.run_tmux("display-message", "-p", "-t", "clipboard",
+                                      "#{window_id} #{pane_id} #{pane_pid}").stdout,
+                         self.identity)
+
+    def test_workstation_clipboard(self):
+        self.check_config(self.profile_config(".tmux.conf.local"))
+
+    def test_cold_recovery_clipboard(self):
+        self.check_config(self.recovery_config(), preserve_custom=True, reload=False)
+
+    def test_linux_profile_clipboard(self):
+        self.check_config(self.profile_config("profiles/linux-server/tmux.conf.local"),
+                          preserve_custom=True)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--probe":
         probe(Path(sys.argv[2]))
+    elif len(sys.argv) == 3 and sys.argv[1] == "--clipboard-probe":
+        clipboard_probe(Path(sys.argv[2]))
     else:
         unittest.main()

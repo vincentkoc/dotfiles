@@ -1099,6 +1099,8 @@ set -g extended-keys on
 set -g extended-keys-format csi-u
 set -g terminal-features "xterm*:RGB:clipboard:ccolour:cstyle:extkeys:focus:title,screen*:title,rxvt*:ignorefkeys,xterm-256color:RGB:hyperlinks,tmux-256color:RGB:hyperlinks"
 set -ga terminal-overrides ",*:Tc,linux*:AX@"
+# Mosh 1.4 requires selector c; preserve explicit selectors for other clients.
+set -as terminal-overrides '\'',xterm*:Ms=\E]52;%?%p1%l%t%p1%s%ec%;;%p2%s\007'\''
 set -g monitor-activity off
 set -g visual-activity off
 set -g bell-action none
