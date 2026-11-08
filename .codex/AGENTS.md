@@ -188,7 +188,7 @@
 - Worktree maintenance is a broad destructive mutation, never an automatic recovery step. Do not run `agent-worktree-maintain` because disk is low, the worktree count is high, state looks stale, or another cleanup command such as `gwt rm` just ran.
 - Before invoking worktree maintenance, resolve the exact host, canonical repository set, target worktree paths, owner session or PIDs, lock owner, and stop condition. A live maintainer/cleaner process or lock is contention: do not start a second process, kill it, or clear its lock; wait for the owner to finish unless the user gives current-turn permission naming that exact process or lock.
 - Run worktree maintenance only with current-turn user authorization naming the exact host, repository/worktree scope, and destructive mode. Restrict cleanup to paths owned by the current task or exact paths explicitly authorized; age, merged branches, missing panes, and low disk never prove ownership.
-- If the current worktree was cleaned up or no longer exists, stop and ask whether to recreate it.
+- If the current worktree is missing, verify its unfinished task, branch, HEAD, owner, and native lifecycle state, then recover it through the native owner under existing task authority; ask only if recovery is ambiguous, the task is finalized or cancelled, or scope would change.
 
 ## OpenClaw
 
