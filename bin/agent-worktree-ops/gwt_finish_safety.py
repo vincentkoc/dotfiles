@@ -1003,9 +1003,11 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                             # Only commit roots bound by the surviving refs/reflogs
                             # can prove those bytes remain recoverable after removal.
                             candidates = (preserved_oids or set()) - {snap["head"]}
-                            if len(candidates) > 128:
-                                raise Retain("commit-message-proof-limit")
-                            for oid in sorted(candidates):
+                            # Bound actual reads: a large surviving reflog can
+                            # still contain a matching proof within this budget.
+                            for number, oid in enumerate(sorted(candidates)):
+                                if number == 128:
+                                    raise Retain("commit-message-proof-limit")
                                 message = git(snap["path"], "--no-replace-objects", "show", "-s",
                                               "--format=%B%x00", oid, strict=True, deadline=until,
                                               capture_limit=LEAF_LIMIT)

@@ -1316,14 +1316,59 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
         self.assertEqual(git(self.repo, "show", "-s", "--format=%B", recovery), "unpreserved message")
 
-    def test_committed_message_proof_candidates_remain_bounded(self):
-        self.fast_forwarded_task()
+    def message_proof_roots(self):
+        roots = {git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                     "-m", "preserved message " + str(number)) for number in range(129)}
+        return sorted(roots)
+
+    def test_committed_message_proof_bounds_actual_reads(self):
+        roots = self.message_proof_roots()
         with FINISH.ledger(self.state) as db:
             snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
-        with self.assertRaisesRegex(FINISH.Retain, "commit-message-proof-limit"):
-            FINISH.safety().admin_inventory(
-                snap, FINISH.git, time.monotonic() + 10,
-                preserved_oids={f"{number:040x}" for number in range(129)})
+        saved = self.admin / "COMMIT_EDITMSG"
+        cases = ((roots[:128], 127, None), (roots, 127, None),
+                 (roots, 128, "commit-message-proof-limit"),
+                 (roots, None, "commit-message-proof-limit"),
+                 (roots[:128], None, "commit-message-recovery-required"))
+        for candidates, match, reason in cases:
+            with self.subTest(population=len(candidates), match=match, reason=reason):
+                message = (git(self.repo, "show", "-s", "--format=%B", roots[match]) + "\n").encode() \
+                    if match is not None else b"uncommitted draft\n"
+                saved.write_bytes(message)
+                with mock.patch.object(FINISH, "git", wraps=FINISH.git) as queries:
+                    if reason is None:
+                        FINISH.safety().admin_inventory(
+                            snap, FINISH.git, time.monotonic() + 20, preserved_oids=set(candidates))
+                    else:
+                        with self.assertRaisesRegex(FINISH.Retain, reason):
+                            FINISH.safety().admin_inventory(
+                                snap, FINISH.git, time.monotonic() + 20, preserved_oids=set(candidates))
+                shows = [call.args for call in queries.call_args_list if "show" in call.args]
+                self.assertEqual([args[-1] for args in shows], [self.head, *candidates[:128]])
+                self.assertEqual(saved.read_bytes(), message)
+                self.assertTrue((self.admin / "locked").exists())
+
+    def large_target_reflog(self):
+        self.fast_forwarded_task()
+        roots = self.message_proof_roots()
+        for oid in roots:
+            git(self.repo, "update-ref", "--create-reflog", "refs/remotes/origin/main", oid)
+        saved = (git(self.repo, "show", "-s", "--format=%B", roots[0]) + "\n").encode()
+        (self.admin / "COMMIT_EDITMSG").write_bytes(saved)
+        with FINISH.ledger(self.state) as db:
+            snap = FINISH.revalidate(FINISH.get_row(db, self.wt))
+        refs, composed = FINISH.release_refs(snap, "main", time.monotonic() + 10)
+        self.assertIn(snap["branch"], refs)
+        self.assertIn("refs/remotes/origin/main", refs)
+        self.assertGreater(len(composed - {self.head}), 128)
+        self.assertLess(sorted(composed - {self.head}).index(roots[0]), 128)
+
+    def test_large_target_reflog_allows_automatic_message_proof(self):
+        self.large_target_reflog()
+        result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertTrue(self.legacy.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
 
     def test_large_head_message_keeps_metadata_capture_limit(self):
         message = self.base / "large-message"
@@ -1926,6 +1971,8 @@ class FinalizedRemovalTests(unittest.TestCase):
     setUp = ReleaseTests.setUp
     tearDown = ReleaseTests.tearDown
     fast_forwarded_task = ReleaseTests.fast_forwarded_task
+    message_proof_roots = ReleaseTests.message_proof_roots
+    large_target_reflog = ReleaseTests.large_target_reflog
 
     def remove(self, *roots):
         args = ["--finalized"]
@@ -1957,6 +2004,17 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "show", "-s", "--format=%B", authored), "authored message")
         self.assertTrue(self.legacy.exists())
         self.assertEqual((donor / "keep").read_text(), "shared dependency\n")
+
+    def test_large_target_reflog_allows_finalized_message_proof(self):
+        self.large_target_reflog()
+        self.artifacts()
+        self.assertEqual(self.finish()[1][0]["checkout"], "retained")
+        result = self.remove(".crabbox")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
 
     def test_fast_forwarded_divergent_draft_is_preserved(self):
         _, message = self.fast_forwarded_task()
