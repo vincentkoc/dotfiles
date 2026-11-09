@@ -1316,6 +1316,80 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
         self.assertEqual(git(self.repo, "show", "-s", "--format=%B", recovery), "unpreserved message")
 
+    def test_message_proof_rejects_noncommit_and_missing_roots(self):
+        authored, message = self.fast_forwarded_task()
+        payload = self.base / "message-blob"
+        payload.write_bytes(message + b"\0")
+        blob = git(self.repo, "hash-object", "-w", str(payload))
+        git(self.repo, "tag", "-a", "message-proof", authored, "-m", "annotated proof")
+        roots = {
+            "blob": blob,
+            "tree": git(self.repo, "rev-parse", authored + "^{tree}"),
+            "tag": git(self.repo, "rev-parse", "refs/tags/message-proof"),
+            "missing": "f" * 40,
+        }
+        snap = FINISH.revalidate(self.row())
+        for kind, oid in roots.items():
+            with self.subTest(kind=kind):
+                # A valid matching commit must not hide another invalid witness
+                # in the same bounded read window, even when it sorts first.
+                with self.assertRaisesRegex(FINISH.Retain, "commit-message-proof-invalid"):
+                    FINISH.safety().admin_inventory(
+                        snap, FINISH.git, time.monotonic() + 10,
+                        preserved_oids={authored, oid})
+                self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
+                self.assertTrue((self.admin / "locked").exists())
+
+    def test_message_proof_ignores_replacement_objects(self):
+        authored, message = self.fast_forwarded_task()
+        replacement = git(self.repo, "commit-tree", authored + "^{tree}",
+                          "-m", "replacement message")
+        git(self.repo, "replace", authored, replacement)
+        snap = FINISH.revalidate(self.row())
+        FINISH.safety().admin_inventory(
+            snap, FINISH.git, time.monotonic() + 10, preserved_oids={authored})
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
+
+        payload = self.base / "replaced-blob"
+        payload.write_bytes(message + b"\0")
+        blob = git(self.repo, "hash-object", "-w", str(payload))
+        git(self.repo, "update-ref", "refs/replace/" + blob, authored)
+        with self.assertRaisesRegex(FINISH.Retain, "commit-message-proof-invalid"):
+            FINISH.safety().admin_inventory(
+                snap, FINISH.git, time.monotonic() + 10, preserved_oids={blob})
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_message_proof_rejects_malformed_batch_output(self):
+        authored, message = self.fast_forwarded_task()
+        snap = FINISH.revalidate(self.row())
+        valid = (authored + " commit\n").encode()
+        original = FINISH.git
+        for output in (b"", valid[:-1], valid + b"\n", valid * 2,
+                       valid.replace(b"commit", b"blob"), b"0" * 40 + b" commit\n"):
+            with self.subTest(output=output):
+                def malformed(path, *args, **kwargs):
+                    if "--batch-check=%(objectname) %(objecttype)" in args:
+                        return output
+                    return original(path, *args, **kwargs)
+
+                with mock.patch.object(FINISH, "git", side_effect=malformed), \
+                        self.assertRaisesRegex(FINISH.Retain, "commit-message-proof-invalid"):
+                    FINISH.safety().admin_inventory(
+                        snap, FINISH.git, time.monotonic() + 10, preserved_oids={authored})
+                self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
+                self.assertTrue((self.admin / "locked").exists())
+
+    def test_empty_message_proof_roots_retain_without_batch_input(self):
+        self.fast_forwarded_task()
+        snap = FINISH.revalidate(self.row())
+        with mock.patch.object(FINISH, "git", wraps=FINISH.git) as queries, \
+                self.assertRaisesRegex(FINISH.Retain, "commit-message-recovery-required"):
+            FINISH.safety().admin_inventory(
+                snap, FINISH.git, time.monotonic() + 10, preserved_oids=set())
+        self.assertFalse(any("cat-file" in call.args for call in queries.call_args_list))
+        self.assertTrue((self.admin / "locked").exists())
+
     def message_proof_roots(self):
         roots = {git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
                      "-m", "preserved message " + str(number)) for number in range(129)}
@@ -2023,6 +2097,29 @@ class FinalizedRemovalTests(unittest.TestCase):
         with self.assertRaisesRegex(FINISH.Retain, "commit-message-recovery-required"):
             self.remove()
         self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), draft)
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_reflog_blob_cannot_attest_saved_draft(self):
+        draft = b"uncommitted draft\n"
+        payload = self.base / "draft-blob"
+        payload.write_bytes(draft + b"\0")
+        blob = git(self.repo, "hash-object", "-w", str(payload))
+        saved = self.admin / "COMMIT_EDITMSG"
+        saved.write_bytes(draft)
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+        with reflog.open("ab") as stream:
+            stream.write((self.head + " " + blob
+                          + " Fixture <fixture@example.test> 1 +0000\tfixture\n").encode())
+        preserved = reflog.read_bytes()
+        with mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            with self.assertRaisesRegex(FINISH.Retain, "commit-message-proof-invalid"):
+                self.remove()
+        self.assertFalse(any("worktree" in call.args[0] and ("unlock" in call.args[0] or "remove" in call.args[0])
+                             for call in children.call_args_list))
+        self.assertEqual(saved.read_bytes(), draft)
+        self.assertEqual(reflog.read_bytes(), preserved)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.wt.exists())
         self.assertTrue((self.admin / "locked").exists())
 
     def test_committed_message_drift_between_admissions_keeps_native_lock(self):
