@@ -70,16 +70,16 @@ if [[ -z "$real_codex" || ! -x "$real_codex" ]]; then
   exit 127
 fi
 
+if [[ "${CODEX_WRAPPER_DEBUG:-0}" == "1" ]]; then
+  printf 'codex launcher: %s\n' "$real_codex" >&2
+fi
+
 # Metadata probes must not wait on authentication or rewrite model catalogs.
 case "${1:-}" in
   -V|--version|-h|--help)
     exec "$real_codex" "$@"
     ;;
 esac
-
-if [[ "${CODEX_WRAPPER_DEBUG:-0}" == "1" ]]; then
-  printf 'codex launcher: %s\n' "$real_codex" >&2
-fi
 
 constrained_network=0
 heavy_work=0

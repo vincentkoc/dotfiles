@@ -202,6 +202,7 @@ esac
 [[ "$TOKENJUICE_STATS" == off ]]
 /bin/bash --noprofile --norc -c '[[ "$TOKENJUICE_STATS" == off ]]' || exit 67
 printf 'native\n'
+[[ -z "${CODEX_TEST_NATIVE_STDERR:-}" ]] || printf '%s\n' "$CODEX_TEST_NATIVE_STDERR" >&2
 exit "${CODEX_TEST_NATIVE_EXIT:-0}"
 EOF
 chmod +x "$catalog_binary"
@@ -366,6 +367,44 @@ printf 'admission\n' >>"$CODEX_TEST_ORDER_LOG"
 printf '%s\0' "$#" "$@" >"$CODEX_TEST_ORDER_LOG.args"
 EOF
 chmod +x "$temporary/catalog-admission"
+
+# Metadata keeps native behavior while exposing the selected launcher on request.
+for option in -V --version -h --help; do
+  for debug in 0 1; do
+    for native_stderr in "" "native diagnostic"; do
+      : >"$native_args"
+      : >"$helper_args"
+      : >"$order_log"
+      : >"$temporary/metadata-auth.log"
+      if output="$(CODEX_WRAPPER_DEBUG="$debug" CODEX_TEST_NATIVE_EXIT=74 \
+        CODEX_TEST_NATIVE_STDERR="$native_stderr" \
+        CODEX_TEST_AUTH_LOG="$temporary/metadata-auth.log" \
+        catalog_run "$option" "" "two words" $'line\nbreak' '*' --heavy-work \
+        2>"$temporary/metadata.stderr")"; then
+        printf 'metadata probe must preserve the native exit status\n' >&2
+        exit 1
+      else
+        status=$?
+      fi
+      [[ "$status" -eq 74 && "$output" == native ]]
+      assert_argv "$native_args" "$option" "" "two words" $'line\nbreak' '*' --heavy-work
+      [[ "$(cat "$order_log")" == native ]]
+      [[ ! -s "$helper_args" && ! -s "$temporary/metadata-auth.log" ]]
+      : >"$temporary/expected.stderr"
+      if [[ "$debug" == 1 ]]; then
+        printf 'codex launcher: %s\n' "$catalog_binary" >>"$temporary/expected.stderr"
+      fi
+      if [[ -n "$native_stderr" ]]; then
+        printf '%s\n' "$native_stderr" >>"$temporary/expected.stderr"
+      fi
+      cmp "$temporary/expected.stderr" "$temporary/metadata.stderr" || {
+        printf 'metadata stderr mismatch: flag=%s debug=%s\n' "$option" "$debug" >&2
+        exit 1
+      }
+    done
+  done
+done
+
 : >"$native_args"
 : >"$helper_args"
 : >"$order_log"
