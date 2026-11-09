@@ -732,8 +732,10 @@ Normal rebases preserve old tips through the existing common branch reflog,
 whose bytes and identity must survive removal. Missing or expired recovery
 coverage retains. `AUTO_MERGE` is disposable only when it names the final HEAD
 tree. Editor-generated `COMMIT_EDITMSG` comments use Git's own cleanup and must
-reduce to the committed message; divergent drafts, unsupported cleanup modes
-and verbose/scissors residue retain.
+reduce to HEAD's message or a commit message retained by the bound surviving
+refs and reflogs (at most 128 additional commit roots). This includes authored
+messages left behind by fast-forwards. Divergent drafts, unsupported cleanup
+modes and verbose/scissors residue retain.
 Tracked regular source files are hashed in chunks of at most 64KiB, bounded by
 1GiB of verified working bytes per pass and 131072 source entries including
 directories. Other leaf reads retain the 8MiB limit. Subprocess and admin reads keep
