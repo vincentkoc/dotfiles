@@ -1002,10 +1002,21 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                             # Fast-forwards leave the last authored message behind.
                             # Only commit roots bound by the surviving refs/reflogs
                             # can prove those bytes remain recoverable after removal.
-                            candidates = (preserved_oids or set()) - {snap["head"]}
+                            candidates = sorted((preserved_oids or set()) - {snap["head"]})
+                            bounded = candidates[:128]
+                            if bounded:
+                                # A framed reflog can name non-commits. Qualify the
+                                # whole read window before any bytes attest a draft.
+                                objects = git(snap["path"], "--no-replace-objects", "cat-file",
+                                              "--batch-check=%(objectname) %(objecttype)",
+                                              input_data=os.fsencode("".join(oid + "\n" for oid in bounded)),
+                                              raw=True, strict=True, deadline=until,
+                                              capture_limit=LEAF_LIMIT)
+                                if objects != os.fsencode("".join(oid + " commit\n" for oid in bounded)):
+                                    raise Retain("commit-message-proof-invalid")
                             # Bound actual reads: a large surviving reflog can
                             # still contain a matching proof within this budget.
-                            for number, oid in enumerate(sorted(candidates)):
+                            for number, oid in enumerate(candidates):
                                 if number == 128:
                                     raise Retain("commit-message-proof-limit")
                                 message = git(snap["path"], "--no-replace-objects", "show", "-s",
