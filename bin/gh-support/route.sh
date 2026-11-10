@@ -318,7 +318,8 @@ gh_route() {
     }
   fi
   ghx_bin="$(gh_backend ghx)" || true
-  unset GH_FORCE_TTY
+  # The persistent ghx daemon inherits these even for later structured reads.
+  unset GH_FORCE_TTY FORCE_COLOR COLORTERM
   export NO_COLOR=1 CLICOLOR=0 CLICOLOR_FORCE=0
   if [[ "${1:-}" != auth && ! -t 0 ]]; then
     export GH_PROMPT_DISABLED=1 GH_PAGER=cat
