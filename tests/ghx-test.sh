@@ -47,7 +47,8 @@ cat >"$backend/gh" <<'EOF'
 printf '%s\n' "${0##*/}" >"$TEST_ROUTE"
 printf '%s\n' "$@" >"$TEST_ARGS"
 printf '%s\n' "${GH_FORCE_TTY-unset}" "${GH_PROMPT_DISABLED-unset}" \
-  "${GH_PAGER-unset}" "${NO_COLOR-unset}" "${GHX_GH_PATH-unset}" "$PWD" >"$TEST_ENV"
+  "${GH_PAGER-unset}" "${NO_COLOR-unset}" "${GHX_GH_PATH-unset}" "$PWD" \
+  "${FORCE_COLOR-unset}" "${COLORTERM-unset}" "${CLICOLOR-unset}" "${CLICOLOR_FORCE-unset}" >"$TEST_ENV"
 if [[ "${TEST_READ_STDIN:-0}" == 1 ]]; then cat >"$TEST_INPUT"; fi
 [[ ! -f "$TEST_OUTPUT" ]] || cat "$TEST_OUTPUT"
 printf '%s' "${TEST_ERROR:-}" >&2
@@ -153,6 +154,16 @@ for entry in gh ghx; do
   route ghx "$entry" pr checks 123 --repo=example/repo --json state
   route ghx "$entry" xcache stats
   route ghx "$entry" xdaemon status
+  # Daemon startup inherits this environment; forced colors corrupt cached JSON.
+  for command in 'xdaemon restart' 'pr view 123 -R example/repo --json number'; do
+    # Intentional splitting of fixed command fixtures.
+    # shellcheck disable=SC2086
+    route ghx env FORCE_COLOR=3 COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 "$entry" $command
+    [[ "$(sed -n '7,10p' "$TEST_ENV")" == $'unset\nunset\n0\n0' ]] || {
+      printf 'FAIL: forced colors reached the ghx backend\n' >&2
+      exit 1
+    }
+  done
   route ghx "$entry" --no-cache xcache stats
   [[ "$(head -1 "$TEST_ARGS")" == xcache ]]
   route ghx "$entry" xversion
