@@ -43,7 +43,7 @@ if [[ ${#sources[@]} -eq 0 ]]; then
     exit 0
 fi
 
-# Build and check the archive before it can replace a recovery set.
+# Build and check the archive before publishing it.
 cd "$OPENCLAW_LOCAL_STATE"
 TEMP_FILE="$(mktemp "$BACKUP_DIR/.openclaw-state.XXXXXX")"
 trap 'rm -f -- "$TEMP_FILE"' EXIT
@@ -55,12 +55,12 @@ if ! tar -czf "$TEMP_FILE" \
     exit 1
 fi
 
-if [[ ! -s "$TEMP_FILE" ]] || ! tar -tzf "$TEMP_FILE" >/dev/null 2>&1; then
+if [[ ! -s "$TEMP_FILE" ]] || ! gzip -t "$TEMP_FILE" >/dev/null 2>&1 || ! tar -tzf "$TEMP_FILE" >/dev/null 2>&1; then
     echo "[ERROR] Backup archive validation failed" >&2
     exit 1
 fi
 
-if ! ln -- "$TEMP_FILE" "$BACKUP_FILE"; then
+if ! link "$TEMP_FILE" "$BACKUP_FILE"; then
     echo "[ERROR] Backup destination already exists or cannot be published" >&2
     exit 1
 fi
@@ -87,7 +87,7 @@ if [[ ${#backups[@]} -gt "$MAX_BACKUPS" ]]; then
     DELETE_COUNT=$((${#backups[@]} - MAX_BACKUPS))
     echo "[INFO] Cleaning up $DELETE_COUNT old backup(s)..."
     for ((i = 0; i < DELETE_COUNT; i++)); do
-        rm -- "${backups[i]}"
+        rm -f -- "${backups[i]}"
     done
 fi
 
