@@ -35,35 +35,60 @@ if [[ ! -d "$OPENCLAW_LOCAL_STATE" ]]; then
     exit 0
 fi
 
-# Check if there's anything to backup
-if [[ ! -d "$OPENCLAW_LOCAL_STATE/cron" && ! -d "$OPENCLAW_LOCAL_STATE/memory" ]]; then
+sources=()
+[[ -d "$OPENCLAW_LOCAL_STATE/cron" ]] && sources+=(cron)
+[[ -d "$OPENCLAW_LOCAL_STATE/memory" ]] && sources+=(memory)
+if [[ ${#sources[@]} -eq 0 ]]; then
     echo "[WARN] No cron or memory directories found in $OPENCLAW_LOCAL_STATE"
     exit 0
 fi
 
-# Create the backup
+# Build and check the archive before it can replace a recovery set.
 cd "$OPENCLAW_LOCAL_STATE"
-tar -czf "$BACKUP_FILE" \
+TEMP_FILE="$(mktemp "$BACKUP_DIR/.openclaw-state.XXXXXX")"
+trap 'rm -f -- "$TEMP_FILE"' EXIT
+if ! tar -czf "$TEMP_FILE" \
     --exclude='*.log' \
     --exclude='*.tmp' \
-    cron memory 2>/dev/null || true
-
-if [[ -f "$BACKUP_FILE" ]]; then
-    SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-    echo "[OK] Backup created: $BACKUP_FILE ($SIZE)"
-else
-    echo "[ERROR] Failed to create backup"
+    "${sources[@]}" 2>/dev/null; then
+    echo "[ERROR] Backup archive creation failed" >&2
     exit 1
 fi
 
-# Cleanup old backups (keep last MAX_BACKUPS)
-cd "$BACKUP_DIR"
-BACKUP_COUNT=$(ls -1 openclaw-state-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+if [[ ! -s "$TEMP_FILE" ]] || ! tar -tzf "$TEMP_FILE" >/dev/null 2>&1; then
+    echo "[ERROR] Backup archive validation failed" >&2
+    exit 1
+fi
 
-if [[ "$BACKUP_COUNT" -gt "$MAX_BACKUPS" ]]; then
-    DELETE_COUNT=$((BACKUP_COUNT - MAX_BACKUPS))
+if ! ln -- "$TEMP_FILE" "$BACKUP_FILE"; then
+    echo "[ERROR] Backup destination already exists or cannot be published" >&2
+    exit 1
+fi
+rm -f -- "$TEMP_FILE"
+trap - EXIT
+SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+echo "[OK] Backup created: $BACKUP_FILE ($SIZE)"
+
+# Retain the newest timestamped sets only after a validated publication.
+shopt -s nullglob
+candidates=("$BACKUP_DIR"/openclaw-state-*.tar.gz)
+shopt -u nullglob
+backups=()
+for candidate in "${candidates[@]}"; do
+    name="${candidate##*/}"
+    if [[ ! "$name" =~ ^openclaw-state-[0-9]{8}_[0-9]{6}\.tar\.gz$ || ! -f "$candidate" || -L "$candidate" ]]; then
+        echo "[WARN] Backup retention held: unexpected archive entry" >&2
+        backups=()
+        break
+    fi
+    backups+=("$candidate")
+done
+if [[ ${#backups[@]} -gt "$MAX_BACKUPS" ]]; then
+    DELETE_COUNT=$((${#backups[@]} - MAX_BACKUPS))
     echo "[INFO] Cleaning up $DELETE_COUNT old backup(s)..."
-    ls -1t openclaw-state-*.tar.gz | tail -n "$DELETE_COUNT" | xargs rm -f
+    for ((i = 0; i < DELETE_COUNT; i++)); do
+        rm -- "${backups[i]}"
+    done
 fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Backup complete."
