@@ -3360,6 +3360,8 @@ show_pane_menu() {
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
   [[ -n "$client" ]] && client_args=(-c "$client")
 
+  # Menu commands expand IDs before confirm-before applies strftime to prompts.
+  # Escape prompt percents only; action targets must keep the original pane ID.
   "$TMUX_BIN" -N display-menu "${client_args[@]}" -T "Pane #{pane_index}" -t "$target" -x "$x" -y "$y" \
     "Edit note" e "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 84 -h 24 -E '$self note edit #{pane_id}'" \
     "Show note" v "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 72 -h 16 -E '$self note show #{pane_id} | LESS= less -SR'" \
@@ -3384,8 +3386,8 @@ show_pane_menu() {
     "#{?pane_marked_set,,-}Swap Marked" S "swap-pane" \
     "#{?pane_marked,Unmark,Mark}" m "select-pane -m" \
     "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
-    "Respawn" R "confirm-before -t #{q:client_name} -p 'Respawn pane #{pane_id}? (y/n)' 'respawn-pane -k -t #{pane_id}'" \
-    "Kill" X "confirm-before -t #{q:client_name} -p 'Kill pane #{pane_id}? (y/n)' 'kill-pane -t #{pane_id}'"
+    "Respawn" R "confirm-before -t #{q:client_name} -p 'Respawn pane #{s/%/%%/:pane_id}? (y/n)' 'respawn-pane -k -t #{pane_id}'" \
+    "Kill" X "confirm-before -t #{q:client_name} -p 'Kill pane #{s/%/%%/:pane_id}? (y/n)' 'kill-pane -t #{pane_id}'"
 }
 
 install_window_menu_bindings() {

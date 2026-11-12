@@ -105,7 +105,8 @@ class MenuTests(unittest.TestCase):
         self.children.append(child)
         self.output("Respawn")
         os.write(self.master, key)
-        self.output("? (y/n)")
+        action = {b"X": "Kill", b"R": "Respawn"}[key]
+        self.output(f"{action} pane {target}? (y/n)")
         return child
 
     def test_pane_kill_and_respawn_cancel_leave_every_process(self):
@@ -193,6 +194,37 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(alternate, self.tmux("list-keys", "-T", "root", "M-MouseDown3Pane"))
         self.assertEqual(before, [self.tmux("list-keys", "-T", "root", key) for key in
                                 ("MouseDown1StatusRight", "MouseDown3StatusRight")])
+
+    def test_config_pane_confirmations_display_literal_id(self):
+        before = self.panes()
+        for relative in (".tmux.conf.local", "profiles/linux-server/tmux.conf.local"):
+            text = (ROOT / relative).read_text()
+            commands = [cmd for cmd in re.findall(r'"(confirm-before [^"\n]+)"', text)
+                        if " pane " in cmd]
+            self.assertEqual(len(commands), 2)
+            for command in commands:
+                with self.subTest(config=relative, command=command):
+                    args = shlex.split(command)
+                    action = args[args.index("-p") + 1].split()[0]
+                    key, target_command = {
+                        "Kill": (b"X", ["kill-pane", "-t", "#{pane_id}"]),
+                        "Respawn": (b"R", ["respawn-pane", "-k", "-t", "#{pane_id}"]),
+                    }[action]
+                    self.assertEqual(shlex.split(args[-1]), target_command)
+                    self.drain()
+                    # Use real menu expansion before confirm-before's strftime.
+                    child = subprocess.Popen(
+                        [TMUX, "-N", "-S", self.socket, "display-menu", "-c", self.client,
+                         "-t", self.pane, "-T", "Confirmation fixture", "-x", "P", "-y", "P",
+                         action, key.decode(), command],
+                        env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    self.children.append(child)
+                    self.output("Confirmation fixture")
+                    os.write(self.master, key)
+                    self.output(f"{action} pane {self.pane}? (y/n)")
+                    os.write(self.master, b"n")
+                    self.assertEqual(child.wait(timeout=3), 0)
+                    self.assertEqual(self.panes(), before)
 
     def test_mouse_click_on_inactive_pane_keeps_its_socket_and_id(self):
         for directory in (self.root / "bin", self.root / ".local/bin"):
