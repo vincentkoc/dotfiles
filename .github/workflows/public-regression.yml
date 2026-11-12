@@ -19,6 +19,7 @@ on:
       - "profiles/linux-server/**"
       - "tests/linux-server-startup-test.py"
       - "bin/quickssh"
+      - "bin/openclaw-state-backup.sh"
       - "bin/agent-worktree-ops/**"
       - "bin/gwt-storage"
       - "bin/tt"
@@ -36,6 +37,7 @@ on:
       - "tests/install-tt-recovery-guidance-test.sh"
       - "tests/linux-server-auth-proof-test.sh"
       - "tests/quickssh-test.py"
+      - "tests/openclaw-state-backup-test.sh"
       - "tests/agent-worktree-maintain-test.sh"
       - "tests/tt-safety-test.py"
       - "tests/tt-codex-snapshot-live-test.sh"
@@ -78,5 +80,6 @@ jobs:
           bash tests/deepclean-test.sh
           bash tests/linux-server-auth-proof-test.sh
           python3 tests/quickssh-test.py
+          bash tests/openclaw-state-backup-test.sh
           python3 tests/tt-safety-test.py
           bash tests/tt-codex-snapshot-live-test.sh
