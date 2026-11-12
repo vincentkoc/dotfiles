@@ -2,6 +2,7 @@
 """Probe palette and clipboard bytes on private tmux; never launch an agent."""
 
 import base64
+import errno
 import fcntl
 import importlib.machinery
 import importlib.util
@@ -352,14 +353,16 @@ class ClipboardTest(PrivateTmuxTest):
 
     def stop(self):
         (self.root / "stop").touch()
-        for client, master in self.clients:
+        clients, self.clients = self.clients, []
+        # Unread output can block client shutdown; close every PTY before waiting.
+        for _, master in clients:
+            os.close(master)
+        for client, _ in clients:
             try:
                 client.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 client.terminate()
                 client.wait(timeout=2)
-            finally:
-                os.close(master)
         deadline = time.monotonic() + 5
         while self.run_tmux("has-session", "-t", "clipboard", check=False).returncode == 0:
             self.assertLess(time.monotonic(), deadline, "private clipboard pane did not stop")
@@ -452,6 +455,29 @@ class ClipboardTest(PrivateTmuxTest):
         self.assertEqual(self.run_tmux("display-message", "-p", "-t", "clipboard",
                                       "#{window_id} #{pane_id} #{pane_pid}").stdout,
                          self.identity)
+
+    def test_stop_reaps_two_clients_with_unread_output(self):
+        for terminal in ("xterm-256color", "vt100"):
+            self.attach(terminal)
+        clients = list(self.clients)
+        for _, master in clients:
+            self.assertTrue(select.select([master], [], [], 5)[0])
+
+        real_wait = subprocess.Popen.wait
+
+        def wait_after_masters_close(client, *args, **kwargs):
+            if any(client is attached for attached, _ in clients):
+                for _, master in clients:
+                    with self.assertRaises(OSError) as closed:
+                        os.fstat(master)
+                    self.assertEqual(closed.exception.errno, errno.EBADF)
+            return real_wait(client, *args, **kwargs)
+
+        with mock.patch.object(subprocess.Popen, "wait", wait_after_masters_close):
+            self.stop()
+        self.assertEqual(self.clients, [])
+        for client, _ in clients:
+            self.assertIsNotNone(client.poll())
 
     def test_workstation_clipboard(self):
         self.check_config(self.profile_config(".tmux.conf.local"))
