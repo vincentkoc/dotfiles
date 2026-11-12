@@ -1448,6 +1448,14 @@ create_profile_window() {
   profile="$("$TMUX_BIN" show-options -qv -t "$session" @tt_profile)"
   require_operator_topology_scope new-window "$new_window_socket:$session:$window" || return $?
 
+  # Exact restores can lack profile metadata. Reuse a surviving 3x2 layout.
+  if [[ -z "$profile" ]] && "$TMUX_BIN" list-panes -s -t "$session" \
+    -F '#{window_id} #{pane_left} #{pane_top}' | awk '
+      { panes[$1]++; if (!xs[$1, $2]++) columns[$1]++; if (!ys[$1, $3]++) rows[$1]++ }
+      END { for (w in panes) if (panes[w] == 6 && columns[w] == 3 && rows[w] == 2) found=1; exit !found }
+    '; then
+    profile=ops
+  fi
   placement=(-t "$session:")
   case "$position" in
     before) placement=(-b -t "$session:$window") ;;
@@ -3354,6 +3362,8 @@ show_pane_menu() {
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
   [[ -n "$client" ]] && client_args=(-c "$client")
 
+  # Menu commands expand IDs before confirm-before applies strftime to prompts.
+  # Escape prompt percents only; action targets must keep the original pane ID.
   "$TMUX_BIN" -N display-menu "${client_args[@]}" -T "Pane #{pane_index}" -t "$target" -x "$x" -y "$y" \
     "Edit note" e "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 84 -h 24 -E '$self note edit #{pane_id}'" \
     "Show note" v "display-popup -t '#{pane_id}' -T 'note: #{session_name}:#{window_index}.#{pane_index}' -x '#{pane_left}' -y '#{pane_top}' -w 72 -h 16 -E '$self note show #{pane_id} | LESS= less -SR'" \
@@ -3378,8 +3388,20 @@ show_pane_menu() {
     "#{?pane_marked_set,,-}Swap Marked" S "swap-pane" \
     "#{?pane_marked,Unmark,Mark}" m "select-pane -m" \
     "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
-    "Respawn" R "confirm-before -t #{q:client_name} -p 'Respawn pane #{pane_id}? (y/n)' 'respawn-pane -k -t #{pane_id}'" \
-    "Kill" X "confirm-before -t #{q:client_name} -p 'Kill pane #{pane_id}? (y/n)' 'kill-pane -t #{pane_id}'"
+    "Respawn" R "confirm-before -t #{q:client_name} -p 'Respawn pane #{s/%/%%/:pane_id}? (y/n)' 'respawn-pane -k -t #{pane_id}'" \
+    "Kill" X "confirm-before -t #{q:client_name} -p 'Kill pane #{s/%/%%/:pane_id}? (y/n)' 'kill-pane -t #{pane_id}'"
+}
+
+install_window_menu_bindings() {
+  local socket="${1:-}"
+  local -a socket_args=()
+  if [[ -n "$socket" ]]; then
+    [[ "$socket" == /* ]] || { echo "tt window-menu-bind: socket must be an absolute path" >&2; return 2; }
+    socket_args=(-S "$socket")
+  fi
+  # Keep normal startup and cold recovery on the same three binding definitions.
+  awk '/^# Cockpit windows use/ { copy=1; next } copy && /^# / { exit } copy { print }' \
+    "$DOTFILES_DIR/.tmux.conf.local" | "$TMUX_BIN" -N "${socket_args[@]}" source-file -
 }
 
 install_pane_menu_binding() {
@@ -3398,6 +3420,7 @@ install_agent_status_menu() {
   local self tmux_cmd
   self="$(tt_self_command)"
   tmux_cmd="$(shell_quote "$TMUX_BIN")"
+  install_window_menu_bindings
 
   "$TMUX_BIN" bind-key N display-popup -t "#{pane_id}" -T "note: #{session_name}:#{window_index}.#{pane_index}" -x "#{pane_left}" -y "#{pane_top}" -w 84 -h 24 -E "$self note edit #{pane_id}" 2>/dev/null || true
   install_pane_menu_binding 2>/dev/null || true
@@ -4644,6 +4667,10 @@ case "${1:-}" in
   pane-menu)
     show_pane_menu "${2:-${TMUX_PANE:-}}" "${3:-P}" "${4:-P}" "${5:-}"
     ;;
+  window-menu-bind)
+    [[ $# -le 2 ]] || { echo "usage: tt window-menu-bind [socket-path]" >&2; exit 2; }
+    install_window_menu_bindings "${2:-}"
+    ;;
   pane-menu-bind)
     [[ $# -le 2 ]] || { echo "usage: tt pane-menu-bind [socket-path]" >&2; exit 2; }
     install_pane_menu_binding "${2:-}"
@@ -4790,7 +4817,7 @@ case "${1:-}" in
     if "$TMUX_BIN" has-session -t "$1" 2>/dev/null; then
       attach_or_switch "$1"
     else
-      echo "usage: tt [ai [session]|ops [session]|new-window [--before|--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|pane-menu-bind [socket-path]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
+      echo "usage: tt [ai [session]|ops [session]|new-window [--before|--after] [--socket path] [--target pane-id|window-id]|shell [session]|mobile [session]|reset [ai|shell|mobile] [session]|window-menu-bind [socket-path]|pane-menu-bind [socket-path]|restore [target]|restore-preview [snapshot]|recover [manifest] [attach-session]|snapshot [file] [--quiet]|codex-snapshot [file] [--quiet]|codex-snapshot-show [snapshot]|snapshot-history [codex-cockpit|agent-cockpit] [limit]|status|doctor [--fix|--check]|popup [snapshot|restore-preview|snapshot-history|status|doctor]|codex-restore [preview|all|pane <target>|window <session:window>] [snapshot] [--execute]|autosave [on|off]|refresh [agents]|sync [target|all]|note [set|clear|show|edit|prompt|sync|list]|marker [set|clear|sync|list]|title [target] <short-title>|colorfix|status-audit|titles [on|off] [target]|wsl-bridge ensure|kill|attach <session>|ls]" >&2
       exit 2
     fi
     ;;
