@@ -73,7 +73,7 @@ restore is necessary, preserve these native contracts in full.
   available. Preserve ID, objective, lifecycle, token/time budgets and consumed
   usage. Report missing state as unknown; do not recreate goals or reset budgets.
 - Active goals retain normal native continuation. Paused, blocked, complete,
-  cancelled and budget-limited goals retain their saved states. Do not issue
+  usage-limited and budget-limited goals retain their saved states. Do not issue
   blanket resume/pause/clear commands or edit goal databases. An explicit user
   request to change lifecycle is separate from cockpit restoration.
 - Interrupting a turn can pause its goal. Preserve busy owners. If correcting a
