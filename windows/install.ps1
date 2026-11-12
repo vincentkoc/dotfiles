@@ -4,15 +4,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $Repo 'windows\Microsoft.PowerShell_profile.ps1'
 if (!(Test-Path $source)) { throw "dotfiles PowerShell profile missing: $source" }
+$escapedSource = $source.Replace("'", "''")
 $block = @"
 # >>> vincent-dotfiles >>>
-. '$source'
+. '$escapedSource'
 # <<< vincent-dotfiles <<<
 "@
-$profiles = @(
-    (Join-Path $HOME 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
-    (Join-Path $HOME 'Documents\PowerShell\Microsoft.PowerShell_profile.ps1')
-)
+. (Join-Path $PSScriptRoot 'profile-paths.ps1')
+$profiles = @(Get-DotfilesPowerShellProfiles)
 foreach ($profilePath in $profiles) {
     $profileDir = Split-Path -Parent $profilePath
     New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
