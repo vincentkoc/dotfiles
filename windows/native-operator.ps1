@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'profile-paths.ps1')
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $markerStart = '# >>> vincent-dotfiles >>>'
 $markerEnd = '# <<< vincent-dotfiles <<<'
@@ -100,10 +101,7 @@ function Update-ProcessPath {
 }
 
 function Get-ProfileTargets {
-    @(
-        (Join-Path $HOME 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
-        (Join-Path $HOME 'Documents\PowerShell\Microsoft.PowerShell_profile.ps1')
-    )
+    Get-DotfilesPowerShellProfiles
 }
 
 function Get-ManagedProfileText([string]$Current, [string]$Source) {

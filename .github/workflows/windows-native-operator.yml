@@ -5,7 +5,11 @@ on:
     paths:
       - ".github/workflows/windows-native-operator.yml"
       - "tests/windows-native-operator-rollback-test.ps1"
+      - "tests/windows-profile-install-test.ps1"
+      - "tests/windows-profile-paths-test.ps1"
+      - "windows/install.ps1"
       - "windows/native-operator.ps1"
+      - "windows/profile-paths.ps1"
   workflow_dispatch:
 
 permissions:
@@ -17,9 +21,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Test rollback with Windows PowerShell 5.1
+      - name: Test profile paths and rollback with Windows PowerShell 5.1
         shell: powershell
-        run: ./tests/windows-native-operator-rollback-test.ps1
-      - name: Test rollback with PowerShell 7
+        run: |
+          ./tests/windows-profile-paths-test.ps1
+          ./tests/windows-profile-install-test.ps1
+          ./tests/windows-native-operator-rollback-test.ps1
+      - name: Test profile paths and rollback with PowerShell 7
         shell: pwsh
-        run: ./tests/windows-native-operator-rollback-test.ps1
+        run: |
+          ./tests/windows-profile-paths-test.ps1
+          ./tests/windows-profile-install-test.ps1
+          ./tests/windows-native-operator-rollback-test.ps1
