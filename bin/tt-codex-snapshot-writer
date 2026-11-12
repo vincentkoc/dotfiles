@@ -1020,6 +1020,20 @@ def recovery_shell_command(command):
     return ["env", "-u", "NO_COLOR", "-u", "TERMINFO", "/bin/sh", "-c", program]
 
 
+def cold_recovery_host_matches(host):
+    if host == os.uname().nodename:
+        return True
+    if sys.platform != "darwin":
+        return False
+    # macOS can replace its dynamic nodename after a network change. Only cold
+    # recovery accepts the configured Bonjour name; live server identity stays exact.
+    local_name = run(["/usr/sbin/scutil", "--get", "LocalHostName"]).rstrip("\n")
+    return (
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", local_name) is not None
+        and host == f"{local_name}.local"
+    )
+
+
 def freeze_recovery(schema, source, selector):
     if schema not in ("codex", "agents"):
         raise SnapshotError("invalid recovery schema")
@@ -1031,7 +1045,7 @@ def freeze_recovery(schema, source, selector):
         raise SnapshotError("attach session is not present in the validated recovery input")
     if schema == "codex" and "# restore-identity\t" in text:
         saved = saved_restore_identity(text).get("server", {})
-        if saved.get("host") != os.uname().nodename or saved.get("uid") != os.getuid():
+        if saved.get("uid") != os.getuid() or not cold_recovery_host_matches(saved.get("host")):
             raise SnapshotError("recovery input belongs to another host or user")
     root = private_disk_directory(STATE_HOME / "tt" / "recovery-inputs")
     fd, name = tempfile.mkstemp(prefix=f"{schema}-", suffix=".tsv", dir=root)
