@@ -2651,6 +2651,8 @@ def main(argv=None):
     if args.read_only:
         with diagnostic_phase("state-session"), read_only_ledger(args.state_dir) as db:
             if db is None:
+                if not args.all:
+                    raise Retain("not-enrolled")
                 output = []
             elif args.all:
                 output = [summary(db, row) for row in db.execute(

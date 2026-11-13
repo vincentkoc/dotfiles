@@ -632,6 +632,22 @@ class WrapperTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "[]\n")
                 self.assertFalse(state.exists())
 
+    def test_read_only_single_status_preserves_absent_not_enrolled_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            for create_state in (False, True):
+                if create_state:
+                    state.mkdir(mode=0o700)
+                for read_only in (False, True):
+                    args = [str(TOOL), "status", "--state-dir", str(state)]
+                    if read_only:
+                        args.append("--read-only")
+                    result = subprocess.run(args, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("(not-enrolled)", result.stderr)
+                self.assertEqual(list(state.iterdir()) if state.exists() else [], [])
+
     def test_gwt_wrapper_creates_private_locked_entry_and_parks_only_its_shell(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp).resolve()
