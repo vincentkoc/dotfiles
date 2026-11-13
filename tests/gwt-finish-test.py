@@ -1121,23 +1121,41 @@ class ReleaseTests(unittest.TestCase):
         git(self.repo, "config", "extensions.worktreeConfig", "true")
         git(self.wt, "sparse-checkout", "disable")
         git(self.wt, "config", "--worktree", "dotfiles.sparseProfile", "full")
+        git(self.wt, "config", "--worktree", "core.hooksPath", "git-hooks")
         git(self.wt, "config", "--worktree", "user.fixtureNote", "preserve")
         self.assert_release_blocked("worktree-config-recovery-required")
         self.assertTrue(self.wt.exists())
         git(self.wt, "config", "--worktree", "--unset", "user.fixtureNote")
+        for values in (("/tmp/custom-hooks",), ("",), ("git-hooks", "git-hooks")):
+            with self.subTest(hooks=values):
+                git(self.wt, "config", "--worktree", "--replace-all", "core.hooksPath", values[0])
+                for value in values[1:]:
+                    git(self.wt, "config", "--worktree", "--add", "core.hooksPath", value)
+                self.call("resume")
+                self.assert_release_blocked("worktree-config-recovery-required")
+                self.assertTrue(self.wt.exists())
+        git(self.wt, "config", "--worktree", "--replace-all", "core.hooksPath", "git-hooks")
         self.call("resume")
         self.assertEqual(self.finish("--release")[1][0]["checkout"], "removed")
 
-    def test_post_release_admin_profile_change_requires_new_signoff(self):
+    def test_post_release_admin_config_change_requires_new_signoff(self):
         git(self.repo, "config", "extensions.worktreeConfig", "true")
-        git(self.wt, "config", "--worktree", "dotfiles.sparseProfile", "full")
-        self.proofs[self.url].update(merged=False, state="open", merge=None)
-        self.finish("--release")
-        git(self.wt, "config", "--worktree", "dotfiles.sparseProfile", "custom")
-        self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
-        result = self.call("check", "--apply")[1][0]
-        self.assertEqual(result["reason"], "released-admin-changed-resume-first")
-        self.assertTrue(self.wt.exists())
+        for key, value in (("dotfiles.sparseProfile", "custom"), ("core.hooksPath", None)):
+            with self.subTest(key=key):
+                git(self.wt, "config", "--worktree", "dotfiles.sparseProfile", "full")
+                git(self.wt, "config", "--worktree", "core.hooksPath", "git-hooks")
+                self.proofs[self.url].update(merged=False, state="open", merge=None)
+                self.finish("--release")
+                if value is None:
+                    with (self.admin / "config.worktree").open("ab") as config:
+                        config.write(b"# repository hooks unchanged\n")
+                else:
+                    git(self.wt, "config", "--worktree", key, value)
+                self.proofs[self.url].update(merged=True, state="closed", merge="a" * 40)
+                result = self.call("check", "--apply")[1][0]
+                self.assertEqual(result["reason"], "released-admin-changed-resume-first")
+                self.assertTrue(self.wt.exists())
+                self.call("resume")
 
     def test_present_skip_worktree_file_is_not_exempt_from_bytes_proof(self):
         git(self.wt, "update-index", "--skip-worktree", "file")
@@ -2671,6 +2689,8 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertNotIn("sibling_identities_after", result)
 
     def test_finalized_evidence_disposal_preserves_branch_and_skips_automatic_policy(self):
+        git(self.repo, "config", "extensions.worktreeConfig", "true")
+        git(self.wt, "config", "--worktree", "core.hooksPath", "git-hooks")
         self.artifacts()
         with mock.patch.object(FINISH, "qualified_policy") as policy, \
                 mock.patch.object(FINISH, "holder_qualification") as qualification:

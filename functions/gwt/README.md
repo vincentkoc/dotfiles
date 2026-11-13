@@ -515,6 +515,12 @@ existence and contents. The durable enrollment and completion proof are not
 rewritten.
 Automatic lifecycle checks do not accept this branch transition.
 
+Worktree configuration may contain one `core.hooksPath=git-hooks` entry alongside
+the supported sparse-checkout settings. Custom, empty or duplicate hook paths and
+unknown settings retain the checkout. Closeout does not execute hooks, and the
+configuration's exact bytes and identity remain bound through removal; changing
+them after release requires a new signoff.
+
 Manual closeout accepts `FETCH_HEAD` only when every record names a literal
 commit preserved by the captured current or enrolled branch heads, the recorded
 target's existing `origin` remote-tracking ref, or their common reflogs, including
