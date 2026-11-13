@@ -1034,9 +1034,16 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                     keys = git(snap["path"], "config", "--file", str(path), "--no-includes",
                                "--null", "--name-only", "--list").split("\0")
                     allowed = {"core.sparsecheckout", "core.sparsecheckoutcone", "index.sparse",
-                               "dotfiles.sparseprofile", "dotfiles.sparseprofilefile"}
+                               "dotfiles.sparseprofile", "dotfiles.sparseprofilefile", "core.hookspath"}
                     if any(key and key.lower() not in allowed for key in keys):
                         raise Retain("worktree-config-recovery-required")
+                    if any(key.lower() == "core.hookspath" for key in keys):
+                        hooks = git(snap["path"], "config", "--file", str(path), "--no-includes",
+                                    "--null", "--get-all", "core.hooksPath",
+                                    raw=True, strict=True, deadline=until)
+                        # Admit only the repository convention, never custom or duplicate values.
+                        if hooks != b"git-hooks\0":
+                            raise Retain("worktree-config-recovery-required")
                     if file_identity(path.lstat()) != identity:
                         raise Retain("worktree-config-changed")
                 if name == "FETCH_HEAD":
