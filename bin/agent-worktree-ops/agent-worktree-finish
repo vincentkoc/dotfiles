@@ -240,6 +240,7 @@ def private_file(path):
     if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid()
             or details.st_nlink != 1 or details.st_mode & 0o077):
         raise Retain("private-file-permissions-required")
+    return details
 
 
 def host_key():
@@ -372,6 +373,68 @@ def ledger(state_dir, *, create=False):
             ensure_owner_schema(db)
             ensure_retirement_schema(db)
         yield db
+    finally:
+        if db is not None:
+            db.close()
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def read_only_ledger(state_dir):
+    root = Path(state_dir).expanduser()
+    if not os.path.lexists(root):
+        yield None
+        return
+    if not root.is_absolute() or str(root.resolve()) != str(root):
+        raise Retain("state-directory-must-be-canonical")
+    details = root.lstat()
+    if (not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid()
+            or details.st_mode & 0o077):
+        raise Retain("private-state-directory-required")
+    database = root / "lifecycle.sqlite"
+    if not os.path.lexists(database):
+        if any(os.path.lexists(root / ("lifecycle.sqlite" + suffix))
+               for suffix in ("-journal", "-wal", "-shm")):
+            raise Retain("lifecycle-sidecar-requires-recovery")
+        yield None
+        return
+    lock_path = root / "lifecycle.lock"
+    if not os.path.lexists(lock_path):
+        raise Retain("lifecycle-lock-required-for-read-only-status")
+    private_file(lock_path)
+    fd = os.open(lock_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    db = None
+    try:
+        held = os.fstat(fd)
+        current = lock_path.lstat()
+        if (not stat.S_ISREG(held.st_mode) or held.st_uid != os.getuid()
+                or held.st_nlink != 1 or held.st_mode & 0o077
+                or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)):
+            raise Retain("lifecycle-lock-changed")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Retain("lifecycle-busy") from error
+        # SQLite immutable reads skip its own locks, so the GWT lock must
+        # serialize writers; a journal or WAL requires recovery before audit.
+        for suffix in ("-journal", "-wal", "-shm"):
+            if os.path.lexists(root / ("lifecycle.sqlite" + suffix)):
+                raise Retain("lifecycle-sidecar-requires-recovery")
+        before = private_file(database)
+        db = sqlite3.connect(database.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=1)
+        db.row_factory = sqlite3.Row
+        yield db
+        after = database.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
+                                        after.st_mtime_ns, after.st_ctime_ns):
+            raise Retain("lifecycle-changed-during-read-only-status")
+        current = lock_path.lstat()
+        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            raise Retain("lifecycle-lock-changed")
+        for suffix in ("-journal", "-wal", "-shm"):
+            if os.path.lexists(root / ("lifecycle.sqlite" + suffix)):
+                raise Retain("lifecycle-sidecar-requires-recovery")
     finally:
         if db is not None:
             db.close()
@@ -2367,6 +2430,7 @@ def parser():
     result.add_argument("--policy")
     result.add_argument("--if-enrolled", action="store_true")
     result.add_argument("--all", action="store_true")
+    result.add_argument("--read-only", action="store_true")
     result.add_argument("--apply", action="store_true")
     result.add_argument("--release", action="store_true")
     result.add_argument("--new-token")
@@ -2566,6 +2630,8 @@ def main(argv=None):
         raise Retain("new-enrollment-token-invalid")
     if args.all and args.command not in ("status", "check", "guard"):
         raise Retain("all-is-only-valid-for-status-check-or-guard")
+    if args.read_only and args.command != "status":
+        raise Retain("read-only-is-only-valid-for-status")
     if args.command == "finish" and (not args.pr or len(args.wait_for) > 16):
         raise Retain("finish-requires-primary-pr-and-at-most-16-dependencies")
     if args.command == "holder-qualification":
@@ -2581,6 +2647,17 @@ def main(argv=None):
     if args.command == "guard":
         with diagnostic_phase("state-session"), ledger(args.state_dir) as db:
             guard(db, args.worktree, owner=args.all)
+        return 0
+    if args.read_only:
+        with diagnostic_phase("state-session"), read_only_ledger(args.state_dir) as db:
+            if db is None:
+                output = []
+            elif args.all:
+                output = [summary(db, row) for row in db.execute(
+                    "SELECT * FROM worktrees ORDER BY path")]
+            else:
+                output = [summary(db, get_row(db, args.worktree))]
+        print(json.dumps(output, sort_keys=True))
         return 0
     if args.all:
         with diagnostic_phase("state-session"), ledger(args.state_dir) as db:

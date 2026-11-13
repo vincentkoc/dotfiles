@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import contextlib
 import errno
+import fcntl
 import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
@@ -125,6 +126,56 @@ class LifecycleTests(unittest.TestCase):
 
     def check_reason(self):
         return self.call("check")[1][0]["reason"]
+
+    def test_read_only_status_preserves_ledger_and_matches_status(self):
+        expected = self.call("status", "--all")[1]
+        before = {
+            path.name: (path.stat().st_size, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+            for path in self.state.iterdir()
+        }
+        self.assertEqual(self.call("status", "--all", "--read-only"), (0, expected))
+        self.assertEqual(self.call("status", "--read-only"), (0, expected))
+        self.assertEqual(before, {
+            path.name: (path.stat().st_size, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+            for path in self.state.iterdir()
+        })
+
+    def test_read_only_status_requires_existing_uncontended_lock_and_clean_database(self):
+        lock = self.state / "lifecycle.lock"
+        with lock.open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                self.call("status", "--read-only")
+        sidecar = self.state / "lifecycle.sqlite-journal"
+        sidecar.write_bytes(b"pending")
+        sidecar.chmod(0o600)
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-sidecar-requires-recovery"):
+            self.call("status", "--read-only")
+        self.assertEqual(sidecar.read_bytes(), b"pending")
+        sidecar.unlink()
+        lock.unlink()
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-lock-required"):
+            self.call("status", "--read-only")
+        self.assertFalse(lock.exists())
+
+    def test_read_only_status_works_without_write_permission(self):
+        database = self.state / "lifecycle.sqlite"
+        lock = self.state / "lifecycle.lock"
+        database.chmod(0o400)
+        lock.chmod(0o400)
+        self.state.chmod(0o500)
+        try:
+            result, rows = self.call("status", "--all", "--read-only")
+            self.assertEqual(result, 0)
+            self.assertEqual([row["worktree"] for row in rows], [str(self.wt)])
+        finally:
+            self.state.chmod(0o700)
+            lock.chmod(0o600)
+            database.chmod(0o600)
+
+    def test_read_only_option_rejects_mutation_commands(self):
+        with self.assertRaisesRegex(FINISH.Retain, "read-only-is-only-valid-for-status"):
+            self.call("check", "--read-only")
 
     def test_finish_and_check_confirm_completion_but_retain_checkout(self):
         result = self.finish()[1][0]
@@ -570,7 +621,8 @@ class WrapperTests(unittest.TestCase):
     def test_absent_status_and_check_are_side_effect_free(self):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
-            for args in (("status", "--all"), ("check", "--all")):
+            for args in (("status", "--all"), ("status", "--all", "--read-only"),
+                         ("check", "--all")):
                 result = subprocess.run(
                     [str(TOOL), *args, "--state-dir", str(state)],
                     capture_output=True,
