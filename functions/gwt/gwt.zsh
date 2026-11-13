@@ -1275,7 +1275,7 @@ Commands:
                                     Recorded-owner acknowledgment for resume only
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
-  gwt finish-status [--all]         Show local completion state
+  gwt finish-status [--all] [--read-only]  Show local completion state
   gwt recover-missing --worktree <path> --worktree-id <id> --generation <n>
     --expected-head <sha> --index-sha256 <sha256> [--apply --recovery-sha256 <sha256>]
                                     Plan or restore an exact missing enrolled checkout

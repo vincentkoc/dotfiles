@@ -699,10 +699,17 @@ Only explicit installation and qualified activation let that consumer remove tre
 
 ```sh
 gwt finish-status --all
+gwt finish-status --all --read-only      # Audit without opening the ledger for writes
 gwt finish-check --all                   # Refresh proof only
 # Only after explicit host activation:
 gwt finish-check --all --apply --policy /absolute/private/policy.json
 ```
+
+`finish-status --read-only` uses the existing shared lifecycle lock and opens
+SQLite without creating files or performing recovery. It refuses a busy or
+missing lock and any journal/WAL sidecar; use the normal owner workflow to
+resolve those states before retrying the audit. The flag also works for one
+enrolled checkout and does not change normal `finish-status` behavior.
 
 The evaluator removes one exact checkout at a time with native non-force
 `git worktree remove`. It preserves local branches, siblings and external
