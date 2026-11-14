@@ -7,6 +7,7 @@
 /apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json
 /apps/macos/Sources/OpenClaw/HostEnvSecurityPolicy.generated.swift
 /config/
+/crates/openclaw-iroh-node/package.json
 /custodian-skills/
 /deploy/
 /docs/
@@ -21,4 +22,5 @@
 /skills/
 /src/
 /test/
+/tools/solid-lint/
 /ui/

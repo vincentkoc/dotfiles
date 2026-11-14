@@ -21,18 +21,21 @@ INCLUDED = (
     "AGENTS.md", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml",
     ".agents/skills/review/SKILL.md", ".claude/settings.json", ".github/workflows/test.yml",
     ".vscode/settings.json", "config/models.json", "custodian-skills/check/SKILL.md",
-    "deploy/container.yml", "docs/AGENTS.md", "docs/zh-CN/guide.md", "examples/demo.ts",
+    "crates/openclaw-iroh-node/package.json", "deploy/container.yml",
+    "docs/AGENTS.md", "docs/zh-CN/guide.md", "examples/demo.ts",
     "extensions/demo/package.json", "git-hooks/pre-commit", "packages/core/package.json",
     "patches/tool.patch", "qa/scenarios/test.yml", "qa/scores/baseline.json",
     "scripts/check.mjs", "security/policy.md", "skills/review/SKILL.md",
-    "src/index.ts", "test/index.test.ts", "ui/AGENTS.md", "ui/scripts/check.ts",
+    "src/index.ts", "test/index.test.ts", "tools/solid-lint/package.json",
+    "tools/solid-lint/index.mjs", "ui/AGENTS.md", "ui/scripts/check.ts",
     "ui/config/settings.json", "ui/src/index.ts", *SNAPSHOTS,
 )
 EXCLUDED = (
     "apps/ios/Sources/Other.swift", "apps/android/src/Other.kt",
     "apps/macos/Sources/OpenClaw/Other.swift",
     "apps/shared/OpenClawKit/Sources/OpenClawKit/Other.swift",
-    "assets/large.bin", "vendor/a2ui/renderers/lit/index.ts", "bin/old",
+    "assets/large.bin", "crates/openclaw-iroh-node/src/lib.rs",
+    "tools/unrelated/index.mjs", "vendor/a2ui/renderers/lit/index.ts", "bin/old",
     ".changeset/old.md", ".pi/old.md", "unrelated/large.bin",
 )
 SPECIAL_DIRS = ('"quoted dir', "line\nbreak", "-option")
