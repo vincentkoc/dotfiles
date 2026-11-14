@@ -2093,8 +2093,7 @@ def missing_recovery_preimage(db, row, args, until, *, published=False):
         raise Retain("recovery-common-binding-changed")
     # Checks that need a Git cwd use the unchanged canonical owner while all
     # inventoried admin paths still belong to this exact missing checkout.
-    admin = module.admin_inventory({**snap, "path": snap["owner"]}, git, until,
-                                   preserved_oids={args.expected_head})
+    admin = module.recovery_admin_inventory({**snap, "path": snap["owner"]}, git, until)
     refs = preserved_refs(snap, [snap["branch"]], until)
     if refs[snap["branch"]]["head"] != args.expected_head:
         raise Retain("recovery-branch-changed")

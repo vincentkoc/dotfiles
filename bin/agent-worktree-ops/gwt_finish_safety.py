@@ -924,6 +924,16 @@ def access_boundary(path, until):
 
 
 def admin_inventory(snap, git, until, *, preserved_oids=None):
+    return _admin_inventory(snap, git, until, preserved_oids=preserved_oids, retained=False)
+
+
+def recovery_admin_inventory(snap, git, until):
+    # Missing-checkout recovery retains this admin directory. FETCH_HEAD needs
+    # valid commit objects and exact digest custody, not deletion ancestry proof.
+    return _admin_inventory(snap, git, until, preserved_oids={snap["head"]}, retained=True)
+
+
+def _admin_inventory(snap, git, until, *, preserved_oids, retained):
     root = Path(snap["gitdir"])
     rows = {"": [[*file_identity(root.lstat()), disposable_metadata(root, until)], None]}
     used = 0
@@ -960,7 +970,7 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                 used += len(data)
                 if name == "FETCH_HEAD":
                     # Git writes OID, merge marker, and note/URL, terminated by LF.
-                    # The caller supplies refs retained outside this admin directory.
+                    # Deletion requires refs retained outside this admin directory.
                     if data and not data.endswith(b"\n"):
                         raise Retain("fetch-head-recovery-required")
                     for line in data.split(b"\n")[:-1]:
@@ -975,7 +985,7 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
                                 if git(snap["path"], "--no-replace-objects", "cat-file", "-t", oid,
                                        raw=True, strict=True, deadline=until) != b"commit\n":
                                     raise Retain("fetch-head-recovery-required")
-                                if oid not in preserved_oids and git(
+                                if not retained and oid not in preserved_oids and git(
                                         snap["path"], "--no-replace-objects", "rev-list", "--max-count=1",
                                         oid, "--not", *sorted(preserved_oids), "--",
                                         raw=True, strict=True, deadline=until):
