@@ -164,6 +164,12 @@ holder visibility and unchanged admin, branch, lock, index and owner facts.
 Conflicts, sparse/unknown index formats, resolve-undo entries, gitlinks, pending
 Git or lifecycle operations, held paths and appeared destinations refuse.
 
+Recovery preserves `FETCH_HEAD`, including fetched commits outside the task's
+ancestry. Its records must parse strictly and name existing commit objects; the
+plan hash binds their sorted OIDs, file identity and exact bytes. Apply refuses
+drift. Removal still requires proof that fetched commits survive outside the
+admin directory being deleted.
+
 Device identities are strict by default. After independently establishing a
 device-number change, `--allow-device-renumbering` permits only a bijective map
 with unchanged physical paths, directory ownership and inodes. The missing

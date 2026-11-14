@@ -1801,6 +1801,144 @@ class MissingRecoveryTests(unittest.TestCase):
     def plan(self):
         return self.recover()["recovery_sha256"]
 
+    def fetched_main(self):
+        target = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "main advances")
+        git(self.repo, "update-ref", "refs/heads/main", target)
+        git(self.repo, "--git-dir", str(self.admin), "fetch", "--no-auto-maintenance", "--no-tags",
+            str(self.repo), "refs/heads/main:refs/remotes/origin/main")
+        self.assertEqual(git(self.repo, "rev-list", target, "--not", self.head), target)
+        return target
+
+    def test_fetched_main_outside_task_head_is_preserved_by_recovery(self):
+        target = self.fetched_main()
+        path = self.admin / "FETCH_HEAD"
+        before = FINISH.safety().read_file(path, time.monotonic() + 10)
+        digest = self.plan()
+        self.assertFalse(self.wt.exists())
+        self.assertIsNone(self.record()[0])
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "recovery-operator"}):
+            result = self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual(FINISH.safety().read_file(path, time.monotonic() + 10), before)
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        self.assertEqual(git(self.wt, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), target)
+        record, _ = self.record()
+        inventory = record["preimage"]["admin"]["FETCH_HEAD"]
+        self.assertEqual(inventory[0][:-1], list(before[1]))
+        self.assertEqual(inventory[1:], [hashlib.sha256(before[0]).hexdigest(), [target]])
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual(FINISH.owner_rows(db, row["id"]), [{"owner": "owner-1", "completed": 0}])
+            FINISH.revalidate(row)
+        self.assertEqual(self.recover("--apply", "--recovery-sha256", digest,
+                                      "--intent-id", result["intent_id"]), result)
+
+    def test_retained_fetch_head_inventory_sorts_unique_validated_oids(self):
+        target = self.fetched_main()
+        unanchored = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "fetched-only commit")
+        path = self.admin / "FETCH_HEAD"
+        path.write_text("".join(oid + "\tnot-for-merge\tfetched commit\n"
+                               for oid in (target, unanchored, self.head, target)))
+        digest = self.plan()
+        self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(self.record()[0]["preimage"]["admin"]["FETCH_HEAD"][2],
+                         sorted({target, unanchored, self.head}))
+
+    def test_fetch_head_recovery_does_not_relax_deletion_ancestry(self):
+        self.fetched_main()
+        snap = {**json.loads(self.original["identity"]), "path": str(self.repo), "head": self.head}
+        before = (self.admin / "FETCH_HEAD").read_bytes()
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            FINISH.safety().admin_inventory(snap, FINISH.git, time.monotonic() + 10,
+                                            preserved_oids={self.head})
+        self.assertEqual((self.admin / "FETCH_HEAD").read_bytes(), before)
+        self.assertFalse(self.wt.exists())
+        self.assertIsNone(self.record()[0])
+
+    def test_fetch_head_byte_or_inode_drift_invalidates_reviewed_digest(self):
+        self.fetched_main()
+        path = self.admin / "FETCH_HEAD"
+        for change in ("bytes", "inode"):
+            with self.subTest(change=change):
+                digest = self.plan()
+                if change == "bytes":
+                    path.write_bytes(path.read_bytes().replace(b"branch ", b"updated branch "))
+                else:
+                    replacement = self.base / "replacement"
+                    replacement.write_bytes(path.read_bytes())
+                    self.assertNotEqual(path.stat().st_ino, replacement.stat().st_ino)
+                    replacement.replace(path)
+                changed = FINISH.safety().read_file(path, time.monotonic() + 10)
+                self.assertNotEqual(self.plan(), digest)
+                with self.assertRaisesRegex(FINISH.Retain, "reviewed-preimage-required"):
+                    self.recover("--apply", "--recovery-sha256", digest)
+                self.assertEqual(FINISH.safety().read_file(path, time.monotonic() + 10), changed)
+                self.assertFalse(self.wt.exists())
+                self.assertIsNone(self.record()[0])
+
+    def test_fetch_head_malformed_missing_or_noncommit_objects_refuse(self):
+        oid = self.head.encode()
+        blob = git(self.repo, "rev-parse", self.head + ":file").encode()
+        tree = git(self.repo, "rev-parse", self.head + "^{tree}").encode()
+        git(self.repo, "tag", "-a", "fetched-tag", self.head, "-m", "tag fixture")
+        tag = git(self.repo, "rev-parse", "fetched-tag").encode()
+        valid = oid + b"\t\tvalid commit\n"
+        path = self.admin / "FETCH_HEAD"
+        for data in (
+                b"0" * 40 + b"\t\tmissing object\n",
+                blob + b"\t\tblob\n", tree + b"\t\ttree\n", tag + b"\t\ttag\n",
+                oid.upper() + b"\t\tuppercase\n", oid[:-1] + b"\t\tshort oid\n",
+                oid + b"\tmerge\tnote\n", oid + b"\t\tunterminated",
+                oid + b"\t\tnote\0url\n", valid + b"\n", valid + b"partial",
+                valid + blob + b"\tnot-for-merge\tmixed invalid record\n"):
+            with self.subTest(data=data):
+                path.write_bytes(data)
+                before = FINISH.safety().read_file(path, time.monotonic() + 10)
+                with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+                    self.recover()
+                self.assertEqual(FINISH.safety().read_file(path, time.monotonic() + 10), before)
+                self.assertFalse(self.wt.exists())
+                self.assertIsNone(self.record()[0])
+                self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+                self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_fetch_head_symlink_and_unknown_admin_metadata_refuse(self):
+        path = self.admin / "FETCH_HEAD"
+        path.symlink_to(self.external)
+        with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
+            self.recover()
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(self.external.read_text(), "untouched\n")
+        path.unlink()
+        self.fetched_main()
+        unknown = self.admin / "unknown-recovery"
+        unknown.write_text("preserve\n")
+        with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
+            self.recover()
+        self.assertEqual(unknown.read_text(), "preserve\n")
+        self.assertFalse(self.wt.exists())
+        self.assertIsNone(self.record()[0])
+
+    def test_fetch_head_drift_after_staging_prevents_publication(self):
+        self.fetched_main()
+        digest = self.plan()
+        tree = FINISH.recovery_tree
+        path = self.admin / "FETCH_HEAD"
+        def drift(*args, **kwargs):
+            result = tree(*args, **kwargs)
+            if kwargs.get("write"):
+                path.write_bytes(path.read_bytes().replace(b"branch ", b"updated branch "))
+            return result
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "pre-publication-drift"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(self.record()[1]["state"], "recovery-pending")
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
     def record(self):
         with FINISH.ledger(self.state) as db:
             row = FINISH.get_row(db, self.wt)
