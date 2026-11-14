@@ -2387,12 +2387,12 @@ class FinalizedRemovalTests(unittest.TestCase):
         empty = self.wt / "vendor/empty"
         admission, calls = FINISH.finalized_admission, []
 
-        def replace(*args):
+        def replace(*args, **kwargs):
             calls.append(args)
             if len(calls) == 2:
                 empty.rename(self.base / "original-gitlink")
                 empty.mkdir()
-            return admission(*args)
+            return admission(*args, **kwargs)
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=replace), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
@@ -3065,11 +3065,11 @@ class FinalizedRemovalTests(unittest.TestCase):
         path.write_text(self.head + "\t\toriginal note\n")
         admission, calls = FINISH.finalized_admission, []
 
-        def drift(*args):
+        def drift(*args, **kwargs):
             calls.append(args)
             if len(calls) == 2:
                 path.write_text(self.head + "\t\tchanged note\n")
-            return admission(*args)
+            return admission(*args, **kwargs)
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
@@ -3221,11 +3221,11 @@ class FinalizedRemovalTests(unittest.TestCase):
         expected = self.resolve_undo_fixture()
         admission, calls = FINISH.finalized_admission, []
 
-        def drift(*args):
+        def drift(*args, **kwargs):
             calls.append(args)
             if len(calls) == 2:
                 self.write_resolve_undo({"file": expected["file"][:1]})
-            return admission(*args)
+            return admission(*args, **kwargs)
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
@@ -3341,11 +3341,11 @@ class FinalizedRemovalTests(unittest.TestCase):
         git(self.wt, "checkout", "-b", "reviewed-current")
         admission, calls = FINISH.finalized_admission, []
 
-        def drift(*args):
+        def drift(*args, **kwargs):
             calls.append(args)
             if len(calls) == 2:
                 git(self.wt, "commit", "--allow-empty", "-m", "unexpected work")
-            return admission(*args)
+            return admission(*args, **kwargs)
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
@@ -3643,8 +3643,8 @@ class FinalizedRemovalTests(unittest.TestCase):
         admission, supervise = FINISH.finalized_admission, FINISH.safety().supervise
         remaining = []
 
-        def limited_owner(*args):
-            result = admission(*args)
+        def limited_owner(*args, **kwargs):
+            result = admission(*args, **kwargs)
             FINISH.safety().DEADLINE = time.monotonic() + 40
             return result
 
@@ -3665,8 +3665,8 @@ class FinalizedRemovalTests(unittest.TestCase):
         admission, native = FINISH.finalized_admission, FINISH.git
         supervise = FINISH.safety().supervise
 
-        def exhausted_owner(*args):
-            result = admission(*args)
+        def exhausted_owner(*args, **kwargs):
+            result = admission(*args, **kwargs)
             FINISH.safety().DEADLINE = time.monotonic() + 31
             return result
 
@@ -3844,6 +3844,269 @@ class FinalizedRemovalTests(unittest.TestCase):
         with (self.wt / "file").open():
             with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
                 FINISH.manual_holders(snap, {"entries": {"file": entry}}, {}, float("inf"))
+
+
+class QualificationFetchLeaseTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = ReleaseTests.finish
+    setUp = ReleaseTests.setUp
+    tearDown = ReleaseTests.tearDown
+    row = ReleaseTests.row
+    remove = FinalizedRemovalTests.remove
+
+    def carrier(self):
+        path = self.repo / ".git" / FINISH.QualificationFetchLease.name
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        return path
+
+    def assert_contender(self, path, *, busy):
+        # A separate process must see the same advisory exclusion, including
+        # during native Git execution and the final preservation readbacks.
+        code = """import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(11)
+finally:
+    os.close(fd)
+"""
+        result = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True)
+        self.assertEqual(result.returncode, 11 if busy else 0, result.stderr)
+
+    def test_idle_carrier_is_preserved_and_held_through_native_remove_and_readback(self):
+        path = self.carrier()
+        before = FINISH.safety().file_identity(path.stat())
+        native = FINISH.safety().supervise
+        phases = []
+
+        def observe(command, **kwargs):
+            if "worktree" in command and ("unlock" in command or "remove" in command):
+                self.assert_contender(path, busy=True)
+                phases.append("native")
+                if "remove" in command:
+                    self.assertEqual(len(kwargs["pass_fds"]), 1)
+                    self.assertEqual(FINISH.safety().file_identity(
+                        os.fstat(kwargs["pass_fds"][0])), before)
+            result = native(command, **kwargs)
+            if "worktree" in command and "list" in command and not self.wt.exists():
+                self.assert_contender(path, busy=True)
+                phases.append("readback")
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=observe):
+            result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertIn("native", phases)
+        self.assertIn("readback", phases)
+        self.assertEqual(FINISH.safety().file_identity(path.stat()), before)
+        self.assert_contender(path, busy=False)
+        self.assertTrue(self.legacy.exists())
+
+    def test_held_carrier_refuses_before_removal_intent(self):
+        path = self.carrier()
+        with path.open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(FINISH.Retain, "qualification-fetch-lease-busy"):
+                self.remove()
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+        self.assertTrue((self.admin / "locked").exists())
+        self.assert_contender(path, busy=False)
+
+    def test_idle_carrier_is_admitted_by_report_and_automatic_paths(self):
+        path = self.carrier()
+        before = FINISH.safety().file_identity(path.stat())
+        row = {**self.row(), "finish_head": self.head}
+        self.assertEqual(FINISH.local_checks(row)["head"], self.head)
+        result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual(FINISH.safety().file_identity(path.stat()), before)
+
+    def test_absent_carrier_is_never_created(self):
+        path = self.repo / ".git" / FINISH.QualificationFetchLease.name
+        self.assertEqual(self.remove()[1][0]["checkout"], "removed")
+        self.assertFalse(path.exists())
+
+    def test_generic_and_worktree_admin_locks_remain_blocking(self):
+        carrier = self.carrier()
+        for path in (self.repo / ".git/index.lock", self.repo / ".git/unknown.lock",
+                     self.admin / FINISH.QualificationFetchLease.name):
+            with self.subTest(path=path.name):
+                path.touch(mode=0o600)
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "git-lock-present"):
+                        self.remove()
+                finally:
+                    path.unlink()
+        self.assert_contender(carrier, busy=False)
+
+    def test_malformed_carriers_are_never_exempted(self):
+        path = self.repo / ".git" / FINISH.QualificationFetchLease.name
+        snap = FINISH.revalidate(self.row())
+        for kind in ("content", "mode", "hardlink", "symlink", "directory", "fifo"):
+            with self.subTest(kind=kind):
+                other = self.base / "carrier-target"
+                if kind in ("content", "mode", "hardlink"):
+                    self.carrier()
+                    if kind == "content":
+                        path.write_bytes(b"active")
+                    elif kind == "mode":
+                        path.chmod(0o644)
+                    else:
+                        os.link(path, other)
+                elif kind == "symlink":
+                    other.touch(mode=0o600)
+                    path.symlink_to(other)
+                elif kind == "directory":
+                    path.mkdir(mode=0o600)
+                else:
+                    os.mkfifo(path, 0o600)
+                try:
+                    with self.assertRaises((FINISH.Retain, OSError)):
+                        with FINISH.QualificationFetchLease(snap):
+                            self.fail("malformed carrier admitted")
+                finally:
+                    path.rmdir() if kind == "directory" else path.unlink()
+                    if other.exists():
+                        other.unlink()
+
+    def test_wrong_common_directory_identity_is_rejected(self):
+        snap = FINISH.revalidate(self.row())
+        snap["common_id"] = [snap["common_id"][0], -1]
+        with self.assertRaisesRegex(FINISH.Retain, "qualification-fetch-common-changed"):
+            with FINISH.QualificationFetchLease(snap):
+                self.fail("wrong common directory admitted")
+
+    def test_producer_chmod_before_waiting_for_flock_is_drift(self):
+        path = self.carrier()
+        snap = FINISH.revalidate(self.row())
+        with FINISH.QualificationFetchLease(snap) as lease:
+            result = subprocess.run([sys.executable, "-c", """import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+os.fchmod(fd, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(11)
+finally:
+    os.close(fd)
+""", str(path)], capture_output=True)
+            self.assertEqual(result.returncode, 11, result.stderr)
+            with self.assertRaisesRegex(FINISH.Retain, "qualification-fetch-carrier-changed"):
+                lease.validate()
+
+    def test_native_child_retains_lease_after_parent_death(self):
+        path = self.carrier()
+        ready, release, done = (self.base / name for name in ("ready", "release", "done"))
+        child_code = """import os, pathlib, time
+ready, release, done = map(pathlib.Path, ARGS)
+ready.write_text(str(os.getpid()))
+until = time.monotonic() + 15
+while not release.exists() and time.monotonic() < until:
+    time.sleep(0.01)
+done.touch()
+""".replace("ARGS", repr([str(ready), str(release), str(done)]))
+        parent_code = """import os, runpy, shlex, sys
+tool = runpy.run_path(sys.argv[1])
+snap = {"common": sys.argv[2], "common_id": tool["identity"](sys.argv[2])}
+command = [tool["shutil"].which("git"), "-c",
+    "alias.lease-fixture=!" + shlex.join([sys.executable, "-c", sys.argv[3]]), "lease-fixture"]
+with tool["QualificationFetchLease"](snap) as lease:
+    tool["safety"]().supervise(command, cwd="/",
+        env=dict(os.environ), timeout=20, pass_fds=(lease.descriptor,))
+"""
+        parent = subprocess.Popen([sys.executable, "-c", parent_code, str(TOOL),
+                                   str(path.parent), child_code],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            until = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < until and parent.poll() is None:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "fixture child failed to start")
+            self.assert_contender(path, busy=True)
+            parent.kill()  # Only this test's exact disposable parent process.
+            parent.wait(timeout=3)
+            self.assert_contender(path, busy=True)
+            release.touch()
+            until = time.monotonic() + 5
+            while not done.exists() and time.monotonic() < until:
+                time.sleep(0.01)
+            self.assertTrue(done.exists(), "fixture child failed to finish")
+            # The marker precedes interpreter teardown and descriptor close.
+            with path.open("rb") as contender:
+                while True:
+                    try:
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= until:
+                            self.fail("fixture child retained the lease after exit")
+                        time.sleep(0.01)
+        finally:
+            release.touch()
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait(timeout=3)
+            parent.stderr.close()
+
+    def test_carrier_replacement_between_admissions_never_unlocks(self):
+        path = self.carrier()
+        admission = FINISH.finalized_admission
+        calls = []
+
+        def replace(*args, **kwargs):
+            result = admission(*args, **kwargs)
+            if not calls:
+                path.rename(self.base / "original-carrier")
+                self.carrier()
+            calls.append(None)
+            return result
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=replace):
+            result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(result["reason"], "qualification-fetch-carrier-changed")
+        self.assertTrue((self.admin / "locked").exists())
+        self.assertTrue(self.wt.exists())
+
+    def test_late_carrier_appearance_never_unlocks(self):
+        admission = FINISH.finalized_admission
+        calls = []
+
+        def appear(*args, **kwargs):
+            result = admission(*args, **kwargs)
+            if not calls:
+                self.carrier()
+            calls.append(None)
+            return result
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=appear):
+            result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(result["reason"], "qualification-fetch-carrier-changed")
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_carrier_drift_after_native_removal_is_incomplete(self):
+        path = self.carrier()
+        native = FINISH.safety().supervise
+
+        def replace(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                path.rename(self.base / "original-carrier")
+                self.carrier()
+            return result
+
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=replace):
+            result = self.remove()[1][0]
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(result["retirement_state"], "incomplete")
+        self.assertEqual(result["reason"], "qualification-fetch-carrier-changed")
 
 
 class ManualHolderTests(unittest.TestCase):

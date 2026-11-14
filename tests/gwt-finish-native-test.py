@@ -336,6 +336,15 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNone(result.proof["pid"])
         self.assertIsNotNone(result.failure)
 
+    def test_descriptor_inheritance_is_one_exact_nonprivileged_descriptor(self):
+        for descriptors, sudo in (((3, 4), False), ((0,), False), ((True,), False),
+                                   ([3], False), ((3,), True)):
+            with self.subTest(descriptors=descriptors, sudo=sudo), \
+                    mock.patch.object(NATIVE.subprocess, "Popen") as spawn:
+                result = self.invoke("pass", pass_fds=descriptors, sudo_monitor=sudo)
+            spawn.assert_not_called()
+            self.assertIsNotNone(result.failure)
+
     def test_selector_close_failure_still_reaps_owned_child(self):
         original = NATIVE.selectors.DefaultSelector
         selector = original()
