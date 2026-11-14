@@ -138,7 +138,7 @@ def tracked_blob(path, until, expected, limit):
 
 
 def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None,
-              sudo_monitor=False, deadline=None):
+              sudo_monitor=False, deadline=None, pass_fds=()):
     """Bound one child; sudo cleanup signals only its monitor, never a group."""
     child = selector = None
     output = [bytearray(), bytearray()]
@@ -150,10 +150,17 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
         tick(until)
         if input_data is not None and (not isinstance(input_data, bytes) or len(input_data) > LEAF_LIMIT):
             raise Retain("child-input-limit")
+        # Native removal inherits only its owner's one advisory carrier. Other
+        # descriptors, especially ledger/maintenance locks, remain parent-owned.
+        if (not isinstance(pass_fds, tuple) or len(pass_fds) > 1
+                or any(type(fd) is not int or fd < 3 for fd in pass_fds)
+                or (sudo_monitor and pass_fds)):
+            raise Retain("child-descriptor-inheritance-unqualified")
         child = subprocess.Popen(command, cwd=cwd, env=env,
                                  stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                                  stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, start_new_session=not sudo_monitor)
+                                 stderr=subprocess.PIPE, start_new_session=not sudo_monitor,
+                                 pass_fds=pass_fds)
         proof["pid"] = child.pid
         selector = selectors.DefaultSelector()
         for i, stream in enumerate((child.stdout, child.stderr)):

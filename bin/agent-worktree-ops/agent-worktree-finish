@@ -747,38 +747,111 @@ def finish(db, row, args):
         )
 
 
+class QualificationFetchLease:
+    # The qualification producer keeps this empty flock carrier after release.
+    # Hold its existing inode through removal; unlinking or probing then closing
+    # would let a fetch race the shared-ref preservation checks.
+    name = "openclaw-main-qualification-fetch.lock"
+
+    def __init__(self, snap):
+        self.common = snap["common"]
+        self.common_id = snap["common_id"]
+        self.directory = self.descriptor = None
+        self.carrier = None
+
+    def __enter__(self):
+        try:
+            self.directory = os.open(self.common, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self.validate_common()
+            try:
+                self.descriptor = os.open(self.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                          dir_fd=self.directory)
+            except FileNotFoundError:
+                pass
+            if self.descriptor is not None:
+                details = os.fstat(self.descriptor)
+                if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid()
+                        or stat.S_IMODE(details.st_mode) != 0o600
+                        or details.st_nlink != 1 or details.st_size != 0):
+                    raise Retain("qualification-fetch-carrier-unsafe")
+                self.carrier = safety().file_identity(details)
+                try:
+                    fcntl.flock(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise Retain("qualification-fetch-lease-busy") from error
+            self.validate()
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def validate_common(self):
+        details = os.fstat(self.directory)
+        if ([details.st_dev, details.st_ino] != self.common_id
+                or details.st_uid != os.getuid() or identity(self.common) != self.common_id):
+            raise Retain("qualification-fetch-common-changed")
+
+    def validate(self):
+        self.validate_common()
+        try:
+            details = os.stat(self.name, dir_fd=self.directory, follow_symlinks=False)
+        except FileNotFoundError:
+            if self.carrier is None:
+                return
+            raise Retain("qualification-fetch-carrier-changed") from None
+        if (self.carrier is None or safety().file_identity(details) != self.carrier
+                or safety().file_identity(os.fstat(self.descriptor)) != self.carrier):
+            raise Retain("qualification-fetch-carrier-changed")
+
+    def admits(self, path, snap):
+        if (Path(path) != Path(self.common) / self.name
+                or snap["common"] != self.common or snap["common_id"] != self.common_id):
+            return False
+        self.validate()
+        return self.carrier is not None
+
+    def __exit__(self, *_):
+        for attribute in ("descriptor", "directory"):
+            descriptor = getattr(self, attribute)
+            if descriptor is not None:
+                os.close(descriptor)
+                setattr(self, attribute, None)
+
+
 def local_checks(row):
     snap = revalidate(row)
-    if not row["finish_head"] or snap["head"] != row["finish_head"]:
-        raise Retain("unfinished-or-head-changed")
-    if "lock_reason" in snap:
-        # Raw index and complete working bytes own the new-format proof.
-        # Status may invoke user filters and excludes ignored recovery content.
-        safety().inventory(snap, git, time.monotonic() + 30)
-    for directory in (Path(snap["gitdir"]), Path(snap["common"])):
-        if any(directory.glob("*.lock")):
-            raise Retain("git-lock-present")
-        for marker in (
-            "MERGE_HEAD",
-            "CHERRY_PICK_HEAD",
-            "REVERT_HEAD",
-            "BISECT_LOG",
-            "rebase-merge",
-            "rebase-apply",
-            "sequencer",
+    with QualificationFetchLease(snap) as fetch_lease:
+        if not row["finish_head"] or snap["head"] != row["finish_head"]:
+            raise Retain("unfinished-or-head-changed")
+        if "lock_reason" in snap:
+            # Raw index and complete working bytes own the new-format proof.
+            # Status may invoke user filters and excludes ignored recovery content.
+            safety().inventory(snap, git, time.monotonic() + 30)
+        for directory in (Path(snap["gitdir"]), Path(snap["common"])):
+            if any(not fetch_lease.admits(path, snap) for path in directory.glob("*.lock")):
+                raise Retain("git-lock-present")
+            for marker in (
+                "MERGE_HEAD",
+                "CHERRY_PICK_HEAD",
+                "REVERT_HEAD",
+                "BISECT_LOG",
+                "rebase-merge",
+                "rebase-apply",
+                "sequencer",
+            ):
+                if (directory / marker).exists():
+                    raise Retain("git-operation-in-progress")
+        if "lock_reason" not in snap and git(
+            snap["path"],
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
         ):
-            if (directory / marker).exists():
-                raise Retain("git-operation-in-progress")
-    if "lock_reason" not in snap and git(
-        snap["path"],
-        "status",
-        "--porcelain=v1",
-        "-z",
-        "--untracked-files=all",
-        "--ignore-submodules=none",
-    ):
-        raise Retain("dirty-or-untracked-worktree")
-    return snap
+            raise Retain("dirty-or-untracked-worktree")
+        fetch_lease.validate()
+        return snap
 
 
 def merged_checks(row):
@@ -1053,7 +1126,7 @@ def preserved_refs(snap, branches, until):
     return result
 
 
-def deletion_admission(row, item, qualification, until):
+def deletion_admission(row, item, qualification, until, fetch_lease=None):
     if not automatic_holder_contract(item):
         raise Retain("automatic-holder-contract-not-enrolled")
     module = safety()
@@ -1102,7 +1175,8 @@ def deletion_admission(row, item, qualification, until):
             with os.scandir(current) as scan:
                 for entry in scan:
                     visited += 1
-                    if visited > module.ENTRY_LIMIT or entry.name.endswith(".lock"):
+                    if (visited > module.ENTRY_LIMIT or (entry.name.endswith(".lock")
+                            and (fetch_lease is None or not fetch_lease.admits(entry.path, snap)))):
                         raise Retain("git-lock-or-ref-population-unknown")
                     if current != Path(snap["common"]) and entry.is_dir(follow_symlinks=False):
                         stack.append(Path(entry.path))
@@ -1305,7 +1379,7 @@ def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=Fal
         raise Retain("pending-departure")
 
 
-def finalized_admission(db, row, args, until, *, completed=False):
+def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=None):
     snap = revalidate(row)
     if snap["head"] != row["finish_head"]:
         raise Retain("finalized-head-changed")
@@ -1315,7 +1389,8 @@ def finalized_admission(db, row, args, until, *, completed=False):
         raise Retain("preserved-branch-lock-present")
     for key in ("common", "gitdir"):
         directory = Path(snap[key])
-        if any(directory.glob("*.lock")):
+        if any(fetch_lease is None or not fetch_lease.admits(path, snap)
+               for path in directory.glob("*.lock")):
             raise Retain("git-lock-present")
         if any((directory / name).exists() for name in (
                 "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG",
@@ -1368,7 +1443,8 @@ def remove_finalized(db, row, args, *, completed=False):
     storage_guard()
     module = safety()
     until = time.monotonic() + 120
-    with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
+    with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))), \
+            QualificationFetchLease(snap) as fetch_lease:
         # A fetched target may retain history absent from either task branch.
         # Reuse release roots so manual closeout binds that ref to the same drift checks.
         row["finalized_refs"], _ = release_refs(snap, row["target"], until, branches=(enrolled_branch,))
@@ -1381,7 +1457,7 @@ def remove_finalized(db, row, args, *, completed=False):
                 completion_checks(db, current, local=False)
                 all_released(db, current, item)
             options = {"completed": True} if completed else {}
-            return finalized_admission(db, row, args, until, **options)
+            return finalized_admission(db, row, args, until, fetch_lease=fetch_lease, **options)
 
         before = admit()
         return remove_with_intent(
@@ -1389,7 +1465,7 @@ def remove_finalized(db, row, args, *, completed=False):
             admit,
             {"mode": "explicit-finalized-task", "operator": owner_id(args),
              "discard_ignored": sorted(args.discard_ignored)},
-            restore_lock=True)
+            restore_lock=True, fetch_lease=fetch_lease)
 
 
 def remove_released(db, row, item, qualification, args):
@@ -1404,20 +1480,22 @@ def remove_released(db, row, item, qualification, args):
     until = time.monotonic() + 120
     module = safety()
     try:
-        with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
+        with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))), \
+                QualificationFetchLease(revalidate(row)) as fetch_lease:
             # Apply owns full initial/final inventory below. Do not repeat
             # those large reads through report-only completion projections.
             completion_checks(db, row, local=False)
             all_released(db, row, item)
-            before = deletion_admission(row, item, qualification, until)
+            before = deletion_admission(row, item, qualification, until, fetch_lease)
 
             def recheck():
                 if qualified_policy(args, row) != qualification:
                     raise Retain("activation-proof-changed")
                 merged_checks(row)
-                return deletion_admission(row, item, qualification, until)
+                return deletion_admission(row, item, qualification, until, fetch_lease)
 
-            return remove_with_intent(db, row, item, before, recheck, qualification)
+            return remove_with_intent(db, row, item, before, recheck, qualification,
+                                      fetch_lease=fetch_lease)
     finally:
         NATIVE_GIT = prior_git
 
@@ -1589,7 +1667,8 @@ def siblings_preserved(before, after):
         return False
 
 
-def remove_with_intent(db, row, item, before, recheck, qualification, *, restore_lock=False):
+def remove_with_intent(db, row, item, before, recheck, qualification, *, restore_lock=False,
+                       fetch_lease=None):
     module, snap = safety(), before["snapshot"]
     native_git = NATIVE_GIT or shutil.which("git")
     if native_git is None or any(
@@ -1625,6 +1704,8 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         removal_until = min(time.monotonic() + 180, module.DEADLINE - 32)
         if time.monotonic() >= removal_until:
             raise Retain("removal-budget-exhausted")
+        if fetch_lease is not None:
+            fetch_lease.validate()
         git(snap["owner"], "worktree", "unlock", "--", snap["path"])
         command = [native_git, "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                    "-c", "maintenance.auto=false", "-c", "core.fsmonitor=false",
@@ -1636,7 +1717,12 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         remaining = removal_until - time.monotonic()
         if remaining <= 0:
             raise Retain("removal-budget-exhausted")
-        result = module.supervise(command, cwd=snap["owner"], env=env, timeout=remaining)
+        # Keep the flock alive if this owner dies while native removal continues.
+        # Closing our descriptor later must not explicitly unlock the child's copy.
+        pass_fds = ((fetch_lease.descriptor,) if fetch_lease is not None
+                    and fetch_lease.descriptor is not None else ())
+        result = module.supervise(command, cwd=snap["owner"], env=env, timeout=remaining,
+                                  pass_fds=pass_fds)
         outcome["child"] = result.proof
         after = records(snap["owner"])
         outcome.update(path_absent=not os.path.lexists(snap["path"]),
@@ -1665,6 +1751,8 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         outcome["discarded_link_targets_preserved"] = all(
             (list(module.file_identity(os.stat(path))[:2]) if os.path.exists(path) else None) == expected
             for path, expected in before["contents"].get("discarded_links", {}).items())
+        if fetch_lease is not None:
+            fetch_lease.validate()
         if not result.failure and result.returncode == 0 and all(
                 outcome[key] for key in ("path_absent", "admin_absent", "registration_absent",
                 "siblings_preserved", "branch_preserved", "branch_reflog_preserved",

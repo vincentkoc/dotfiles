@@ -499,6 +499,17 @@ in-progress Git operations, unrelated locks and live file/CWD holders. Symlink
 targets are never traversed or removed. This is routine task closeout, with no
 evidence archive or additional permission step.
 
+The common Git directory's `openclaw-main-qualification-fetch.lock` is a
+persistent advisory-lock carrier. GWT admits only its existing empty, regular,
+single-link, current-user file with mode `0600`, opened without following
+symlinks. It pins the common directory and holds a nonblocking exclusive flock
+through both admission passes, native removal and outcome verification. A busy,
+malformed, replaced or newly appearing carrier retains the checkout; drift after
+removal starts leaves an incomplete outcome. GWT never creates, writes, changes
+permissions on or unlinks this carrier. Every other Git lock remains blocking.
+Native removal inherits only the carrier descriptor, so parent death cannot
+release its flock while the removal child still runs.
+
 This route consumes only a matching native managed enrollment. It records a
 removal intent, rechecks the tree, unlocks only its own enrollment marker and
 runs one non-force Git removal. It preserves the branch, shared owner and
