@@ -1511,8 +1511,19 @@ def sibling_rows(rows):
 
 
 def sibling_absence(path, until):
-    """ENOENT is known only beneath an unchanged canonical owned ancestor."""
+    """Bind observed ENOENT to a canonical owned or system ancestor."""
     module = safety()
+    def parent_metadata(details):
+        if (not stat.S_ISDIR(details.st_mode) or
+                (details.st_uid != os.getuid() and
+                 (details.st_uid != 0 or
+                  (details.st_mode & 0o022 and not details.st_mode & stat.S_ISVTX)))):
+            raise Retain("directory-identity-unsafe")
+        # Shared directory entries may change independently. Only the ancestor's
+        # identity and access metadata bind this read-only absence observation.
+        return [details.st_dev, details.st_ino, details.st_uid, details.st_gid,
+                details.st_mode, getattr(details, "st_flags", 0)]
+
     module.tick(until)
     try:
         os.lstat(path)
@@ -1526,13 +1537,34 @@ def sibling_absence(path, until):
     while True:
         module.tick(until)
         try:
-            parent_id = identity(parent)
+            metadata = parent_metadata(parent.lstat())
             break
         except FileNotFoundError:
             parent = parent.parent
-    if physical(parent) != str(parent):
-        raise Retain("sibling-parent-rebound")
-    return {"state": "absent", "errno": 2, "parent": str(parent), "parent_id": parent_id}
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        missing = Path(path).relative_to(parent).parts[0]
+        for _ in range(2):
+            module.tick(until)
+            # A sticky parent still permits new names. Check the first missing
+            # component through the pinned directory, without following links.
+            try:
+                os.stat(missing, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Retain("sibling-absence-changed")
+            if (parent_metadata(os.fstat(fd)) != metadata or
+                    parent_metadata(parent.lstat()) != metadata or physical(parent) != str(parent)):
+                raise Retain("sibling-parent-rebound")
+        result = {"state": "absent", "errno": 2, "parent": str(parent), "parent_id": metadata[:2]}
+        # Older same-user observations participate in receipt reconciliation.
+        # Only the newly admitted system-parent case adds its access metadata.
+        if metadata[2] != os.getuid():
+            result["parent_metadata"] = metadata[2:]
+        return result
+    finally:
+        os.close(fd)
 
 
 def sibling_admin_index(snap, until):

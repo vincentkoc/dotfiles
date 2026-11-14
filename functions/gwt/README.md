@@ -787,6 +787,12 @@ An already absent sibling root or `.git` pointer is captured as an explicit
 ENOENT state, bound to its canonical existing parent and unique native admin
 backlink. The admin/common identities and lock still have to survive. This
 does not depend on Git marking the registration prunable, and never prunes it.
+Absence may also be observed beneath a root-owned parent that is not group- or
+other-writable, or has the sticky bit. A no-follow directory descriptor binds
+its identity, ownership, mode and flags; unrelated directory timestamp and
+link-count changes are ignored. The sticky bit does not prevent new entries,
+so reappearance still fails preservation. Target and admin ownership rules
+remain unchanged.
 New absence, reappearance, replacement, ambiguous backlinks and unknown read
 errors fail preservation; they are not treated as preexisting absence.
 Admission keeps its 120s limit. Recursive deletion has a separate maximum 180s
