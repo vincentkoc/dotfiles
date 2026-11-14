@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+# crabbox-shim: opt-in, process-local Boat credentials.
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+def find_backend():
+    override = os.environ.get("CRABBOX_BIN")
+    candidates = [override] if override else [
+        str(Path(entry or ".") / "crabbox")
+        for entry in os.get_exec_path()
+    ]
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if not path.is_file() or not os.access(path, os.X_OK):
+            continue
+        if path.resolve() == Path(__file__).resolve():
+            continue
+        with path.open("rb") as source:
+            if b"# crabbox-shim:" in source.read(256):
+                continue
+        return str(path.absolute())
+    raise RuntimeError("no native Crabbox found; install Crabbox or set CRABBOX_BIN")
+
+
+def selected_provider(backend, args):
+    provider = None
+    for index, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg in ("--provider", "-provider"):
+            if index + 1 >= len(args):
+                raise RuntimeError("--provider requires a value")
+            provider = args[index + 1]
+        elif arg.startswith(("--provider=", "-provider=")):
+            provider = arg.split("=", 1)[1]
+    if provider is not None:
+        return provider
+    result = subprocess.run(
+        [backend, "config", "show", "--json"],
+        stdout=subprocess.PIPE, check=True, text=True,
+    )
+    config = json.loads(result.stdout)
+    if len(args) >= 3 and args[0] == "job":
+        job = (config.get("jobs") or {}).get(args[2], {})
+        if job.get("provider"):
+            return job["provider"]
+    return config["provider"]
+
+
+def main():
+    args = sys.argv[1:]
+    backend = find_backend()
+    profile = os.environ.get("CRABBOX_BOAT_CREDENTIAL_PROFILE")
+    options = args[:args.index("--")] if "--" in args else args
+    if (not profile or not args or args[0] == "help"
+            or any(arg in ("--help", "-h", "--version", "-v") for arg in options)
+            or os.environ.get("CRABBOX_ASCII_BOX_API_KEY")
+            or os.environ.get("ASCII_BOX_API_KEY")):
+        os.execv(backend, [backend, *args])
+    if selected_provider(backend, args) not in ("boat", "ascii-box", "ascii", "asciibox"):
+        os.execv(backend, [backend, *args])
+    helper = shutil.which("fleet-credentials")
+    if not helper:
+        raise RuntimeError("Boat credentials require fleet-credentials on PATH")
+    os.execv(helper, [helper, "run", profile, "--key", "CRABBOX_ASCII_BOX_API_KEY",
+                     "--", backend, *args])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        print(f"crabbox: {error}", file=sys.stderr)
+        sys.exit(1)

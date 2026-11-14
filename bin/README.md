@@ -579,3 +579,29 @@ Homebrew on macOS, then PATH. It skips itself, symlink aliases, and marked wrapp
 copies. Arguments, stdin, working directory, and backend exit status are retained.
 It does not install a backend, read auth configuration, select a token source, or
 change credentials. Gitcrawl and Crawlkit remain the owners of token resolution.
+
+## Crabbox and Boat
+
+`boat-install` installs the official, SHA-256-verified Boat executable in
+`~/.local/bin/boat`. It does not start onboarding, change shell files, or choose a
+plan. Add `~/.local/bin` to PATH if your shell does not load the dotfiles exports.
+
+The `crabbox` launcher normally passes through to the native Crabbox on PATH.
+`CRABBOX_BIN` can select an explicit native executable. To enable per-command
+Boat credentials, register the existing key with `fleet-credentials`:
+
+```sh
+fleet-credentials key PROFILE CRABBOX_ASCII_BOX_API_KEY op://VAULT/ITEM/FIELD
+```
+
+Set `CRABBOX_BOAT_CREDENTIAL_PROFILE=PROFILE` in private `~/.exports.local`.
+Set `BOX_ORG` there to the intended Boat organization ID as well: Crabbox defaults
+to personal billing and does not inherit Boat's active wallet. Keep identities
+and secret references out of public dotfiles.
+
+The launcher resolves the selected provider from arguments before `--`, or from
+Crabbox's merged configuration. Only Boat requests use the selected credential
+profile; other providers, help, and version pass through. Existing
+`CRABBOX_ASCII_BOX_API_KEY` or `ASCII_BOX_API_KEY` values take precedence.
+The helper injects the key only into that command. Native Crabbox may persist it
+in its private Boat CLI state; the launcher does not export it to the parent shell.

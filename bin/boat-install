@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Install Boat's verified native CLI without onboarding or shell rewrites."""
+import hashlib
+import os
+from pathlib import Path
+import platform
+import sys
+import tempfile
+import urllib.request
+
+
+def install():
+    systems = {"Darwin": "darwin", "Linux": "linux"}
+    architectures = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}
+    system = systems.get(platform.system())
+    architecture = architectures.get(platform.machine().lower())
+    if not system or not architecture:
+        raise RuntimeError("Boat installer supports macOS/Linux on arm64/x64")
+    asset = f"boat-{system}-{architecture}"
+    url = f"https://boat.dev/api/boat/cli/download?platform={system}-{architecture}&channel=prod"
+    with urllib.request.urlopen(url + "&integrity=sha256", timeout=60) as response:
+        sums = response.read().decode()
+    matches = [parts[0].lower() for line in sums.splitlines()
+               if len(parts := line.split()) == 2 and parts[1].lstrip("*") == asset]
+    if len(matches) != 1 or len(matches[0]) != 64 or any(c not in "0123456789abcdef" for c in matches[0]):
+        raise RuntimeError(f"expected exactly one SHA-256 checksum for {asset}")
+    destination = Path.home() / ".local/bin/boat"
+    if destination.is_symlink():
+        raise RuntimeError(f"refusing to replace symlink: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        digest = hashlib.sha256()
+        with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".boat-", delete=False) as output:
+            temporary = Path(output.name)
+            with urllib.request.urlopen(url, timeout=120) as response:
+                while chunk := response.read(1024 * 1024):
+                    digest.update(chunk)
+                    output.write(chunk)
+        if digest.hexdigest() != matches[0]:
+            raise RuntimeError("Boat checksum mismatch; existing installation preserved")
+        temporary.chmod(0o755)
+        os.replace(temporary, destination)
+        print(f"Installed verified Boat CLI: {destination}")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:]:
+        print("usage: boat-install\nInstalls ~/.local/bin/boat from Boat's official checksummed download.")
+        sys.exit(0 if sys.argv[1:] in (["--help"], ["-h"]) else 2)
+    try:
+        install()
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"boat-install: {error}", file=sys.stderr)
+        sys.exit(1)
