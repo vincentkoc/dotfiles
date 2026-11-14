@@ -2261,6 +2261,165 @@ def stat_mode(path):
     return path.stat().st_mode & 0o777
 
 
+class SiblingAbsenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.parent = self.base / "parent"
+        self.parent.mkdir()
+        self.path = self.parent / "missing" / ".git"
+        FINISH.safety()
+
+    def capture(self):
+        return FINISH.sibling_absence(self.path, time.monotonic() + 10)
+
+    def metadata(self, details, **changes):
+        fields = {name: getattr(details, name, 0) for name in (
+            "st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_flags")}
+        return types.SimpleNamespace(**{**fields, **changes})
+
+    def test_real_root_owned_temporary_parent_is_read_only(self):
+        parent = Path("/tmp").resolve()
+        before = parent.lstat()
+        if os.getuid() == 0 or before.st_uid != 0 or not before.st_mode & FINISH.stat.S_ISVTX:
+            self.skipTest("non-owner observation of root-owned sticky temporary directory unavailable")
+        self.path = parent / ("gwt-absence-fixture-" + uuid.uuid4().hex) / ".git"
+        proof = self.capture()
+        self.assertEqual(proof["parent"], str(parent))
+        self.assertEqual(proof["parent_id"], [before.st_dev, before.st_ino])
+        self.assertEqual(proof["parent_metadata"], [before.st_uid, before.st_gid,
+                                                   before.st_mode, getattr(before, "st_flags", 0)])
+        self.assertFalse(os.path.lexists(self.path.parent))
+        if os.getuid() != 0:
+            with self.assertRaisesRegex(FINISH.Retain, "directory-identity-unsafe"):
+                FINISH.identity(parent)
+
+    def test_same_user_parent_keeps_existing_receipt_shape(self):
+        details = self.parent.lstat()
+        self.assertEqual(self.capture(), {"state": "absent", "errno": errno.ENOENT,
+                                         "parent": str(self.parent),
+                                         "parent_id": [details.st_dev, details.st_ino]})
+
+    def test_root_modes_and_foreign_owners_have_separate_admission(self):
+        native_lstat, native_fstat = os.lstat, os.fstat
+        for uid, mode, accepted in ((0, 0o755, True), (0, 0o1777, True),
+                                    (0, 0o777, False), (0, 0o775, False),
+                                    (os.getuid() + 1000, 0o755, False)):
+            with self.subTest(uid=uid, mode=mode):
+                def named(path):
+                    details = native_lstat(path)
+                    return self.metadata(details, st_uid=uid, st_mode=FINISH.stat.S_IFDIR | mode) \
+                        if Path(path) == self.parent else details
+                def held(fd):
+                    return self.metadata(native_fstat(fd), st_uid=uid, st_mode=FINISH.stat.S_IFDIR | mode)
+                with mock.patch.object(FINISH.os, "getuid", return_value=501), \
+                        mock.patch.object(FINISH.os, "lstat", side_effect=named), \
+                        mock.patch.object(Path, "lstat", named), \
+                        mock.patch.object(FINISH.os, "fstat", side_effect=held):
+                    if accepted:
+                        self.assertEqual(self.capture()["parent_metadata"][0], uid)
+                    else:
+                        with self.assertRaisesRegex(FINISH.Retain, "directory-identity-unsafe"):
+                            self.capture()
+
+    def test_parent_metadata_drift_is_not_preservation(self):
+        native = os.fstat
+        before = self.parent.lstat()
+        for field, value in (("st_dev", before.st_dev + 1), ("st_ino", before.st_ino + 1),
+                             ("st_uid", os.getuid() + 1000), ("st_gid", before.st_gid + 1),
+                             ("st_mode", before.st_mode ^ 0o100),
+                             ("st_flags", getattr(before, "st_flags", 0) ^ 1)):
+            with self.subTest(field=field), mock.patch.object(
+                    FINISH.os, "fstat", side_effect=lambda fd: self.metadata(native(fd), **{field: value})):
+                with self.assertRaises(FINISH.Retain):
+                    self.capture()
+
+    def test_unrelated_directory_churn_does_not_change_absence(self):
+        before = self.capture()
+        native = os.stat
+        def churn(path, *args, **kwargs):
+            try:
+                return native(path, *args, **kwargs)
+            except FileNotFoundError:
+                if "dir_fd" in kwargs and not (self.parent / "other").exists():
+                    (self.parent / "other").mkdir()
+                raise
+        with mock.patch.object(FINISH.os, "stat", side_effect=churn):
+            self.assertEqual(self.capture(), before)
+
+    def test_symlink_parent_and_non_directory_prefix_refuse(self):
+        link = self.base / "link"
+        link.symlink_to(self.parent, target_is_directory=True)
+        self.path = link / "missing"
+        with self.assertRaisesRegex(FINISH.Retain, "sibling-path-rebound"):
+            self.capture()
+        file = self.base / "file"
+        file.write_text("untouched\n")
+        self.path = file / "missing"
+        with self.assertRaises(NotADirectoryError):
+            self.capture()
+        self.assertEqual(file.read_text(), "untouched\n")
+
+    def test_unknown_read_errors_are_not_enoent(self):
+        for error in (PermissionError(errno.EACCES, "fixture"),
+                      NotADirectoryError(errno.ENOTDIR, "fixture"), OSError(errno.EIO, "fixture")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(FINISH.os, "lstat", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        self.capture()
+                native = os.stat
+                def failed(path, *args, **kwargs):
+                    if "dir_fd" in kwargs:
+                        raise error
+                    return native(path, *args, **kwargs)
+                with mock.patch.object(FINISH.os, "stat", side_effect=failed):
+                    with self.assertRaises(type(error)):
+                        self.capture()
+
+    def test_parent_replaced_during_open_refuses_and_closes_descriptor(self):
+        native_open, native_fstat = os.open, os.fstat
+        opened = []
+        def replace(path, flags, *args, **kwargs):
+            if Path(path) == self.parent:
+                self.parent.rename(self.base / "old-parent")
+                self.parent.mkdir()
+            fd = native_open(path, flags, *args, **kwargs)
+            opened.append(fd)
+            return fd
+        with mock.patch.object(FINISH.os, "open", side_effect=replace):
+            with self.assertRaisesRegex(FINISH.Retain, "sibling-parent-rebound"):
+                self.capture()
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError) as error:
+            native_fstat(opened[0])
+        self.assertEqual(error.exception.errno, errno.EBADF)
+
+    def test_missing_component_reappearance_refuses_without_following_links(self):
+        native = os.stat
+        for kind in ("directory", "file", "symlink"):
+            with self.subTest(kind=kind):
+                def appear(path, *args, **kwargs):
+                    try:
+                        return native(path, *args, **kwargs)
+                    except FileNotFoundError:
+                        if "dir_fd" in kwargs:
+                            if kind == "directory":
+                                self.path.parent.mkdir()
+                            elif kind == "file":
+                                self.path.parent.write_text("keep\n")
+                            else:
+                                self.path.parent.symlink_to(self.base / "unavailable")
+                        raise
+                with mock.patch.object(FINISH.os, "stat", side_effect=appear):
+                    with self.assertRaisesRegex(FINISH.Retain, "sibling-absence-changed"):
+                        self.capture()
+                if kind == "directory":
+                    self.path.parent.rmdir()
+                else:
+                    self.path.parent.unlink()
+
+
 class FinalizedRemovalTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
@@ -2728,6 +2887,37 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertNotIn("path_absence", saved)
         self.assertEqual(saved["pointer_absence"]["parent_id"], root_id)
         self.assertTrue(result["siblings_preserved"])
+
+    def test_absent_sibling_under_system_temp_preserves_prunable_registration(self):
+        parent = Path("/tmp").resolve()
+        details = parent.lstat()
+        if os.getuid() == 0 or details.st_uid != 0 or not details.st_mode & FINISH.stat.S_ISVTX:
+            self.skipTest("non-owner observation of root-owned sticky temporary directory unavailable")
+        with tempfile.TemporaryDirectory(prefix="gwt-sibling-", dir=parent) as temporary:
+            sibling = Path(temporary)
+            sibling.rmdir()
+            git(self.repo, "worktree", "move", str(self.legacy), str(sibling))
+            admin = Path(git(sibling, "rev-parse", "--absolute-git-dir"))
+            admin_id = FINISH.identity(admin)
+            backlinks = {name: (admin / name).read_bytes() for name in ("gitdir", "commondir")}
+            shutil.rmtree(sibling)
+            row = next(row for row in FINISH.records(str(self.repo)) if row["worktree"] == str(sibling))
+            self.assertIn("prunable", row)
+            code, rows = self.remove()
+            self.assertEqual(code, 0, rows)
+            self.assertEqual(rows[0]["checkout"], "removed")
+            self.assertFalse(self.wt.exists())
+            self.assertFalse(self.admin.exists())
+            self.assertFalse(sibling.exists())
+            self.assertEqual(FINISH.identity(admin), admin_id)
+            self.assertEqual({name: (admin / name).read_bytes() for name in backlinks}, backlinks)
+            self.assertIn(row, FINISH.records(str(self.repo)))
+            with FINISH.ledger(self.state) as db:
+                result = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+            proof = result["sibling_identities_after"][str(sibling)]
+            self.assertEqual(proof["path_absence"]["parent"], str(parent))
+            self.assertEqual(proof["pointer_absence"]["parent_metadata"][0], 0)
+            self.assertTrue(result["siblings_preserved"])
 
     def test_known_absent_sibling_admin_index_is_shared_once_per_pass(self):
         second = self.root / "second-absent"
