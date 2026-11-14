@@ -2315,6 +2315,7 @@ class SiblingAbsenceTests(unittest.TestCase):
                     return self.metadata(native_fstat(fd), st_uid=uid, st_mode=FINISH.stat.S_IFDIR | mode)
                 with mock.patch.object(FINISH.os, "getuid", return_value=501), \
                         mock.patch.object(FINISH.os, "lstat", side_effect=named), \
+                        mock.patch.object(Path, "lstat", named), \
                         mock.patch.object(FINISH.os, "fstat", side_effect=held):
                     if accepted:
                         self.assertEqual(self.capture()["parent_metadata"][0], uid)
