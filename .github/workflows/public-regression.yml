@@ -12,6 +12,9 @@ on:
       - ".mackup.cfg"
       - ".mackup/portable-tool-preferences.cfg"
       - "bin/mac-preferences"
+      - "bin/crabbox"
+      - "bin/boat-install"
+      - "tests/crabbox-boat-test.py"
       - "profiles/macos/**"
       - "tests/mac-preferences-test.py"
       - "tests/optional-shell-hooks-test.py"
@@ -67,6 +70,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 tests/optional-shell-hooks-test.py
+          python3 tests/crabbox-boat-test.py
           python3 tests/mac-preferences-test.py
           python3 tests/linux-server-startup-test.py
           bash tests/install-foundations-test.sh
