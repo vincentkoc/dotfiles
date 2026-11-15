@@ -2048,16 +2048,105 @@ def recovery_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def missing_recovery_record(db, row):
+RECOVERY_CONTRACT = "gwt-missing-recovery.v2"
+
+
+def missing_recovery_fact(db, row):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                       "AND name='missing_recoveries'").fetchone():
         return None
     result = db.execute("SELECT fact FROM missing_recoveries WHERE worktree_id=?",
                         (row["id"],)).fetchone()
-    return json.loads(result[0]) if result else None
+    return result[0] if result else None
 
 
-def missing_recovery_preimage(db, row, args, until, *, published=False):
+def missing_recovery_record(db, row):
+    fact = missing_recovery_fact(db, row)
+    return json.loads(fact) if fact is not None else None
+
+
+def completed_recovery_successor(record, row):
+    try:
+        before, result, intent = record["preimage"], record["result"], record["intent"]
+        stage = record["stage_id"]
+        valid = (result["checkout"] == "restored"
+                 and result["intent_id"] == intent["id"] == record["id"]
+                 and result["recovery_sha256"] == intent["digest"] == record["digest"] == recovery_digest(before)
+                 and result["head"] == before["head"]
+                 and type(before["generation"]) is int and type(result["generation"]) is int
+                 and result["generation"] == before["generation"] + 1
+                 and isinstance(stage, list) and len(stage) == 2
+                 and all(type(value) is int and value >= 0 for value in stage)
+                 and json.loads(row["identity"]) == {**before["observed_identity"], "path_id": stage})
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise Retain("recovery-completed-receipt-invalid")
+
+
+def missing_recovery_history(db, row, predecessor=None):
+    history = []
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                  "AND name='missing_recovery_history'").fetchone():
+        for item in db.execute("SELECT intent_id, fact FROM missing_recovery_history "
+                               "WHERE worktree_id=? ORDER BY intent_id", (row["id"],)):
+            record = json.loads(item["fact"])
+            if record["id"] != item["intent_id"] or not record.get("result"):
+                raise Retain("recovery-history-invalid")
+            history.append({"id": item["intent_id"],
+                            "sha256": hashlib.sha256(item["fact"].encode()).hexdigest()})
+    if predecessor is not None:
+        record = json.loads(predecessor)
+        if any(item["id"] == record["id"] for item in history):
+            raise Retain("recovery-history-collision")
+        if record["preimage"].get("recovery_history", []) != history:
+            raise Retain("recovery-history-drift")
+        history.append({"id": record["id"], "sha256": hashlib.sha256(predecessor.encode()).hexdigest()})
+    return sorted(history, key=lambda item: item["id"])
+
+
+def recovery_release_evidence(db, row, item, owners, head):
+    releases = [dict(value) for value in db.execute(
+        "SELECT owner, generation FROM owner_releases WHERE worktree_id=? ORDER BY owner", (row["id"],))]
+    proof = {key: row[key] for key in ("finish_head", "primary_pr", "target", "dependencies")}
+    proof["inventory"] = item["inventory"]
+    if releases:
+        repo = json.loads(row["identity"])["repo"]
+        def local_pr(url):
+            match = PR_URL.fullmatch(url) if isinstance(url, str) else None
+            return match is not None and url == f"https://github.com/{repo}/pull/{match[2]}"
+
+        completed = {owner["owner"] for owner in owners if owner["completed"] == 1}
+        if (any(release["owner"] not in completed or type(release["generation"]) is not int
+                or release["generation"] != item["generation"] for release in releases)
+                or proof["finish_head"] != head
+                or not local_pr(proof["primary_pr"])
+                or not isinstance(proof["target"], str) or not proof["target"]):
+            raise Retain("recovery-release-proof-invalid")
+        try:
+            dependencies = json.loads(proof["dependencies"])
+            inventory = json.loads(proof["inventory"])
+            if (not isinstance(dependencies, list) or len(dependencies) > 16
+                    or any(not isinstance(value, dict) or set(value) != {"url", "head", "target"}
+                           or not local_pr(value["url"]) or value["url"] == proof["primary_pr"]
+                           or not isinstance(value["head"], str) or not SHA.fullmatch(value["head"])
+                           or value["target"] != proof["target"] for value in dependencies)):
+                raise Retain("recovery-release-proof-invalid")
+            valid = (isinstance(inventory, dict)
+                     and inventory["schema"] == RELEASE_BASELINE_SCHEMA
+                     and isinstance(inventory["discard_ignored"], list)
+                     and all(isinstance(value, str) for value in inventory["discard_ignored"])
+                     and ((isinstance(inventory["baseline"], dict) and inventory["blocker"] is None)
+                          or (inventory["baseline"] is None and isinstance(inventory["blocker"], str)
+                              and bool(inventory["blocker"]))))
+        except (TypeError, ValueError, KeyError):
+            valid = False
+        if not valid:
+            raise Retain("recovery-release-inventory-invalid")
+    return {"releases": releases, "completion_proof": proof}
+
+
+def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=False, predecessor=None):
     module = safety()
     snap = json.loads(row["identity"])
     original_identity = json.loads(row["identity"])
@@ -2105,14 +2194,16 @@ def missing_recovery_preimage(db, row, args, until, *, published=False):
             raise Retain("recovery-git-operation-present")
     snap = {**snap, "head": args.expected_head}
     admin_path = Path(snap["gitdir"])
-    raw, _ = module.read_file(admin_path / "index", until)
+    raw, index_identity = module.read_file(admin_path / "index", until)
     if hashlib.sha256(raw).hexdigest() != args.index_sha256:
         raise Retain("recovery-index-changed")
-    entries, resolve_undo = module.index_entries(raw)
-    if resolve_undo is not None or any(entry[2] for entry in entries.values()):
-        raise Retain("recovery-sparse-or-undo-index")
+    entries, resolve_undo = module.index_entries(raw, allow_resolve_undo=not legacy)
+    if any(entry[2] for entry in entries.values()):
+        raise Retain("recovery-sparse-index")
+    if resolve_undo is not None:
+        module.retained_resolve_undo(snap["owner"], git, until, resolve_undo)
     tree = module.tree_entries(git(snap["owner"], "--no-replace-objects", "ls-tree", "-rz",
-                                   args.expected_head, deadline=until))
+                                   args.expected_head, deadline=until, capture_limit=32 * 1024 * 1024))
     if {name: entry[:2] for name, entry in entries.items()} != tree:
         raise Retain("recovery-index-not-head")
     for name, expected in (("HEAD", "ref: " + snap["branch"] + "\n"),
@@ -2126,6 +2217,9 @@ def missing_recovery_preimage(db, row, args, until, *, published=False):
     # Checks that need a Git cwd use the unchanged canonical owner while all
     # inventoried admin paths still belong to this exact missing checkout.
     admin = module.recovery_admin_inventory({**snap, "path": snap["owner"]}, git, until)
+    if (admin["index"][0][:-1] != list(index_identity)
+            or admin["index"][1] != args.index_sha256):
+        raise Retain("recovery-index-changed")
     refs = preserved_refs(snap, [snap["branch"]], until)
     if refs[snap["branch"]]["head"] != args.expected_head:
         raise Retain("recovery-branch-changed")
@@ -2135,10 +2229,21 @@ def missing_recovery_preimage(db, row, args, until, *, published=False):
     owners = owner_rows(db, row["id"])
     if not owners or row["state"] != "active":
         raise Retain("recovery-needs-existing-active-owners")
+    if not legacy and (not any(owner["completed"] == 0 for owner in owners)
+                       or any(type(owner["completed"]) is not int or owner["completed"] not in (0, 1)
+                              for owner in owners)):
+        raise Retain("recovery-needs-unfinished-owner")
+    if cancellation_rows(db, row["id"]):
+        raise Retain("recovery-cancellation-present")
     if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
         raise Retain("recovery-pin-present")
-    if db.execute("SELECT 1 FROM owner_releases WHERE worktree_id=?", (row["id"],)).fetchone():
+    if legacy and db.execute("SELECT 1 FROM owner_releases WHERE worktree_id=?", (row["id"],)).fetchone():
         raise Retain("recovery-release-present")
+    evidence = {} if legacy else {
+        "recovery_contract": RECOVERY_CONTRACT,
+        "resolve_undo": resolve_undo,
+        "recovery_history": missing_recovery_history(db, row, predecessor),
+        **recovery_release_evidence(db, row, item, owners, args.expected_head)}
     boundaries = [module.access_boundary(str(path.parent), until),
                   module.access_boundary(snap["gitdir"], until)]
     manual_holders(snap, {"entries": {}, "discarded_inodes": [snap["path_id"]]}, admin, until)
@@ -2148,7 +2253,7 @@ def missing_recovery_preimage(db, row, args, until, *, published=False):
             "head": args.expected_head,
             "index_sha256": args.index_sha256, "registration": selected[0], "admin": admin,
             "refs": refs, "boundaries": boundaries, "owners": owners,
-            "generation": item["generation"], "state": row["state"]}, tree
+            "generation": item["generation"], "state": row["state"], **evidence}, tree
 
 
 RECOVERY_BLOB_LIMIT = 16 * 1024 * 1024
@@ -2291,9 +2396,28 @@ def recover_missing(db, row, args):
     until = safety().DEADLINE
     who = owner_id(args)
     with safety().maintainer_lock(Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))):
-        record = missing_recovery_record(db, row)
+        receipt = missing_recovery_fact(db, row)
+        record = json.loads(receipt) if receipt is not None else None
+        predecessor = None
+        # Receipts without a contract use the original no-release preimage.
+        # Never silently recalculate an outstanding operator-approved digest.
+        legacy = record is not None and "contract" not in record
+        if record is not None and not legacy and record["contract"] != RECOVERY_CONTRACT:
+            raise Retain("recovery-receipt-contract-unsupported")
         if args.continue_partial and (record is None or record.get("result")):
             raise Retain("recovery-partial-needs-pending-intent")
+        if record is not None and record.get("result") and not args.intent_id:
+            completed_recovery_successor(record, row)
+            if args.generation < record["result"]["generation"]:
+                raise Retain("recovery-generation-changed")
+            predecessor, record, legacy = receipt, None, False
+
+        def observe(observed_row=row, observed_args=args, *, published=False):
+            if missing_recovery_fact(db, row) != receipt:
+                raise Retain("recovery-receipt-drift")
+            return missing_recovery_preimage(db, observed_row, observed_args, until, published=published,
+                                             legacy=legacy, predecessor=predecessor)
+
         if record is not None:
             if (not args.intent_id or record["id"] != args.intent_id
                     or record["digest"] != args.recovery_sha256
@@ -2311,7 +2435,14 @@ def recover_missing(db, row, args):
                     raise Retain("recovery-successor-changed")
                 successor_args = types.SimpleNamespace(**{**vars(args), "generation": args.generation + 1})
                 original_row = {**dict(row), "identity": json.dumps(record["preimage"]["identity"])}
-                observed, entries = missing_recovery_preimage(db, original_row, successor_args, until, published=True)
+                observed, entries = observe(original_row, successor_args, published=True)
+                if not legacy:
+                    # Identity publication invalidates deletion authority through
+                    # the normal trigger. The receipt retains the prior evidence.
+                    if observed["releases"] or observed["completion_proof"]["inventory"] is not None:
+                        raise Retain("recovery-successor-release-changed")
+                    observed["releases"] = record["preimage"]["releases"]
+                    observed["completion_proof"]["inventory"] = record["preimage"]["completion_proof"]["inventory"]
                 observed.update(generation=args.generation, registration=record["preimage"]["registration"])
                 if recovery_digest(observed) != record["digest"]:
                     raise Retain("recovery-successor-admin-changed")
@@ -2325,7 +2456,7 @@ def recover_missing(db, row, args):
         if record and (item["state"] != "recovery-pending" or json.loads(item["intent"]) != record["intent"]):
             raise Retain("recovery-intent-state-changed")
         published = record is not None and os.path.lexists(row["path"])
-        preimage, entries = missing_recovery_preimage(db, row, args, until, published=published)
+        preimage, entries = observe(published=published)
         if record is not None:
             # Only the target's presence changes when the same staged inode was published.
             preimage["registration"] = record["preimage"]["registration"]
@@ -2363,23 +2494,51 @@ def recover_missing(db, row, args):
             staging = str(Path(row["path"]).parent / (".gwt-recover-" + identifier))
             intent = {"kind": "recover-missing", "id": identifier, "digest": digest,
                       "operator": who, "stage": staging}
-            record = {"id": identifier, "intent": intent, "digest": digest, "preimage": preimage,
+            record = {"contract": RECOVERY_CONTRACT, "id": identifier,
+                      "intent": intent, "digest": digest, "preimage": preimage,
                       "stage": staging, "stage_id": None, "result": None}
             with db:
+                db.execute("BEGIN IMMEDIATE")
                 db.execute("CREATE TABLE IF NOT EXISTS missing_recoveries ("
                            "worktree_id TEXT PRIMARY KEY REFERENCES worktrees(id), fact TEXT NOT NULL)")
+                if missing_recovery_fact(db, row) != receipt:
+                    raise Retain("recovery-receipt-drift")
+                if missing_recovery_history(db, row, predecessor) != preimage["recovery_history"]:
+                    raise Retain("recovery-history-drift")
+                if predecessor is not None:
+                    # Archive exact prior receipt bytes, replacement and lifecycle
+                    # CAS atomically. Pending receipts never enter this branch.
+                    db.execute("CREATE TABLE IF NOT EXISTS missing_recovery_history ("
+                               "worktree_id TEXT NOT NULL REFERENCES worktrees(id), intent_id TEXT NOT NULL, "
+                               "fact TEXT NOT NULL, PRIMARY KEY(worktree_id, intent_id))")
+                    for action in ("UPDATE", "DELETE"):
+                        db.execute(f"CREATE TRIGGER IF NOT EXISTS missing_recovery_history_{action.lower()} "
+                                   f"BEFORE {action} ON missing_recovery_history BEGIN "
+                                   "SELECT RAISE(ABORT, 'recovery-history-is-immutable'); END")
+                    previous = json.loads(predecessor)
+                    db.execute("INSERT INTO missing_recovery_history VALUES (?, ?, ?)",
+                               (row["id"], previous["id"], predecessor))
                 changed = db.execute("UPDATE retirement SET state='recovery-pending', intent=? "
-                                     "WHERE worktree_id=? AND generation=? AND state='enrolled' AND intent IS NULL",
+                                     "WHERE worktree_id=? AND generation=? AND state='enrolled' "
+                                     "AND intent IS NULL AND result IS NULL",
                                      (json.dumps(intent, sort_keys=True), row["id"], args.generation)).rowcount
                 if changed != 1:
                     raise Retain("recovery-generation-cas-failed")
-                db.execute("INSERT INTO missing_recoveries VALUES (?, ?)",
-                           (row["id"], json.dumps(record, sort_keys=True)))
+                encoded = json.dumps(record, sort_keys=True)
+                if predecessor is None:
+                    db.execute("INSERT INTO missing_recoveries VALUES (?, ?)", (row["id"], encoded))
+                elif db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=? AND fact=?",
+                                (encoded, row["id"], predecessor)).rowcount != 1:
+                    raise Retain("recovery-receipt-cas-failed")
+            receipt, predecessor = encoded, None
             Path(staging).mkdir(mode=0o700)
             record["stage_id"] = identity(staging)
+            encoded = json.dumps(record, sort_keys=True)
             with db:
-                db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
-                           (json.dumps(record, sort_keys=True), row["id"]))
+                if db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=? AND fact=?",
+                              (encoded, row["id"], receipt)).rowcount != 1:
+                    raise Retain("recovery-receipt-cas-failed")
+            receipt = encoded
             recovery_tree(staging, entries, preimage["identity"]["gitdir"], until,
                           write=True, owner=preimage["identity"]["owner"])
         elif args.continue_partial:
@@ -2390,7 +2549,7 @@ def recover_missing(db, row, args):
                 or (published and os.path.lexists(record["stage"]))):
             raise Retain("recovery-staged-inode-unknown")
         recovery_tree(source, entries, preimage["identity"]["gitdir"], until)
-        final, _ = missing_recovery_preimage(db, row, args, until, published=published)
+        final, _ = observe(published=published)
         final["registration"] = preimage["registration"]
         if recovery_digest(final) != digest:
             raise Retain("recovery-pre-publication-drift")
@@ -2400,7 +2559,7 @@ def recover_missing(db, row, args):
         if immutable(current) != {**preimage["observed_identity"], "path_id": record["stage_id"]}:
             raise Retain("recovery-published-identity-changed")
         recovery_tree(row["path"], entries, preimage["identity"]["gitdir"], until)
-        final, _ = missing_recovery_preimage(db, row, args, until, published=True)
+        final, _ = observe(published=True)
         final["registration"] = preimage["registration"]
         if recovery_digest(final) != digest:
             raise Retain("recovery-post-publication-drift")
@@ -2419,8 +2578,9 @@ def recover_missing(db, row, args):
                        (json.dumps(immutable(current), sort_keys=True), row["id"], row["identity"]))
             if retirement(db, row)["generation"] != args.generation + 1:
                 raise Retain("recovery-successor-generation-invalid")
-            db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
-                       (json.dumps(record, sort_keys=True), row["id"]))
+            if db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=? AND fact=?",
+                          (json.dumps(record, sort_keys=True), row["id"], receipt)).rowcount != 1:
+                raise Retain("recovery-receipt-cas-failed")
         return result
 
 

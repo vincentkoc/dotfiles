@@ -1795,11 +1795,719 @@ class MissingRecoveryTests(unittest.TestCase):
 
     def recover(self, *args):
         return self.call("recover-missing", "--worktree-id", self.original["id"],
-                         "--generation", "0", "--expected-head", self.head,
+                         "--generation", str(getattr(self, "generation", 0)), "--expected-head", self.head,
                          "--index-sha256", self.index_sha, *args)[1][0]
 
     def plan(self):
         return self.recover()["recovery_sha256"]
+
+    def disappear_again(self):
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        self.generation = self.record()[1]["generation"]
+        shutil.rmtree(self.wt)
+
+    def repeated_tree(self, directories):
+        blob = git(self.repo, "rev-parse", "HEAD:file")
+        def tree(records):
+            result = subprocess.run(["git", "-C", str(self.repo), "mktree", "-z"],
+                                    input=b"".join(records), stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, check=True)
+            return result.stdout.decode().strip()
+        leaf = tree(f"100644 blob {blob}\t{i:04d}-{'x' * 180}\0".encode() for i in range(1000))
+        return tree(f"040000 tree {leaf}\tdirectory-{i:04d}\0".encode() for i in range(directories))
+
+    def test_recovery_uses_tree_capture_budget_with_no_replace_prefix(self):
+        tree = self.repeated_tree(8)
+        self.head = git(self.repo, "commit-tree", tree, "-p", self.head, "-m", "recovery fixture")
+        git(self.repo, "update-ref", "refs/heads/released-feature", self.head)
+        git(self.repo, "--git-dir", str(self.admin), "read-tree", tree)
+        self.index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        with self.assertRaisesRegex(FINISH.Retain, "git-failed"):
+            FINISH.git(self.repo, "--no-replace-objects", "ls-tree", "-rz", self.head)
+        plan = self.recover()
+        self.assertEqual(plan["entries"], 8000)
+        self.assertFalse(self.wt.exists())
+        self.assertIsNone(self.record()[0])
+
+    def test_tree_capture_still_stops_above_32_mib(self):
+        tree = self.repeated_tree(160)
+        native = FINISH.safety().supervise
+        observed = []
+        def bounded(*args, **kwargs):
+            result = native(*args, **kwargs)
+            observed.append(result)
+            return result
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=bounded):
+            with self.assertRaisesRegex(FINISH.Retain, "git-failed"):
+                FINISH.git(self.repo, "--no-replace-objects", "ls-tree", "-rz", tree,
+                           capture_limit=32 * 1024 * 1024)
+        self.assertGreater(len(observed[0].stdout), 32 * 1024 * 1024)
+        self.assertLessEqual(len(observed[0].stdout), 32 * 1024 * 1024 + 65536)
+        self.assertTrue(observed[0].proof["reaped"])
+        self.assertTrue(observed[0].proof["group_absent"])
+
+    def test_successive_recovery_preserves_exact_completed_receipts(self):
+        first = self.recover("--apply", "--recovery-sha256", self.plan())
+        with FINISH.ledger(self.state) as db:
+            original = db.execute("SELECT fact FROM missing_recoveries WHERE worktree_id=?",
+                                  (self.original["id"],)).fetchone()[0]
+            # Custody covers original serialized bytes, not a canonical rewrite.
+            original += "\n"
+            with db:
+                db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
+                           (original, self.original["id"]))
+        self.call("resume")
+        (self.wt / "file").write_text("next committed source\n")
+        git(self.wt, "commit", "-am", "next source")
+        self.disappear_again()
+        second = self.recover("--apply", "--recovery-sha256", self.plan())
+        self.assertNotEqual(first["intent_id"], second["intent_id"])
+        self.assertEqual((self.wt / "file").read_text(), "next committed source\n")
+        with FINISH.ledger(self.state) as db:
+            archived = db.execute(
+                "SELECT fact FROM missing_recovery_history WHERE worktree_id=? AND intent_id=?",
+                (self.original["id"], first["intent_id"])).fetchone()[0]
+            self.assertEqual(archived, original)
+            second_fact = db.execute("SELECT fact FROM missing_recoveries WHERE worktree_id=?",
+                                     (self.original["id"],)).fetchone()[0]
+        self.call("resume")
+        self.disappear_again()
+        third_digest = self.plan()
+        self.assertEqual(len(self.history()), 1)
+        third = self.recover("--apply", "--recovery-sha256", third_digest)
+        self.assertEqual(self.history(), {first["intent_id"]: original, second["intent_id"]: second_fact})
+        self.assertNotIn(third["intent_id"], self.history())
+        with FINISH.ledger(self.state) as db:
+            for sql in ("UPDATE missing_recovery_history SET fact='changed'",
+                        "DELETE FROM missing_recovery_history"):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    db.execute(sql)
+        with self.assertRaisesRegex(FINISH.Retain, "exact-intent-required"):
+            self.recover("--apply", "--recovery-sha256", first["recovery_sha256"],
+                         "--intent-id", first["intent_id"])
+
+    def mixed_owner_missing(self, blocker=False):
+        self.recover("--apply", "--recovery-sha256", self.plan())
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "owner-2"}):
+            self.call("resume")
+        if blocker:
+            (self.admin / "REBASE_HEAD").write_text(self.head + "\n")
+        self.proofs[self.url] = self.proof(self.url)
+        finished = self.finish()[1][0]
+        self.assertEqual(finished["released_owners"], ["owner-1"])
+        inventory = self.record()[1]["inventory"]
+        self.disappear_again()
+        return inventory
+
+    def test_mixed_owner_release_is_evidence_not_recovery_authority(self):
+        inventory = self.mixed_owner_missing(blocker=True)
+        result = self.recover("--apply", "--recovery-sha256", self.plan())
+        self.assertEqual(result["checkout"], "restored")
+        record = self.record()[0]
+        self.assertEqual(record["preimage"]["completion_proof"]["inventory"], inventory)
+        self.assertEqual(json.loads(inventory)["blocker"], "admin-recovery-content-unknown")
+        self.assertEqual(record["preimage"]["releases"],
+                         [{"owner": "owner-1", "generation": self.generation}])
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(FINISH.owner_rows(db, self.original["id"]),
+                             [{"owner": "owner-1", "completed": 1},
+                              {"owner": "owner-2", "completed": 0}])
+            self.assertFalse(db.execute("SELECT 1 FROM owner_releases WHERE worktree_id=?",
+                                        (self.original["id"],)).fetchone())
+            self.assertIsNone(FINISH.retirement(db, self.original)["inventory"])
+        self.assertEqual(self.recover("--apply", "--recovery-sha256", result["recovery_sha256"],
+                                      "--intent-id", result["intent_id"]), result)
+
+    def test_retained_rebase_head_outside_branch_is_preserved(self):
+        oid = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "retained rebase commit")
+        path = self.admin / "REBASE_HEAD"
+        path.write_text(oid + "\n")
+        before = FINISH.safety().read_file(path, time.monotonic() + 10)
+        result = self.recover("--apply", "--recovery-sha256", self.plan())
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual(FINISH.safety().read_file(path, time.monotonic() + 10), before)
+        self.assertEqual(self.record()[0]["preimage"]["admin"]["REBASE_HEAD"][2], [oid])
+
+    def history(self):
+        with FINISH.ledger(self.state) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='missing_recovery_history'").fetchone():
+                return {}
+            return dict(db.execute("SELECT intent_id, fact FROM missing_recovery_history WHERE worktree_id=?",
+                                   (self.original["id"],)))
+
+    def second_missing(self):
+        self.recover("--apply", "--recovery-sha256", self.plan())
+        self.call("resume")
+        self.disappear_again()
+
+    def legacy_receipt(self):
+        record, _ = self.record()
+        record.pop("contract")
+        for key in ("recovery_contract", "recovery_history", "releases", "completion_proof", "resolve_undo"):
+            record["preimage"].pop(key)
+        record["digest"] = FINISH.recovery_digest(record["preimage"])
+        record["intent"]["digest"] = record["digest"]
+        if record["result"]:
+            record["result"]["recovery_sha256"] = record["digest"]
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
+                       (json.dumps(record, sort_keys=True), self.original["id"]))
+            if not record["result"]:
+                db.execute("UPDATE retirement SET intent=? WHERE worktree_id=?",
+                           (json.dumps(record["intent"], sort_keys=True), self.original["id"]))
+        return record
+
+    def test_legacy_completed_receipt_replays_without_digest_change(self):
+        self.recover("--apply", "--recovery-sha256", self.plan())
+        old = self.legacy_receipt()
+        self.assertEqual(self.recover("--apply", "--intent-id", old["id"],
+                                      "--recovery-sha256", old["digest"]), old["result"])
+        self.assertNotIn("contract", self.record()[0])
+
+    def test_inconsistent_completed_receipt_cannot_authorize_successor(self):
+        self.second_missing()
+        with FINISH.ledger(self.state) as db:
+            original = FINISH.missing_recovery_fact(db, self.original)
+        changes = [
+            ("result", {"checkout": "removed"}),
+            ("result.checkout", "unknown"),
+            ("result.intent_id", str(uuid.uuid4())),
+            ("result.recovery_sha256", "0" * 64),
+            ("result.head", "0" * 40),
+            ("result.generation", self.generation + 1),
+            ("stage_id", [0, 0]),
+        ]
+        for key, value in changes:
+            with self.subTest(key=key):
+                altered = json.loads(original)
+                target = altered
+                parts = key.split(".")
+                for part in parts[:-1]:
+                    target = target[part]
+                target[parts[-1]] = value
+                raw = json.dumps(altered)
+                with FINISH.ledger(self.state) as db, db:
+                    db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=?",
+                               (raw, self.original["id"]))
+                with self.assertRaisesRegex(FINISH.Retain, "completed-receipt-invalid"):
+                    self.recover()
+                with FINISH.ledger(self.state) as db:
+                    self.assertEqual(FINISH.missing_recovery_fact(db, self.original), raw)
+                self.assertEqual(self.history(), {})
+                self.assertFalse(self.wt.exists())
+
+    def test_legacy_pending_receipt_replays_original_contract(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=RuntimeError("crash")):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        old = self.legacy_receipt()
+        result = self.recover("--apply", "--intent-id", old["id"], "--recovery-sha256", old["digest"])
+        self.assertEqual(result["recovery_sha256"], old["digest"])
+        self.assertNotIn("contract", self.record()[0])
+
+    def test_legacy_pending_receipt_still_rejects_releases(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        old = self.legacy_receipt()
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO owner_releases VALUES (?, ?, ?)", (self.original["id"], "owner-1", 0))
+        with self.assertRaisesRegex(FINISH.Retain, "recovery-release-present"):
+            self.recover("--apply", "--intent-id", old["id"], "--recovery-sha256", old["digest"])
+
+    def test_real_conflict_rebase_recovers_with_unchanged_resolve_undo(self):
+        self.recover("--apply", "--recovery-sha256", self.plan())
+        self.call("resume")
+        (self.wt / "file").write_text("feature\n")
+        git(self.wt, "commit", "-am", "feature")
+        old_head = git(self.wt, "rev-parse", "HEAD")
+        (self.repo / "file").write_text("main\n")
+        git(self.repo, "commit", "-am", "main")
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.wt, "rebase", "main")
+        (self.wt / "file").write_text("resolved\n")
+        git(self.wt, "add", "file")
+        with mock.patch.dict(os.environ, {"GIT_EDITOR": "true"}):
+            git(self.wt, "rebase", "--continue")
+        self.assertEqual(git(self.wt, "status", "--porcelain"), "")
+        self.assertEqual((self.admin / "REBASE_HEAD").read_text(), old_head + "\n")
+        self.assertTrue(git(self.wt, "rev-list", old_head, "--not", "HEAD"))
+        self.assertFalse(any((self.admin / name).exists() for name in ("rebase-merge", "rebase-apply", "sequencer")))
+        index = (self.admin / "index").read_bytes()
+        _, undo = FINISH.safety().index_entries(index, allow_resolve_undo=True)
+        self.assertTrue(undo)
+        before = self.record()[0]
+        index_before = FINISH.safety().read_file(self.admin / "index", time.monotonic() + 10)
+        admin_id = FINISH.identity(self.admin)
+        lock = (self.admin / "locked").read_bytes()
+        self.disappear_again()
+        result = self.recover("--apply", "--recovery-sha256", self.plan())
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual((self.wt / "file").read_text(), "resolved\n")
+        self.assertEqual(FINISH.safety().read_file(self.admin / "index", time.monotonic() + 10), index_before)
+        self.assertEqual(FINISH.identity(self.admin), admin_id)
+        self.assertEqual((self.admin / "locked").read_bytes(), lock)
+        self.assertEqual((self.admin / "REBASE_HEAD").read_text(), old_head + "\n")
+        self.assertEqual(self.record()[0]["preimage"]["resolve_undo"], undo)
+        self.assertEqual(json.loads(self.history()[before["id"]]), before)
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(FINISH.owner_rows(db, self.original["id"]), [{"owner": "owner-1", "completed": 0}])
+        self.assertEqual(self.recover("--apply", "--intent-id", result["intent_id"],
+                                      "--recovery-sha256", result["recovery_sha256"]), result)
+
+    def undo_record(self, *, oid=None, mode=0o100644, stage=1, name=b"file"):
+        oid = oid or git(self.repo, "rev-parse", "HEAD:file")
+        return (name + b"\0" + b"".join((format(mode, "o").encode() if i == stage else b"0") + b"\0"
+                                        for i in (1, 2, 3)) + bytes.fromhex(oid))
+
+    def write_undo(self, *payloads, body=None):
+        body = self.before_index[:-20] if body is None else body
+        for payload in payloads:
+            body += b"REUC" + struct.pack(">I", len(payload)) + payload
+        data = body + hashlib.sha1(body).digest()
+        (self.admin / "index").write_bytes(data)
+        self.index_sha = hashlib.sha256(data).hexdigest()
+        return data
+
+    def test_retained_unanchored_executable_and_missing_stages_do_not_authorize_deletion(self):
+        blob = FINISH.git(self.repo, "hash-object", "-w", "--stdin", input_data=b"retained undo only\n")
+        payload = self.undo_record(oid=blob, mode=0o100755, stage=2, name=b"undo-only")
+        self.write_undo(payload)
+        before = FINISH.safety().read_file(self.admin / "index", time.monotonic() + 10)
+        expected = {"undo-only": [[2, 0o100755, blob]]}
+        self.recover("--apply", "--recovery-sha256", self.plan())
+        self.assertEqual(self.record()[0]["preimage"]["resolve_undo"], expected)
+        self.assertEqual(FINISH.safety().read_file(self.admin / "index", time.monotonic() + 10), before)
+        self.assertFalse((self.wt / "undo-only").exists())
+        self.assertEqual((self.wt / "file").read_bytes(), b"original\n")
+        with self.assertRaisesRegex(FINISH.Retain, "resolve-undo-recovery-required"):
+            FINISH.safety().preserved_resolve_undo({"path": str(self.wt)}, FINISH.git,
+                                                 time.monotonic() + 10, expected, {self.head})
+
+    def test_retained_undo_wrong_missing_and_replaced_objects_refuse(self):
+        blob = git(self.repo, "rev-parse", "HEAD:file")
+        for oid in (self.head, git(self.repo, "rev-parse", "HEAD^{tree}"), "f" * 40):
+            with self.subTest(oid=oid):
+                data = self.write_undo(self.undo_record(oid=oid))
+                with self.assertRaisesRegex(FINISH.Retain, "resolve-undo-object-type-or-missing"):
+                    self.recover()
+                self.assertEqual((self.admin / "index").read_bytes(), data)
+                self.assertIsNone(self.record()[0])
+        git(self.repo, "update-ref", "refs/replace/" + self.head, blob)
+        self.assertEqual(git(self.repo, "cat-file", "-t", self.head), "blob")
+        self.write_undo(self.undo_record(oid=self.head))
+        with self.assertRaisesRegex(FINISH.Retain, "resolve-undo-object-type-or-missing"):
+            self.recover()
+
+    def test_retained_undo_malformed_duplicate_and_symlink_stages_refuse(self):
+        valid = self.undo_record()
+        for payloads, reason in (
+                ((valid[:-1],), "resolve-undo-invalid"),
+                ((valid + valid,), "resolve-undo-invalid"),
+                ((valid, valid), "resolve-undo-duplicate-extension"),
+                ((self.undo_record(mode=0o120000),), "retained-mode-unsupported")):
+            with self.subTest(payloads=payloads):
+                data = self.write_undo(*payloads)
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.recover()
+                self.assertEqual((self.admin / "index").read_bytes(), data)
+                self.assertIsNone(self.record()[0])
+
+    def test_retained_undo_does_not_admit_unresolved_or_sparse_stage_zero(self):
+        body = bytearray(self.before_index[:-20])
+        flags = struct.unpack_from(">H", body, 12 + 60)[0]
+        struct.pack_into(">H", body, 12 + 60, flags | 0x1000)
+        self.write_undo(self.undo_record(), body=bytes(body))
+        with self.assertRaisesRegex(FINISH.Retain, "raw-index-flags-or-mode-unsupported"):
+            self.recover()
+        (self.admin / "index").write_bytes(self.before_index)
+        git(self.repo, "--git-dir", str(self.admin), "update-index", "--skip-worktree", "file")
+        self.write_undo(self.undo_record(), body=(self.admin / "index").read_bytes()[:-20])
+        with self.assertRaisesRegex(FINISH.Retain, "recovery-sparse-index"):
+            self.recover()
+        self.assertIsNone(self.record()[0])
+
+    def test_legacy_pending_receipt_rejects_resolve_undo(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        old = self.legacy_receipt()
+        data = self.write_undo(self.undo_record())
+        with self.assertRaisesRegex(FINISH.Retain, "recovery-exact-intent-required"):
+            self.recover("--apply", "--intent-id", old["id"], "--recovery-sha256", old["digest"])
+        # Even with the new index operand, the original receipt's parser must
+        # refuse REUC rather than silently changing its approved digest shape.
+        args = types.SimpleNamespace(worktree_id=self.original["id"], generation=0,
+                                     expected_head=self.head, index_sha256=self.index_sha,
+                                     allow_device_renumbering=False)
+        with FINISH.ledger(self.state) as db:
+            with self.assertRaisesRegex(FINISH.Retain, "raw-index-extension-unsupported"):
+                FINISH.missing_recovery_preimage(db, FINISH.get_row(db, self.wt), args,
+                                                 time.monotonic() + 10, legacy=True)
+        self.assertEqual(self.record()[0], old)
+        self.assertEqual((self.admin / "index").read_bytes(), data)
+
+    def test_retained_undo_index_byte_and_inode_drift_refuse_before_intent(self):
+        self.write_undo(self.undo_record())
+        path = self.admin / "index"
+        digest = self.plan()
+        moved = self.base / "original-index"
+        path.rename(moved)
+        path.write_bytes(moved.read_bytes())
+        with self.assertRaisesRegex(FINISH.Retain, "reviewed-preimage-required"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        digest = self.plan()
+        self.write_undo(self.undo_record(stage=3))
+        with self.assertRaisesRegex(FINISH.Retain, "reviewed-preimage-required"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        path.unlink()
+        path.symlink_to(moved)
+        with self.assertRaises(FINISH.Retain):
+            self.recover()
+        self.assertIsNone(self.record()[0])
+        self.assertFalse(self.wt.exists())
+
+    def test_retained_undo_index_rebound_between_parse_and_inventory_refuses(self):
+        self.write_undo(self.undo_record())
+        validate = FINISH.safety().retained_resolve_undo
+        def rebound(*args):
+            validate(*args)
+            path = self.admin / "index"
+            path.rename(self.base / "old-index")
+            path.write_bytes((self.base / "old-index").read_bytes())
+        with mock.patch.object(FINISH.safety(), "retained_resolve_undo", side_effect=rebound):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-index-changed"):
+                self.recover()
+        self.assertIsNone(self.record()[0])
+
+    def test_retained_undo_index_drift_before_publication_refuses(self):
+        self.write_undo(self.undo_record())
+        digest = self.plan()
+        materialize = FINISH.recovery_tree
+        def drift(*args, **kwargs):
+            result = materialize(*args, **kwargs)
+            if kwargs.get("write"):
+                self.write_undo(self.undo_record(stage=3))
+            return result
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-index-changed"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(self.record()[1]["state"], "recovery-pending")
+
+    def test_retained_undo_index_drift_after_publication_keeps_pending_receipt(self):
+        self.write_undo(self.undo_record())
+        digest = self.plan()
+        publish = FINISH.recovery_publish
+        def drift(*args):
+            publish(*args)
+            self.write_undo(self.undo_record(stage=3))
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-index-changed"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertTrue(self.wt.exists())
+        record, retirement = self.record()
+        self.assertIsNone(record["result"])
+        self.assertEqual(retirement["state"], "recovery-pending")
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_resolve_undo_object_batches_are_bounded_and_strict(self):
+        expected = {str(i): [[1, 0o100644, f"{i + 1:040x}"]] for i in range(2050)}
+        batches = []
+        def objects(path, *args, **kwargs):
+            self.assertEqual(args, ("--no-replace-objects", "cat-file", "--batch-check=%(objectname) %(objecttype)"))
+            self.assertTrue(kwargs["strict"])
+            self.assertTrue(kwargs["raw"])
+            batch = kwargs["input_data"].splitlines()
+            batches.append(len(batch))
+            return b"".join(oid + b" blob\n" for oid in batch)
+        FINISH.safety().retained_resolve_undo(self.repo, objects, time.monotonic() + 10, expected)
+        self.assertEqual(batches, [1024, 1024, 2])
+        def partial(*args, **kwargs):
+            return objects(*args, **kwargs)[:-1]
+        with self.assertRaisesRegex(FINISH.Retain, "resolve-undo-object-type-or-missing"):
+            FINISH.safety().retained_resolve_undo(self.repo, partial, time.monotonic() + 10, expected)
+
+    def test_rebase_head_invalid_objects_and_bytes_refuse(self):
+        path = self.admin / "REBASE_HEAD"
+        invalid = [b"", self.head.encode(), self.head.upper().encode() + b"\n",
+                   b"ref: refs/heads/main\n", b"f" * 40 + b"\n",
+                   git(self.repo, "rev-parse", "HEAD^{tree}").encode() + b"\n",
+                   (self.head + "\n" + self.head + "\n").encode()]
+        for raw in invalid:
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                with self.assertRaisesRegex(FINISH.Retain, "rebase-head-recovery-required"):
+                    self.recover()
+                self.assertIsNone(self.record()[0])
+        path.unlink()
+        path.symlink_to(self.external)
+        with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
+            self.recover()
+
+    def test_rebase_head_identity_and_byte_drift_refuse(self):
+        path = self.admin / "REBASE_HEAD"
+        path.write_text(self.head + "\n")
+        digest = self.plan()
+        moved = self.base / "retained-rebase-head"
+        path.rename(moved)
+        path.write_bytes(moved.read_bytes())
+        with self.assertRaisesRegex(FINISH.Retain, "reviewed-preimage-required"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        digest = self.plan()
+        other = git(self.repo, "rev-parse", "main")
+        path.write_text(other + "\n")
+        with self.assertRaisesRegex(FINISH.Retain, "reviewed-preimage-required"):
+            self.recover("--apply", "--recovery-sha256", digest)
+
+    def test_rebase_head_replacement_cannot_make_noncommit_valid(self):
+        blob = git(self.repo, "rev-parse", "HEAD:file")
+        git(self.repo, "update-ref", "refs/replace/" + blob, self.head)
+        self.assertEqual(git(self.repo, "cat-file", "-t", blob), "commit")
+        (self.admin / "REBASE_HEAD").write_text(blob + "\n")
+        with self.assertRaisesRegex(FINISH.Retain, "rebase-head-recovery-required"):
+            self.recover()
+        self.assertFalse(self.wt.exists())
+
+    def test_rebase_head_foreign_file_owner_refuses(self):
+        path = self.admin / "REBASE_HEAD"
+        path.write_text(self.head + "\n")
+        native = FINISH.safety().read_file
+        def foreign(candidate, *args, **kwargs):
+            data, identity = native(candidate, *args, **kwargs)
+            if candidate == path:
+                identity = (*identity[:3], os.getuid() + 1, *identity[4:])
+            return data, identity
+        with mock.patch.object(FINISH.safety(), "read_file", side_effect=foreign):
+            with self.assertRaisesRegex(FINISH.Retain, "rebase-head-recovery-required"):
+                self.recover()
+        self.assertEqual(path.read_text(), self.head + "\n")
+        self.assertIsNone(self.record()[0])
+
+    def test_rebase_head_does_not_relax_deletion_or_active_operation_guards(self):
+        path = self.admin / "REBASE_HEAD"
+        path.write_text(self.head + "\n")
+        snap = {**json.loads(self.original["identity"]), "path": str(self.repo), "head": self.head}
+        with self.assertRaisesRegex(FINISH.Retain, "admin-recovery-content-unknown"):
+            FINISH.safety().admin_inventory(snap, FINISH.git, time.monotonic() + 10,
+                                            preserved_oids={self.head})
+        digest = self.plan()
+        tree = FINISH.recovery_tree
+        def started(*args, **kwargs):
+            result = tree(*args, **kwargs)
+            if kwargs.get("write"):
+                (self.admin / "rebase-merge").mkdir()
+            return result
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=started):
+            with self.assertRaisesRegex(FINISH.Retain, "git-operation-present"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertFalse(self.wt.exists())
+
+    def test_recovery_requires_unfinished_owner_and_rejects_cancellation(self):
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE owners SET completed=1 WHERE worktree_id=?", (self.original["id"],))
+        with self.assertRaisesRegex(FINISH.Retain, "needs-unfinished-owner"):
+            self.recover()
+        with FINISH.ledger(self.state) as db:
+            FINISH.ensure_cancellation_schema(db)
+            with db:
+                db.execute("UPDATE owners SET completed=0 WHERE worktree_id=?", (self.original["id"],))
+                db.execute("INSERT INTO owner_cancellations VALUES (?, ?, ?, ?, ?)",
+                           (self.original["id"], "owner-1", self.head, "cancelled", 1))
+            self.generation = FINISH.retirement(db, self.original)["generation"]
+        with self.assertRaisesRegex(FINISH.Retain, "cancellation-present"):
+            self.recover()
+        self.assertFalse(self.wt.exists())
+
+    def test_mixed_releases_reject_stale_unknown_and_malformed_proof(self):
+        self.mixed_owner_missing()
+        with FINISH.ledger(self.state) as db:
+            baseline = FINISH.retirement(db, self.original)["inventory"]
+        mutations = [
+            ("UPDATE owner_releases SET generation=generation-1", (), "release-proof-invalid"),
+            ("UPDATE owner_releases SET owner='unknown-owner'", (), "release-proof-invalid"),
+            ("UPDATE owner_releases SET owner='owner-2'", (), "release-proof-invalid"),
+            ("UPDATE retirement SET inventory='{}' WHERE worktree_id=?", (self.original["id"],),
+             "release-inventory-invalid"),
+        ]
+        for sql, values, reason in mutations:
+            with self.subTest(reason=reason, sql=sql):
+                with FINISH.ledger(self.state) as db, db:
+                    db.execute(sql, values)
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.recover()
+                with FINISH.ledger(self.state) as db, db:
+                    db.execute("DELETE FROM owner_releases WHERE worktree_id=?", (self.original["id"],))
+                    db.execute("INSERT INTO owner_releases VALUES (?, ?, ?)",
+                               (self.original["id"], "owner-1", self.generation))
+                    db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                               (baseline, self.original["id"]))
+
+    def test_release_inventory_drift_after_staging_refuses(self):
+        self.mixed_owner_missing(blocker=True)
+        digest = self.plan()
+        tree = FINISH.recovery_tree
+        def changed(*args, **kwargs):
+            result = tree(*args, **kwargs)
+            if kwargs.get("write"):
+                # The public command already owns the native ledger lock.
+                with contextlib.closing(sqlite3.connect(self.state / "lifecycle.sqlite")) as db, db:
+                    raw = json.loads(db.execute("SELECT inventory FROM retirement WHERE worktree_id=?",
+                                                (self.original["id"],)).fetchone()[0])
+                    raw["blocker"] = "different-blocker"
+                    db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                               (json.dumps(raw), self.original["id"]))
+            return result
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=changed):
+            with self.assertRaisesRegex(FINISH.Retain, "pre-publication-drift"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(len(self.history()), 1)
+
+    def test_release_for_other_finish_head_refuses(self):
+        inventory = self.mixed_owner_missing()
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE worktrees SET finish_head=? WHERE id=?",
+                       (git(self.repo, "rev-parse", "main"), self.original["id"]))
+            self.generation = FINISH.retirement(db, self.original)["generation"]
+            db.execute("INSERT INTO owner_releases VALUES (?, ?, ?)",
+                       (self.original["id"], "owner-1", self.generation))
+            db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                       (inventory, self.original["id"]))
+        with self.assertRaisesRegex(FINISH.Retain, "release-proof-invalid"):
+            self.recover()
+        self.assertFalse(self.wt.exists())
+
+    def test_release_proof_requires_producer_dependency_shape_and_repository(self):
+        inventory = self.mixed_owner_missing()
+        dependency = {"url": "https://github.com/example/repo/pull/2",
+                      "head": self.head, "target": "main"}
+        changes = [
+            ("primary_pr", "https://github.com/foreign/repo/pull/1"),
+            ("dependencies", "[{}]"),
+            ("dependencies", json.dumps([{**dependency, "url": self.url}])),
+            ("dependencies", json.dumps([{**dependency, "url": "https://github.com/foreign/repo/pull/2"}])),
+            ("dependencies", json.dumps([{**dependency, "head": "invalid"}])),
+            ("dependencies", json.dumps([{**dependency, "target": "other"}])),
+            ("dependencies", json.dumps([dependency] * 17)),
+        ]
+        for field, value in changes:
+            with self.subTest(field=field, value=value):
+                with FINISH.ledger(self.state) as db, db:
+                    db.execute("UPDATE worktrees SET primary_pr=?, dependencies=? WHERE id=?",
+                               (value if field == "primary_pr" else self.url,
+                                value if field == "dependencies" else "[]", self.original["id"]))
+                    self.generation = FINISH.retirement(db, self.original)["generation"]
+                    db.execute("INSERT INTO owner_releases VALUES (?, ?, ?)",
+                               (self.original["id"], "owner-1", self.generation))
+                    db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                               (inventory, self.original["id"]))
+                with self.assertRaisesRegex(FINISH.Retain, "release-proof-invalid"):
+                    self.recover()
+                self.assertFalse(self.wt.exists())
+
+    def test_cancellation_after_staging_is_preserved_and_refuses_publication(self):
+        with FINISH.ledger(self.state) as db:
+            FINISH.ensure_cancellation_schema(db)
+        digest = self.plan()
+        tree = FINISH.recovery_tree
+        def cancelled(*args, **kwargs):
+            result = tree(*args, **kwargs)
+            if kwargs.get("write"):
+                with contextlib.closing(sqlite3.connect(self.state / "lifecycle.sqlite")) as db, db:
+                    db.execute("INSERT INTO owner_cancellations VALUES (?, ?, ?, ?, ?)",
+                               (self.original["id"], "owner-1", self.head, "cancelled", 1))
+            return result
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=cancelled):
+            with self.assertRaisesRegex(FINISH.Retain, "cancellation-present"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertFalse(self.wt.exists())
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(FINISH.cancellation_rows(db, self.original["id"])[0]["reason"], "cancelled")
+
+    def test_archiving_and_replacement_roll_back_with_lifecycle_cas(self):
+        self.second_missing()
+        before = self.record()[0]
+        digest = self.plan()
+        with FINISH.ledger(self.state) as db:
+            db.execute("CREATE TRIGGER fixture_cas_failure BEFORE UPDATE ON retirement "
+                       "WHEN NEW.state='recovery-pending' BEGIN SELECT RAISE(ABORT, 'fixture-cas'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "fixture-cas"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(self.record()[0], before)
+        self.assertEqual(self.history(), {})
+        with FINISH.ledger(self.state) as db:
+            self.assertFalse(db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='missing_recovery_history'").fetchone())
+        self.assertFalse(self.wt.exists())
+
+    def test_history_collision_refuses_without_replacing_receipt(self):
+        self.second_missing()
+        before = self.record()[0]
+        with FINISH.ledger(self.state) as db, db:
+            fact = FINISH.missing_recovery_fact(db, self.original)
+            db.execute("CREATE TABLE missing_recovery_history (worktree_id TEXT, intent_id TEXT, fact TEXT)")
+            db.execute("INSERT INTO missing_recovery_history VALUES (?, ?, ?)",
+                       (self.original["id"], before["id"], fact))
+        with self.assertRaisesRegex(FINISH.Retain, "history-collision"):
+            self.recover()
+        self.assertEqual(self.record()[0], before)
+        self.assertEqual(self.history(), {before["id"]: fact})
+
+    def test_pending_successor_cannot_be_displaced_by_new_or_old_intent(self):
+        self.second_missing()
+        old, _ = self.record()
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        pending, retirement = self.record()
+        history = self.history()
+        for args in ((), ("--intent-id", old["id"], "--recovery-sha256", old["digest"])):
+            with self.assertRaisesRegex(FINISH.Retain, "exact-intent-required"):
+                self.recover(*args)
+        self.assertEqual(self.record(), (pending, retirement))
+        self.assertEqual(self.history(), history)
+        self.assertFalse(self.wt.exists())
+
+    def test_second_recovery_crash_replays_same_intent_without_rearchiving(self):
+        self.second_missing()
+        digest = self.plan()
+        publish = FINISH.recovery_publish
+        def crashed(source, target):
+            publish(source, target)
+            raise RuntimeError("after publication")
+        with mock.patch.object(FINISH, "recovery_publish", side_effect=crashed):
+            with self.assertRaisesRegex(RuntimeError, "after publication"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        history = self.history()
+        before = FINISH.identity(self.wt)
+        self.assertEqual(len(history), 1)
+        result = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertEqual(FINISH.identity(self.wt), before)
+        self.assertEqual(self.history(), history)
+        self.assertEqual(result["intent_id"], record["id"])
+
+    def test_receipt_drift_after_staging_refuses(self):
+        self.second_missing()
+        digest = self.plan()
+        tree = FINISH.recovery_tree
+        def changed(*args, **kwargs):
+            result = tree(*args, **kwargs)
+            if kwargs.get("write"):
+                with contextlib.closing(sqlite3.connect(self.state / "lifecycle.sqlite")) as db, db:
+                    db.execute("UPDATE missing_recoveries SET fact=fact || ' ' WHERE worktree_id=?",
+                               (self.original["id"],))
+            return result
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=changed):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-receipt-drift"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertFalse(self.wt.exists())
 
     def fetched_main(self):
         target = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "main advances")

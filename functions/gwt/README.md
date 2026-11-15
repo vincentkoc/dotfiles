@@ -161,7 +161,7 @@ The plan takes native lifecycle and maintenance coordination locks but does not
 create the checkout or a recovery intent. Apply the same operands with
 `--apply --recovery-sha256 <reviewed-plan-hash>`. Both phases require complete
 holder visibility and unchanged admin, branch, lock, index and owner facts.
-Conflicts, sparse/unknown index formats, resolve-undo entries, gitlinks, pending
+Conflicts, sparse/unknown index formats, gitlinks, pending
 Git or lifecycle operations, held paths and appeared destinations refuse.
 
 Recovery preserves `FETCH_HEAD`, including fetched commits outside the task's
@@ -169,6 +169,29 @@ ancestry. Its records must parse strictly and name existing commit objects; the
 plan hash binds their sorted OIDs, file identity and exact bytes. Apply refuses
 drift. Removal still requires proof that fetched commits survive outside the
 admin directory being deleted.
+
+Successful conflict rebases can also leave `REBASE_HEAD` outside the current
+branch's ancestry. Recovery retains this file only when it contains one full
+lowercase commit OID followed by a newline, with no active Git operation. The
+plan binds its bytes, identity, metadata and validated object without following
+Git replacement objects. Removal continues to refuse this recovery metadata.
+Recovery also retains strictly parsed `REUC` resolve-undo entries with regular
+`100644` or executable `100755` stages. Every recorded stage must name an
+existing blob without Git replacements; absent stages are allowed. The plan
+binds the parsed stages and exact index bytes, inode and metadata, and rechecks
+them before and after publication. Only stage-zero files matching `HEAD` are
+restored. Undo stages need not be reachable from a retained commit because
+recovery preserves the index and object store; deletion still requires its
+separate literal-path reachability proof. Symlink undo stages, unresolved or
+sparse entries refuse. Legacy recovery receipts retain their original index
+rules and digest shape.
+
+At least one recorded owner must have unfinished work. Completed owners may
+have current-generation releases only with matching completion proof. Recovery
+binds those releases and their exact inventory, including a recorded blocker,
+into the receipt. Publishing the recovered identity invalidates deletion
+authority through the normal generation transition; owner completion stays
+intact. Any cancellation refuses recovery.
 
 Device identities are strict by default. After independently establishing a
 device-number change, `--allow-device-renumbering` permits only a bijective map
@@ -181,7 +204,8 @@ remains in recovery history; only the verified successor identity is normalized.
 Only committed blobs whose tree exactly matches the saved index are written.
 The operation runs no checkout filters, hooks, dependency installation or fetch.
 Recovery blob capture and verification are bounded by 16 MiB per file and the
-staging pass by 512 MiB; other native Git/read limits are unchanged.
+staging pass by 512 MiB. Tree enumeration uses the native 32 MiB capture budget,
+including when replacement objects are disabled; other read limits are unchanged.
 the existing 238-second owner deadline is unchanged. A private sibling directory
 is verified before native no-replace publication at the original path. The
 original Git admin files, index, ref, native lock and owner rows remain intact;
@@ -200,6 +224,13 @@ and admits native holders for the staging inode before writing. It creates only
 missing committed entries with no-follow, exclusive creation; existing files
 are never rewritten. Plan this continuation without `--apply` first. Changed
 identities or later source edits remain held.
+After a completed recovery, a later disappearance can be planned against the
+current generation and committed index. Applying that new plan atomically
+archives the exact completed receipt, replaces the current receipt and records
+the new lifecycle intent. History is immutable and bound into subsequent plan
+hashes. Pending intents are never displaced, and an old intent cannot authorize
+a later generation. Legacy receipts keep their original exact-replay digest
+and no-release requirement.
 No recovery failure authorizes an alternate checkout or broad maintenance.
 
 ## Scheduled Git maintenance

@@ -358,21 +358,37 @@ def index_entries(data, *, allow_empty_gitlinks=False, allow_resolve_undo=False)
     return result, resolve_undo
 
 
-def preserved_resolve_undo(snap, git, until, resolve_undo, preserved_oids):
+def resolve_undo_objects(path, git, until, resolve_undo, roots=()):
     blobs = {oid for stages in resolve_undo.values() for _, _, oid in stages}
-    if not blobs:
+    objects = [(oid, "commit") for oid in roots] + [(oid, "blob") for oid in sorted(blobs)]
+    # Keep both native input and output bounded even at the index entry limit.
+    for offset in range(0, len(objects), 1024):
+        tick(until)
+        batch = objects[offset:offset + 1024]
+        types = git(path, "--no-replace-objects", "cat-file",
+                    "--batch-check=%(objectname) %(objecttype)",
+                    input_data="".join(oid + "\n" for oid, _ in batch).encode(),
+                    raw=True, strict=True, deadline=until)
+        if types != "".join(f"{oid} {kind}\n" for oid, kind in batch).encode():
+            raise Retain("resolve-undo-object-type-or-missing")
+
+
+def retained_resolve_undo(path, git, until, resolve_undo):
+    # Restoration keeps the index and object store. Validate regular stages
+    # without granting deletion's separate literal-path reachability authority.
+    if any(mode not in (0o100644, 0o100755)
+           for stages in resolve_undo.values() for _, mode, _ in stages):
+        raise Retain("resolve-undo-retained-mode-unsupported")
+    resolve_undo_objects(path, git, until, resolve_undo)
+
+
+def preserved_resolve_undo(snap, git, until, resolve_undo, preserved_oids):
+    if not resolve_undo:
         return
     if not preserved_oids:
         raise Retain("resolve-undo-recovery-required")
     roots = sorted(preserved_oids)
-    objects = [(oid, "commit") for oid in roots] + [(oid, "blob") for oid in sorted(blobs)]
-    tick(until)
-    types = git(snap["path"], "--no-replace-objects", "cat-file",
-                "--batch-check=%(objectname) %(objecttype)",
-                input_data="".join(oid + "\n" for oid, _ in objects).encode(),
-                raw=True, strict=True, deadline=until)
-    if types != "".join(f"{oid} {kind}\n" for oid, kind in objects).encode():
-        raise Retain("resolve-undo-object-type-or-missing")
+    resolve_undo_objects(snap["path"], git, until, resolve_undo, roots)
     for name, stages in resolve_undo.items():
         tick(until)
         # NUL framing binds literal paths even when names contain newlines.
@@ -928,8 +944,8 @@ def admin_inventory(snap, git, until, *, preserved_oids=None):
 
 
 def recovery_admin_inventory(snap, git, until):
-    # Missing-checkout recovery retains this admin directory. FETCH_HEAD needs
-    # valid commit objects and exact digest custody, not deletion ancestry proof.
+    # Recovery retains this directory. Fetched and stopped-rebase commits need
+    # exact custody and valid objects, not proof permitting their deletion.
     return _admin_inventory(snap, git, until, preserved_oids={snap["head"]}, retained=True)
 
 
@@ -965,9 +981,21 @@ def _admin_inventory(snap, git, until, *, preserved_oids, retained):
             elif stat.S_ISREG(s.st_mode) and (name in (
                     "HEAD", "index", "commondir", "gitdir", "locked", "ORIG_HEAD", "logs/HEAD",
                     "config.worktree", "info/sparse-checkout", "COMMIT_EDITMSG", "AUTO_MERGE")
-                    or (name == "FETCH_HEAD" and preserved_oids is not None)):
+                    or (name == "FETCH_HEAD" and preserved_oids is not None)
+                    or (name == "REBASE_HEAD" and retained)):
                 data, identity = read_file(path, until, min(LEAF_LIMIT, PASS_LIMIT - used))
                 used += len(data)
+                if name == "REBASE_HEAD":
+                    if (identity[3] != os.getuid()
+                            or re.fullmatch(rb"[0-9a-f]{40}(?:[0-9a-f]{24})?\n", data) is None):
+                        raise Retain("rebase-head-recovery-required")
+                    oid = data[:-1].decode("ascii")
+                    try:
+                        if git(snap["path"], "--no-replace-objects", "cat-file", "-t", oid,
+                               raw=True, strict=True, deadline=until) != b"commit\n":
+                            raise Retain("rebase-head-recovery-required")
+                    except Retain as error:
+                        raise Retain("rebase-head-recovery-required") from error
                 if name == "FETCH_HEAD":
                     # Git writes OID, merge marker, and note/URL, terminated by LF.
                     # Deletion requires refs retained outside this admin directory.
@@ -1066,10 +1094,10 @@ def _admin_inventory(snap, git, until, *, preserved_oids, retained):
                 if name == "FETCH_HEAD":
                     rows[name] = [[*identity, attrs], hashlib.sha256(data).hexdigest(),
                                   sorted(qualified_fetch_oids)]
-                elif name in ("ORIG_HEAD", "logs/HEAD"):
-                    # All referenced commits must remain named by the preserved
-                    # branch. The caller checks reachability before removal.
-                    refs = data.split() if name == "ORIG_HEAD" else [
+                elif name in ("ORIG_HEAD", "logs/HEAD", "REBASE_HEAD"):
+                    # Bind named objects for deletion reachability checks or
+                    # retained-recovery custody; only deletion needs ancestry.
+                    refs = data.split() if name != "logs/HEAD" else [
                         oid for line in data.splitlines() for oid in line.split()[:2]]
                     rows[name] = [[*identity, attrs], hashlib.sha256(data).hexdigest(),
                                   sorted(set(os.fsdecode(x) for x in refs if x != b"0" * 40))]
