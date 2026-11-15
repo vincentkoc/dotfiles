@@ -285,6 +285,7 @@ class SupervisorTests(unittest.TestCase):
     def test_actual_owned_child_exits_reaped_with_output_hash(self):
         result = self.invoke("print('fixture')")
         self.assertIsNone(result.failure)
+        self.assertIsNone(result.failure_code)
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.proof["reaped"])
         self.assertTrue(result.proof["group_absent"])
@@ -294,6 +295,8 @@ class SupervisorTests(unittest.TestCase):
     def test_timeout_kills_only_owned_group_and_reaps(self):
         result = self.invoke("import time; time.sleep(30)", timeout=0.05)
         self.assertIsNotNone(result.failure)
+        self.assertEqual(result.failure, "Retain")
+        self.assertEqual(result.failure_code, "deadline")
         self.assertTrue(result.proof["reaped"])
         self.assertTrue(result.proof["group_absent"])
         self.assertLess(result.proof["ended_monotonic"] - result.proof["started_monotonic"], 3)
@@ -327,6 +330,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNone(result.proof["pid"])
         self.assertFalse(result.proof["reaped"])
         self.assertIsNotNone(result.failure)
+        self.assertEqual(result.failure_code, "os-error")
 
     def test_expired_deadline_never_spawns(self):
         with mock.patch.object(NATIVE, "DEADLINE", time.monotonic() - 1), \

@@ -258,6 +258,16 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
                                          bytes(output[0]), bytes(output[1]))
     result.proof = proof
     result.failure = type(failure).__name__ if failure else None
+    # Keep the historical failure field; only fixed codes cross the CLI boundary.
+    codes = {"admission-deadline": "deadline", "child-input-limit": "input-limit",
+             "child-output-limit": "output-limit",
+             "child-descriptor-inheritance-unqualified": "descriptor-limit",
+             "owned-child-group-survives": "cleanup-incomplete"}
+    result.failure_code = (codes.get(str(failure), "supervisor-error") if isinstance(failure, Retain)
+                           else "deadline" if isinstance(failure, subprocess.TimeoutExpired)
+                           else "os-error" if isinstance(failure, OSError)
+                           else "supervisor-error" if failure else None)
+    result.failure_errno = failure.errno if isinstance(failure, OSError) else None
     return result
 
 

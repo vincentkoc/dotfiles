@@ -7,6 +7,7 @@ import ctypes
 import fcntl
 import functools
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,20 @@ def diagnostic_phase(phase):
 def failure_diagnostic(error):
     # Never render exception text, class names, paths, SQL or traceback data.
     # Optional numeric attributes also work on Python versions before 3.11.
+    if isinstance(error, Retain):
+        source = getattr(error, "_gwt_child_diagnostic", {})
+        details = {"category": "child-error"}
+        codes = {"deadline", "input-limit", "output-limit", "descriptor-limit",
+                 "cleanup-incomplete", "os-error", "supervisor-error", "exit-status"}
+        cause = source.get("cause")
+        details["cause"] = cause if isinstance(cause, str) and cause in codes else "supervisor-error"
+        for key in ("returncode", "errno", "stdout_bytes", "stderr_bytes"):
+            if type(source.get(key)) is int:
+                details[key] = source[key]
+        for key in ("started", "reaped", "group_absent"):
+            if type(source.get(key)) is bool or source.get(key) is None:
+                details[key] = source.get(key)
+        return json.dumps(details, sort_keys=True)
     if isinstance(error, OSError):
         category, attributes = "os-error", ("errno", "winerror")
     elif isinstance(error, sqlite3.Error):
@@ -97,7 +112,15 @@ def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, 
     result = safety().supervise(command, cwd=cwd, env=env, limit=limit, input_data=input_data,
                                 deadline=deadline)
     if result.failure or result.returncode not in allowed:
-        raise Retain(f"{Path(command[0]).name}-failed")
+        error = Retain(f"{Path(command[0]).name}-failed")
+        proof = result.proof
+        error._gwt_child_diagnostic = {
+            "cause": result.failure_code if result.failure else "exit-status",
+            "returncode": result.returncode, "errno": result.failure_errno,
+            "stdout_bytes": len(result.stdout), "stderr_bytes": len(result.stderr),
+            "started": proof.get("pid") is not None,
+            "reaped": proof.get("reaped"), "group_absent": proof.get("group_absent")}
+        raise error
     return result
 
 
@@ -2257,6 +2280,61 @@ def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=F
 
 
 RECOVERY_BLOB_LIMIT = 16 * 1024 * 1024
+RECOVERY_BATCH_ENTRIES = 1024
+
+
+def recovery_blobs(owner, entries, until, byte_budget):
+    pending = iter(entries)
+    while group := list(itertools.islice(pending, RECOVERY_BATCH_ENTRIES)):
+        safety().tick(until)
+        request = b"".join(oid.encode() + b"\n" for _, (_, oid) in group)
+        metadata = git(owner, "--no-replace-objects", "cat-file", "--batch-check",
+                       input_data=request, raw=True, strict=True, deadline=until,
+                       capture_limit=RECOVERY_BATCH_ENTRIES * 64)
+        lines = metadata.split(b"\n")
+        if len(lines) != len(group) + 1 or lines[-1] != b"":
+            raise Retain("recovery-batch-metadata-invalid")
+        sized = []
+        for (name, (mode, oid)), line in zip(group, lines):
+            fields = line.split(b" ")
+            if (len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"]
+                    or not re.fullmatch(rb"0|[1-9][0-9]{0,8}", fields[2])):
+                raise Retain("recovery-batch-metadata-invalid")
+            size = int(fields[2])
+            if size > RECOVERY_BLOB_LIMIT:
+                raise Retain("recovery-blob-size-limit")
+            sized.append((name, mode, oid, size, line + b"\n"))
+        while sized:
+            count = total = 0
+            for entry in sized:
+                if total + entry[3] > RECOVERY_BLOB_LIMIT:
+                    break
+                count += 1
+                total += entry[3]
+            batch, sized = sized[:count], sized[count:]
+            if total > byte_budget:
+                raise Retain("recovery-source-byte-limit")
+            # Frame overhead is exact; raw leaf and staging budgets stay unchanged.
+            data = git(owner, "--no-replace-objects", "cat-file", "--batch",
+                       input_data=b"".join(entry[2].encode() + b"\n" for entry in batch),
+                       raw=True, strict=True, deadline=until,
+                       capture_limit=total + sum(len(entry[4]) + 1 for entry in batch))
+            verified, offset = [], 0
+            for name, mode, oid, size, header in batch:
+                safety().tick(until)
+                start, end = offset + len(header), offset + len(header) + size
+                if data[offset:start] != header or data[end:end + 1] != b"\n":
+                    raise Retain("recovery-batch-content-invalid")
+                blob = data[start:end]
+                if hashlib.sha1(b"blob " + str(size).encode() + b"\0" + blob).hexdigest() != oid:
+                    raise Retain("recovery-blob-identity-mismatch")
+                verified.append((name, mode, blob))
+                offset = end + 1
+            if offset != len(data):
+                raise Retain("recovery-batch-content-invalid")
+            byte_budget -= total
+            # Validate every frame before the caller can write any member.
+            yield from verified
 
 
 def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allow_partial=False):
@@ -2285,19 +2363,16 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
                     continue
                 with recovery_parent(root_fd, name) as (parent_fd, leaf):
                     os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
-            total = present_bytes
-            for name, (mode, oid) in expected.items():
+            pointer = os.fsencode("gitdir: " + gitdir + "\n")
+            pointer_bytes = 0 if ".git" in present else len(pointer)
+            if present_bytes + pointer_bytes > module.PASS_LIMIT:
+                raise Retain("recovery-source-byte-limit")
+            blobs = recovery_blobs(owner, ((name, value) for name, value in entries.items()
+                                           if name not in present), until,
+                                   module.PASS_LIMIT - present_bytes - pointer_bytes)
+            source = itertools.chain(blobs, [] if ".git" in present else [(".git", 0o100600, pointer)])
+            for name, mode, data in source:
                 module.tick(until)
-                if name in present:
-                    continue
-                data = (os.fsencode("gitdir: " + gitdir + "\n") if oid is None else
-                        git(owner, "cat-file", "blob", oid, raw=True, strict=True, deadline=until,
-                            capture_limit=RECOVERY_BLOB_LIMIT))
-                total += len(data)
-                if total > module.PASS_LIMIT:
-                    raise Retain("recovery-source-byte-limit")
-                if oid is not None and hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
-                    raise Retain("recovery-blob-identity-mismatch")
                 with recovery_parent(root_fd, name) as (parent_fd, leaf):
                     if mode == 0o120000:
                         os.symlink(os.fsdecode(data), leaf, dir_fd=parent_fd)
@@ -3023,7 +3098,8 @@ def cli(argv=None):
         return main(argv)
     except (Retain, OSError, sqlite3.Error, ValueError) as error:
         reason = str(error) if isinstance(error, Retain) else "state-or-proof-unavailable"
-        diagnostic = "" if isinstance(error, Retain) else " " + failure_diagnostic(error)
+        diagnostic = (" " + failure_diagnostic(error)
+                      if not isinstance(error, Retain) or hasattr(error, "_gwt_child_diagnostic") else "")
         if reason == "worktree-identity-changed":
             diagnostic += ("; inspect recorded/current identities first; device-only renumbering "
                            "can be acknowledged by the recorded owner with gwt resume "

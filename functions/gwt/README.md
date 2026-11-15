@@ -206,7 +206,12 @@ The operation runs no checkout filters, hooks, dependency installation or fetch.
 Recovery blob capture and verification are bounded by 16 MiB per file and the
 staging pass by 512 MiB. Tree enumeration uses the native 32 MiB capture budget,
 including when replacement objects are disabled; other read limits are unchanged.
-the existing 238-second owner deadline is unchanged. A private sibling directory
+Missing blobs are read in finite batches of at most 1024 requests and 16 MiB of
+content, with separately bounded protocol framing. Every batch is verified before
+any member is written. Duplicate blobs count once per restored path. Supervised
+child failures retain fixed cause codes, numeric exit/byte counts and cleanup
+facts without printing command arguments, paths or child diagnostics.
+The existing 238-second owner deadline is unchanged. A private sibling directory
 is verified before native no-replace publication at the original path. The
 original Git admin files, index, ref, native lock and owner rows remain intact;
 the lifecycle records the actual recovery operator separately and advances the
