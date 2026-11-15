@@ -2884,7 +2884,7 @@ class MissingRecoveryTests(unittest.TestCase):
         native_git = FINISH.git
         def appeared(path, *args, **kwargs):
             result = native_git(path, *args, **kwargs)
-            if args[:2] == ("cat-file", "blob") and not (stage / "nested/command").exists():
+            if args[:3] == ("--no-replace-objects", "cat-file", "--batch") and not (stage / "nested/command").exists():
                 (stage / "nested/command").write_text("appeared\n")
             return result
         with mock.patch.object(FINISH, "git", side_effect=appeared):
@@ -2917,6 +2917,90 @@ class MissingRecoveryTests(unittest.TestCase):
         finally:
             os.close(fd)
         self.assertFalse((self.base / "should-not-write").exists())
+
+    @unittest.skipUnless(os.environ.get("GWT_RECOVERY_SCALE") == "1", "explicit large apply qualification")
+    def test_large_batch_recovery_applies_with_original_deadline(self):
+        count, source_bytes, largest = 52034, 432123812, 9516304
+        target = b"000/00001"
+        size, extra = divmod(source_bytes - largest - len(target), count - 2)
+        expected = {}
+        message = (self.admin / "COMMIT_EDITMSG").read_bytes()
+        child = subprocess.Popen(["git", "-C", str(self.repo), "fast-import", "--quiet"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            for i in range(count):
+                name = f"{i // 1000:03d}/{i:05d}"
+                length = largest if i == 0 else size + (i <= extra)
+                data = (target if i == count - 1 else
+                        i.to_bytes(8, "big") + b"\0\n" + b"x" * (length - 10))
+                mode = 0o120000 if i == count - 1 else 0o100755 if i == 0 else 0o100644
+                oid = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+                expected[name] = (mode, oid)
+                child.stdin.write(f"blob\nmark :{i + 1}\ndata {len(data)}\n".encode() + data + b"\n")
+            child.stdin.write(("commit refs/heads/released-feature\n"
+                               "committer Fixture <fixture@example.test> 1 +0000\n"
+                               f"data {len(message)}\n").encode() + message +
+                              ("\nfrom " + self.head + "\ndeleteall\n").encode())
+            for i, (name, (mode, _)) in enumerate(expected.items()):
+                child.stdin.write(f"M {mode:o} :{i + 1} {name}\n".encode())
+            child.stdin.write(b"\ndone\n")
+            child.stdin.close()
+            child.stdin = None
+            output, errors = child.communicate()
+            self.assertEqual(child.returncode, 0, errors)
+            self.assertEqual(output, b"")
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+        self.assertEqual(len({oid for _, oid in expected.values()}), count)
+        self.head = git(self.repo, "rev-parse", "released-feature")
+        git(self.repo, "--git-dir", str(self.admin), "read-tree", self.head)
+        self.before_index = (self.admin / "index").read_bytes()
+        self.index_sha = hashlib.sha256(self.before_index).hexdigest()
+        digest = self.plan()
+        children = {"metadata": 0, "content": 0}
+        native = FINISH.safety().supervise
+        def observed(command, **options):
+            result = native(command, **options)
+            if "cat-file" in command and command[-1] in ("--batch", "--batch-check"):
+                children["content" if command[-1] == "--batch" else "metadata"] += 1
+                self.assertIsNone(result.failure)
+                self.assertTrue(result.proof["reaped"])
+                self.assertTrue(result.proof["group_absent"])
+                self.assertIn("--no-replace-objects", command)
+                self.assertLessEqual(len(options["input_data"].splitlines()), 1024)
+            return result
+        started = time.monotonic()
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=observed), \
+                mock.patch.object(FINISH.os, "fsync", wraps=os.fsync) as synced:
+            result = self.recover("--apply", "--recovery-sha256", digest)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 238)
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(result["entries"], count)
+        self.assertEqual(children, {"metadata": 51, "content": 52})
+        self.assertGreaterEqual(synced.call_count, count)
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), message)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        for name, (mode, oid) in expected.items():
+            path = self.wt / name
+            self.assertEqual(path.lstat().st_uid, os.getuid())
+            data = os.fsencode(os.readlink(path)) if mode == 0o120000 else path.read_bytes()
+            if mode != 0o120000:
+                self.assertEqual(stat_mode(path), mode & 0o777)
+            self.assertEqual(hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest(), oid)
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            self.assertEqual(FINISH.owner_rows(db, row["id"]), [{"owner": "owner-1", "completed": 0}])
+            FINISH.revalidate(row)
+        print(json.dumps({"qualification": "large-recovery-apply", "entries": count,
+                          "source_bytes": source_bytes, "largest_blob": largest,
+                          "elapsed_seconds": round(elapsed, 3), "children": children,
+                          "fsync_calls": synced.call_count, "generation": result["generation"]}, sort_keys=True))
 
     def test_crash_before_publish_retains_intent_and_requires_exact_reconciliation(self):
         digest = self.plan()
@@ -2967,6 +3051,131 @@ class MissingRecoveryTests(unittest.TestCase):
 
 def stat_mode(path):
     return path.stat().st_mode & 0o777
+
+
+class RecoveryBatchTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name).resolve()
+        git(self.repo, "init", "-b", "main")
+        self.stage = self.repo / "stage"
+        self.stage.mkdir(mode=0o700)
+        self.until = time.monotonic() + 238
+        self.deadline = mock.patch.object(FINISH.safety(), "DEADLINE", self.until)
+        self.deadline.start()
+        self.addCleanup(self.deadline.stop)
+
+    def blob(self, data):
+        return subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                              input=data, stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+
+    def write(self, entries, **options):
+        return FINISH.recovery_tree(self.stage, entries, str(self.repo / ".git"), self.until,
+                                    write=True, owner=str(self.repo), **options)
+
+    def test_binary_duplicate_executable_and_symlink_blobs_are_raw(self):
+        data = b"\0line\n" + b"f" * 40 + b" blob 0\n\n"
+        oid, target = self.blob(data), self.blob(b"../outside\nname")
+        entries = {"first": (0o100644, oid), "nested/exec": (0o100755, oid),
+                   "link": (0o120000, target)}
+        self.write(entries)
+        self.assertEqual((self.stage / "first").read_bytes(), data)
+        self.assertEqual((self.stage / "nested/exec").read_bytes(), data)
+        self.assertEqual(stat_mode(self.stage / "nested/exec"), 0o755)
+        self.assertEqual(os.readlink(self.stage / "link"), "../outside\nname")
+
+    def test_exact_leaf_limit_succeeds_and_one_more_refuses_before_write(self):
+        data = b"x" * FINISH.RECOVERY_BLOB_LIMIT
+        oid = self.blob(data)
+        self.write({"exact": (0o100644, oid)})
+        self.assertEqual((self.stage / "exact").read_bytes(), data)
+        large = self.blob(data + b"x")
+        with self.assertRaisesRegex(FINISH.Retain, "recovery-blob-size-limit"):
+            self.write({"exact": (0o100644, oid), "too-large": (0o100644, large)}, allow_partial=True)
+
+    def test_1024_and_1025_empty_requests_remain_count_bounded(self):
+        oid = self.blob(b"")
+        for count in (1024, 1025):
+            entries = [(str(i), (0o100644, oid)) for i in range(count)]
+            with self.subTest(count=count), mock.patch.object(FINISH, "git", wraps=FINISH.git) as calls:
+                actual = list(FINISH.recovery_blobs(self.repo, entries, self.until, 0))
+            self.assertEqual(len(actual), count)
+            self.assertTrue(all(data == b"" for _, _, data in actual))
+            self.assertEqual(len(calls.call_args_list), 2 if count == 1024 else 4)
+            for call in calls.call_args_list:
+                self.assertEqual(call.args[1:3], ("--no-replace-objects", "cat-file"))
+                self.assertLessEqual(len(call.kwargs["input_data"].splitlines()), 1024)
+
+    def test_whole_content_batch_is_validated_before_first_write(self):
+        first, second = self.blob(b"first"), self.blob(b"second")
+        entries = {"first": (0o100644, first), "second": (0o100644, second)}
+        native = FINISH.git
+        def corrupt(change):
+            def invoke(path, *args, **kwargs):
+                raw = native(path, *args, **kwargs)
+                return change(raw) if args[-1] == "--batch" else raw
+            return invoke
+        header = second.encode() + b" blob 6\n"
+        for change in (lambda raw: raw.replace(header, first.encode() + b" blob 6\n"),
+                       lambda raw: raw.replace(header, second.encode() + b" tree 6\n"),
+                       lambda raw: raw.replace(header, second.encode() + b" blob 06\n"),
+                       lambda raw: raw.replace(header, second.encode() + b" blob 5\n"),
+                       lambda raw: raw.replace(b"second", b"broken"),
+                       lambda raw: raw[:-1] + b"X", lambda raw: raw[:-3],
+                       lambda raw: raw + b"extra\n"):
+            with self.subTest(change=change), mock.patch.object(FINISH, "git", side_effect=corrupt(change)):
+                with self.assertRaises(FINISH.Retain):
+                    self.write(entries)
+            self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_metadata_requires_exact_order_type_size_count_and_eof(self):
+        oid = self.blob(b"x")
+        native = FINISH.git
+        for bad in (b"", oid.encode() + b" missing\n", oid.encode() + b" tree 1\n",
+                    b"f" * 40 + b" blob 1\n", oid.encode() + b" blob 01\n",
+                    oid.encode() + b" blob -1\n", oid.encode() + b" blob 1",
+                    oid.encode() + b" blob 1\nextra\n"):
+            def invoke(path, *args, **kwargs):
+                return bad if args[-1] == "--batch-check" else native(path, *args, **kwargs)
+            with self.subTest(bad=bad), mock.patch.object(FINISH, "git", side_effect=invoke):
+                with self.assertRaisesRegex(FINISH.Retain, "recovery-batch-metadata-invalid"):
+                    self.write({"first": (0o100644, oid)})
+            self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_pass_budget_counts_duplicates_partial_bytes_and_git_pointer(self):
+        oid = self.blob(b"abc")
+        entries = {name: (0o100644, oid) for name in ("existing", "first", "second")}
+        (self.stage / "existing").write_bytes(b"abc")
+        before = (self.stage / "existing").stat().st_ino
+        pointer = len(os.fsencode("gitdir: " + str(self.repo / ".git") + "\n"))
+        with mock.patch.object(FINISH.safety(), "PASS_LIMIT", pointer + 8), \
+                mock.patch.object(FINISH, "git", wraps=FINISH.git) as calls:
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-source-byte-limit"):
+                self.write(entries, allow_partial=True)
+        self.assertFalse(any(call.args[-1] == "--batch" for call in calls.call_args_list))
+        self.assertEqual(list(self.stage.iterdir()), [self.stage / "existing"])
+        self.assertEqual((self.stage / "existing").stat().st_ino, before)
+        with mock.patch.object(FINISH.safety(), "PASS_LIMIT", pointer + 9):
+            self.write(entries, allow_partial=True)
+        self.assertEqual((self.stage / "existing").stat().st_ino, before)
+
+    def test_replacements_do_not_change_metadata_or_content(self):
+        oid, replaced = self.blob(b"original"), self.blob(b"replacement")
+        git(self.repo, "update-ref", "refs/replace/" + oid, replaced)
+        self.write({"file": (0o100644, oid)})
+        self.assertEqual((self.stage / "file").read_bytes(), b"original")
+
+    def test_exit_zero_with_stderr_still_refuses_before_write(self):
+        oid = self.blob(b"x")
+        run = FINISH.run
+        def diagnostic(_command, **options):
+            return run([sys.executable, "-I", "-c",
+                        "import sys; sys.stdin.buffer.read(); sys.stderr.write('private-secret')"], **options)
+        with mock.patch.object(FINISH, "run", side_effect=diagnostic):
+            with self.assertRaisesRegex(FINISH.Retain, "git-diagnostic"):
+                self.write({"file": (0o100644, oid)})
+        self.assertEqual(list(self.stage.iterdir()), [])
 
 
 class SiblingAbsenceTests(unittest.TestCase):
@@ -5153,7 +5362,12 @@ class ManualHolderTests(unittest.TestCase):
         self.admin = {"index": [[9, 23, FINISH.stat.S_IFREG], None]}
 
     def observe(self, output, *, errors=b"", code=0, failure=None, sudo=False, platform="linux"):
-        result = types.SimpleNamespace(stdout=output, stderr=errors, returncode=code, failure=failure)
+        result = types.SimpleNamespace(
+            stdout=output, stderr=errors, returncode=code,
+            failure=type(failure).__name__ if failure else None,
+            proof={"pid": None, "reaped": False, "group_absent": None},
+            failure_code="os-error" if isinstance(failure, TimeoutError) else "output-limit" if failure else None,
+            failure_errno=None)
         with mock.patch.object(FINISH.sys, "platform", platform), \
                 mock.patch.object(FINISH, "trusted_holder_binary",
                                   side_effect=["/usr/bin/sudo", "/usr/sbin/lsof"]), \
@@ -6168,6 +6382,35 @@ class FailureDiagnosticTests(unittest.TestCase):
                 self.assertIn("(state-or-proof-unavailable)", errors)
                 self.assertNotIn("private-secret", errors)
                 self.assertNotIn("/private/", errors)
+
+    def test_child_failures_keep_reason_and_only_allowlisted_facts(self):
+        cases = [("import sys; sys.stderr.write('private-secret'); sys.exit(7)", {}, "exit-status"),
+                 ("import time; time.sleep(30)", {}, "deadline"),
+                 ("print('private-secret' * 1000)", {"limit": 8}, "output-limit")]
+        for code, options, cause in cases:
+            with self.subTest(cause=cause):
+                def invoke(_):
+                    return FINISH.run([sys.executable, "-I", "-c", code],
+                                      deadline=time.monotonic() + 0.1 if cause == "deadline" else None,
+                                      **options)
+                status, output, errors = self.call_cli(action=invoke)
+                self.assertEqual((status, output), (1, ""))
+                self.assertIn("(" + Path(sys.executable).name + "-failed)", errors)
+                self.assertIn('"cause": "' + cause + '"', errors)
+                self.assertIn('"reaped": true', errors)
+                self.assertIn('"group_absent": true', errors)
+                self.assertNotIn("private-secret", errors)
+                self.assertNotIn(sys.executable, errors)
+
+    def test_child_diagnostic_rejects_arbitrary_metadata(self):
+        error = FINISH.Retain("git-failed")
+        error._gwt_child_diagnostic = {"cause": ["private-secret"], "errno": "private-secret",
+                                       "returncode": True, "argv": "private-secret"}
+        status, output, errors = self.call_cli(error)
+        self.assertEqual((status, output), (1, ""))
+        self.assertIn('"cause": "supervisor-error"', errors)
+        self.assertNotIn("private-secret", errors)
+        self.assertNotIn('"returncode"', errors)
 
     def test_malformed_github_proof_keeps_owner_phase_without_body(self):
         def invoke(_):
