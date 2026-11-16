@@ -6872,6 +6872,60 @@ class FailedCreationTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(FINISH.retirement(db, self.old)["result"].encode()).hexdigest(),
                              self.result_hash)
 
+    @contextlib.contextmanager
+    def recorded_identity(self, change):
+        get_row = FINISH.get_row
+        def altered(db, path):
+            row = get_row(db, path)
+            if row["id"] != self.old["id"]:
+                return row
+            value = dict(row)
+            identity = json.loads(value["identity"])
+            change(identity)
+            value["identity"] = json.dumps(identity, sort_keys=True)
+            return value
+        with mock.patch.object(FINISH, "get_row", side_effect=altered):
+            yield
+
+    def test_explicit_device_renumbering_preserves_original_history(self):
+        def renumber(identity):
+            for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
+                identity[key][0] += 1000
+        with self.recorded_identity(renumber):
+            with self.assertRaisesRegex(FINISH.Retain, "incarnation-mismatch"):
+                self.recover()
+            plan = self.recover("--acknowledge-device-renumbering")[1][0]
+            self.assertEqual(len(plan["device_renumbering"]), 1)
+            result = self.recover("--acknowledge-device-renumbering", "--apply",
+                                  "--recovery-sha256", plan["recovery_sha256"])
+            self.assertEqual(result[1][0]["checkout"], "removed")
+        self.assert_history_unchanged()
+
+    def test_device_acknowledgment_rejects_inode_or_mapping_changes(self):
+        def inode_drift(identity):
+            identity["common_id"][1] += 1
+        def inconsistent(identity):
+            identity["owner_id"][0] += 1000
+        def unchanged_checkout(identity):
+            for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
+                identity[key][0] += 1000
+            identity["path_id"][1] = self.wt.stat().st_ino
+        for change in (inode_drift, inconsistent, unchanged_checkout):
+            with self.subTest(change=change.__name__), self.recorded_identity(change):
+                with self.assertRaises(FINISH.Retain):
+                    self.recover("--acknowledge-device-renumbering")
+        snapshot = FINISH.snapshot
+        def separate_device(*args, **kwargs):
+            result = snapshot(*args, **kwargs)
+            result["path_id"][0] += 1000
+            return result
+        def unmapped(identity):
+            identity["path_id"][0] += 1000
+        with self.recorded_identity(unmapped), mock.patch.object(FINISH, "snapshot", side_effect=separate_device):
+            with self.assertRaisesRegex(FINISH.Retain, "device-mapping-changed"):
+                self.recover("--acknowledge-device-renumbering")
+        self.assert_history_unchanged()
+
     def test_preflight_refuses_historical_path_without_creating_or_changing_it(self):
         git(self.repo, "worktree", "unlock", str(self.wt))
         git(self.repo, "worktree", "remove", str(self.wt))

@@ -238,6 +238,17 @@ def immutable(snap):
     return {key: value for key, value in snap.items() if key != "head"}
 
 
+def device_renumbering(recorded, current, keys):
+    devices = {}
+    for key in keys:
+        old, new = recorded[key], current[key]
+        if old[1] != new[1] or devices.setdefault(old[0], new[0]) != new[0]:
+            raise Retain("worktree-identity-changed")
+    if len(set(devices.values())) != len(devices):
+        raise Retain("worktree-identity-changed")
+    return devices
+
+
 @diagnostic_phase("worktree-identity")
 def revalidate(row, *, allow_device_renumbering=False, allow_branch_change=False):
     recorded = json.loads(row["identity"])
@@ -245,14 +256,10 @@ def revalidate(row, *, allow_device_renumbering=False, allow_branch_change=False
     if allow_branch_change:
         recorded["branch"] = current["branch"]
     if allow_device_renumbering:
-        devices = {}
-        for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
-            old, new = recorded[key], current[key]
-            if old[1] != new[1] or devices.setdefault(old[0], new[0]) != new[0]:
-                raise Retain("worktree-identity-changed")
-            recorded[key] = new
-        if len(set(devices.values())) != len(devices):
-            raise Retain("worktree-identity-changed")
+        keys = ("path_id", "gitdir_id", "common_id", "owner_id")
+        device_renumbering(recorded, current, keys)
+        for key in keys:
+            recorded[key] = current[key]
     if immutable(current) != recorded:
         raise Retain("worktree-identity-changed")
     return current
@@ -1540,10 +1547,24 @@ def recover_failed_creation(db, row, args):
     old = json.loads(row["identity"])
     lock = "gwt-finish.v2:" + args.creation_token
     snap = snapshot(args.worktree, old["root"], lock)
+    devices = {}
+    compared = old
+    if args.acknowledge_device_renumbering:
+        # Stable repository inodes attest the device mapping. New task inodes
+        # must still differ; a remount alone is never a failed recreation.
+        devices = device_renumbering(old, snap, ("common_id", "owner_id"))
+        if any(old[key][0] not in devices for key in ("path_id", "gitdir_id")):
+            raise Retain("failed-creation-device-mapping-changed")
+        compared = dict(old)
+        for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
+            compared[key] = [devices[old[key][0]], old[key][1]]
+        if any(compared[key][0] != snap[key][0] for key in ("path_id", "gitdir_id")):
+            raise Retain("failed-creation-device-mapping-changed")
     if (snap["head"] != args.expected_head or lock == old.get("lock_reason")
-            or any(snap[key] != old[key] for key in (
+            or any(snap[key] != compared[key] for key in (
                 "path", "root", "owner", "common", "gitdir", "common_id", "owner_id", "branch", "repo"))
-            or snap["path_id"] == old["path_id"] or snap["gitdir_id"] == old["gitdir_id"]):
+            or snap["path_id"][1] == compared["path_id"][1]
+            or snap["gitdir_id"][1] == compared["gitdir_id"][1]):
         raise Retain("failed-creation-incarnation-mismatch")
     if any(json.loads(other["identity"]).get("lock_reason") == lock
            for other in db.execute("SELECT identity FROM worktrees")):
@@ -1562,10 +1583,13 @@ def recover_failed_creation(db, row, args):
             return finalized_admission(db, current, args, until, fetch_lease=fetch_lease)
         before = admit()
         preimage = {"history": history, "admission": before, "operator": who,
-                    "creation_token": args.creation_token, "acknowledged_unrecorded_creation": True}
+                    "creation_token": args.creation_token, "acknowledged_unrecorded_creation": True,
+                    "acknowledged_device_renumbering": args.acknowledge_device_renumbering,
+                    "device_renumbering": sorted(devices.items())}
         digest = recovery_digest(preimage)
         output = {"checkout": "retained", "reason": "failed-creation-recovery-planned",
-                  "worktree": args.worktree, "recovery_sha256": digest}
+                  "worktree": args.worktree, "recovery_sha256": digest,
+                  "device_renumbering": sorted(devices.items())}
         if not args.apply:
             return output
         if digest != args.recovery_sha256:
@@ -3035,7 +3059,7 @@ def main(argv=None):
     if args.command == "recover-failed-creation":
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner", "worktree_id",
                    "generation", "result_sha256", "expected_head", "creation_token",
-                   "acknowledge_unrecorded_creation", "apply", "recovery_sha256"}
+                   "acknowledge_unrecorded_creation", "acknowledge_device_renumbering", "apply", "recovery_sha256"}
         if (any(value is not None and value is not False and value != []
                 for name, value in vars(args).items() if name not in allowed)
                 or not args.acknowledge_unrecorded_creation or not Path(args.worktree).is_absolute()

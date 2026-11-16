@@ -714,6 +714,11 @@ repository, distinct checkout/admin identities, no pins, clean source and no
 holders. Apply the reviewed plan by repeating it with
 `--apply --recovery-sha256 <plan-hash>`. Native closeout rechecks the exact
 preimage, preserves prior records and records its own intent before removal.
+If independently verified device renumbering changed only the stable owner and
+common-directory device IDs, add `--acknowledge-device-renumbering` to both
+commands. Their inode identities must match, the device mapping must be
+one-to-one, and the new checkout/admin inodes must still differ. The plan binds
+and reports this explicit acknowledgment and mapping; it never rewrites history.
 It never enrolls the replacement. Any recorded attempt, including an incomplete
 one, refuses replay. Inspect the eight most recent recovery outcomes with
 `gwt finish-status --worktree /absolute/task/checkout --read-only`; they appear

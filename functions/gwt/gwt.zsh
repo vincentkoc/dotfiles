@@ -1279,6 +1279,7 @@ Commands:
   gwt recover-failed-creation --worktree <path> --worktree-id <id> --generation <n>
       --result-sha256 <hash> --creation-token <uuid> --expected-head <sha>
       --acknowledge-unrecorded-creation [--apply --recovery-sha256 <hash>]
+      [--acknowledge-device-renumbering]
                                     Close one audited failed recreation; preserve prior history
   gwt recover-missing --worktree <path> --worktree-id <id> --generation <n>
     --expected-head <sha> --index-sha256 <sha256> [--apply --recovery-sha256 <sha256>]
