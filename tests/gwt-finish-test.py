@@ -676,6 +676,11 @@ _gwt_finish_tool() { "$FAKE_FINISH" "$@"; }
 _gwt_claim_if_enrolled() { _gwt_finish_tool resume --if-enrolled --worktree "$1"; }
 _gwt_tmux_sync_context() { return 0; }
 cd "$2"
+_gwt_finish_tool() { [[ "$1" != creation-check ]]; }
+if gwt new feature main --full --finish-managed; then exit 88; fi
+[[ ! -e "$3" ]] || exit 87
+git show-ref --verify --quiet refs/heads/feature && exit 86
+_gwt_finish_tool() { "$FAKE_FINISH" "$@"; }
 gwt new feature main --full --finish-managed || exit
 [[ "$PWD" == "$3" ]] || exit 91
 gwt finish --pr https://github.com/example/repo/pull/1 || exit
@@ -721,6 +726,7 @@ if gwt new feature main --full --finish-managed; then exit 93; fi
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             recorded = calls.read_text()
+            self.assertLess(recorded.index("creation-check --worktree"), recorded.index("creation-token"))
             self.assertIn("enroll --worktree", recorded)
             self.assertIn("finish --pr", recorded)
             self.assertIn("resume --acknowledge-device-renumbering --worktree", recorded)
@@ -6828,6 +6834,138 @@ class NativePendingConsumerTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "rev-parse", "native-feature"), self.head)
         self.assertTrue(sibling.exists())
         self.assertEqual(git(sibling, "rev-parse", "HEAD"), self.head)
+
+
+class FailedCreationTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        self.holders = mock.patch.object(FINISH, "manual_holders")
+        self.holders.start()
+        self.addCleanup(self.holders.stop)
+        self.assertEqual(self.call("remove", "--finalized")[1][0]["checkout"], "removed")
+        with FINISH.ledger(self.state) as db:
+            self.old = dict(FINISH.get_row(db, self.wt))
+            self.history = FINISH.failed_creation_history(db, self.old)
+        self.result_hash = hashlib.sha256(self.history["retirement"][0]["result"].encode()).hexdigest()
+        self.new_token = str(uuid.uuid4())
+        old_mask = os.umask(0o077)
+        try:
+            git(self.repo, "worktree", "add", "--lock", "--reason", "gwt-finish.v2:" + self.new_token,
+                str(self.wt), "released-feature")
+        finally:
+            os.umask(old_mask)
+        self.admin = Path(git(self.wt, "rev-parse", "--absolute-git-dir"))
+
+    def recover(self, *args):
+        return self.call("recover-failed-creation", "--worktree-id", self.old["id"],
+                         "--generation", str(self.history["retirement"][0]["generation"]),
+                         "--result-sha256", self.result_hash, "--creation-token", self.new_token,
+                         "--expected-head", self.head, "--acknowledge-unrecorded-creation", *args)
+
+    def assert_history_unchanged(self):
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(FINISH.failed_creation_history(db, FINISH.get_row(db, self.wt)), self.history)
+            self.assertEqual(hashlib.sha256(FINISH.retirement(db, self.old)["result"].encode()).hexdigest(),
+                             self.result_hash)
+
+    def test_preflight_refuses_historical_path_without_creating_or_changing_it(self):
+        git(self.repo, "worktree", "unlock", str(self.wt))
+        git(self.repo, "worktree", "remove", str(self.wt))
+        with self.assertRaisesRegex(FINISH.Retain, "already-enrolled-or-path-reused"):
+            self.call("creation-check")
+        self.assertFalse(self.wt.exists())
+        self.assert_history_unchanged()
+
+    def test_plan_and_native_removal_preserve_prior_history(self):
+        before = (self.state / "lifecycle.sqlite").read_bytes()
+        plan = self.recover()[1][0]
+        self.assertEqual((self.state / "lifecycle.sqlite").read_bytes(), before)
+        self.assertTrue(self.wt.exists())
+        result = self.recover("--apply", "--recovery-sha256", plan["recovery_sha256"])
+        self.assertEqual(result[0], 0)
+        self.assertEqual(result[1][0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        self.assert_history_unchanged()
+        status = self.call("status", "--read-only")[1][0]
+        self.assertEqual(status["failed_creation_recoveries"][0]["checkout"], "removed")
+        with FINISH.ledger(self.state) as db:
+            record = FINISH.failed_creation_record(db, self.old, self.new_token)
+            self.assertEqual(json.loads(record["result"])["checkout"], "removed")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                db.execute("DELETE FROM failed_creations")
+        with self.assertRaisesRegex(FINISH.Retain, "already-recorded-no-retry"):
+            self.recover("--apply", "--recovery-sha256", plan["recovery_sha256"])
+
+    def test_incomplete_attempt_retains_lock_and_prior_history_without_retry(self):
+        digest = self.recover()[1][0]["recovery_sha256"]
+        native = FINISH.finalized_admission
+        calls = []
+        def admit(*args, **kwargs):
+            calls.append(None)
+            if len(calls) == 2:
+                raise FINISH.Retain("pending-departure")
+            return native(*args, **kwargs)
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=admit):
+            result = self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual(result[0], 1)
+        self.assertEqual(result[1][0]["checkout"], "unknown")
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.new_token)
+        self.assert_history_unchanged()
+        status = self.call("status", "--read-only")[1][0]
+        self.assertEqual(status["failed_creation_recoveries"][0]["checkout"], "unknown")
+        with self.assertRaisesRegex(FINISH.Retain, "already-recorded-no-retry"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        with self.assertRaisesRegex(FINISH.Retain, "already-recorded-no-retry"):
+            self.recover("--creation-token", str(uuid.uuid4()), "--apply", "--recovery-sha256", digest)
+
+    def test_removal_persistence_callbacks_must_be_paired_before_any_access(self):
+        for callbacks in ({"record_intent": lambda _: None}, {"record_outcome": lambda _: None}):
+            with self.assertRaisesRegex(FINISH.Retain, "callbacks-must-be-paired"):
+                FINISH.remove_with_intent(None, None, None, None, None, None, **callbacks)
+
+    def test_wrong_owner_token_head_and_missing_acknowledgment_fail_closed(self):
+        for args, reason in [(("--owner", "other"), "sole-recorded-owner"),
+                             (("--creation-token", str(uuid.uuid4())), "registration-missing-or-locked"),
+                             (("--expected-head", "1" * 40), "incarnation-mismatch")]:
+            with self.subTest(args=args), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.recover(*args)
+        with self.assertRaisesRegex(FINISH.Retain, "exact-audited"):
+            self.call("recover-failed-creation")
+        self.assert_history_unchanged()
+
+    def test_old_receipt_pin_or_second_owner_cannot_be_recovered(self):
+        with self.assertRaisesRegex(FINISH.Retain, "prior-removed-receipt"):
+            self.recover("--result-sha256", "0" * 64)
+        with FINISH.ledger(self.state) as db:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "removal-intent-holds-worktree"):
+                db.execute("INSERT INTO pins VALUES (?, ?, ?)", (self.old["id"], "owner-1", "unfinished"))
+        for change in ({"pins": [{"owner": "owner-1"}]},
+                       {"owners": [{"owner": "owner-1"}, {"owner": "owner-2"}]}):
+            with mock.patch.object(FINISH, "failed_creation_history", return_value={**self.history, **change}):
+                with self.assertRaisesRegex(FINISH.Retain, "sole-recorded-owner"):
+                    self.recover()
+        self.assert_history_unchanged()
+
+    def test_dirty_or_held_checkout_and_plan_drift_fail_closed(self):
+        digest = self.recover()[1][0]["recovery_sha256"]
+        (self.wt / "file").write_text("changed\n")
+        with self.assertRaisesRegex(FINISH.Retain, "dirty-or-untracked"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        git(self.wt, "checkout", "--", "file")
+        with mock.patch.object(FINISH, "manual_holders", side_effect=FINISH.Retain("pending-departure")):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                self.recover()
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.recover("--apply", "--recovery-sha256", "0" * 64)
+        self.assert_history_unchanged()
 
 
 if __name__ == "__main__":

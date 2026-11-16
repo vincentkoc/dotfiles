@@ -695,6 +695,30 @@ repository-native worktrees are never adopted. Existing ancestor permissions
 are not changed. The private SQLite ledger remains under
 `~/.local/state/gwt-finish`.
 
+Creation rejects a previously enrolled path before creating its Git checkout.
+Older versions could create a new locked checkout there, then fail enrollment.
+For that specific failure, the original sole owner may explicitly attest the
+audited creation token and plan a one-shot closeout:
+
+```sh
+gwt recover-failed-creation --worktree /absolute/task/checkout \
+  --worktree-id <prior-id> --generation <prior-generation> \
+  --result-sha256 <prior-result-hash> --creation-token <new-lock-token> \
+  --expected-head <sha> --acknowledge-unrecorded-creation
+```
+
+The acknowledgment requires independent evidence that this owner created the
+replacement; automation must not infer it from a path or lock. The prior record
+must prove successful removal. The new checkout must have the same branch and
+repository, distinct checkout/admin identities, no pins, clean source and no
+holders. Apply the reviewed plan by repeating it with
+`--apply --recovery-sha256 <plan-hash>`. Native closeout rechecks the exact
+preimage, preserves prior records and records its own intent before removal.
+It never enrolls the replacement. Any recorded attempt, including an incomplete
+one, refuses replay. Inspect the eight most recent recovery outcomes with
+`gwt finish-status --worktree /absolute/task/checkout --read-only`; they appear
+under `failed_creation_recoveries`, separately from the original retirement.
+
 A finished fix or feature is eligible as soon as every owner has completed and
 released, its exact PR head has merged into the final target, and native
 admission passes. There is no age delay. `gwt release` can sign off an already
