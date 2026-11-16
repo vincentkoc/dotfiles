@@ -238,6 +238,17 @@ def immutable(snap):
     return {key: value for key, value in snap.items() if key != "head"}
 
 
+def device_renumbering(recorded, current, keys):
+    devices = {}
+    for key in keys:
+        old, new = recorded[key], current[key]
+        if old[1] != new[1] or devices.setdefault(old[0], new[0]) != new[0]:
+            raise Retain("worktree-identity-changed")
+    if len(set(devices.values())) != len(devices):
+        raise Retain("worktree-identity-changed")
+    return devices
+
+
 @diagnostic_phase("worktree-identity")
 def revalidate(row, *, allow_device_renumbering=False, allow_branch_change=False):
     recorded = json.loads(row["identity"])
@@ -245,14 +256,10 @@ def revalidate(row, *, allow_device_renumbering=False, allow_branch_change=False
     if allow_branch_change:
         recorded["branch"] = current["branch"]
     if allow_device_renumbering:
-        devices = {}
-        for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
-            old, new = recorded[key], current[key]
-            if old[1] != new[1] or devices.setdefault(old[0], new[0]) != new[0]:
-                raise Retain("worktree-identity-changed")
-            recorded[key] = new
-        if len(set(devices.values())) != len(devices):
-            raise Retain("worktree-identity-changed")
+        keys = ("path_id", "gitdir_id", "common_id", "owner_id")
+        device_renumbering(recorded, current, keys)
+        for key in keys:
+            recorded[key] = current[key]
     if immutable(current) != recorded:
         raise Retain("worktree-identity-changed")
     return current
@@ -1491,6 +1498,135 @@ def remove_finalized(db, row, args, *, completed=False):
             restore_lock=True, fetch_lease=fetch_lease)
 
 
+def failed_creation_history(db, row):
+    # The old incarnation remains authoritative history. Never repurpose its
+    # retirement row or its owners to enroll the replacement checkout.
+    result = {"worktree": dict(row)}
+    for table in ("retirement", "owners", "pins", "owner_releases", "owner_cancellations"):
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            result[table] = None
+            continue
+        result[table] = sorted((dict(item) for item in db.execute(
+            f"SELECT * FROM {table} WHERE worktree_id=?", (row["id"],))),
+            key=lambda value: json.dumps(value, sort_keys=True))
+    return result
+
+
+def failed_creation_record(db, row, token=None):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='failed_creations'").fetchone():
+        return None
+    if token is None:
+        return db.execute("SELECT * FROM failed_creations WHERE worktree_id=? LIMIT 1", (row["id"],)).fetchone()
+    return db.execute("SELECT * FROM failed_creations WHERE worktree_id=? AND creation_token=?",
+                      (row["id"], token)).fetchone()
+
+
+def recover_failed_creation(db, row, args):
+    who = owner_id(args)
+    if row["id"] != args.worktree_id or row["path"] != args.worktree:
+        raise Retain("failed-creation-record-mismatch")
+    history = failed_creation_history(db, row)
+    item = retirement(db, row)
+    if (item is None or item["state"] != "removed" or item["generation"] != args.generation
+            or item["intent"] is not None or not item["result"]
+            or hashlib.sha256(item["result"].encode()).hexdigest() != args.result_sha256):
+        raise Retain("failed-creation-needs-prior-removed-receipt")
+    prior = json.loads(item["result"])
+    child = prior.get("child") or {}
+    if (prior.get("checkout") != "removed" or child.get("returncode") != 0
+            or child.get("reaped") is not True or child.get("group_absent") is not True
+            or any(prior.get(key) is not True for key in (
+                "path_absent", "admin_absent", "registration_absent", "siblings_preserved",
+                "branch_preserved", "branch_reflog_preserved", "dependency_preserved",
+                "discarded_link_targets_preserved"))):
+        raise Retain("failed-creation-prior-removal-unverified")
+    if ([owner["owner"] for owner in history["owners"]] != [who] or history["pins"]):
+        raise Retain("failed-creation-requires-sole-recorded-owner-without-pins")
+    if failed_creation_record(db, row) is not None:
+        raise Retain("failed-creation-attempt-already-recorded-no-retry")
+    old = json.loads(row["identity"])
+    lock = "gwt-finish.v2:" + args.creation_token
+    snap = snapshot(args.worktree, old["root"], lock)
+    devices = {}
+    compared = old
+    if args.acknowledge_device_renumbering:
+        # Stable repository inodes attest the device mapping. New task inodes
+        # must still differ; a remount alone is never a failed recreation.
+        devices = device_renumbering(old, snap, ("common_id", "owner_id"))
+        if any(old[key][0] not in devices for key in ("path_id", "gitdir_id")):
+            raise Retain("failed-creation-device-mapping-changed")
+        compared = dict(old)
+        for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
+            compared[key] = [devices[old[key][0]], old[key][1]]
+        if any(compared[key][0] != snap[key][0] for key in ("path_id", "gitdir_id")):
+            raise Retain("failed-creation-device-mapping-changed")
+    if (snap["head"] != args.expected_head or lock == old.get("lock_reason")
+            or any(snap[key] != compared[key] for key in (
+                "path", "root", "owner", "common", "gitdir", "common_id", "owner_id", "branch", "repo"))
+            or snap["path_id"][1] == compared["path_id"][1]
+            or snap["gitdir_id"][1] == compared["gitdir_id"][1]):
+        raise Retain("failed-creation-incarnation-mismatch")
+    if any(json.loads(other["identity"]).get("lock_reason") == lock
+           for other in db.execute("SELECT identity FROM worktrees")):
+        raise Retain("failed-creation-token-already-enrolled")
+    current = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True),
+               "finish_head": snap["head"]}
+    storage_guard()
+    until = time.monotonic() + 120
+    with safety().maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))), \
+            QualificationFetchLease(snap) as fetch_lease:
+        current["finalized_refs"], _ = release_refs(snap, row["target"], until, branches=(old["branch"],))
+        def admit():
+            latest = get_row(db, args.worktree)
+            if failed_creation_history(db, latest) != history:
+                raise Retain("failed-creation-history-changed")
+            return finalized_admission(db, current, args, until, fetch_lease=fetch_lease)
+        before = admit()
+        preimage = {"history": history, "admission": before, "operator": who,
+                    "creation_token": args.creation_token, "acknowledged_unrecorded_creation": True,
+                    "acknowledged_device_renumbering": args.acknowledge_device_renumbering,
+                    "device_renumbering": sorted(devices.items())}
+        digest = recovery_digest(preimage)
+        output = {"checkout": "retained", "reason": "failed-creation-recovery-planned",
+                  "worktree": args.worktree, "recovery_sha256": digest,
+                  "device_renumbering": sorted(devices.items())}
+        if not args.apply:
+            return output
+        if digest != args.recovery_sha256:
+            raise Retain("failed-creation-preimage-changed")
+        encoded = json.dumps(preimage, sort_keys=True)
+        def record_intent(intent):
+            with db:
+                db.execute("CREATE TABLE IF NOT EXISTS failed_creations ("
+                           "worktree_id TEXT NOT NULL REFERENCES worktrees(id), creation_token TEXT NOT NULL, "
+                           "preimage TEXT NOT NULL, intent TEXT NOT NULL, result TEXT, "
+                           "PRIMARY KEY(worktree_id, creation_token))")
+                db.execute("CREATE TRIGGER IF NOT EXISTS failed_creations_immutable "
+                           "BEFORE UPDATE ON failed_creations WHEN OLD.result IS NOT NULL "
+                           "OR NEW.worktree_id != OLD.worktree_id OR NEW.creation_token != OLD.creation_token "
+                           "OR NEW.preimage != OLD.preimage OR NEW.intent != OLD.intent "
+                           "BEGIN SELECT RAISE(ABORT, 'failed-creation-record-is-immutable'); END")
+                db.execute("CREATE TRIGGER IF NOT EXISTS failed_creations_no_delete "
+                           "BEFORE DELETE ON failed_creations "
+                           "BEGIN SELECT RAISE(ABORT, 'failed-creation-record-is-immutable'); END")
+                db.execute("INSERT INTO failed_creations VALUES (?, ?, ?, ?, NULL)",
+                           (row["id"], args.creation_token, encoded, json.dumps(intent, sort_keys=True)))
+        def record_outcome(outcome):
+            with db:
+                changed = db.execute("UPDATE failed_creations SET result=? "
+                                     "WHERE worktree_id=? AND creation_token=? AND preimage=? AND result IS NULL",
+                                     (json.dumps(outcome, sort_keys=True), row["id"], args.creation_token, encoded)).rowcount
+                if changed != 1:
+                    raise Retain("failed-creation-result-conflict")
+        remove_with_intent(db, current, item, before, admit,
+                          {"mode": "audited-failed-creation", "operator": who},
+                          restore_lock=True, fetch_lease=fetch_lease,
+                          record_intent=record_intent, record_outcome=record_outcome)
+        record = failed_creation_record(db, row, args.creation_token)
+        outcome = json.loads(record["result"])
+        return {**output, "checkout": outcome["checkout"], "reason": outcome["reason"]}
+
+
 def remove_released(db, row, item, qualification, args):
     if not automatic_holder_contract(item):
         raise Retain("automatic-holder-contract-not-enrolled")
@@ -1723,7 +1859,9 @@ def siblings_preserved(before, after):
 
 
 def remove_with_intent(db, row, item, before, recheck, qualification, *, restore_lock=False,
-                       fetch_lease=None):
+                       fetch_lease=None, record_intent=None, record_outcome=None):
+    if (record_intent is None) != (record_outcome is None):
+        raise Retain("removal-persistence-callbacks-must-be-paired")
     module, snap = safety(), before["snapshot"]
     native_git = NATIVE_GIT or shutil.which("git")
     if native_git is None or any(
@@ -1739,12 +1877,15 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
               "siblings": siblings, "sibling_identities": sibling_ids, "qualification": qualification}
     # Keep ownership durable before unlocking. A partial native result must
     # never become a retryable ordinary checkout, even for older consumers.
-    with db:
-        changed = db.execute("UPDATE retirement SET state='intent', intent=? "
-                             "WHERE worktree_id=? AND generation=? AND state='enrolled'",
-                             (json.dumps(intent, sort_keys=True), row["id"], item["generation"])).rowcount
-        if changed != 1:
-            raise Retain("release-generation-changed")
+    if record_intent is not None:
+        record_intent(intent)
+    else:
+        with db:
+            changed = db.execute("UPDATE retirement SET state='intent', intent=? "
+                                 "WHERE worktree_id=? AND generation=? AND state='enrolled'",
+                                 (json.dumps(intent, sort_keys=True), row["id"], item["generation"])).rowcount
+            if changed != 1:
+                raise Retain("release-generation-changed")
     outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None}
     if "resolve_undo" in before["contents"]:
         outcome["resolve_undo"] = before["contents"]["resolve_undo"]
@@ -1830,14 +1971,17 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
                         snap["path"], snap["root"], snap["lock_reason"]) == snap
             except (Retain, OSError, ValueError):
                 pass
-    with db:
-        db.execute("UPDATE retirement SET state=?, result=? WHERE worktree_id=?",
-                   ("removed" if outcome["checkout"] == "removed" else "incomplete",
-                    json.dumps(outcome, sort_keys=True), row["id"]))
-        if restore_lock and outcome["checkout"] == "removed":
-            # Once manual closeout is verified, only the terminal tombstone is
-            # needed. Retain detailed admission data solely for incomplete work.
-            db.execute("UPDATE retirement SET intent=NULL, inventory=NULL WHERE worktree_id=?", (row["id"],))
+    if record_outcome is not None:
+        record_outcome(outcome)
+    else:
+        with db:
+            db.execute("UPDATE retirement SET state=?, result=? WHERE worktree_id=?",
+                       ("removed" if outcome["checkout"] == "removed" else "incomplete",
+                        json.dumps(outcome, sort_keys=True), row["id"]))
+            if restore_lock and outcome["checkout"] == "removed":
+                # Once manual closeout is verified, only the terminal tombstone is
+                # needed. Retain detailed admission data solely for incomplete work.
+                db.execute("UPDATE retirement SET intent=NULL, inventory=NULL WHERE worktree_id=?", (row["id"],))
     return outcome["reason"]
 
 
@@ -2699,6 +2843,15 @@ def summary(db, row, reason=None):
     }
     if cancellations:
         result["cancelled_owners"] = cancellations
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='failed_creations'").fetchone():
+        attempts = db.execute("SELECT creation_token, intent, result FROM failed_creations "
+                              "WHERE worktree_id=? ORDER BY rowid DESC LIMIT 8", (row["id"],))
+        result["failed_creation_recoveries"] = [
+            {"creation_token": attempt["creation_token"],
+             "intent_id": json.loads(attempt["intent"])["id"],
+             **({"checkout": "unknown", "reason": "removal-incomplete"} if attempt["result"] is None
+                else {key: json.loads(attempt["result"])[key] for key in ("checkout", "reason")})}
+            for attempt in attempts]
     if item is not None and item["state"] == "enrolled":
         baseline = json.loads(item["inventory"]) if item["inventory"] else None
         semantic = baseline is not None and baseline.get("schema") == RELEASE_BASELINE_SCHEMA
@@ -2761,6 +2914,8 @@ def parser():
         "check",
         "holder-qualification",
         "creation-token",
+        "creation-check",
+        "recover-failed-creation",
         "guard",
     ))
     result.add_argument("--worktree", default=os.getcwd())
@@ -2803,6 +2958,8 @@ def parser():
     result.add_argument("--recovery-sha256")
     result.add_argument("--allow-device-renumbering", action="store_true")
     result.add_argument("--continue-partial", action="store_true")
+    result.add_argument("--creation-token")
+    result.add_argument("--acknowledge-unrecorded-creation", action="store_true")
     return result
 
 
@@ -2899,6 +3056,40 @@ def process_one(db, row, args):
 def main(argv=None):
     args = parser().parse_args(argv)
     safety().DEADLINE = time.monotonic() + 238
+    if args.command == "recover-failed-creation":
+        allowed = {"command", "worktree", "managed_root", "state_dir", "owner", "worktree_id",
+                   "generation", "result_sha256", "expected_head", "creation_token",
+                   "acknowledge_unrecorded_creation", "acknowledge_device_renumbering", "apply", "recovery_sha256"}
+        if (any(value is not None and value is not False and value != []
+                for name, value in vars(args).items() if name not in allowed)
+                or not args.acknowledge_unrecorded_creation or not Path(args.worktree).is_absolute()
+                or not args.worktree_id or str(uuid.UUID(args.worktree_id)) != args.worktree_id
+                or not args.creation_token or str(uuid.UUID(args.creation_token)) != args.creation_token
+                or args.generation is None or args.generation < 0
+                or not args.result_sha256 or not re.fullmatch(r"[0-9a-f]{64}", args.result_sha256)
+                or not args.expected_head or not SHA.fullmatch(args.expected_head)
+                or (args.apply and not args.recovery_sha256)
+                or (args.recovery_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.recovery_sha256))):
+            raise Retain("failed-creation-needs-exact-audited-creation-and-prior-receipt")
+        with (ledger(args.state_dir) if args.apply else read_only_ledger(args.state_dir)) as db:
+            if db is None:
+                raise Retain("not-enrolled")
+            result = recover_failed_creation(db, get_row(db, args.worktree), args)
+        print(json.dumps([result], sort_keys=True))
+        return 1 if args.apply and result["checkout"] != "removed" else 0
+    if args.creation_token or args.acknowledge_unrecorded_creation:
+        raise Retain("creation-recovery-options-require-recover-failed-creation")
+    if args.command == "creation-check":
+        allowed = {"command", "worktree", "managed_root", "state_dir", "owner"}
+        if (not Path(args.worktree).is_absolute() or any(
+                value is not None and value is not False and value != []
+                for name, value in vars(args).items() if name not in allowed)):
+            raise Retain("creation-check-needs-one-absolute-path")
+        with read_only_ledger(args.state_dir) as db:
+            if db is not None and db.execute("SELECT 1 FROM worktrees WHERE path=?",
+                                             (str(Path(args.worktree).resolve()),)).fetchone():
+                raise Retain("already-enrolled-or-path-reused")
+        return 0
     # Acknowledgment permits identity selection only; new action options must
     # never silently inherit permission to mutate an existing enrollment.
     if args.acknowledge_device_renumbering and (

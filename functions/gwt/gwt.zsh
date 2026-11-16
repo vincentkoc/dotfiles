@@ -1276,6 +1276,11 @@ Commands:
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all] [--read-only]  Show local completion state
+  gwt recover-failed-creation --worktree <path> --worktree-id <id> --generation <n>
+      --result-sha256 <hash> --creation-token <uuid> --expected-head <sha>
+      --acknowledge-unrecorded-creation [--apply --recovery-sha256 <hash>]
+      [--acknowledge-device-renumbering]
+                                    Close one audited failed recreation; preserve prior history
   gwt recover-missing --worktree <path> --worktree-id <id> --generation <n>
     --expected-head <sha> --index-sha256 <sha256> [--apply --recovery-sha256 <sha256>]
                                     Plan or restore an exact missing enrolled checkout
@@ -1346,6 +1351,10 @@ gwt() {
             ;;
         root)
             _gwt_worktrees_root
+            ;;
+        recover-failed-creation)
+            _gwt_finish_tool "$subcommand" "$@"
+            return $?
             ;;
         finish-status|finish-check|finish-reconcile)
             _gwt_finish_tool "${subcommand#finish-}" "$@"
@@ -1719,6 +1728,9 @@ gwt() {
                 binding_state=$(_gwt_explicit_dependency snapshot "$dependency_source" "$repo_root" "$worktree_path") || return 1
             fi
             if [[ "$finish_managed" == true ]]; then
+                # Historical paths cannot be enrolled again. Refuse before
+                # Git creates a locked checkout that has no lifecycle owner.
+                _gwt_finish_tool creation-check --worktree "$worktree_path" || return
                 finish_token=$(_gwt_finish_tool creation-token) || return
                 [[ "$finish_token" =~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ]] || {
                     echo "gwt: invalid lifecycle creation token" >&2
