@@ -271,6 +271,42 @@ class StorageTest(unittest.TestCase):
         self.assertIn("protected", result.stderr)
         self.assertFalse((self.home / ".local/state/gwt/dependencies").exists())
 
+    def test_dependency_receipt_accepts_only_workspace_package_links(self):
+        # pnpm links workspace packages back into the checkout, e.g. ui and packages/*.
+        (self.repo / "pnpm-workspace.yaml").write_text(
+            "packages:\n  - ui\n  - 'packages/*'\n  - \"!packages/private\"  # excluded\n\nonlyBuiltDependencies: []\n"
+        )
+        for name in ("ui", "packages/core", "packages/private", "scripts"):
+            (self.repo / name).mkdir(parents=True)
+            (self.repo / name / "package.json").write_text("{}\n")
+        modules = self.prepare_dependencies()
+        outside = self.root / "outside-package"
+        outside.mkdir()
+        (outside / "package.json").write_text("{}\n")
+        (modules / ".pnpm/node_modules").mkdir()
+        (modules / "@scope").mkdir()
+        rejected = {
+            "broken": (modules / "missing", "../absent"),
+            "outside repository": (modules / "outside", outside),
+            "repo directory outside workspace": (modules / "scripts", "../scripts"),
+            "excluded workspace glob": (modules / "@scope/private", "../../packages/private"),
+            "repository root not listed": (modules / "root", ".."),
+        }
+        for name, (link, target) in rejected.items():
+            with self.subTest(name=name):
+                link.symlink_to(target, target_is_directory=True)
+                result = self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install", ok=False)
+                self.assertIn("symlink escapes installation or is broken: " + str(link.relative_to(modules)), result.stderr)
+                link.unlink()
+        self.assertFalse((self.home / ".local/state/gwt/dependencies").exists())
+        (modules / ".pnpm/node_modules/control-ui").symlink_to("../../../ui", target_is_directory=True)
+        (modules / "@scope/core").symlink_to("../../packages/core", target_is_directory=True)
+        receipt = Path(self.helper("dependencies", "record", "--source", self.repo, "--after-frozen-install").stdout.strip())
+        self.assertEqual(json.loads(receipt.read_text())["workspace_links"], 2)
+        # Sharing stays refused: relative links would execute this checkout's workspace code.
+        result = self.helper("dependencies", "check", "--source", self.repo, "--target", self.repo, ok=False)
+        self.assertIn("2 workspace packages", result.stderr)
+
     def test_dependency_scan_failure_is_not_compatibility_proof(self):
         modules = self.prepare_dependencies()
         original = os.scandir

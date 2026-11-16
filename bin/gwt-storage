@@ -5,6 +5,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import fnmatch
 import os
 from pathlib import Path
 import re
@@ -65,6 +66,47 @@ def direct(path):
 
 def inside(path, root):
     return path == root or root in path.parents
+
+
+def workspace_patterns(repo):
+    """Return (include, exclude) globs from the `packages:` list of pnpm-workspace.yaml."""
+    path = repo / "pnpm-workspace.yaml"
+    if not path.is_file() or path.is_symlink():
+        return [], []
+    include, exclude, active = [], [], False
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            active = line.split("#", 1)[0].strip() == "packages:"
+            continue
+        item = re.fullmatch(r"\s*-\s*(['\"]?)([^'\"#]+?)\1\s*(?:#.*)?", line) if active else None
+        if item:
+            glob = item.group(2).strip().removeprefix("./").rstrip("/") or "."
+            (exclude if glob.startswith("!") else include).append(glob.lstrip("!"))
+        elif active:
+            # Flow sequences or other layouts are unknown: accept no workspace links.
+            return [], []
+    return include, exclude
+
+
+def glob_parts_match(parts, glob):
+    if not glob:
+        return not parts
+    if glob[0] == "**":
+        return any(glob_parts_match(parts[index:], glob[1:]) for index in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatchcase(parts[0], glob[0]) and glob_parts_match(parts[1:], glob[1:])
+
+
+def workspace_package(target, repo, patterns):
+    """True when target is a package directory selected by the repo's pnpm workspace."""
+    if not inside(target, repo) or not target.is_dir() or not (target / "package.json").is_file():
+        return False
+    relative = target.relative_to(repo).parts
+    def matches(glob):
+        return glob_parts_match(list(relative), [part for part in glob.split("/") if part not in ("", ".")])
+    include, exclude = patterns
+    return any(matches(glob) for glob in include) and not any(matches(glob) for glob in exclude)
 
 
 def synthetic_root():
@@ -451,7 +493,11 @@ def dependency_install(source):
     if installed_lock_document(installed_lock) != wanted_lock_dependency_document(source / "pnpm-lock.yaml"):
         raise ValueError("installed lockfile differs from checkout lockfile")
     runtime = subprocess.run(["node", "-p", "JSON.stringify({node:process.versions.node,abi:process.versions.modules,platform:process.platform,arch:process.arch})"], capture_output=True, text=True, check=True)
-    # Workspace links back into donor source would execute the wrong checkout.
+    # pnpm links workspace packages back into the install's own checkout. They are
+    # valid for the install itself, but are counted so sharing can refuse them:
+    # a consumer would otherwise execute the donor checkout's workspace code.
+    patterns = workspace_patterns(source)
+    workspace_links = 0
     started = time.monotonic()
     entries = 0
     def scan_error(error):
@@ -463,11 +509,22 @@ def dependency_install(source):
             if entries > 300000 or time.monotonic() - started > 10:
                 raise ValueError("dependency link scan exceeded its bound")
             path = Path(parent) / name
-            if path.is_symlink() and (not path.exists() or not inside(path.resolve(), modules)):
-                raise ValueError("dependency symlink escapes installation or is broken: " + str(path.relative_to(modules)))
-    return {"version": 1, "source": str(source), "modules": [str(modules), details.st_dev, details.st_ino],
-            "inputs": inputs, "runtime": json.loads(runtime.stdout),
-            "metadata": hashlib.sha256(raw.encode()).hexdigest()}
+            if not path.is_symlink():
+                continue
+            target = path.resolve() if path.exists() else None
+            if target is not None and inside(target, modules):
+                continue
+            if target is not None and workspace_package(target, source, patterns):
+                workspace_links += 1
+                continue
+            raise ValueError("dependency symlink escapes installation or is broken: " + str(path.relative_to(modules)))
+    install = {"version": 1, "source": str(source), "modules": [str(modules), details.st_dev, details.st_ino],
+               "inputs": inputs, "runtime": json.loads(runtime.stdout),
+               "metadata": hashlib.sha256(raw.encode()).hexdigest()}
+    if workspace_links:
+        # Present only when needed so receipts for link-free installs stay unchanged.
+        install["workspace_links"] = workspace_links
+    return install
 
 
 def dependencies(args):
@@ -496,6 +553,9 @@ def dependencies(args):
         raise ValueError("dependency install or runtime changed since its frozen-install receipt")
     if dependency_inputs(args.target) != current["inputs"]:
         raise ValueError("consumer dependency inputs differ from the attested installation")
+    if current.get("workspace_links"):
+        raise ValueError(f"install links {current['workspace_links']} workspace packages into its own checkout; "
+                         "a shared node_modules would run the donor's workspace code; leave checkout code-only")
     print("gwt: dependency inputs, pnpm layout, Node runtime and internal links match the install receipt")
 
 

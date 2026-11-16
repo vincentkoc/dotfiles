@@ -475,6 +475,12 @@ Dependency compatibility:
   leave new worktrees code-only. An explicit source fails and retains the new
   checkout. Existing links are validated without repair or replacement.
 - Links inside the install must resolve within its physical `node_modules`.
+- Recording also accepts links to package directories selected by the install
+  checkout's `pnpm-workspace.yaml` `packages:` globs (pnpm's normal workspace
+  links). Broken links, links outside the checkout and links to unlisted or
+  excluded directories still fail. The receipt counts workspace links, and
+  `check` refuses to share such an install: relative links would resolve into
+  the donor checkout and run its workspace code instead of the consumer's.
   Workspace links into donor source are refused. Deep workspace sharing remains
   unavailable until each installation has its own qualification contract.
 - The receipt does not hash every installed package or prove native artifacts.
