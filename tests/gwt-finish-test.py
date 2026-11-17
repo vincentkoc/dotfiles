@@ -6621,6 +6621,44 @@ class ResumeAcknowledgementTests(unittest.TestCase):
             self.reject("resume")
             self.assertEqual(self.call("resume", self.flag)[1][0]["state"], "active")
 
+    def test_acknowledged_completion_never_releases_or_changes_enrollment(self):
+        self.call("resume", "--owner", "owner-2")
+        self.call("pin", "--reason", "retain requested checkout")
+        row = self.row()
+        lock = (self.admin / "locked").read_bytes()
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed), \
+                mock.patch.object(FINISH, "release") as release, \
+                mock.patch.object(FINISH, "evaluate_release") as removal:
+            result = self.call("finish", self.flag, "--pr", self.url)[1][0]
+        release.assert_not_called()
+        removal.assert_not_called()
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed):
+            self.reject("finish", "--pr", self.url)
+            self.reject("release")
+        self.assertEqual(result["pr"], self.url)
+        self.assertEqual(result["owners"], [{"owner": "owner-1", "completed": 1},
+                                            {"owner": "owner-2", "completed": 0}])
+        self.assertEqual(result["released_owners"], [])
+        self.assertEqual(result["checkout"], "retained")
+        self.assertEqual(result["pins"], [{"owner": "owner-1", "reason": "retain requested checkout"}])
+        self.assertEqual(self.row()["identity"], row["identity"])
+        self.assertEqual((self.admin / "locked").read_bytes(), lock)
+        self.assertTrue(self.wt.exists())
+
+    def test_acknowledged_completion_rechecks_identity_and_exact_pr(self):
+        bad = {**self.changed, "path_id": [self.changed["path_id"][0], 1]}
+        with mock.patch.object(FINISH, "snapshot", return_value=bad):
+            self.reject("finish", self.flag, "--pr", self.url)
+        late = {**self.changed, "branch": "refs/heads/replaced"}
+        with mock.patch.object(FINISH, "snapshot", side_effect=[self.changed, late]):
+            self.reject("finish", self.flag, "--pr", self.url)
+        with mock.patch.object(FINISH, "snapshot", return_value=self.changed):
+            self.reject("finish", self.flag, "--pr", self.url, "--owner", "new-owner",
+                        reason="requires-recorded-owner")
+            with mock.patch.object(FINISH, "pr", return_value=self.proof(self.url, head="1" * 40)):
+                self.reject("finish", self.flag, "--pr", self.url,
+                            reason="primary-pr-repository-or-head-mismatch")
+
     def test_new_owner_and_conflicting_runtime_owner_cannot_acknowledge(self):
         with mock.patch.object(FINISH, "snapshot", return_value=self.changed):
             self.reject("resume", self.flag, "--owner", "new-owner", reason="requires-recorded-owner")
@@ -6692,7 +6730,7 @@ class ResumeAcknowledgementTests(unittest.TestCase):
         self.assertEqual(probe.call_count, 2)
 
     def test_flag_rejects_other_actions_and_automatic_or_combined_resume(self):
-        commands = ("enroll", "finish", "cancel", "release", "remove", "pin", "unpin",
+        commands = ("enroll", "cancel", "release", "remove", "pin", "unpin",
                     "status", "check", "holder-qualification", "creation-token", "guard",
                     "reconcile", "recover-missing")
         value_options = ("--pr", "--target", "--wait-for", "--reason", "--policy", "--new-token",
@@ -6707,8 +6745,16 @@ class ResumeAcknowledgementTests(unittest.TestCase):
         for command, extra in [*((command, ()) for command in commands),
                                *(("resume", option) for option in options)]:
             with self.subTest(command=command, extra=extra), mock.patch.object(FINISH, "ledger") as ledger:
-                with self.assertRaisesRegex(FINISH.Retain, "one-explicit-resume"):
+                with self.assertRaisesRegex(FINISH.Retain, "explicit-resume-or-retained-finish"):
                     self.call(command, self.flag, *extra)
+                ledger.assert_not_called()
+
+    def test_acknowledged_finish_rejects_release_and_disposal_options(self):
+        for extra in (("--release",), ("--apply",), ("--policy", ""),
+                      ("--discard-ignored", "ignored"), ("--all",), ("--if-enrolled",)):
+            with self.subTest(extra=extra), mock.patch.object(FINISH, "ledger") as ledger:
+                with self.assertRaisesRegex(FINISH.Retain, "explicit-resume-or-retained-finish"):
+                    self.call("finish", self.flag, "--pr", self.url, *extra)
                 ledger.assert_not_called()
 
     def test_failed_claim_rolls_back_owner_completion_and_release_invalidation(self):

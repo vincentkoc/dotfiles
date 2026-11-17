@@ -767,9 +767,25 @@ The acknowledgment does not prove historical volume continuity or rewrite the
 recorded enrollment identity. Default resume, finish, release, pin and removal
 admission keep their existing checks; a later strict identity check can still
 refuse. Automatic `gwt cd`/`gwt new` reuse never acknowledges this difference.
-The flag accepts only checkout, state-directory and owner selection. It rejects
-other actions, batch mode, `--if-enrolled`, and all recovery, reconciliation,
-removal and holder-scan options, including explicitly supplied empty values.
+
+To record completed work while retaining a checkout whose device number changed:
+
+```sh
+gwt finish --pr https://github.com/example/project/pull/123 \
+  --acknowledge-device-renumbering --worktree /absolute/path/to/task
+```
+
+This verifies the same owner and identity constraints and the exact PR head,
+then records completion without signing off or attempting removal. It preserves
+the original enrollment identity, pins and other owners. It is not a release
+or removal qualification. Ordinary later release still requires strict identity
+validation.
+
+For resume, the flag accepts only checkout, state-directory and owner selection.
+For completion, it also accepts the PR, target and dependencies. It rejects
+other actions, batch mode, `--release`, `--if-enrolled`, and all recovery,
+reconciliation, disposal and holder-scan options, including explicitly supplied
+empty values.
 
 The wrapper parks only its own shell before release. It cannot move the parent
 Codex process. An alive parent outside the checkout/admin paths may remain

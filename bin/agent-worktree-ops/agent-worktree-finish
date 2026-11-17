@@ -657,7 +657,7 @@ def claim(db, row, owner):
         )
 
 
-def acknowledged_resume_row(db, row, owner):
+def acknowledged_owner_row(db, row, owner):
     require_open_retirement(db, row)
     if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=?",
                       (row["id"], owner)).fetchone():
@@ -665,9 +665,9 @@ def acknowledged_resume_row(db, row, owner):
     if not json.loads(row["identity"]).get("lock_reason", "").startswith("gwt-finish.v2:"):
         raise Retain("device-acknowledgement-requires-native-enrollment")
     current = revalidate(row, allow_device_renumbering=True)
-    # Same-owner resume acknowledges device numbering, not volume continuity.
-    # Claim strictly rechecks this transient identity under the lifecycle lock;
-    # durable enrollment and every completion/removal check keep their contract.
+    # Acknowledgment selects a transient identity, not historical volume continuity.
+    # The caller rechecks it under the lifecycle lock. Never rewrite enrollment
+    # or use this selection to grant release/removal authority.
     return {**row, "identity": json.dumps(immutable(current), sort_keys=True)}
 
 
@@ -2984,10 +2984,11 @@ def process_one(db, row, args):
     if args.command == "cancel":
         cancel(db, row, args)
     elif args.command == "finish":
-        finish(db, row, args)
+        selected = acknowledged_owner_row(db, row, owner_id(args)) if args.acknowledge_device_renumbering else row
+        finish(db, selected, args)
     elif args.command == "resume":
         who = owner_id(args)
-        resumed = acknowledged_resume_row(db, row, who) if args.acknowledge_device_renumbering else row
+        resumed = acknowledged_owner_row(db, row, who) if args.acknowledge_device_renumbering else row
         claim(db, resumed, who)
     elif args.command in ("pin", "unpin"):
         if not args.reason or len(args.reason) > 500:
@@ -3031,6 +3032,10 @@ def process_one(db, row, args):
     current = db.execute(
         "SELECT * FROM worktrees WHERE id = ?", (row["id"],)
     ).fetchone()
+    if args.command == "finish" and args.acknowledge_device_renumbering:
+        # Completion is useful even when the historical device binding prevents
+        # release. Preserve that binding and stop before every disposal path.
+        return summary(db, current)
     if args.command == "release" or (args.command == "finish" and (
             args.release or retirement(db, current) is not None)):
         release(db, current, args)
@@ -3092,13 +3097,15 @@ def main(argv=None):
         return 0
     # Acknowledgment permits identity selection only; new action options must
     # never silently inherit permission to mutate an existing enrollment.
-    if args.acknowledge_device_renumbering and (
-            args.command != "resume" or any(
+    if args.acknowledge_device_renumbering:
+        allowed = {"command", "worktree", "managed_root", "state_dir", "owner",
+                   "acknowledge_device_renumbering"}
+        if args.command == "finish":
+            allowed.update({"pr", "target", "wait_for"})
+        if args.command not in ("resume", "finish") or any(
                 value is not None and value is not False and value != []
-                for name, value in vars(args).items()
-                if name not in {"command", "worktree", "managed_root", "state_dir", "owner",
-                                "acknowledge_device_renumbering"})):
-        raise Retain("device-acknowledgement-requires-one-explicit-resume")
+                for name, value in vars(args).items() if name not in allowed):
+            raise Retain("device-acknowledgement-requires-explicit-resume-or-retained-finish")
     if args.sudo_holder_scan and not (args.command == "remove" and args.finalized):
         raise Retain("sudo-holder-scan-requires-manual-finalized-removal")
     if args.sudo_holder_scan and sys.platform != "linux":
