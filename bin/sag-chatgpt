@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+export SAG_CHATGPT_CODEX="${SAG_CHATGPT_CODEX:-$HOME/.codex/packages/standalone/current/bin/codex}"
+backend="$HOME/.local/lib/sag/chatgpt-33e4c6b/sag"
+case "${1:-}" in
+  help|completion|-h|--help|-V|--version) exec "$backend" "$@" ;;
+  speak|voices|login) sag_subcommand="$1"; shift ;;
+  *) sag_subcommand=speak ;;
+esac
+if [ "$sag_subcommand" = speak ]; then
+  exec "$backend" speak --provider chatgpt --keep-alive 1m "$@"
+fi
+exec "$backend" "$sag_subcommand" --provider chatgpt "$@"
