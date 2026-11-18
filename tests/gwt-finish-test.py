@@ -4191,6 +4191,52 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.assertEqual(item["state"], "enrolled")
             self.assertIsNone(item["intent"])
 
+    def squash_merged_target(self):
+        # A squash merge is a fresh commit on the target, not a descendant of the task head.
+        (self.wt / "file").write_text("squashed change\n")
+        git(self.wt, "commit", "-am", "task change")
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        base = git(self.repo, "rev-parse", "main")
+        squash = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", base, "-m", "squash merge (#1)")
+        git(self.repo, "update-ref", "refs/heads/main", squash, base)
+        git(self.wt, "fetch", "--no-auto-maintenance", "--no-tags", str(self.repo),
+            "refs/heads/main:refs/remotes/origin/main")
+        self.assertIn(squash, (self.admin / "FETCH_HEAD").read_text())
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.repo, "merge-base", "--is-ancestor", squash, "released-feature")
+        self.proofs[self.url] = self.proof(self.url, merge=squash)
+        return squash
+
+    def test_finalized_squash_merge_in_fetch_head_is_admitted(self):
+        squash = self.squash_merged_target()
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        self.assertEqual(self.finish()[1][0]["reason"], "pr-not-merged")
+        result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), squash)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
+    def test_completed_squash_merge_in_fetch_head_is_admitted(self):
+        squash = self.squash_merged_target()
+        with mock.patch.object(FINISH, "manual_holders"):
+            result = LifecycleTests.finish(self, "--release")[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/main"), squash)
+
+    def test_finalized_squash_fetch_head_unreachable_oid_retains(self):
+        self.squash_merged_target()
+        self.proofs[self.url].update(merged=False, state="open", merge=None)
+        self.assertEqual(self.finish()[1][0]["reason"], "pr-not-merged")
+        stray = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "fetched elsewhere")
+        path = self.admin / "FETCH_HEAD"
+        path.write_text(stray + "\t\tunreachable fetch\n")
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(path.read_text(), stray + "\t\tunreachable fetch\n")
+
     def test_finalized_fetch_head_without_recorded_target_retains(self):
         self.fetched_target(recorded=False)
         before = (self.admin / "FETCH_HEAD").read_bytes()
