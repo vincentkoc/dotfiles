@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+backend="$HOME/.local/lib/sag/voice-834bc54/sag"
+case "${1:-}" in
+  help|completion|-h|--help|-V|--version) exec "$backend" "$@" ;;
+  speak|voices) sag_subcommand="$1"; shift ;;
+  *) sag_subcommand=speak ;;
+esac
+exec fleet-credentials run foundation --env ELEVENLABS_API_KEY=op://nfpveecxnlmlka74d4f4dssr2a/gyhcaud5f4jr4jvx67egnfsqha/eojokdey5ttxlvymefipzo4nsa -- "$backend" "$sag_subcommand" --provider elevenlabs "$@"
