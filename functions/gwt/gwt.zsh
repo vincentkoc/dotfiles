@@ -1861,16 +1861,26 @@ gwt() {
                 return 1
             fi
 
-            if ! target_path=$(_gwt_find_path "$target"); then
-                echo "gwt: no matching worktree found for '$target'"
-                return 1
-            fi
-
             repo_root=$(_gwt_git_probe rev-parse --show-toplevel 2>/dev/null) || return 1
-            target_path=$(_gwt_registered_worktree_path "$repo_root" "$target_path" 2>/dev/null) || {
-                echo "gwt: refusing path not registered to this repository: $target_path" >&2
-                return 1
-            }
+            if $finalized_remove; then
+                # Finished checkouts can disappear before closeout. Match only
+                # their literal registration; the native owner validates absence.
+                local registered_path
+                target_path=""
+                while IFS= read -r registered_path; do
+                    [[ "$registered_path" == "$target" ]] && target_path="$target"
+                done < <(_gwt_git_probe worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}')
+                [[ -n "$target_path" ]] || {
+                    echo "gwt: refusing path not registered to this repository: $target" >&2
+                    return 1
+                }
+            else
+                target_path=$(_gwt_find_path "$target") &&
+                    target_path=$(_gwt_registered_worktree_path "$repo_root" "$target_path" 2>/dev/null) || {
+                    echo "gwt: no matching registered worktree found for '$target'" >&2
+                    return 1
+                }
+            fi
             if ! $finalized_remove; then
                 _gwt_finish_tool guard --worktree "$target_path" || return
             fi

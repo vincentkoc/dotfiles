@@ -587,6 +587,15 @@ external dependencies. A partial failure holds the intent and restores the
 matching native lock when its original registration still exists; it never
 replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
 
+If the checkout directory is already absent, the same literal `--finalized`
+command can retire its surviving registration. This requires all recorded
+owners completed and released, exact merged PR proof, no pending recovery,
+and unchanged owner, admin, branch, index and native lock identities. The index
+and admin recovery data must remain recoverable through surviving refs; holders
+and sibling preservation are checked as usual. The result records that working
+files were already absent and could not be audited. No checkout is recreated.
+An appeared directory or symlink refuses closeout.
+
 An explicit finalized closeout can admit a different named local branch from
 the one recorded at enrollment. Checkout, owner, Git administration and native
 enrollment-marker identities must still match. Admission pins the current

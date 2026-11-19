@@ -4326,6 +4326,7 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.proofs[self.url] = self.proof(self.url)
         self.assert_release_blocked("raw-index-flags-or-mode-unsupported")
         contents = self.inventory(allow_empty_gitlinks=True)
+        self.assertEqual(contents["index_sha256"], hashlib.sha256((self.admin / "index").read_bytes()).hexdigest())
         self.assertEqual({name: proof["state"] for name, proof in contents["gitlinks"].items()},
                          {"vendor/empty": "empty", "vendor/missing": "absent", "absent/leaf": "absent"})
         self.assertIn("vendor/empty", contents["entries"])
@@ -5987,6 +5988,191 @@ class FinalizedRemovalTests(unittest.TestCase):
         with (self.wt / "file").open():
             with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
                 FINISH.manual_holders(snap, {"entries": {"file": entry}}, {}, float("inf"))
+
+
+class MissingFinalizedRemovalTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = LifecycleTests.finish
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        self.proofs[self.url]["merged"] = False
+        self.finish()
+        self.proofs[self.url]["merged"] = True
+        self.before_lock = (self.admin / "locked").read_bytes()
+        self.original = ReleaseTests.row(self)
+
+    def disappear(self):
+        shutil.rmtree(self.wt)
+
+    def assert_retained(self, reason):
+        with mock.patch.object(FINISH, "remove_with_intent") as remove:
+            with self.assertRaisesRegex(FINISH.Retain, reason):
+                self.remove()
+        remove.assert_not_called()
+        self.assertTrue(self.admin.exists())
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_missing_checkout_uses_one_nonforce_removal_and_preserves_survivors(self):
+        donor = self.base / "donor"
+        donor.mkdir()
+        (donor / "keep").write_text("shared dependency")
+        (self.wt / "node_modules").symlink_to(donor)
+        self.disappear()
+        native = FINISH.safety().supervise
+        with mock.patch.object(FINISH.safety(), "supervise", wraps=native) as calls:
+            result = self.remove()[1][0]
+        removals = [call.args[0] for call in calls.call_args_list
+                    if "worktree" in call.args[0] and "remove" in call.args[0]]
+        self.assertEqual(len(removals), 1)
+        self.assertNotIn("--force", removals[0])
+        self.assertEqual(removals[0][-3:], ["remove", "--", str(self.wt)])
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        self.assertEqual((donor / "keep").read_text(), "shared dependency")
+        with FINISH.ledger(self.state) as db:
+            outcome = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertEqual(outcome["working_tree"], "already-absent-not-audited")
+
+    def test_missing_container_is_not_recreated(self):
+        self.disappear()
+        # The fixture's sibling lives under this root, so move it outside the
+        # missing container through native Git before removing that container.
+        git(self.repo, "worktree", "move", str(self.legacy), str(self.base / "sibling"))
+        self.root.rmdir()
+        # Missing the managed root itself must refuse; only its child container
+        # may already be absent.
+        with self.assertRaises(FileNotFoundError):
+            self.remove()
+        self.assertTrue(self.admin.exists())
+
+    def test_unfinished_unreleased_foreign_and_unmerged_owners_refuse(self):
+        self.disappear()
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "other-owner"}):
+            self.assert_retained("recorded-owner")
+        self.proofs[self.url]["merged"] = False
+        self.assert_retained("pr-closed-unmerged")
+        self.proofs[self.url]["merged"] = True
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("DELETE FROM owner_releases WHERE worktree_id=?", (self.original["id"],))
+        self.assert_retained("awaiting-owner-release")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE owners SET completed=0 WHERE worktree_id=?", (self.original["id"],))
+        self.assert_retained("awaiting-owner-completion")
+
+    def test_staged_only_index_bytes_refuse(self):
+        (self.wt / "file").write_text("uncommitted staged work")
+        git(self.wt, "add", "file")
+        self.disappear()
+        self.assert_retained("staged-or-index-only-changes")
+
+    def test_unanchored_fetch_head_refuses(self):
+        commit = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "unretained")
+        (self.admin / "FETCH_HEAD").write_text(commit + "\t\tfixture\n")
+        self.disappear()
+        self.assert_retained("fetch-head-recovery-required")
+
+    def test_reachable_ancestor_in_admin_survives_through_branch(self):
+        ancestor = self.head
+        (self.wt / "file").write_text("next committed revision\n")
+        git(self.wt, "commit", "-am", "next revision")
+        self.head = git(self.wt, "rev-parse", "HEAD")
+        self.proofs[self.url] = self.proof(self.url, merged=False)
+        self.finish()
+        self.proofs[self.url]["merged"] = True
+        (self.admin / "ORIG_HEAD").write_text(ancestor + "\n")
+        self.disappear()
+        self.assertEqual(self.remove()[1][0]["checkout"], "removed")
+        self.assertEqual(git(self.repo, "merge-base", ancestor, "released-feature"), ancestor)
+
+    def test_wrapper_forwards_only_exact_registered_missing_path(self):
+        self.disappear()
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; '
+                  '_gwt_tmux_sync_context() { :; }; gwt rm "$3" --finalized')
+        command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), str(self.repo)]
+        result = subprocess.run([*command, str(self.wt)], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(result.stdout.splitlines(), ["remove", "--worktree", str(self.wt), "--finalized"])
+        result = subprocess.run([*command, str(self.wt) + "-unknown"], env=env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("--worktree", result.stdout)
+
+    def test_divergent_draft_and_unknown_admin_refuse(self):
+        self.disappear()
+        saved = self.admin / "COMMIT_EDITMSG"
+        saved.write_text("unsaved draft\n")
+        self.assert_retained("commit-message-recovery-required")
+        saved.unlink()
+        (self.admin / "private-session").write_text("must survive")
+        self.assert_retained("admin-recovery-content-unknown")
+
+    def test_pin_refuses(self):
+        self.disappear()
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO pins VALUES (?, ?, ?)", (self.original["id"], "owner-1", "needed"))
+        self.assert_retained("recovery-pin-present")
+
+    def test_pending_recovery_refuses(self):
+        self.disappear()
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("CREATE TABLE missing_recoveries (worktree_id TEXT PRIMARY KEY, fact TEXT)")
+            db.execute("INSERT INTO missing_recoveries VALUES (?, ?)",
+                       (self.original["id"], json.dumps({"result": None})))
+        self.assert_retained("missing-recovery-intent-present")
+
+    def test_appeared_root_or_symlink_after_admission_never_reaches_native_removal(self):
+        self.disappear()
+        admit = FINISH.finalized_admission
+        calls = 0
+        def appear(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.wt.parent.mkdir(exist_ok=True)
+                self.wt.symlink_to(self.legacy)
+            return admit(*args, **kwargs)
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=appear):
+            result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "unknown")
+        self.assertTrue(self.wt.is_symlink())
+        self.assertTrue((self.legacy / "file").exists())
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_native_failure_restores_lock_and_preserves_nonretryable_intent(self):
+        self.disappear()
+        native = FINISH.safety().supervise
+        def fail_removal(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                return types.SimpleNamespace(proof={"returncode": 1}, failure=None, returncode=1)
+            return native(command, **kwargs)
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=fail_removal):
+            result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "unknown")
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        with FINISH.ledger(self.state) as db:
+            retirement = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertTrue(json.loads(retirement["result"])["native_lock_preserved"])
+            self.assertIsNotNone(retirement["intent"])
+        with self.assertRaisesRegex(FINISH.Retain, "intent"):
+            self.remove()
+
+
+class MissingContainerFinalizedRemovalTests(MissingFinalizedRemovalTests):
+    recovery_container = True
+
+    def disappear(self):
+        super().disappear()
+        self.wt.parent.rmdir()
 
 
 class QualificationFetchLeaseTests(unittest.TestCase):
