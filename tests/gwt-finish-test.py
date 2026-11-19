@@ -3198,6 +3198,62 @@ class MissingContainerRecoveryTests(unittest.TestCase):
         self.assertEqual(self.record()[1]["generation"], 1)
         self.assertEqual((sibling / "keep").read_text(), "other owner")
 
+    def test_large_blob_partial_container_recovery_replays_once(self):
+        self.apply()
+        data = b"x" * 17_387_080
+        (self.wt / "large").write_bytes(data)
+        (self.wt / "large").chmod(0o644)
+        git(self.wt, "add", ".")
+        git(self.wt, "commit", "-m", "large container recovery fixture")
+        MissingRecoveryTests.disappear_again(self)
+        self.container.rmdir()
+        before_index = (self.admin / "index").read_bytes()
+        digest = self.plan()
+        native = FINISH.recovery_blobs
+
+        def interrupted(*args, **kwargs):
+            with contextlib.closing(native(*args, **kwargs)) as blobs:
+                for name, mode, blob in blobs:
+                    yield name, mode, blob
+                    # Resume must verify the streamed large file and preserve
+                    # its inode while publishing the same staged container.
+                    if name == "large":
+                        raise RuntimeError("after large blob")
+
+        with mock.patch.object(FINISH, "recovery_blobs", side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, "after large blob"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, state = self.record()
+        self.assertEqual(record["contract"], FINISH.RECOVERY_CONTAINER_CONTRACT)
+        self.assertEqual(state["generation"], 1)
+        self.assertFalse(self.container.exists())
+        stage = Path(record["stage"])
+        before_stage = FINISH.identity(stage)
+        before_container = FINISH.identity(stage.parent)
+        before_file = (stage / "large").stat().st_ino
+        self.assertEqual((stage / "large").read_bytes(), data)
+        plan = self.recover("--continue-partial", "--intent-id", record["id"],
+                            "--recovery-sha256", digest)
+        self.assertTrue(plan["partial_continuation"])
+        self.assertEqual(plan["recovery_sha256"], digest)
+        result = self.recover("--continue-partial", "--apply", "--intent-id", record["id"],
+                              "--recovery-sha256", digest)
+        self.assertEqual(result["generation"], 2)
+        self.assertEqual(FINISH.identity(self.wt), before_stage)
+        self.assertEqual(FINISH.identity(self.container), before_container)
+        self.assertEqual((self.wt / "large").stat().st_ino, before_file)
+        self.assertEqual((self.wt / "large").read_bytes(), data)
+        self.assertEqual(stat_mode(self.wt / "large"), 0o644)
+        self.assertEqual((self.admin / "index").read_bytes(), before_index)
+        completed = self.record()
+        replay = self.recover("--apply", "--intent-id", record["id"],
+                              "--recovery-sha256", digest)
+        self.assertEqual(replay, result)
+        self.assertEqual(self.record(), completed)
+        self.assertEqual(completed[1]["generation"], 2)
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM missing_recovery_history").fetchone()[0], 1)
+
     def test_native_fd_publication_collision_preserves_both_directories(self):
         source = self.root / "source"
         target = self.root / "target"
@@ -3706,6 +3762,7 @@ class RecoveryBatchTests(unittest.TestCase):
         oid = self.blob(b"abc")
         entries = {name: (0o100644, oid) for name in ("existing", "first", "second")}
         (self.stage / "existing").write_bytes(b"abc")
+        (self.stage / "existing").chmod(0o644)
         before = (self.stage / "existing").stat().st_ino
         pointer = len(os.fsencode("gitdir: " + str(self.repo / ".git") + "\n"))
         with mock.patch.object(FINISH.safety(), "PASS_LIMIT", pointer + 8), \
