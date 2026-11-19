@@ -752,7 +752,11 @@ class ReleaseTests(unittest.TestCase):
     def setUp(self):
         LifecycleTests.setUp(self)
         self.legacy = self.wt
-        self.wt = self.root / "released-task"
+        parent = self.root
+        if getattr(self, "recovery_container", False):
+            parent /= "example-repo"
+            parent.mkdir(mode=0o700)
+        self.wt = parent / "released-task"
         self.token = str(uuid.uuid4())
         old_mask = os.umask(0o077)
         try:
@@ -1862,7 +1866,8 @@ class MissingRecoveryTests(unittest.TestCase):
         raw = (self.admin / "index").read_bytes()
         self.index_sha = hashlib.sha256(raw).hexdigest()
         self.assertGreater(len(raw), 65536)
-        with mock.patch.object(module, "LEAF_LIMIT", 65536):
+        with mock.patch.object(module, "LEAF_LIMIT", 65536), \
+                mock.patch.object(module.read_file, "__defaults__", (65536,)):
             result = self.recover("--apply", "--recovery-sha256", self.plan())
             self.assertEqual(result["checkout"], "restored")
             snap = FINISH.snapshot(str(self.wt), str(self.root), self.before_lock.decode().strip())
@@ -3094,6 +3099,431 @@ def stat_mode(path):
     return path.stat().st_mode & 0o777
 
 
+class MissingContainerRecoveryTests(unittest.TestCase):
+    recovery_container = True
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+    recover = MissingRecoveryTests.recover
+    plan = MissingRecoveryTests.plan
+    record = MissingRecoveryTests.record
+
+    def setUp(self):
+        MissingRecoveryTests.setUp(self)
+        self.container = self.wt.parent
+        self.container.rmdir()
+        self.acl = mock.patch.object(FINISH.safety(), "non_granting_acl", return_value=None)
+        self.acl.start()
+        self.addCleanup(self.acl.stop)
+
+    def apply(self):
+        return self.recover("--apply", "--recovery-sha256", self.plan())
+
+    def test_plan_is_read_only_and_binds_existing_root(self):
+        before = set(self.root.iterdir())
+        result = self.recover()
+        self.assertFalse(result["checkout_mutation"])
+        self.assertEqual(result["container_layout"]["root_id"], FINISH.identity(self.root))
+        self.assertEqual(result["container_layout"]["container"], "example-repo")
+        self.assertEqual(set(self.root.iterdir()), before)
+        self.assertFalse(self.container.exists())
+        self.assertIsNone(self.record()[0])
+
+    def test_native_publish_preserves_source_and_generation_once(self):
+        digest = self.plan()
+        result = self.recover("--apply", "--recovery-sha256", digest)
+        record, state = self.record()
+        self.assertEqual(record["contract"], FINISH.RECOVERY_CONTAINER_CONTRACT)
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(state["generation"], 1)
+        self.assertEqual((self.wt / "file").read_text(), "original\n")
+        self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+        self.assertEqual(FINISH.identity(self.container), record["container_id"])
+        self.assertFalse(Path(record["stage"]).parent.exists())
+        sibling = self.container / "independent-task"
+        sibling.mkdir()
+        (sibling / "keep").write_text("other owner")
+        replay = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", result["intent_id"])
+        self.assertEqual(replay, result)
+        self.assertEqual(self.record()[1]["generation"], 1)
+        self.assertEqual((sibling / "keep").read_text(), "other owner")
+
+    def test_native_fd_publication_collision_preserves_both_directories(self):
+        source = self.root / "source"
+        target = self.root / "target"
+        source.mkdir()
+        target.mkdir()
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with self.assertRaisesRegex(FINISH.Retain, "no-replace-refused"):
+                FINISH.recovery_publish_at(fd, "source", "target")
+        finally:
+            os.close(fd)
+        self.assertTrue(source.is_dir())
+        self.assertTrue(target.is_dir())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin access boundary fixture")
+    def test_native_publish_with_real_access_boundaries(self):
+        with mock.patch.object(FINISH.safety(), "access_boundary", self.boundary.temp_original), \
+                mock.patch.object(FINISH.safety(), "non_granting_acl", self.acl.temp_original):
+            self.assertEqual(self.apply()["checkout"], "restored")
+        self.assertEqual(stat_mode(self.container), 0o700)
+        self.assertEqual(stat_mode(self.wt), 0o700)
+
+    def test_appeared_container_or_symlink_refuses_without_intent(self):
+        digest = self.plan()
+        for symlink in (False, True):
+            if symlink:
+                self.container.symlink_to(self.base, target_is_directory=True)
+            else:
+                self.container.mkdir()
+            try:
+                with self.assertRaises(FINISH.Retain):
+                    self.recover("--apply", "--recovery-sha256", digest)
+                self.assertIsNone(self.record()[0])
+            finally:
+                self.container.unlink() if symlink else self.container.rmdir()
+
+    def test_root_replacement_invalidates_reviewed_digest(self):
+        digest = self.plan()
+        self.root.rename(self.base / "old-root")
+        self.root.mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "reviewed-preimage"):
+            self.recover("--apply", "--recovery-sha256", digest)
+        self.assertIsNone(self.record()[0])
+        self.assertFalse(self.container.exists())
+
+    def test_root_swap_at_mkdir_cannot_redirect_creation(self):
+        mkdir = os.mkdir
+        moved = self.base / "moved-root"
+        def swap(name, *args, **kwargs):
+            if str(name).startswith(".gwt-recover-"):
+                self.root.rename(moved)
+                mkdir(self.root, mode=0o700)
+            return mkdir(name, *args, **kwargs)
+        digest = self.plan()
+        with mock.patch.object(os, "mkdir", side_effect=swap):
+            with self.assertRaisesRegex(FINISH.Retain, "root-changed"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, state = self.record()
+        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertTrue((moved / Path(record["stage"]).parent.name / self.wt.name).is_dir())
+        self.assertEqual(state["generation"], 0)
+        self.assertIsNone(record["result"])
+
+    def test_root_swap_at_native_rename_cannot_redirect_publication(self):
+        publish = FINISH.recovery_publish_at
+        moved = self.base / "moved-root"
+        def swap(fd, source, target):
+            self.root.rename(moved)
+            self.root.mkdir(mode=0o700)
+            for name in (source, target):
+                (self.root / name).mkdir(mode=0o700)
+                (self.root / name / "keep").write_text(name)
+            publish(fd, source, target)
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish_at", side_effect=swap):
+            with self.assertRaisesRegex(FINISH.Retain, "root-changed"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, state = self.record()
+        for name in (Path(record["stage"]).parent.name, self.container.name):
+            self.assertEqual((self.root / name / "keep").read_text(), name)
+        self.assertEqual((moved / self.container.name / self.wt.name / "file").read_text(), "original\n")
+        self.assertEqual(state["generation"], 0)
+
+    def test_directory_receipts_follow_fsync_and_publication_syncs_root(self):
+        fsync, create = os.fsync, FINISH.RecoveryContainer.create
+        synced = []
+        def sync(fd):
+            fsync(fd)
+            synced.append([os.fstat(fd).st_dev, os.fstat(fd).st_ino])
+        def checked_create(instance, record, persist):
+            def checked_persist():
+                self.assertIn(instance.fact["root_id"], synced)
+                self.assertIn(record["container_id"], synced)
+                if record["stage_id"] is not None:
+                    self.assertIn(record["stage_id"], synced)
+                persist()
+            create(instance, record, checked_persist)
+        with mock.patch.object(os, "fsync", side_effect=sync), \
+                mock.patch.object(FINISH.RecoveryContainer, "create", checked_create):
+            self.apply()
+        self.assertGreaterEqual(synced.count(FINISH.identity(self.root)), 2)
+
+    def test_real_access_boundary_rejects_root_mode_drift(self):
+        with mock.patch.object(FINISH.safety(), "access_boundary", self.boundary.temp_original):
+            digest = self.plan()
+            self.root.chmod(0o777)
+            with self.assertRaisesRegex(FINISH.Retain, "access-boundary"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertIsNone(self.record()[0])
+
+    def test_missing_managed_root_never_creates_ancestors(self):
+        self.legacy.rename(self.base / "legacy")
+        self.root.rmdir()
+        with self.assertRaises((FINISH.Retain, FileNotFoundError)):
+            self.recover()
+        self.assertFalse(self.root.exists())
+        self.assertIsNone(self.record()[0])
+
+    def test_deeper_missing_container_is_unsupported(self):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            snap = json.loads(row["identity"])
+        snap["path"] = str(self.container / "nested" / self.wt.name)
+        with self.assertRaisesRegex(FINISH.Retain, "layout-unsupported"):
+            FINISH.RecoveryContainer(snap, FINISH.safety().DEADLINE)
+        self.assertFalse(self.container.exists())
+
+    def interrupted(self):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=RuntimeError("fixture interruption")):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        return record, digest
+
+    def test_partial_stage_requires_explicit_same_intent(self):
+        record, digest = self.interrupted()
+        self.assertFalse(self.container.exists())
+        with self.assertRaisesRegex(FINISH.Retain, "incomplete-or-rebound"):
+            self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        result = self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                              "--intent-id", record["id"])
+        self.assertEqual(result["generation"], 1)
+
+    @contextlib.contextmanager
+    def native_self_holders(self):
+        run = FINISH.run
+        def fixture_process(command, **kwargs):
+            if Path(command[0]).name == "lsof":
+                # Real native cwd/FD records, restricted to this fixture process.
+                command = [command[0], "-a", "-p", str(os.getpid()), *command[1:]]
+            return run(command, **kwargs)
+        with mock.patch.object(FINISH, "manual_holders", self.holders.temp_original), \
+                mock.patch.object(FINISH, "run", side_effect=fixture_process):
+            yield
+
+    def assert_container_holder_refused(self, *, partial):
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_tree" if partial else "recovery_publish_at",
+                               side_effect=RuntimeError("fixture interruption")):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, state = self.record()
+        stage = Path(record["stage"]).parent
+        before = sorted(str(path.relative_to(stage)) for path in stage.rglob("*"))
+        for kind in ("cwd", "fd"):
+            with self.subTest(kind=kind):
+                cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+                held = None
+                try:
+                    if kind == "cwd":
+                        os.chdir(stage)
+                    else:
+                        held = os.open(stage, os.O_RDONLY | os.O_DIRECTORY)
+                    with self.native_self_holders():
+                        with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                            self.recover(*(["--continue-partial"] if partial else []),
+                                         "--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+                finally:
+                    if held is not None:
+                        os.close(held)
+                    os.fchdir(cwd)
+                    os.close(cwd)
+                self.assertEqual(self.record(), (record, state))
+                self.assertEqual(sorted(str(path.relative_to(stage)) for path in stage.rglob("*")), before)
+                self.assertFalse(self.container.exists())
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_container_cwd_and_fd_block_partial_write(self):
+        self.assert_container_holder_refused(partial=True)
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_container_cwd_and_fd_block_same_intent_publication(self):
+        self.assert_container_holder_refused(partial=False)
+
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_pinned_managed_root_fd_does_not_block_publication(self):
+        with self.native_self_holders():
+            self.assertEqual(self.apply()["checkout"], "restored")
+
+    def test_container_inode_alias_blocks_partial_write(self):
+        record, digest = self.interrupted()
+        device, inode = record["container_id"]
+        observed = types.SimpleNamespace(
+            stdout=f"p7\0\nf3\0D0x{device:x}\0i{inode}\0n/fixture/alias\0\n".encode(), stderr=b"")
+        run, which = FINISH.run, shutil.which
+        def aliased(command, **kwargs):
+            return observed if command[0] == "/fixture/lsof" else run(command, **kwargs)
+        with mock.patch.object(FINISH, "manual_holders", self.holders.temp_original), \
+                mock.patch.object(FINISH.shutil, "which", side_effect=lambda name:
+                                  "/fixture/lsof" if name == "lsof" else which(name)), \
+                mock.patch.object(FINISH, "run", side_effect=aliased):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                             "--intent-id", record["id"])
+        self.assertEqual(self.record()[0], record)
+        self.assertEqual(list(Path(record["stage"]).iterdir()), [])
+
+    def test_extra_staged_child_is_preserved_and_refused(self):
+        record, digest = self.interrupted()
+        extra = Path(record["stage"]).parent / "other"
+        extra.write_text("preserve")
+        with self.assertRaisesRegex(FINISH.Retain, "unexpected-entry"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                         "--intent-id", record["id"])
+        self.assertEqual(extra.read_text(), "preserve")
+        self.assertFalse(self.container.exists())
+
+    def test_staged_container_symlink_is_preserved_and_refused(self):
+        record, digest = self.interrupted()
+        stage = Path(record["stage"]).parent
+        saved = self.base / "saved-stage"
+        stage.rename(saved)
+        stage.symlink_to(saved, target_is_directory=True)
+        with self.assertRaisesRegex(FINISH.Retain, "directory-unsafe"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                         "--intent-id", record["id"])
+        self.assertTrue(stage.is_symlink())
+        self.assertTrue((saved / self.wt.name).is_dir())
+
+    def test_staged_checkout_replacement_is_preserved_and_refused(self):
+        record, digest = self.interrupted()
+        stage = Path(record["stage"])
+        saved = self.base / "saved-checkout"
+        stage.rename(saved)
+        stage.mkdir(mode=0o700)
+        with self.assertRaisesRegex(FINISH.Retain, "directory-changed"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                         "--intent-id", record["id"])
+        self.assertTrue(stage.is_dir())
+        self.assertTrue(saved.is_dir())
+        self.assertEqual(self.record()[0], record)
+
+    def replace_before_write(self, operation):
+        materialize = FINISH.recovery_tree
+        replaced = []
+        saved = self.base / "recorded-stage"
+        def swap(root, *args, **kwargs):
+            if kwargs.get("write"):
+                root = Path(root)
+                root.rename(saved)
+                root.mkdir(mode=0o700)
+                replaced.append(root)
+            return materialize(root, *args, **kwargs)
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=swap):
+            with self.assertRaisesRegex(FINISH.Retain, "staging-rebound"):
+                operation()
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(list(replaced[0].iterdir()), [])
+        self.assertTrue(saved.is_dir())
+        self.assertFalse(self.container.exists())
+        self.assertEqual(self.record()[1]["generation"], 0)
+
+    def test_replaced_stage_before_initial_write_is_untouched(self):
+        digest = self.plan()
+        self.replace_before_write(lambda: self.recover("--apply", "--recovery-sha256", digest))
+
+    def test_replaced_stage_before_partial_write_is_untouched(self):
+        record, digest = self.interrupted()
+        self.replace_before_write(lambda: self.recover(
+            "--continue-partial", "--apply", "--recovery-sha256", digest, "--intent-id", record["id"]))
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin ACL fixture")
+    def test_real_staged_acl_grant_refuses_continuation(self):
+        record, digest = self.interrupted()
+        stage = Path(record["stage"]).parent
+        subprocess.run(["/bin/chmod", "+a", "everyone allow readattr", str(stage)], check=True)
+        try:
+            with mock.patch.object(FINISH.safety(), "non_granting_acl", self.acl.temp_original):
+                with self.assertRaisesRegex(FINISH.Retain, "grants"):
+                    self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                                 "--intent-id", record["id"])
+        finally:
+            subprocess.run(["/bin/chmod", "-N", str(stage)], check=True)
+        self.assertEqual(self.record()[0], record)
+
+    def test_mkdir_before_inode_receipt_remains_unknown(self):
+        original = FINISH.RecoveryContainer.directory
+        def interrupted_directory(instance, name, parent_fd, expected=None):
+            if name.startswith(".gwt-recover-"):
+                raise RuntimeError("before inode persistence")
+            return original(instance, name, parent_fd, expected)
+        digest = self.plan()
+        with mock.patch.object(FINISH.RecoveryContainer, "directory", interrupted_directory):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        stage = Path(record["stage"]).parent
+        self.assertTrue(stage.is_dir())
+        self.assertIsNone(record["container_id"])
+        with self.assertRaisesRegex(FINISH.Retain, "inode-unknown"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                         "--intent-id", record["id"])
+        self.assertTrue(stage.is_dir())
+
+    def test_checkout_mkdir_before_inode_receipt_remains_unknown(self):
+        original = FINISH.RecoveryContainer.directory
+        def interrupted_directory(instance, name, parent_fd, expected=None):
+            if name == self.wt.name:
+                raise RuntimeError("before checkout inode persistence")
+            return original(instance, name, parent_fd, expected)
+        digest = self.plan()
+        with mock.patch.object(FINISH.RecoveryContainer, "directory", interrupted_directory):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, _ = self.record()
+        self.assertIsNotNone(record["container_id"])
+        self.assertIsNone(record["stage_id"])
+        self.assertTrue(Path(record["stage"]).is_dir())
+        with self.assertRaisesRegex(FINISH.Retain, "inode-unknown"):
+            self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                         "--intent-id", record["id"])
+
+    def test_post_publish_crash_replays_same_inode_and_history(self):
+        publish = FINISH.recovery_publish_at
+        def interrupted(*args):
+            publish(*args)
+            raise RuntimeError("after publication")
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish_at", side_effect=interrupted):
+            with self.assertRaises(RuntimeError):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, state = self.record()
+        self.assertEqual(state["generation"], 0)
+        before = FINISH.identity(self.wt)
+        result = self.recover("--apply", "--recovery-sha256", digest, "--intent-id", record["id"])
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(FINISH.identity(self.wt), before)
+        # A subsequent disappearance archives the exact v3 receipt and uses v2
+        # when the shared container now exists.
+        self.generation = 1
+        shutil.rmtree(self.wt)
+        second = self.apply()
+        self.assertEqual(second["generation"], 2)
+        self.assertEqual(self.record()[0]["contract"], FINISH.RECOVERY_CONTRACT)
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM missing_recovery_history").fetchone()[0], 1)
+
+    def test_post_publish_admin_drift_keeps_pending_intent(self):
+        publish = FINISH.recovery_publish_at
+        def changed(*args):
+            publish(*args)
+            (self.admin / "COMMIT_EDITMSG").write_text("changed after publication\n")
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_publish_at", side_effect=changed):
+            with self.assertRaisesRegex(FINISH.Retain, "commit-message-recovery-required"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, state = self.record()
+        self.assertTrue(self.wt.is_dir())
+        self.assertIsNone(record["result"])
+        self.assertEqual(state["state"], "recovery-pending")
+        self.assertEqual(state["generation"], 0)
+        self.assertEqual((self.admin / "COMMIT_EDITMSG").read_text(), "changed after publication\n")
+
+
 class RecoveryBatchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3114,6 +3544,21 @@ class RecoveryBatchTests(unittest.TestCase):
     def write(self, entries, **options):
         return FINISH.recovery_tree(self.stage, entries, str(self.repo / ".git"), self.until,
                                     write=True, owner=str(self.repo), **options)
+
+    def test_stage_replacement_before_open_is_never_written(self):
+        expected = FINISH.identity(self.stage)
+        opened = os.open
+        saved = self.repo / "recorded-stage"
+        def swap(path, *args, **kwargs):
+            if Path(path) == self.stage:
+                self.stage.rename(saved)
+                self.stage.mkdir(mode=0o700)
+            return opened(path, *args, **kwargs)
+        with mock.patch.object(os, "open", side_effect=swap):
+            with self.assertRaisesRegex(FINISH.Retain, "staging-rebound"):
+                self.write({}, expected_id=expected)
+        self.assertEqual(list(saved.iterdir()), [])
+        self.assertEqual(list(self.stage.iterdir()), [])
 
     def test_binary_duplicate_executable_and_symlink_blobs_are_raw(self):
         data = b"\0line\n" + b"f" * 40 + b" blob 0\n\n"

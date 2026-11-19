@@ -883,8 +883,11 @@ def non_granting_acl(path, until):
     lib.acl_to_text.argtypes = [C.c_void_p, C.POINTER(C.c_ssize_t)]
     lib.acl_to_text.restype = C.c_void_p
     lib.acl_free.argtypes = [C.c_void_p]
-    named = os.lstat(path)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    # Recovery already holds its directory through a pinned parent. Borrow that
+    # descriptor without resolving the pathname again or taking its ownership.
+    source_fd = isinstance(path, int)
+    named = os.fstat(path) if source_fd else os.lstat(path)
+    fd = os.dup(path) if source_fd else os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
     acl = None
     try:
         if file_identity(os.fstat(fd)) != file_identity(named):
@@ -925,7 +928,8 @@ def non_granting_acl(path, until):
             lib.acl_free(acl)
         after = os.fstat(fd)
         os.close(fd)
-        if file_identity(named) != file_identity(after) or file_identity(named) != file_identity(os.lstat(path)):
+        current = os.fstat(path) if source_fd else os.lstat(path)
+        if file_identity(named) != file_identity(after) or file_identity(named) != file_identity(current):
             raise Retain("native-acl-object-changed")
 
 

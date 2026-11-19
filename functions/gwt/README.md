@@ -168,6 +168,25 @@ refuse before recovery; this does not change the accepted index formats.
 Conflicts, sparse/unknown index formats, gitlinks, pending
 Git or lifecycle operations, held paths and appeared destinations refuse.
 
+When only the managed repository container and its checkout are missing, the
+existing managed root must still resolve to a verified physical directory.
+The plan binds that root's inode, access boundary and the two missing names.
+Apply holds the root descriptor while creating a private container stage and
+publishing it with a relative native no-replace rename. It never creates a
+missing managed root or a deeper ancestor chain, and never adopts an appeared
+container. The new container and checkout use mode `0700`.
+
+This layout uses a `gwt-missing-recovery.v3` receipt, recording each created
+directory inode separately after syncing it and its parent. A crash between
+creation and the corresponding durable inode record remains unknown; even an
+empty appeared directory cannot be adopted. A private stage must contain only
+the recorded checkout. Initial and partial writes verify the recorded checkout
+inode again when opening the staging directory. Existing-parent recovery retains
+its v2 receipt shape, and pending legacy/v2 receipts keep their original
+reconciliation rules. Before partial writes and publication, holder checks cover
+the unpublished container itself and its checkout. Published sibling checkouts
+remain outside that private staging scope.
+
 Recovery preserves `FETCH_HEAD`, including fetched commits outside the task's
 ancestry. Its records must parse strictly and name existing commit objects; the
 plan hash binds their sorted OIDs, file identity and exact bytes. Apply refuses
