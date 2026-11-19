@@ -324,6 +324,24 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(result.proof["reaped"])
         self.assertTrue(result.proof["group_absent"])
 
+    def test_buffered_limit_retains_received_overflow_chunk(self):
+        result = self.invoke("import sys; sys.stdout.buffer.write(b'x' * 11)", limit=10)
+        self.assertEqual(result.failure_code, "output-limit")
+        self.assertEqual(result.stdout, b"x" * 11)
+        self.assertEqual(result.stdout_bytes, 11)
+
+    def test_stdout_spool_stderr_keeps_independent_memory_bound(self):
+        for size in (NATIVE.LEAF_LIMIT, NATIVE.LEAF_LIMIT + 1):
+            with self.subTest(size=size), tempfile.TemporaryFile() as spool:
+                result = self.invoke(f"import os; os.write(2, b'x' * {size})",
+                                     stdout_sink=spool, limit=2 * NATIVE.LEAF_LIMIT)
+            self.assertEqual(result.failure_code, "output-limit" if size > NATIVE.LEAF_LIMIT else None)
+            self.assertLessEqual(len(result.stderr), NATIVE.LEAF_LIMIT)
+            self.assertEqual(result.stderr_bytes, size)
+            self.assertEqual(result.proof["stderr_sha256"], hashlib.sha256(b"x" * size).hexdigest())
+            self.assertTrue(result.proof["reaped"])
+            self.assertTrue(result.proof["group_absent"])
+
     def test_stdout_spool_error_reaps_child_and_keeps_byte_count(self):
         for result_value in (0, None, -1):
             with self.subTest(result_value=result_value):

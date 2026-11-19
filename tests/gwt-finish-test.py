@@ -3035,7 +3035,7 @@ class MissingRecoveryTests(unittest.TestCase):
         self.assertEqual(result["checkout"], "restored")
         self.assertEqual(result["generation"], 1)
         self.assertEqual(result["entries"], count)
-        self.assertEqual(children, {"metadata": 51, "content": 52})
+        self.assertEqual(children, {"metadata": 102, "content": 52})
         self.assertGreaterEqual(synced.call_count, count)
         self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
         self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)

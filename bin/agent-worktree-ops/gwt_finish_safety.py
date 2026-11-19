@@ -194,7 +194,13 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
                 else:
                     counts[key.data] += len(chunk)
                     digests[key.data].update(chunk)
-                    if sum(counts) > limit:
+                    if stdout_sink is None:
+                        output[key.data].extend(chunk)
+                    # A large stdout allowance must not turn stderr into an
+                    # equally large in-memory capture. Buffered callers retain
+                    # their existing overflow chunk for diagnostic accounting.
+                    if (sum(counts) > limit
+                            or (stdout_sink is not None and key.data == 1 and counts[1] > LEAF_LIMIT)):
                         raise Retain("child-output-limit")
                     if key.data == 0 and stdout_sink is not None:
                         # The parent owns the spool; the child still inherits only
@@ -206,7 +212,7 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
                             if type(written) is not int or not 0 < written <= len(chunk) - offset:
                                 raise Retain("child-output-sink-write-invalid")
                             offset += written
-                    else:
+                    elif stdout_sink is not None:
                         output[key.data].extend(chunk)
         child.wait(timeout=max(0.001, until - time.monotonic()))
     except Exception as error:
