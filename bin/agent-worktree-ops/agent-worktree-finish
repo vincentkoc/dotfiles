@@ -1429,8 +1429,45 @@ def manual_holders(snap, contents, admin, until, *, sudo_holder_scan_enabled=Fal
         raise Retain("pending-departure")
 
 
+def missing_finalized_snapshot(row, until, lock_reason):
+    """Bind surviving administration without recreating already absent source."""
+    snap = {**json.loads(row["identity"]), "head": row["finish_head"]}
+    if (not snap["head"] or not SHA.fullmatch(snap["head"])
+            or physical(snap["root"]) != snap["root"]
+            or not inside(snap["path"], snap["root"]) or snap["path"] == snap["root"]
+            or identity(snap["root"])[0] != snap["path_id"][0]):
+        raise Retain("missing-closeout-boundary-changed")
+    for key in ("owner", "common", "gitdir"):
+        if physical(snap[key]) != snap[key] or identity(snap[key]) != snap[key + "_id"]:
+            raise Retain("missing-closeout-identity-changed")
+    if (git(snap["owner"], "rev-parse", "--path-format=absolute", "--git-common-dir") != snap["common"]
+            or repository(git(snap["owner"], "remote", "get-url", "origin")) != snap["repo"]):
+        raise Retain("missing-closeout-owner-binding-changed")
+    selected = [entry for entry in records(snap["owner"]) if entry.get("worktree") == snap["path"]]
+    if (len(selected) != 1 or selected[0].get("HEAD") != snap["head"]
+            or selected[0].get("branch") != snap["branch"]
+            or selected[0].get("locked") != lock_reason):
+        raise Retain("missing-closeout-registration-changed")
+    observed = sibling_identity(snap, snap["path"], until)
+    if (observed["path_id"] is not None or observed["gitdir"] != snap["gitdir"]
+            or observed["gitdir_id"] != snap["gitdir_id"]):
+        raise Retain("missing-closeout-target-changed")
+    raw, _ = safety().read_file(Path(snap["gitdir"]) / "HEAD", until)
+    if raw != os.fsencode("ref: " + snap["branch"] + "\n"):
+        raise Retain("missing-closeout-head-changed")
+    # The absent root's old inode remains a holder domain. Its working bytes
+    # cannot be audited; only the surviving index/admin data can be retired.
+    snap["path_absence"] = observed["path_absence"]
+    snap.pop("lock_reason", None)
+    if lock_reason is not None:
+        snap["lock_reason"] = lock_reason
+    return snap
+
+
 def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=None):
-    snap = revalidate(row)
+    missing = row.get("missing_worktree", False)
+    snap = (missing_finalized_snapshot(row, until, json.loads(row["identity"])["lock_reason"])
+            if missing else revalidate(row))
     if snap["head"] != row["finish_head"]:
         raise Retain("finalized-head-changed")
     if db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone():
@@ -1446,15 +1483,28 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
                 "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG",
                 "rebase-merge", "rebase-apply", "sequencer")):
             raise Retain("git-operation-in-progress")
-    keys = git(snap["path"], "config", "--includes", "--null", "--name-only", "--list")
-    if any(key.lower().startswith("filter.") for key in keys.split("\0")):
-        raise Retain("git-conversion-filter-unqualified")
-    if git(snap["path"], "status", "--porcelain=v1", "-z",
-           "--untracked-files=all", "--ignore-submodules=none"):
-        raise Retain("dirty-or-untracked-worktree")
-    ignored = {name.rstrip("/") for name in git(
-        snap["path"], "ls-files", "--others", "--ignored", "--exclude-standard",
-        "--directory", "-z").split("\0") if name}
+    if missing:
+        completion_checks(db, row, local=False)
+        all_released(db, row, retirement(db, row))
+        if owner_id(args) not in {owner["owner"] for owner in owner_rows(db, row["id"])}:
+            raise Retain("missing-closeout-requires-recorded-owner")
+        recovery = missing_recovery_record(db, row)
+        if recovery is not None and not recovery["result"]:
+            raise Retain("missing-recovery-intent-present")
+        attempt = failed_creation_record(db, row)
+        if attempt is not None:
+            raise Retain("failed-creation-recovery-present")
+        ignored = set()
+    else:
+        keys = git(snap["path"], "config", "--includes", "--null", "--name-only", "--list")
+        if any(key.lower().startswith("filter.") for key in keys.split("\0")):
+            raise Retain("git-conversion-filter-unqualified")
+        if git(snap["path"], "status", "--porcelain=v1", "-z",
+               "--untracked-files=all", "--ignore-submodules=none"):
+            raise Retain("dirty-or-untracked-worktree")
+        ignored = {name.rstrip("/") for name in git(
+            snap["path"], "ls-files", "--others", "--ignored", "--exclude-standard",
+            "--directory", "-z").split("\0") if name}
     disposable = set(args.discard_ignored)
     dependency_link = completed and ignored == {"node_modules"} and (Path(snap["path"]) / "node_modules").is_symlink()
     if disposable != ignored and not dependency_link:
@@ -1464,9 +1514,20 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
     for proof in row["finalized_refs"].values():
         if proof["reflog"] is not None:
             preserved_oids.update(proof["reflog"]["oids"])
-    contents = module.inventory(snap, git, until, discard_ignored=disposable, compact_discarded=True,
-                                allow_empty_gitlinks=True, preserved_oids=preserved_oids)
-    admin = module.admin_inventory(snap, git, until, preserved_oids=preserved_oids)
+    if missing:
+        proof, _, _ = module.index_inventory({**snap, "path": snap["owner"]}, git, until,
+                                             preserved_oids=preserved_oids, revision=snap["head"])
+        contents = {**proof, "entries": {}, "dependency": None, "missing_worktree": True,
+                    "discarded_inodes": [snap["path_id"]]}
+    else:
+        contents = module.inventory(snap, git, until, discard_ignored=disposable, compact_discarded=True,
+                                    allow_empty_gitlinks=True, preserved_oids=preserved_oids)
+    admin = module.admin_inventory({**snap, "path": snap["owner"]} if missing else snap,
+                                   git, until, preserved_oids=preserved_oids)
+    if missing:
+        preserve_release_recovery({**snap, "path": snap["owner"]}, sorted({oid for value in admin.values()
+                                               if len(value) == 3 for oid in value[2]}),
+                                  preserved_oids, until)
     holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
     manual_holders(snap, contents, admin, until, **holder_options)
     refs = preserved_refs(snap, row["finalized_refs"], until)
@@ -1476,20 +1537,26 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
     for name, proof in contents.get("gitlinks", {}).items():
         if module.empty_gitlink(snap, name, until) != proof:
             raise Retain("gitlink-state-changed")
-    return {"snapshot": snap, "boundaries": [], "contents": contents, "admin": admin,
+    boundaries = ([module.access_boundary(snap["path_absence"]["parent"], until),
+                   module.access_boundary(snap["gitdir"], until)] if missing else [])
+    return {"snapshot": snap, "boundaries": boundaries, "contents": contents, "admin": admin,
             "branch_reflog": refs[snap["branch"]]["reflog"], "preserved_refs": refs}
 
 
 def remove_finalized(db, row, args, *, completed=False):
     item = require_open_retirement(db, row)
     enrolled_branch = json.loads(row["identity"])["branch"]
-    snap = revalidate(row, allow_device_renumbering=not completed, allow_branch_change=not completed)
+    missing = not os.path.lexists(row["path"])
+    until = time.monotonic() + 120
+    snap = (missing_finalized_snapshot(row, until, json.loads(row["identity"]).get("lock_reason"))
+            if missing else revalidate(row, allow_device_renumbering=not completed,
+                                       allow_branch_change=not completed))
     if "lock_reason" not in snap:
         raise Retain("manual-closeout-needs-native-enrollment")
     # Manual closeout may rebind identity; completion keeps its recorded identity.
     # Keep the durable enrollment and automatic lifecycle qualification unchanged.
     row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True),
-           "finish_head": snap["head"]}
+           "finish_head": snap["head"], "missing_worktree": missing}
     storage_guard()
     module = safety()
     until = time.monotonic() + 120
@@ -1510,12 +1577,15 @@ def remove_finalized(db, row, args, *, completed=False):
             return finalized_admission(db, row, args, until, fetch_lease=fetch_lease, **options)
 
         before = admit()
+        def observe(path, root, lock_reason=None):
+            return missing_finalized_snapshot(row, until, lock_reason)
         return remove_with_intent(
             db, row, item, before,
             admit,
             {"mode": "explicit-finalized-task", "operator": owner_id(args),
              "discard_ignored": sorted(args.discard_ignored)},
-            restore_lock=True, fetch_lease=fetch_lease)
+            restore_lock=True, fetch_lease=fetch_lease,
+            snapshotter=observe if missing else snapshot)
 
 
 def failed_creation_history(db, row):
@@ -1879,10 +1949,11 @@ def siblings_preserved(before, after):
 
 
 def remove_with_intent(db, row, item, before, recheck, qualification, *, restore_lock=False,
-                       fetch_lease=None, record_intent=None, record_outcome=None):
+                       fetch_lease=None, record_intent=None, record_outcome=None, snapshotter=None):
     if (record_intent is None) != (record_outcome is None):
         raise Retain("removal-persistence-callbacks-must-be-paired")
     module, snap = safety(), before["snapshot"]
+    snapshotter = snapshotter or snapshot
     native_git = NATIVE_GIT or shutil.which("git")
     if native_git is None or any(
             inside(physical(path), snap["path"]) or inside(physical(path), snap["gitdir"])
@@ -1907,6 +1978,8 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
             if changed != 1:
                 raise Retain("release-generation-changed")
     outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None}
+    if before["contents"].get("missing_worktree"):
+        outcome["working_tree"] = "already-absent-not-audited"
     if "resolve_undo" in before["contents"]:
         outcome["resolve_undo"] = before["contents"]["resolve_undo"]
     try:
@@ -1979,15 +2052,15 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         outcome["reason"] = str(error) if isinstance(error, Retain) else "removal-readback-unknown"
     if restore_lock and outcome["checkout"] != "removed":
         try:
-            outcome["native_lock_preserved"] = snapshot(
+            outcome["native_lock_preserved"] = snapshotter(
                 snap["path"], snap["root"], snap["lock_reason"]) == snap
         except (Retain, OSError, ValueError):
             outcome["native_lock_preserved"] = False
             try:
-                current = snapshot(snap["path"], snap["root"])
+                current = snapshotter(snap["path"], snap["root"])
                 if {**current, "lock_reason": snap["lock_reason"]} == snap:
                     git(snap["owner"], "worktree", "lock", "--reason", snap["lock_reason"], "--", snap["path"])
-                    outcome["native_lock_preserved"] = snapshot(
+                    outcome["native_lock_preserved"] = snapshotter(
                         snap["path"], snap["root"], snap["lock_reason"]) == snap
             except (Retain, OSError, ValueError):
                 pass

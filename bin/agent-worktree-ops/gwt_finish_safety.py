@@ -534,19 +534,30 @@ def empty_gitlink(snap, name, until):
         return result
 
 
-def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
-              allow_empty_gitlinks=False, preserved_oids=None, logical_index=False):
+def index_inventory(snap, git, until, *, allow_empty_gitlinks=False, preserved_oids=None,
+                    revision="HEAD"):
     index, index_id = read_file(Path(snap["gitdir"]) / "index", until, INDEX_LIMIT)
     entries, resolve_undo = index_entries(
         index, allow_empty_gitlinks=allow_empty_gitlinks, allow_resolve_undo=preserved_oids is not None)
     if resolve_undo is not None:
         preserved_resolve_undo(snap, git, until, resolve_undo, preserved_oids)
-    head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", "HEAD"),
+    head = tree_entries(git(snap["path"], "ls-tree", "-rz", "--full-tree", revision),
                         allow_empty_gitlinks=allow_empty_gitlinks)
-    if any(name == root or name.startswith(root + "/") for name in head for root in discard_ignored):
-        raise Retain("discarded-artifact-overlaps-tracked-source")
     if {name: entry[:2] for name, entry in entries.items()} != head:
         raise Retain("staged-or-index-only-changes")
+    proof = {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest()}
+    if resolve_undo is not None:
+        proof["resolve_undo"] = resolve_undo
+    return proof, entries, head
+
+
+def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
+              allow_empty_gitlinks=False, preserved_oids=None, logical_index=False):
+    index_proof, entries, head = index_inventory(snap, git, until,
+                                         allow_empty_gitlinks=allow_empty_gitlinks,
+                                         preserved_oids=preserved_oids)
+    if any(name == root or name.startswith(root + "/") for name in head for root in discard_ignored):
+        raise Retain("discarded-artifact-overlaps-tracked-source")
     gitlinks = {name for name, entry in head.items() if entry[0] == 0o160000}
     if gitlinks:
         try:
@@ -667,12 +678,9 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
         raise Retain("working-file-missing")
     if any(empty_gitlink(snap, name, until) != proof for name, proof in gitlink_proof.items()):
         raise Retain("gitlink-state-changed")
-    result = {"index": list(index_id), "index_sha256": hashlib.sha256(index).hexdigest(),
-              "entries": rows, "dependency": dependency}
+    result = {**index_proof, "entries": rows, "dependency": dependency}
     if logical_index:
         result["logical_index"] = {name: list(entry) for name, entry in entries.items()}
-    if resolve_undo is not None:
-        result["resolve_undo"] = resolve_undo
     if gitlinks:
         result["gitlinks"] = gitlink_proof
     if discard_ignored:
