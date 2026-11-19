@@ -163,6 +163,29 @@ class ReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(NATIVE.Retain, "raw-index-invalid"):
             NATIVE.index_entries(b"DIRC" + b"\0" * 40)
 
+    def test_index_budget_does_not_raise_ordinary_leaf_limit(self):
+        self.file.write_bytes(b"x" * (NATIVE.LEAF_LIMIT + 1))
+        with self.assertRaisesRegex(NATIVE.Retain, "file-type-or-size"):
+            NATIVE.read_file(self.file, time.monotonic() + 5)
+        data, _ = NATIVE.read_file(self.file, time.monotonic() + 5, NATIVE.INDEX_LIMIT)
+        self.assertEqual(len(data), NATIVE.LEAF_LIMIT + 1)
+        with self.file.open("wb") as stream:
+            stream.truncate(NATIVE.INDEX_LIMIT + 1)
+        with mock.patch.object(NATIVE.os, "open") as opened:
+            with self.assertRaisesRegex(NATIVE.Retain, "file-type-or-size"):
+                NATIVE.read_file(self.file, time.monotonic() + 5, NATIVE.INDEX_LIMIT)
+            opened.assert_not_called()
+
+    def test_index_parser_obeys_size_and_operation_deadline(self):
+        body = b"DIRC" + struct.pack(">II", 2, 0) + b"TREE" + struct.pack(">I", 0)
+        data = body + hashlib.sha1(body).digest()
+        with mock.patch.object(NATIVE, "INDEX_LIMIT", len(data) - 1):
+            with self.assertRaisesRegex(NATIVE.Retain, "raw-index-invalid"):
+                NATIVE.index_entries(data)
+        with mock.patch.object(NATIVE, "DEADLINE", time.monotonic() - 1):
+            with self.assertRaisesRegex(NATIVE.Retain, "deadline"):
+                NATIVE.index_entries(data)
+
     def resolve_undo_index(self, *payloads):
         body = b"DIRC" + struct.pack(">II", 2, 0)
         for payload in payloads:
@@ -585,6 +608,25 @@ class NativeACLTests(unittest.TestCase):
     def test_actual_owned_empty_acl_is_admitted(self):
         with tempfile.TemporaryDirectory() as temp:
             NATIVE.non_granting_acl(Path(temp).resolve(), time.monotonic() + 1)
+
+    def test_borrowed_directory_fd_survives_rename_and_acl_refusal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp).resolve() / "directory"
+            path.mkdir(mode=0o700)
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                renamed = path.with_name("renamed")
+                path.rename(renamed)
+                NATIVE.non_granting_acl(fd, time.monotonic() + 1)
+                subprocess.run(["/bin/chmod", "+a", "everyone allow readattr", str(renamed)], check=True)
+                try:
+                    with self.assertRaisesRegex(NATIVE.Retain, "grants"):
+                        NATIVE.non_granting_acl(fd, time.monotonic() + 1)
+                finally:
+                    subprocess.run(["/bin/chmod", "-N", str(renamed)], check=True)
+                self.assertEqual(os.fstat(fd).st_ino, renamed.stat().st_ino)
+            finally:
+                os.close(fd)
 
     def test_actual_deny_only_ancestor_preserves_private_boundary(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -2220,6 +2220,7 @@ def recovery_digest(value):
 
 
 RECOVERY_CONTRACT = "gwt-missing-recovery.v2"
+RECOVERY_CONTAINER_CONTRACT = "gwt-missing-recovery.v3"
 
 
 def missing_recovery_fact(db, row):
@@ -2317,7 +2318,8 @@ def recovery_release_evidence(db, row, item, owners, head):
     return {"releases": releases, "completion_proof": proof}
 
 
-def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=False, predecessor=None):
+def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=False, predecessor=None,
+                             container=None, record=None):
     module = safety()
     snap = json.loads(row["identity"])
     original_identity = json.loads(row["identity"])
@@ -2325,9 +2327,12 @@ def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=F
     path = Path(snap["path"])
     if row["id"] != args.worktree_id or row["path"] != str(path):
         raise Retain("recovery-record-mismatch")
-    if (physical(path.parent) != str(path.parent) or not inside(str(path), snap["root"])
+    boundary = Path(snap["root"]) if container else path.parent
+    if (physical(boundary) != str(boundary) or not inside(str(path), snap["root"])
             or str(path) == snap["root"]):
         raise Retain("recovery-path-boundary-changed")
+    if container:
+        container.observe(record, published)
     if not published and os.path.lexists(path):
         raise Retain("recovery-target-present")
     for key in ("owner", "common", "gitdir"):
@@ -2347,7 +2352,7 @@ def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=F
             raise Retain("recovery-device-map-not-bijective")
         original_device, original_inode = snap["path_id"]
         if (original_device not in devices
-                or devices[original_device] != identity(path.parent)[0]):
+                or devices[original_device] != identity(boundary)[0]):
             raise Retain("recovery-parent-volume-unmapped-or-changed")
         snap["path_id"] = [devices[original_device], original_inode]
     observed_identity = dict(snap)
@@ -2365,7 +2370,7 @@ def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=F
             raise Retain("recovery-git-operation-present")
     snap = {**snap, "head": args.expected_head}
     admin_path = Path(snap["gitdir"])
-    raw, index_identity = module.read_file(admin_path / "index", until)
+    raw, index_identity = module.read_file(admin_path / "index", until, module.INDEX_LIMIT)
     if hashlib.sha256(raw).hexdigest() != args.index_sha256:
         raise Retain("recovery-index-changed")
     entries, resolve_undo = module.index_entries(raw, allow_resolve_undo=not legacy)
@@ -2411,11 +2416,13 @@ def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=F
     if legacy and db.execute("SELECT 1 FROM owner_releases WHERE worktree_id=?", (row["id"],)).fetchone():
         raise Retain("recovery-release-present")
     evidence = {} if legacy else {
-        "recovery_contract": RECOVERY_CONTRACT,
+        "recovery_contract": RECOVERY_CONTAINER_CONTRACT if container else RECOVERY_CONTRACT,
         "resolve_undo": resolve_undo,
         "recovery_history": missing_recovery_history(db, row, predecessor),
         **recovery_release_evidence(db, row, item, owners, args.expected_head)}
-    boundaries = [module.access_boundary(str(path.parent), until),
+    if container:
+        evidence["container_layout"] = container.fact
+    boundaries = [module.access_boundary(str(boundary), until),
                   module.access_boundary(snap["gitdir"], until)]
     manual_holders(snap, {"entries": {}, "discarded_inodes": [snap["path_id"]]}, admin, until)
     return {"identity": original_identity, "observed_identity": observed_identity,
@@ -2508,10 +2515,15 @@ def recovery_blobs(owner, entries, until, byte_budget):
                 yield from verified
 
 
-def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allow_partial=False):
+def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allow_partial=False,
+                  expected_id=None):
     module = safety()
     root = Path(root)
     root_id = identity(root)
+    # Materialization must use the durably recorded stage, not a replacement
+    # that appeared between creation/partial validation and opening its root.
+    if expected_id is not None and root_id != expected_id:
+        raise Retain("recovery-staging-rebound")
     if root.lstat().st_mode & 0o077:
         raise Retain("recovery-private-staging-required")
     expected = {**entries, ".git": (0o100600, None)}
@@ -2521,7 +2533,8 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
     present = set()
     present_bytes = 0
     if write and allow_partial:
-        verified_id, present, present_bytes = recovery_tree(root, entries, gitdir, until, allow_partial=True)
+        verified_id, present, present_bytes = recovery_tree(
+            root, entries, gitdir, until, allow_partial=True, expected_id=root_id)
         if verified_id != root_id:
             raise Retain("recovery-staging-rebound")
     if write:
@@ -2648,17 +2661,169 @@ def recovery_publish(source, target):
         os.close(fd)
 
 
+def recovery_publish_at(root_fd, source, target):
+    """Publish direct children through the held root, never an absolute pathname."""
+    if any(not name or Path(name).name != name or name in (".", "..") for name in (source, target)):
+        raise Retain("recovery-container-name-invalid")
+    lib = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and hasattr(lib, "renameatx_np"):
+        function, flags = lib.renameatx_np, 4  # SDK sys/stdio.h: RENAME_EXCL
+    elif sys.platform == "linux" and hasattr(lib, "renameat2"):
+        function, flags = lib.renameat2, 1  # linux/fs.h: RENAME_NOREPLACE
+    else:
+        raise Retain("recovery-no-replace-unavailable")
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    if function(root_fd, os.fsencode(source), root_fd, os.fsencode(target), flags) != 0:
+        raise Retain("recovery-no-replace-refused")
+    os.fsync(root_fd)
+
+
+class RecoveryContainer:
+    """One missing repo container; its existing managed root owns all mutations."""
+
+    def __init__(self, snap, until):
+        self.until = until
+        self.root = Path(snap["root"])
+        path = Path(snap["path"])
+        if path.parent.parent != self.root or physical(self.root) != str(self.root):
+            raise Retain("recovery-container-layout-unsupported")
+        self.fact = {"root": str(self.root), "root_id": identity(self.root),
+                     "boundary": safety().access_boundary(str(self.root), until),
+                     "container": path.parent.name, "checkout": path.name}
+        self.fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            self.check_root()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        os.close(self.fd)
+
+    def check_root(self):
+        safety().tick(self.until)
+        if (list(safety().file_identity(os.fstat(self.fd))[:2]) != self.fact["root_id"]
+                or identity(self.root) != self.fact["root_id"]
+                or safety().access_boundary(str(self.root), self.until) != self.fact["boundary"]):
+            raise Retain("recovery-container-root-changed")
+
+    def absent(self, name):
+        try:
+            os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise Retain("recovery-container-appeared")
+
+    def stage_name(self, record):
+        identifier = record["id"]
+        if str(uuid.UUID(identifier)) != identifier:
+            raise Retain("recovery-container-intent-invalid")
+        name = ".gwt-recover-" + identifier
+        if record["stage"] != str(self.root / name / self.fact["checkout"]):
+            raise Retain("recovery-container-stage-binding-changed")
+        return name
+
+    def observe(self, record, published):
+        self.check_root()
+        if record is not None and record["preimage"]["container_layout"] != self.fact:
+            raise Retain("recovery-container-root-changed")
+        if published:
+            self.verify(record, published=True)
+            self.absent(self.stage_name(record))
+        else:
+            self.absent(self.fact["container"])
+
+    def verify(self, record, *, published=False):
+        self.check_root()
+        name = self.fact["container"] if published else self.stage_name(record)
+        expected = record.get("container_id")
+        if expected is None or record["stage_id"] is None:
+            raise Retain("recovery-container-inode-unknown")
+        with self.directory(name, self.fd, expected) as fd:
+            # Only a private stage belongs wholly to this intent. After publication
+            # the shared repo container may acquire independently owned siblings.
+            if not published:
+                with os.scandir(fd) as children:
+                    observed = [entry.name for _, entry in zip(range(2), children)]
+                if observed != [self.fact["checkout"]]:
+                    raise Retain("recovery-container-unexpected-entry")
+            with self.directory(self.fact["checkout"], fd, record["stage_id"]):
+                pass
+
+    @contextlib.contextmanager
+    def directory(self, name, parent_fd, expected=None):
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(named.st_mode) or named.st_uid != os.getuid()
+                or stat.S_IMODE(named.st_mode) != 0o700 or named.st_dev != self.fact["root_id"][0]):
+            raise Retain("recovery-container-directory-unsafe")
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            held = safety().file_identity(os.fstat(fd))
+            if held != safety().file_identity(named) or (expected is not None and list(held[:2]) != expected):
+                raise Retain("recovery-container-directory-changed")
+            acl = safety().non_granting_acl(fd, self.until)
+            yield fd
+            after = safety().file_identity(os.fstat(fd))
+            named = safety().file_identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+            # Child creation changes times and link counts, but not ownership,
+            # permissions, flags or ACLs. Keep those boundaries throughout.
+            if (after != named or after[:5] != held[:5] or after[-1] != held[-1]
+                    or safety().non_granting_acl(fd, self.until) != acl):
+                raise Retain("recovery-container-directory-changed")
+        finally:
+            os.close(fd)
+
+    def create(self, record, persist):
+        self.check_root()
+        name = self.stage_name(record)
+        os.mkdir(name, mode=0o700, dir_fd=self.fd)
+        os.fsync(self.fd)
+        with self.directory(name, self.fd) as fd:
+            os.fsync(fd)
+            record["container_id"] = list(safety().file_identity(os.fstat(fd))[:2])
+            persist()
+            os.mkdir(self.fact["checkout"], mode=0o700, dir_fd=fd)
+            os.fsync(fd)
+            with self.directory(self.fact["checkout"], fd) as child:
+                os.fsync(child)
+                record["stage_id"] = list(safety().file_identity(os.fstat(child))[:2])
+                persist()
+        # A crash before either inode receipt is durable stays UNKNOWN. Continuation
+        # must never infer ownership from an appeared name, even an empty directory.
+        self.verify(record)
+
+    def admit_holders(self, record, snap, admin, inodes=()):
+        self.verify(record)
+        # The container itself is renamed too. Scan its unpublished scope with
+        # temporary stage FDs closed; the held managed-root FD is outside it.
+        manual_holders({**snap, "path": str(self.root / self.stage_name(record))},
+                       {"entries": {}, "discarded_inodes": [
+                           record["container_id"], record["stage_id"], *inodes]}, admin, self.until)
+        self.verify(record)
+
+    def publish(self, record, snap, admin):
+        self.observe(record, False)
+        self.admit_holders(record, snap, admin)
+        with self.directory(self.stage_name(record), self.fd, record["container_id"]) as fd:
+            os.fsync(fd)
+        recovery_publish_at(self.fd, self.stage_name(record), self.fact["container"])
+        self.observe(record, True)
+
+
 def recover_missing(db, row, args):
     until = safety().DEADLINE
     who = owner_id(args)
-    with safety().maintainer_lock(Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))):
+    with safety().maintainer_lock(Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))), \
+            contextlib.ExitStack() as scope:
         receipt = missing_recovery_fact(db, row)
         record = json.loads(receipt) if receipt is not None else None
         predecessor = None
         # Receipts without a contract use the original no-release preimage.
         # Never silently recalculate an outstanding operator-approved digest.
         legacy = record is not None and "contract" not in record
-        if record is not None and not legacy and record["contract"] != RECOVERY_CONTRACT:
+        if record is not None and not legacy and record["contract"] not in (
+                RECOVERY_CONTRACT, RECOVERY_CONTAINER_CONTRACT):
             raise Retain("recovery-receipt-contract-unsupported")
         if args.continue_partial and (record is None or record.get("result")):
             raise Retain("recovery-partial-needs-pending-intent")
@@ -2668,11 +2833,27 @@ def recover_missing(db, row, args):
                 raise Retain("recovery-generation-changed")
             predecessor, record, legacy = receipt, None, False
 
+        container = None
+        if ((record is not None and record.get("contract") == RECOVERY_CONTAINER_CONTRACT)
+                or (record is None and not os.path.lexists(Path(row["path"]).parent))):
+            container = RecoveryContainer(json.loads(row["identity"]), until)
+            scope.callback(container.close)
+
         def observe(observed_row=row, observed_args=args, *, published=False):
             if missing_recovery_fact(db, row) != receipt:
                 raise Retain("recovery-receipt-drift")
             return missing_recovery_preimage(db, observed_row, observed_args, until, published=published,
-                                             legacy=legacy, predecessor=predecessor)
+                                             legacy=legacy, predecessor=predecessor,
+                                             container=container, record=record)
+
+        def persist_container():
+            nonlocal receipt
+            encoded = json.dumps(record, sort_keys=True)
+            with db:
+                if db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=? AND fact=?",
+                              (encoded, row["id"], receipt)).rowcount != 1:
+                    raise Retain("recovery-receipt-cas-failed")
+            receipt = encoded
 
         if record is not None:
             if (not args.intent_id or record["id"] != args.intent_id
@@ -2728,6 +2909,8 @@ def recover_missing(db, row, args):
                                          safety().PASS_LIMIT - pointer_bytes):
             pass
         if args.continue_partial:
+            if container:
+                container.verify(record)
             if (published or record["stage_id"] is None
                     or identity(record["stage"]) != record["stage_id"]):
                 raise Retain("recovery-partial-stage-changed")
@@ -2740,10 +2923,13 @@ def recover_missing(db, row, args):
                     details = (Path(directory) / name).lstat()
                     if not stat.S_ISLNK(details.st_mode):
                         inodes.append([details.st_dev, details.st_ino])
-            manual_holders({**preimage["observed_identity"], "path": record["stage"]},
-                           {"entries": {}, "discarded_inodes": inodes}, preimage["admin"], until)
+            if container:
+                container.admit_holders(record, preimage["observed_identity"], preimage["admin"], inodes)
+            else:
+                manual_holders({**preimage["observed_identity"], "path": record["stage"]},
+                               {"entries": {}, "discarded_inodes": inodes}, preimage["admin"], until)
         if not args.apply:
-            return {"checkout": "unknown" if record else "missing", "recovery_sha256": digest, "entries": len(entries),
+            result = {"checkout": "unknown" if record else "missing", "recovery_sha256": digest, "entries": len(entries),
                     "worktree_id": row["id"], "generation": args.generation,
                     "head": args.expected_head, "index_sha256": args.index_sha256,
                     "allow_device_renumbering": args.allow_device_renumbering,
@@ -2751,16 +2937,23 @@ def recover_missing(db, row, args):
                     "partial_continuation": args.continue_partial,
                     "stage_id": record["stage_id"] if record else None,
                     "untracked_unstaged": "unavailable", "checkout_mutation": False}
+            if container:
+                result["container_layout"] = container.fact
+            return result
         if args.recovery_sha256 != digest:
             raise Retain("recovery-reviewed-preimage-required")
         if record is None:
             identifier = str(uuid.uuid4())
             staging = str(Path(row["path"]).parent / (".gwt-recover-" + identifier))
+            if container:
+                staging = str(container.root / (".gwt-recover-" + identifier) / container.fact["checkout"])
             intent = {"kind": "recover-missing", "id": identifier, "digest": digest,
                       "operator": who, "stage": staging}
-            record = {"contract": RECOVERY_CONTRACT, "id": identifier,
+            record = {"contract": RECOVERY_CONTAINER_CONTRACT if container else RECOVERY_CONTRACT, "id": identifier,
                       "intent": intent, "digest": digest, "preimage": preimage,
                       "stage": staging, "stage_id": None, "result": None}
+            if container:
+                record["container_id"] = None
             with db:
                 db.execute("BEGIN IMMEDIATE")
                 db.execute("CREATE TABLE IF NOT EXISTS missing_recoveries ("
@@ -2795,20 +2988,26 @@ def recover_missing(db, row, args):
                                 (encoded, row["id"], predecessor)).rowcount != 1:
                     raise Retain("recovery-receipt-cas-failed")
             receipt, predecessor = encoded, None
-            Path(staging).mkdir(mode=0o700)
-            record["stage_id"] = identity(staging)
-            encoded = json.dumps(record, sort_keys=True)
-            with db:
-                if db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=? AND fact=?",
-                              (encoded, row["id"], receipt)).rowcount != 1:
-                    raise Retain("recovery-receipt-cas-failed")
-            receipt = encoded
+            if container:
+                container.create(record, persist_container)
+            else:
+                Path(staging).mkdir(mode=0o700)
+                record["stage_id"] = identity(staging)
+                encoded = json.dumps(record, sort_keys=True)
+                with db:
+                    if db.execute("UPDATE missing_recoveries SET fact=? WHERE worktree_id=? AND fact=?",
+                                  (encoded, row["id"], receipt)).rowcount != 1:
+                        raise Retain("recovery-receipt-cas-failed")
+                receipt = encoded
             recovery_tree(staging, entries, preimage["identity"]["gitdir"], until,
-                          write=True, owner=preimage["identity"]["owner"])
+                          write=True, owner=preimage["identity"]["owner"], expected_id=record["stage_id"])
         elif args.continue_partial:
             recovery_tree(record["stage"], entries, preimage["identity"]["gitdir"], until,
-                          write=True, owner=preimage["identity"]["owner"], allow_partial=True)
+                          write=True, owner=preimage["identity"]["owner"], allow_partial=True,
+                          expected_id=record["stage_id"])
         source = row["path"] if published else record["stage"]
+        if container:
+            container.verify(record, published=published)
         if (record["stage_id"] is None or identity(source) != record["stage_id"]
                 or (published and os.path.lexists(record["stage"]))):
             raise Retain("recovery-staged-inode-unknown")
@@ -2818,7 +3017,10 @@ def recover_missing(db, row, args):
         if recovery_digest(final) != digest:
             raise Retain("recovery-pre-publication-drift")
         if not published:
-            recovery_publish(source, row["path"])
+            if container:
+                container.publish(record, preimage["observed_identity"], preimage["admin"])
+            else:
+                recovery_publish(source, row["path"])
         current = snapshot(row["path"], preimage["identity"]["root"], preimage["identity"].get("lock_reason"))
         if immutable(current) != {**preimage["observed_identity"], "path_id": record["stage_id"]}:
             raise Retain("recovery-published-identity-changed")

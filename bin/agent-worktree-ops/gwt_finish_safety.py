@@ -27,6 +27,8 @@ class Retain(RuntimeError):
 
 
 LEAF_LIMIT = 8 * 1024 * 1024
+# Index entries scale with the whole checkout; ordinary admin leaves do not.
+INDEX_LIMIT = 32 * 1024 * 1024
 PASS_LIMIT = 512 * 1024 * 1024
 # A full source checkout can exceed the subprocess/admin transfer budget.
 SOURCE_LIMIT = 1024 * 1024 * 1024
@@ -328,7 +330,7 @@ def resolve_undo_entries(data):
 
 def index_entries(data, *, allow_empty_gitlinks=False, allow_resolve_undo=False):
     """Admit ordinary SHA-1 index v2/v3 before ANY native index consumer."""
-    if (len(data) < 32 or data[:4] != b"DIRC"
+    if (not 32 <= len(data) <= INDEX_LIMIT or data[:4] != b"DIRC"
             or hashlib.sha1(data[:-20]).digest() != data[-20:]):
         raise Retain("raw-index-invalid")
     version, count = struct.unpack_from(">II", data, 4)
@@ -336,6 +338,7 @@ def index_entries(data, *, allow_empty_gitlinks=False, allow_resolve_undo=False)
         raise Retain("raw-index-format-unsupported")
     result, cursor, previous = {}, 12, b""
     for _ in range(count):
+        tick(DEADLINE)
         start = cursor
         if cursor + 62 > len(data) - 20:
             raise Retain("raw-index-truncated")
@@ -373,6 +376,7 @@ def index_entries(data, *, allow_empty_gitlinks=False, allow_resolve_undo=False)
         previous = raw_name
     resolve_undo = None
     while cursor < len(data) - 20:
+        tick(DEADLINE)
         if cursor + 8 > len(data) - 20:
             raise Retain("raw-index-extension-invalid")
         kind = data[cursor:cursor + 4]
@@ -532,7 +536,7 @@ def empty_gitlink(snap, name, until):
 
 def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
               allow_empty_gitlinks=False, preserved_oids=None, logical_index=False):
-    index, index_id = read_file(Path(snap["gitdir"]) / "index", until)
+    index, index_id = read_file(Path(snap["gitdir"]) / "index", until, INDEX_LIMIT)
     entries, resolve_undo = index_entries(
         index, allow_empty_gitlinks=allow_empty_gitlinks, allow_resolve_undo=preserved_oids is not None)
     if resolve_undo is not None:
@@ -901,8 +905,11 @@ def non_granting_acl(path, until):
     lib.acl_to_text.argtypes = [C.c_void_p, C.POINTER(C.c_ssize_t)]
     lib.acl_to_text.restype = C.c_void_p
     lib.acl_free.argtypes = [C.c_void_p]
-    named = os.lstat(path)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    # Recovery already holds its directory through a pinned parent. Borrow that
+    # descriptor without resolving the pathname again or taking its ownership.
+    source_fd = isinstance(path, int)
+    named = os.fstat(path) if source_fd else os.lstat(path)
+    fd = os.dup(path) if source_fd else os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
     acl = None
     try:
         if file_identity(os.fstat(fd)) != file_identity(named):
@@ -943,7 +950,8 @@ def non_granting_acl(path, until):
             lib.acl_free(acl)
         after = os.fstat(fd)
         os.close(fd)
-        if file_identity(named) != file_identity(after) or file_identity(named) != file_identity(os.lstat(path)):
+        current = os.fstat(path) if source_fd else os.lstat(path)
+        if file_identity(named) != file_identity(after) or file_identity(named) != file_identity(current):
             raise Retain("native-acl-object-changed")
 
 
@@ -1015,7 +1023,8 @@ def _admin_inventory(snap, git, until, *, preserved_oids, retained):
                     "config.worktree", "info/sparse-checkout", "COMMIT_EDITMSG", "AUTO_MERGE")
                     or (name == "FETCH_HEAD" and preserved_oids is not None)
                     or (name == "REBASE_HEAD" and retained)):
-                data, identity = read_file(path, until, min(LEAF_LIMIT, PASS_LIMIT - used))
+                limit = INDEX_LIMIT if name == "index" else LEAF_LIMIT
+                data, identity = read_file(path, until, min(limit, PASS_LIMIT - used))
                 used += len(data)
                 if name == "REBASE_HEAD":
                     if (identity[3] != os.getuid()
