@@ -161,6 +161,10 @@ The plan takes native lifecycle and maintenance coordination locks but does not
 create the checkout or a recovery intent. Apply the same operands with
 `--apply --recovery-sha256 <reviewed-plan-hash>`. Both phases require complete
 holder visibility and unchanged admin, branch, lock, index and owner facts.
+The retained Git index has a separate 32 MiB read limit and the existing
+131,072-entry ceiling. Ordinary admin leaves keep their 8 MiB limit, and all
+admin reads still share the aggregate budget. Larger or unsupported indexes
+refuse before recovery; this does not change the accepted index formats.
 Conflicts, sparse/unknown index formats, gitlinks, pending
 Git or lifecycle operations, held paths and appeared destinations refuse.
 

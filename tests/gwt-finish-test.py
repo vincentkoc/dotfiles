@@ -1836,6 +1836,41 @@ class MissingRecoveryTests(unittest.TestCase):
         self.assertFalse(self.wt.exists())
         self.assertIsNone(self.record()[0])
 
+    def test_large_index_plan_uses_index_budget_and_preserves_admin_aggregate(self):
+        tree = self.repeated_tree(40)
+        self.head = git(self.repo, "commit-tree", tree, "-p", self.head, "-m", "recovery fixture")
+        git(self.repo, "update-ref", "refs/heads/released-feature", self.head)
+        git(self.repo, "--git-dir", str(self.admin), "read-tree", tree)
+        raw = (self.admin / "index").read_bytes()
+        self.assertGreater(len(raw), FINISH.safety().LEAF_LIMIT)
+        self.index_sha = hashlib.sha256(raw).hexdigest()
+        plan = self.recover()
+        self.assertEqual(plan["entries"], 40000)
+        self.assertEqual((self.admin / "index").read_bytes(), raw)
+        self.assertIsNone(self.record()[0])
+        with mock.patch.object(FINISH.safety(), "PASS_LIMIT", len(raw) - 1):
+            with self.assertRaisesRegex(FINISH.Retain, "file-type-or-size"):
+                self.recover()
+
+    def test_scoped_index_budget_covers_apply_and_inventory_only(self):
+        # A small budget models the same boundary without materializing 40k files.
+        module = FINISH.safety()
+        tree = self.repeated_tree(1)
+        self.head = git(self.repo, "commit-tree", tree, "-p", self.head, "-m", "recovery fixture")
+        git(self.repo, "update-ref", "refs/heads/released-feature", self.head)
+        git(self.repo, "--git-dir", str(self.admin), "read-tree", tree)
+        raw = (self.admin / "index").read_bytes()
+        self.index_sha = hashlib.sha256(raw).hexdigest()
+        self.assertGreater(len(raw), 65536)
+        with mock.patch.object(module, "LEAF_LIMIT", 65536):
+            result = self.recover("--apply", "--recovery-sha256", self.plan())
+            self.assertEqual(result["checkout"], "restored")
+            snap = FINISH.snapshot(str(self.wt), str(self.root), self.before_lock.decode().strip())
+            module.inventory(snap, FINISH.git, module.DEADLINE)
+            (self.admin / "COMMIT_EDITMSG").write_bytes(b"x" * 65537)
+            with self.assertRaisesRegex(FINISH.Retain, "file-type-or-size"):
+                module.recovery_admin_inventory(snap, FINISH.git, module.DEADLINE)
+
     def test_tree_capture_still_stops_above_32_mib(self):
         tree = self.repeated_tree(160)
         native = FINISH.safety().supervise

@@ -2361,7 +2361,7 @@ def missing_recovery_preimage(db, row, args, until, *, published=False, legacy=F
             raise Retain("recovery-git-operation-present")
     snap = {**snap, "head": args.expected_head}
     admin_path = Path(snap["gitdir"])
-    raw, index_identity = module.read_file(admin_path / "index", until)
+    raw, index_identity = module.read_file(admin_path / "index", until, module.INDEX_LIMIT)
     if hashlib.sha256(raw).hexdigest() != args.index_sha256:
         raise Retain("recovery-index-changed")
     entries, resolve_undo = module.index_entries(raw, allow_resolve_undo=not legacy)
