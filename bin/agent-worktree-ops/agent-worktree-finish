@@ -18,6 +18,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import types
 import uuid
@@ -100,7 +101,8 @@ def safety():
     return module
 
 
-def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, deadline=None):
+def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, deadline=None,
+        stdout_sink=None):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("DYLD_", "LD_"))}
     if Path(command[0]).name == "git":
@@ -110,21 +112,23 @@ def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, 
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
                GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1", LC_ALL="C")
     result = safety().supervise(command, cwd=cwd, env=env, limit=limit, input_data=input_data,
-                                deadline=deadline)
+                                deadline=deadline, stdout_sink=stdout_sink)
     if result.failure or result.returncode not in allowed:
         error = Retain(f"{Path(command[0]).name}-failed")
         proof = result.proof
         error._gwt_child_diagnostic = {
             "cause": result.failure_code if result.failure else "exit-status",
             "returncode": result.returncode, "errno": result.failure_errno,
-            "stdout_bytes": len(result.stdout), "stderr_bytes": len(result.stderr),
+            "stdout_bytes": getattr(result, "stdout_bytes", len(result.stdout)),
+            "stderr_bytes": getattr(result, "stderr_bytes", len(result.stderr)),
             "started": proof.get("pid") is not None,
             "reaped": proof.get("reaped"), "group_absent": proof.get("group_absent")}
         raise error
     return result
 
 
-def git(path, *args, input_data=None, raw=False, strict=False, deadline=None, capture_limit=None):
+def git(path, *args, input_data=None, raw=False, strict=False, deadline=None, capture_limit=None,
+        stdout_sink=None):
     result = run([
         NATIVE_GIT or "git",
         "-c", "core.hooksPath=/dev/null",
@@ -138,7 +142,7 @@ def git(path, *args, input_data=None, raw=False, strict=False, deadline=None, ca
     ], limit=(capture_limit if capture_limit is not None else
               32 * 1024 * 1024 if args and args[0] == "ls-tree" else
               safety().LEAF_LIMIT if args and args[0] in ("show", "stripspace") else 1024 * 1024),
-        input_data=input_data, deadline=deadline)
+        input_data=input_data, deadline=deadline, stdout_sink=stdout_sink)
     if strict and result.stderr:
         raise Retain("git-diagnostic")
     return result.stdout if raw else result.stdout.decode(errors="surrogateescape").rstrip("\n")
@@ -2434,7 +2438,7 @@ RECOVERY_BLOB_LIMIT = 16 * 1024 * 1024
 RECOVERY_BATCH_ENTRIES = 1024
 
 
-def recovery_blobs(owner, entries, until, byte_budget):
+def recovery_blob_metadata(owner, entries, until, byte_budget):
     pending = iter(entries)
     while group := list(itertools.islice(pending, RECOVERY_BATCH_ENTRIES)):
         safety().tick(until)
@@ -2452,40 +2456,63 @@ def recovery_blobs(owner, entries, until, byte_budget):
                     or not re.fullmatch(rb"0|[1-9][0-9]{0,8}", fields[2])):
                 raise Retain("recovery-batch-metadata-invalid")
             size = int(fields[2])
-            if size > RECOVERY_BLOB_LIMIT:
+            if mode == 0o120000 and size > RECOVERY_BLOB_LIMIT:
                 raise Retain("recovery-blob-size-limit")
+            if size > byte_budget:
+                raise Retain("recovery-source-byte-limit")
+            byte_budget -= size
             sized.append((name, mode, oid, size, line + b"\n"))
+        yield sized
+
+
+def recovery_blob_chunks(blob, until):
+    stream, offset, size = blob
+    stream.seek(offset)
+    while size:
+        safety().tick(until)
+        data = stream.read(min(65536, size))
+        if not data:
+            raise Retain("recovery-batch-content-invalid")
+        size -= len(data)
+        yield data
+
+
+def recovery_blobs(owner, entries, until, byte_budget):
+    for sized in recovery_blob_metadata(owner, entries, until, byte_budget):
         while sized:
             count = total = 0
             for entry in sized:
-                if total + entry[3] > RECOVERY_BLOB_LIMIT:
+                if count and total + entry[3] > RECOVERY_BLOB_LIMIT:
                     break
                 count += 1
                 total += entry[3]
             batch, sized = sized[:count], sized[count:]
-            if total > byte_budget:
-                raise Retain("recovery-source-byte-limit")
-            # Frame overhead is exact; raw leaf and staging budgets stay unchanged.
-            data = git(owner, "--no-replace-objects", "cat-file", "--batch",
-                       input_data=b"".join(entry[2].encode() + b"\n" for entry in batch),
-                       raw=True, strict=True, deadline=until,
-                       capture_limit=total + sum(len(entry[4]) + 1 for entry in batch))
-            verified, offset = [], 0
-            for name, mode, oid, size, header in batch:
-                safety().tick(until)
-                start, end = offset + len(header), offset + len(header) + size
-                if data[offset:start] != header or data[end:end + 1] != b"\n":
+            # One large regular blob gets its own batch. The anonymous spool
+            # keeps memory bounded and no destination sees an unverified frame.
+            with tempfile.TemporaryFile() as stream:
+                git(owner, "--no-replace-objects", "cat-file", "--batch",
+                    input_data=b"".join(entry[2].encode() + b"\n" for entry in batch),
+                    raw=True, strict=True, deadline=until, stdout_sink=stream,
+                    capture_limit=total + sum(len(entry[4]) + 1 for entry in batch))
+                stream.seek(0)
+                verified = []
+                for name, mode, oid, size, header in batch:
+                    safety().tick(until)
+                    if stream.read(len(header)) != header:
+                        raise Retain("recovery-batch-content-invalid")
+                    blob = (stream, stream.tell(), size)
+                    digest = hashlib.sha1(b"blob " + str(size).encode() + b"\0")
+                    for chunk in recovery_blob_chunks(blob, until):
+                        digest.update(chunk)
+                    if stream.read(1) != b"\n":
+                        raise Retain("recovery-batch-content-invalid")
+                    if digest.hexdigest() != oid:
+                        raise Retain("recovery-blob-identity-mismatch")
+                    verified.append((name, mode, blob))
+                if stream.read(1):
                     raise Retain("recovery-batch-content-invalid")
-                blob = data[start:end]
-                if hashlib.sha1(b"blob " + str(size).encode() + b"\0" + blob).hexdigest() != oid:
-                    raise Retain("recovery-blob-identity-mismatch")
-                verified.append((name, mode, blob))
-                offset = end + 1
-            if offset != len(data):
-                raise Retain("recovery-batch-content-invalid")
-            byte_budget -= total
-            # Validate every frame before the caller can write any member.
-            yield from verified
+                # Ranges stay valid only while this generator owns the spool.
+                yield from verified
 
 
 def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allow_partial=False,
@@ -2524,23 +2551,26 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
             pointer_bytes = 0 if ".git" in present else len(pointer)
             if present_bytes + pointer_bytes > module.PASS_LIMIT:
                 raise Retain("recovery-source-byte-limit")
-            blobs = recovery_blobs(owner, ((name, value) for name, value in entries.items()
-                                           if name not in present), until,
-                                   module.PASS_LIMIT - present_bytes - pointer_bytes)
-            source = itertools.chain(blobs, [] if ".git" in present else [(".git", 0o100600, pointer)])
-            for name, mode, data in source:
-                module.tick(until)
-                with recovery_parent(root_fd, name) as (parent_fd, leaf):
-                    if mode == 0o120000:
-                        os.symlink(os.fsdecode(data), leaf, dir_fd=parent_fd)
-                    else:
-                        fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                     mode & 0o777, dir_fd=parent_fd)
-                        with os.fdopen(fd, "wb") as stream:
-                            stream.write(data)
-                            stream.flush()
-                            os.fchmod(stream.fileno(), mode & 0o777)
-                            os.fsync(stream.fileno())
+            with contextlib.closing(recovery_blobs(
+                    owner, ((name, value) for name, value in entries.items() if name not in present),
+                    until, module.PASS_LIMIT - present_bytes - pointer_bytes)) as blobs:
+                source = itertools.chain(blobs, [] if ".git" in present else [(".git", 0o100600, pointer)])
+                for name, mode, data in source:
+                    module.tick(until)
+                    with recovery_parent(root_fd, name) as (parent_fd, leaf):
+                        if mode == 0o120000:
+                            target = b"".join(recovery_blob_chunks(data, until))
+                            os.symlink(os.fsdecode(target), leaf, dir_fd=parent_fd)
+                        else:
+                            fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                         mode & 0o777, dir_fd=parent_fd)
+                            with os.fdopen(fd, "wb") as stream:
+                                chunks = (data,) if isinstance(data, bytes) else recovery_blob_chunks(data, until)
+                                for chunk in chunks:
+                                    stream.write(chunk)
+                                stream.flush()
+                                os.fchmod(stream.fileno(), mode & 0o777)
+                                os.fsync(stream.fileno())
         finally:
             os.close(root_fd)
     observed = set()
@@ -2565,17 +2595,24 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
                 if not stat.S_ISLNK(details.st_mode):
                     raise Retain("recovery-link-changed")
                 data = os.fsencode(os.readlink(path))
+                size = len(data)
+                matched = hashlib.sha1(b"blob " + str(size).encode() + b"\0" + data).hexdigest() == oid
             else:
                 if not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != mode & 0o777:
                     raise Retain("recovery-file-mode-changed")
-                data, _ = module.read_file(path, until, RECOVERY_BLOB_LIMIT)
-            total += len(data)
+                if details.st_size > module.PASS_LIMIT - total:
+                    raise Retain("recovery-source-byte-limit")
+                if oid is None:
+                    data, _ = module.read_file(path, until, RECOVERY_BLOB_LIMIT)
+                    size = len(data)
+                    matched = data == os.fsencode("gitdir: " + gitdir + "\n")
+                else:
+                    digest, size = module.tracked_blob(path, until, module.file_identity(details),
+                                                       module.PASS_LIMIT - total)
+                    matched = digest == oid
+            total += size
             if total > module.PASS_LIMIT:
                 raise Retain("recovery-source-byte-limit")
-            if oid is None:
-                matched = data == os.fsencode("gitdir: " + gitdir + "\n")
-            else:
-                matched = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() == oid
             if not matched:
                 raise Retain("recovery-file-content-changed")
     if ((not (allow_partial and not write) and observed != set(expected) | (directories - {""}))
@@ -2863,6 +2900,14 @@ def recover_missing(db, row, args):
         digest = recovery_digest(preimage)
         if record and digest != record["digest"]:
             raise Retain("recovery-preimage-drift")
+        # Admit all committed sizes before creating a new durable intent. This
+        # probe also covers legacy continuations without changing their digest.
+        pointer_bytes = len(os.fsencode("gitdir: " + preimage["identity"]["gitdir"] + "\n"))
+        if pointer_bytes > safety().PASS_LIMIT:
+            raise Retain("recovery-source-byte-limit")
+        for _ in recovery_blob_metadata(preimage["identity"]["owner"], entries.items(), until,
+                                         safety().PASS_LIMIT - pointer_bytes):
+            pass
         if args.continue_partial:
             if container:
                 container.verify(record)
