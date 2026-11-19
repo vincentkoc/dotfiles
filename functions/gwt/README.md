@@ -203,12 +203,17 @@ remains in recovery history; only the verified successor identity is normalized.
 
 Only committed blobs whose tree exactly matches the saved index are written.
 The operation runs no checkout filters, hooks, dependency installation or fetch.
-Recovery blob capture and verification are bounded by 16 MiB per file and the
-staging pass by 512 MiB. Tree enumeration uses the native 32 MiB capture budget,
+Recovery streams regular blobs in 64 KiB chunks within the unchanged 512 MiB
+staging-pass budget. Metadata admission counts every restored path, including
+duplicate blobs and the Git pointer, before recording a new recovery intent.
+Symlink contents retain their 16 MiB limit. Tree enumeration uses the native
+32 MiB capture budget,
 including when replacement objects are disabled; other read limits are unchanged.
 Missing blobs are read in finite batches of at most 1024 requests and 16 MiB of
-content, with separately bounded protocol framing. Every batch is verified before
-any member is written. Duplicate blobs count once per restored path. Supervised
+content, or one larger regular blob, with separately bounded protocol framing.
+An anonymous temporary spool holds each batch; its complete framing and hashes
+are verified before any member is written. The spool is closed on success or
+failure. Duplicate blobs count once per restored path. Supervised
 child failures retain fixed cause codes, numeric exit/byte counts and cleanup
 facts without printing command arguments, paths or child diagnostics.
 The existing 238-second owner deadline is unchanged. A private sibling directory

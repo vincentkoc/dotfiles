@@ -292,6 +292,58 @@ class SupervisorTests(unittest.TestCase):
         self.assertGreater(result.proof["pid"], 0)
         self.assertEqual(result.proof["stdout_sha256"], hashlib.sha256(b"fixture\n").hexdigest())
 
+    def test_stdout_spool_is_chunked_and_counts_short_writes(self):
+        size = 17_387_080
+        class Sink:
+            count = 0
+            digest = hashlib.sha256()
+            def write(inner, data):
+                self.assertLessEqual(len(data), 65536)
+                written = min(4096, len(data))
+                inner.count += written
+                inner.digest.update(data[:written])
+                return written
+        sink = Sink()
+        result = self.invoke(f"import sys; sys.stdout.buffer.write(b'x' * {size})",
+                             stdout_sink=sink, limit=size)
+        self.assertIsNone(result.failure)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stdout_bytes, size)
+        self.assertEqual(sink.count, size)
+        self.assertEqual(result.proof["stdout_sha256"], sink.digest.hexdigest())
+        self.assertTrue(result.proof["reaped"])
+        self.assertTrue(result.proof["group_absent"])
+
+    def test_stdout_spool_limit_is_checked_before_write(self):
+        sink = mock.Mock()
+        result = self.invoke("import sys; sys.stdout.buffer.write(b'x' * 11)",
+                             stdout_sink=sink, limit=10)
+        sink.write.assert_not_called()
+        self.assertEqual(result.failure_code, "output-limit")
+        self.assertEqual(result.stdout_bytes, 11)
+        self.assertTrue(result.proof["reaped"])
+        self.assertTrue(result.proof["group_absent"])
+
+    def test_stdout_spool_error_reaps_child_and_keeps_byte_count(self):
+        for result_value in (0, None, -1):
+            with self.subTest(result_value=result_value):
+                sink = mock.Mock()
+                sink.write.return_value = result_value
+                result = self.invoke("import os,time; os.write(1,b'fixture'); time.sleep(30)",
+                                     stdout_sink=sink)
+                self.assertIsNotNone(result.failure)
+                self.assertEqual(result.stdout_bytes, 7)
+                self.assertTrue(result.proof["reaped"])
+                self.assertTrue(result.proof["group_absent"])
+        sink = mock.Mock()
+        sink.write.side_effect = OSError("private fixture")
+        result = self.invoke("import os,time; os.write(1,b'fixture'); time.sleep(30)",
+                             stdout_sink=sink)
+        self.assertEqual(result.failure_code, "os-error")
+        self.assertEqual(result.stdout_bytes, 7)
+        self.assertTrue(result.proof["reaped"])
+        self.assertTrue(result.proof["group_absent"])
+
     def test_timeout_kills_only_owned_group_and_reaps(self):
         result = self.invoke("import time; time.sleep(30)", timeout=0.05)
         self.assertIsNotNone(result.failure)

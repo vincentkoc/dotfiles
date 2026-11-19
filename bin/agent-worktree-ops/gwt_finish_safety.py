@@ -138,10 +138,12 @@ def tracked_blob(path, until, expected, limit):
 
 
 def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None,
-              sudo_monitor=False, deadline=None, pass_fds=()):
+              sudo_monitor=False, deadline=None, pass_fds=(), stdout_sink=None):
     """Bound one child; sudo cleanup signals only its monitor, never a group."""
     child = selector = None
     output = [bytearray(), bytearray()]
+    counts = [0, 0]
+    digests = [hashlib.sha256(), hashlib.sha256()]
     started = time.monotonic()
     until = min(started + timeout, DEADLINE, deadline if deadline is not None else float("inf"))
     proof = {"pid": None, "started_monotonic": started, "reaped": False}
@@ -190,9 +192,22 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
                 if not chunk:
                     selector.unregister(key.fileobj)
                 else:
-                    output[key.data].extend(chunk)
-                    if sum(map(len, output)) > limit:
+                    counts[key.data] += len(chunk)
+                    digests[key.data].update(chunk)
+                    if sum(counts) > limit:
                         raise Retain("child-output-limit")
+                    if key.data == 0 and stdout_sink is not None:
+                        # The parent owns the spool; the child still inherits only
+                        # its pipes. Count bytes before touching the bounded sink.
+                        offset = 0
+                        while offset < len(chunk):
+                            tick(until)
+                            written = stdout_sink.write(chunk[offset:])
+                            if type(written) is not int or not 0 < written <= len(chunk) - offset:
+                                raise Retain("child-output-sink-write-invalid")
+                            offset += written
+                    else:
+                        output[key.data].extend(chunk)
         child.wait(timeout=max(0.001, until - time.monotonic()))
     except Exception as error:
         failure = error
@@ -252,11 +267,12 @@ def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=No
                     failure = failure or error
             proof["returncode"] = child.returncode
         proof.update(ended_monotonic=time.monotonic(),
-                     stdout_sha256=hashlib.sha256(output[0]).hexdigest(),
-                     stderr_sha256=hashlib.sha256(output[1]).hexdigest())
+                     stdout_sha256=digests[0].hexdigest(), stderr_sha256=digests[1].hexdigest(),
+                     stdout_bytes=counts[0], stderr_bytes=counts[1])
     result = subprocess.CompletedProcess(command, proof.get("returncode"),
                                          bytes(output[0]), bytes(output[1]))
     result.proof = proof
+    result.stdout_bytes, result.stderr_bytes = counts
     result.failure = type(failure).__name__ if failure else None
     # Keep the historical failure field; only fixed codes cross the CLI boundary.
     codes = {"admission-deadline": "deadline", "child-input-limit": "input-limit",
