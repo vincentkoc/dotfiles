@@ -696,16 +696,28 @@ def pr(url):
             or not isinstance(target, str) or not target
             or type(data.get("merged")) is not bool):
         raise Retain("github-pr-proof-incomplete")
+    head_repo = data["head"].get("repo")
+    head_repo = head_repo.get("full_name") if isinstance(head_repo, dict) else None
+    # Deleted or malformed head repositories cannot attest a fork checkout.
+    # Same-repository completion keeps its existing base-repository proof.
+    head_repo = (head_repo.lower() if isinstance(head_repo, str)
+                 and re.fullmatch(r"[\w.-]+/[\w.-]+", head_repo) else None)
     merged = data["merged"] and bool(data.get("merged_at"))
     return {
         "url": f"https://github.com/{repo}/pull/{number}",
         "repo": repo,
+        "head_repo": head_repo,
         "head": head,
         "target": target,
         "merged": merged,
         "state": data.get("state"),
         "merge": data.get("merge_commit_sha"),
     }
+
+
+def primary_matches_checkout(primary, repo, head):
+    return primary["head"] == head and (
+        primary["repo"] == repo or primary.get("head_repo") == repo)
 
 
 @diagnostic_phase("github-target-proof")
@@ -731,15 +743,15 @@ def finish(db, row, args):
         raise Retain("resume-before-finishing")
 
     primary = pr(args.pr)
-    target = args.target or default_target(snap["repo"])
-    if primary["repo"] != snap["repo"] or primary["head"] != snap["head"]:
+    if not primary_matches_checkout(primary, snap["repo"], snap["head"]):
         raise Retain("primary-pr-repository-or-head-mismatch")
+    target = args.target or default_target(primary["repo"])
     if primary["target"] != target:
         raise Retain("primary-pr-not-targeting-final-branch")
     dependencies = []
     for url in dict.fromkeys(args.wait_for):
         dependency = pr(url)
-        if dependency["repo"] != snap["repo"] or dependency["url"] == primary["url"]:
+        if dependency["repo"] != primary["repo"] or dependency["url"] == primary["url"]:
             raise Retain("invalid-stack-dependency")
         if dependency["target"] != target:
             raise Retain("stack-pr-not-targeting-final-branch")
@@ -888,22 +900,26 @@ def local_checks(row):
         return snap
 
 
-def merged_checks(row):
+def completion_pr_proofs(row):
     primary = pr(row["primary_pr"])
     snap = json.loads(row["identity"])
-    if (primary["repo"] != snap["repo"]
-            or primary["head"] != row["finish_head"]
+    if (not primary_matches_checkout(primary, snap["repo"], row["finish_head"])
             or primary["target"] != row["target"]):
         raise Retain("primary-pr-proof-changed")
     proofs = [primary]
     for expected in json.loads(row["dependencies"]):
         current = pr(expected["url"])
-        if (current["head"] != expected["head"]
+        if (current["repo"] != primary["repo"]
+                or current["head"] != expected["head"]
                 or current["target"] != expected["target"]
                 or current["target"] != row["target"]):
             raise Retain("stack-proof-changed-repeat-finish")
         proofs.append(current)
-    for proof in proofs:
+    return proofs
+
+
+def merged_checks(row):
+    for proof in completion_pr_proofs(row):
         if not proof["merged"] or not SHA.fullmatch(proof["merge"] or ""):
             raise Retain(
                 "pr-closed-unmerged" if proof["state"] == "closed" else "pr-not-merged"
@@ -2284,9 +2300,11 @@ def recovery_release_evidence(db, row, item, owners, head):
     proof["inventory"] = item["inventory"]
     if releases:
         repo = json.loads(row["identity"])["repo"]
+        primary = PR_URL.fullmatch(proof["primary_pr"]) if isinstance(proof["primary_pr"], str) else None
+        base_repo = primary[1].lower() if primary is not None else None
         def local_pr(url):
             match = PR_URL.fullmatch(url) if isinstance(url, str) else None
-            return match is not None and url == f"https://github.com/{repo}/pull/{match[2]}"
+            return match is not None and url == f"https://github.com/{base_repo}/pull/{match[2]}"
 
         completed = {owner["owner"] for owner in owners if owner["completed"] == 1}
         if (any(release["owner"] not in completed or type(release["generation"]) is not int
@@ -2315,6 +2333,10 @@ def recovery_release_evidence(db, row, item, owners, head):
             valid = False
         if not valid:
             raise Retain("recovery-release-inventory-invalid")
+        if base_repo != repo:
+            # Existing receipts do not persist fork identity. Recheck it before
+            # consuming cross-repository releases; same-repository recovery stays offline.
+            completion_pr_proofs(row)
     return {"releases": releases, "completion_proof": proof}
 
 

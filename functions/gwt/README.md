@@ -757,6 +757,21 @@ released, its exact PR head has merged into the final target, and native
 admission passes. There is no age delay. `gwt release` can sign off an already
 completed owner without repeating the PR arguments.
 
+The primary PR may target another repository when GitHub identifies the checkout's
+origin as its head repository and its head commit exactly matches the checkout.
+The final branch defaults to the primary PR's base repository default branch;
+all stack dependencies must target that same repository and final branch.
+Same-repository completion does not require an available head repository.
+If a cross-repository PR's head repository is deleted or no longer matches the
+origin, completion and removal retain the checkout.
+
+Missing-checkout recovery with recorded cross-repository owner releases requires
+fresh GitHub identity, head and target proof. Unavailable or changed proof refuses
+recovery completion. If an intent already exists, inspect its recorded state before
+continuation; publication may already have occurred. Do not automatically retry.
+Same-repository recovery keeps its offline proof path. Completion alone never
+substitutes for the fresh merged proof required before eligible checkout removal.
+
 For stacked work, retain a pin while another task still needs this checkout.
 Repeat `--wait-for` for every dependent PR and name the final integration branch:
 
