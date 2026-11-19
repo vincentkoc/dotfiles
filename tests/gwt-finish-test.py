@@ -42,6 +42,34 @@ def git(repo, *args):
     ).stdout.strip()
 
 
+class PullRequestProofTests(unittest.TestCase):
+    def read(self, head_repo, *, base="upstream/repo"):
+        data = {"number": 1, "base": {"repo": {"full_name": base}, "ref": "main"},
+                "head": {"sha": "a" * 40, "repo": head_repo},
+                "merged": False, "merged_at": None, "state": "open"}
+        with mock.patch.object(FINISH, "run", return_value=types.SimpleNamespace(
+                stdout=json.dumps(data).encode())):
+            return FINISH.pr("https://github.com/upstream/repo/pull/1")
+
+    def test_fork_head_repository_is_normalized_and_base_identity_stays_bound(self):
+        proof = self.read({"full_name": "Contributor/Repo"})
+        self.assertEqual(proof["head_repo"], "contributor/repo")
+        self.assertTrue(FINISH.primary_matches_checkout(proof, "contributor/repo", "a" * 40))
+        self.assertFalse(FINISH.primary_matches_checkout(proof, "contributor/repo", "b" * 40))
+        with self.assertRaisesRegex(FINISH.Retain, "github-pr-identity-mismatch"):
+            self.read({"full_name": "contributor/repo"}, base="foreign/repo")
+
+    def test_null_malformed_and_wrong_head_repositories_do_not_attest_a_fork(self):
+        for value in (None, "contributor/repo", {}, {"full_name": None},
+                      {"full_name": 1}, {"full_name": "contributor/repo/extra"},
+                      {"full_name": " contributor/repo"}, {"full_name": "contributor/repo\n"},
+                      {"full_name": "foreign/repo"}):
+            with self.subTest(value=value):
+                proof = self.read(value)
+                self.assertFalse(FINISH.primary_matches_checkout(proof, "contributor/repo", "a" * 40))
+                self.assertTrue(FINISH.primary_matches_checkout(proof, "upstream/repo", "a" * 40))
+
+
 class LifecycleTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -366,6 +394,60 @@ class LifecycleTests(unittest.TestCase):
         self.proofs[self.url].update(target="main", head="b" * 40)
         with self.assertRaisesRegex(FINISH.Retain, "head-mismatch"):
             self.finish()
+
+    def test_fork_completion_uses_base_default_and_retains_open_pr(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        self.proofs[self.url] = self.proof(
+            self.url, repo="upstream/repo", head_repo="example/repo",
+            target="trunk", merged=False, state="open", merge=None)
+        with mock.patch.object(FINISH, "default_target", return_value="trunk") as target:
+            result = self.finish()[1][0]
+        target.assert_called_once_with("upstream/repo")
+        self.assertEqual(result["state"], "finished")
+        self.assertEqual(result["pr"], self.url)
+        self.assertEqual(self.check_reason(), "pr-not-merged")
+        self.assertTrue(self.wt.exists())
+
+    def test_fork_primary_needs_origin_identity_and_exact_head(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        valid = self.proof(self.url, repo="upstream/repo", head_repo="example/repo")
+        for changes in ({"head_repo": None}, {"head_repo": "foreign/repo"}, {"head": "b" * 40}):
+            with self.subTest(changes=changes):
+                self.proofs[self.url] = {**valid, **changes}
+                with self.assertRaisesRegex(FINISH.Retain, "primary-pr-repository-or-head-mismatch"):
+                    self.finish()
+                self.assertIsNone(self.call("status")[1][0]["pr"])
+        self.url = "https://github.com/example/repo/pull/1"
+        self.proofs[self.url] = self.proof(self.url, head_repo=None)
+        self.assertEqual(self.finish()[1][0]["state"], "finished")
+
+    def test_fork_stack_dependencies_share_base_not_contributor_repository(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        self.proofs[self.url] = self.proof(self.url, repo="upstream/repo", head_repo="example/repo")
+        upper = "https://github.com/upstream/repo/pull/2"
+        dependency = self.proof(upper, repo="upstream/repo", head_repo="other/contributor", head="b" * 40)
+        self.proofs[upper] = dependency
+        self.finish("--wait-for", upper)
+        self.assertEqual(self.check_reason(), "completion-confirmed-checkout-retained")
+        foreign = "https://github.com/example/repo/pull/2"
+        self.proofs[foreign] = self.proof(foreign, head="b" * 40)
+        with self.assertRaisesRegex(FINISH.Retain, "invalid-stack-dependency"):
+            self.finish("--wait-for", foreign)
+        self.proofs[upper] = {**dependency, "target": "other"}
+        with self.assertRaisesRegex(FINISH.Retain, "stack-pr-not-targeting-final-branch"):
+            self.finish("--wait-for", upper)
+
+    def test_fork_completion_rechecks_head_repository_head_and_target(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        valid = self.proof(self.url, repo="upstream/repo", head_repo="example/repo")
+        self.proofs[self.url] = valid
+        self.finish()
+        for changes in ({"head_repo": None}, {"head_repo": "foreign/repo"},
+                        {"head": "b" * 40}, {"target": "other"}):
+            with self.subTest(changes=changes):
+                self.proofs[self.url] = {**valid, **changes}
+                self.assertEqual(self.check_reason(), "primary-pr-proof-changed")
+                self.assertTrue(self.wt.exists())
 
     def test_head_or_registration_identity_change_is_reported(self):
         self.finish()
@@ -1620,6 +1702,30 @@ class ForegroundCompletionTests(unittest.TestCase):
         self.assertTrue(self.legacy.exists())
         FINISH.qualified_policy.assert_not_called()
 
+    @unittest.skipUnless(shutil.which("lsof"), "native lsof unavailable")
+    def test_fork_finish_removes_only_after_fresh_merged_proof(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        self.proofs[self.url] = self.proof(self.url, repo="upstream/repo", head_repo="example/repo")
+        result = self.finish()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        FINISH.qualified_policy.assert_not_called()
+
+    def test_fork_proof_drift_before_native_removal_retains_checkout(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        self.proofs[self.url] = self.proof(self.url, repo="upstream/repo", head_repo="example/repo")
+        def drift(*args, **kwargs):
+            self.proofs[self.url]["head_repo"] = None
+        with mock.patch.object(FINISH, "manual_holders", side_effect=drift):
+            result = self.finish()[1][0]
+        self.assertEqual(result["reason"], "primary-pr-proof-changed", result)
+        self.assertTrue(self.wt.exists())
+        self.assertTrue(self.admin.exists())
+        self.assertTrue((self.admin / "locked").exists())
+
     def test_pending_merge_records_signoff_even_with_ignored_recovery_content(self):
         self.proofs[self.url].update(merged=False, state="open", merge=None)
         (self.wt / "ignored").write_text("keep this recovery content\n")
@@ -1933,13 +2039,13 @@ class MissingRecoveryTests(unittest.TestCase):
             self.recover("--apply", "--recovery-sha256", first["recovery_sha256"],
                          "--intent-id", first["intent_id"])
 
-    def mixed_owner_missing(self, blocker=False):
+    def mixed_owner_missing(self, blocker=False, **proof):
         self.recover("--apply", "--recovery-sha256", self.plan())
         with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "owner-2"}):
             self.call("resume")
         if blocker:
             (self.admin / "REBASE_HEAD").write_text(self.head + "\n")
-        self.proofs[self.url] = self.proof(self.url)
+        self.proofs[self.url] = self.proof(self.url, **proof)
         finished = self.finish()[1][0]
         self.assertEqual(finished["released_owners"], ["owner-1"])
         inventory = self.record()[1]["inventory"]
@@ -1964,6 +2070,87 @@ class MissingRecoveryTests(unittest.TestCase):
             self.assertIsNone(FINISH.retirement(db, self.original)["inventory"])
         self.assertEqual(self.recover("--apply", "--recovery-sha256", result["recovery_sha256"],
                                       "--intent-id", result["intent_id"]), result)
+
+    def test_same_repository_release_recovery_stays_offline(self):
+        self.mixed_owner_missing()
+        with mock.patch.object(FINISH, "pr", side_effect=AssertionError("same-repository recovery is offline")):
+            result = self.recover("--apply", "--recovery-sha256", self.plan())
+        self.assertEqual(result["checkout"], "restored")
+
+    def test_fork_release_recovery_preserves_history_and_invalidates_releases(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        inventory = self.mixed_owner_missing(
+            repo="upstream/repo", head_repo="example/repo", merged=False, state="open", merge=None)
+        with FINISH.ledger(self.state) as db:
+            previous = db.execute("SELECT fact FROM missing_recoveries WHERE worktree_id=?",
+                                  (self.original["id"],)).fetchone()[0]
+        result = self.recover("--apply", "--recovery-sha256", self.plan())
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual(result["generation"], self.generation + 1)
+        self.assertEqual(self.history(), {json.loads(previous)["id"]: previous})
+        self.assertEqual(self.record()[0]["preimage"]["completion_proof"]["inventory"], inventory)
+        with FINISH.ledger(self.state) as db:
+            self.assertEqual(FINISH.owner_rows(db, self.original["id"]),
+                             [{"owner": "owner-1", "completed": 1}, {"owner": "owner-2", "completed": 0}])
+            self.assertEqual(list(db.execute("SELECT * FROM owner_releases")), [])
+            self.assertIsNone(FINISH.retirement(db, self.original)["inventory"])
+        with mock.patch.object(FINISH, "pr", side_effect=AssertionError("replay grants no release authority")):
+            self.assertEqual(self.recover("--apply", "--recovery-sha256", result["recovery_sha256"],
+                                          "--intent-id", result["intent_id"]), result)
+
+    def test_fork_release_recovery_refuses_changed_or_unavailable_proof(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        self.mixed_owner_missing(repo="upstream/repo", head_repo="example/repo")
+        digest = self.plan()
+        previous = self.record()
+        valid = dict(self.proofs[self.url])
+        for changes in ({"head_repo": None}, {"head_repo": "foreign/repo"},
+                        {"head": "b" * 40}, {"target": "other"}):
+            with self.subTest(changes=changes):
+                self.proofs[self.url] = {**valid, **changes}
+                with self.assertRaisesRegex(FINISH.Retain, "primary-pr-proof-changed"):
+                    self.recover("--apply", "--recovery-sha256", digest)
+                self.assertEqual(self.record(), previous)
+                self.assertFalse(self.wt.exists())
+        with mock.patch.object(FINISH, "pr", side_effect=FINISH.Retain("ghx-failed")):
+            with self.assertRaisesRegex(FINISH.Retain, "ghx-failed"):
+                self.recover()
+        self.assertEqual(self.record(), previous)
+
+    def test_fork_release_recovery_validates_shape_before_live_proof(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        inventory = self.mixed_owner_missing(repo="upstream/repo", head_repo="example/repo")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE worktrees SET dependencies='[{}]' WHERE id=?", (self.original["id"],))
+            self.generation = FINISH.retirement(db, self.original)["generation"]
+            db.execute("INSERT INTO owner_releases VALUES (?, ?, ?)",
+                       (self.original["id"], "owner-1", self.generation))
+            db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                       (inventory, self.original["id"]))
+        with mock.patch.object(FINISH, "pr", side_effect=AssertionError("shape must be checked first")):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-release-proof-invalid"):
+                self.recover()
+        self.assertFalse(self.wt.exists())
+
+    def test_fork_release_proof_drift_during_materialization_retains_stage(self):
+        self.url = "https://github.com/upstream/repo/pull/1"
+        self.mixed_owner_missing(repo="upstream/repo", head_repo="example/repo")
+        digest = self.plan()
+        materialize = FINISH.recovery_tree
+        def drift(*args, **kwargs):
+            result = materialize(*args, **kwargs)
+            if kwargs.get("write"):
+                self.proofs[self.url]["head_repo"] = "foreign/repo"
+            return result
+        with mock.patch.object(FINISH, "recovery_tree", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "primary-pr-proof-changed"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        record, retirement = self.record()
+        self.assertFalse(self.wt.exists())
+        self.assertTrue(Path(record["stage"]).exists())
+        self.assertIsNone(record["result"])
+        self.assertEqual(retirement["state"], "recovery-pending")
+        self.assertEqual(retirement["generation"], self.generation)
 
     def test_retained_rebase_head_outside_branch_is_preserved(self):
         oid = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "retained rebase commit")
@@ -2432,8 +2619,10 @@ class MissingRecoveryTests(unittest.TestCase):
         inventory = self.mixed_owner_missing()
         dependency = {"url": "https://github.com/example/repo/pull/2",
                       "head": self.head, "target": "main"}
+        foreign = "https://github.com/foreign/repo/pull/1"
+        self.proofs[foreign] = self.proof(foreign, repo="foreign/repo", head_repo="wrong/repo")
         changes = [
-            ("primary_pr", "https://github.com/foreign/repo/pull/1"),
+            ("primary_pr", "https://github.com/foreign/repo/pull/1/"),
             ("dependencies", "[{}]"),
             ("dependencies", json.dumps([{**dependency, "url": self.url}])),
             ("dependencies", json.dumps([{**dependency, "url": "https://github.com/foreign/repo/pull/2"}])),
@@ -2455,6 +2644,17 @@ class MissingRecoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(FINISH.Retain, "release-proof-invalid"):
                     self.recover()
                 self.assertFalse(self.wt.exists())
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE worktrees SET primary_pr=?, dependencies='[]' WHERE id=?",
+                       (foreign, self.original["id"]))
+            self.generation = FINISH.retirement(db, self.original)["generation"]
+            db.execute("INSERT INTO owner_releases VALUES (?, ?, ?)",
+                       (self.original["id"], "owner-1", self.generation))
+            db.execute("UPDATE retirement SET inventory=? WHERE worktree_id=?",
+                       (inventory, self.original["id"]))
+        with self.assertRaisesRegex(FINISH.Retain, "primary-pr-proof-changed"):
+            self.recover()
+        self.assertFalse(self.wt.exists())
 
     def test_cancellation_after_staging_is_preserved_and_refuses_publication(self):
         with FINISH.ledger(self.state) as db:
