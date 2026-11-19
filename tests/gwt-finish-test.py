@@ -2911,6 +2911,55 @@ class MissingRecoveryTests(unittest.TestCase):
         FINISH.recovery_tree(stage, entries, str(self.admin), FINISH.safety().DEADLINE)
         self.assertEqual((stage / "large").read_bytes(), data)
 
+    def test_legacy_size_failure_continues_with_large_blobs_and_preserved_inode(self):
+        self.recover("--apply", "--recovery-sha256", self.plan())
+        data = b"x" * 17_387_080
+        for name in ("large", "large-executable"):
+            (self.wt / name).write_bytes(data)
+        (self.wt / "large-executable").chmod(0o755)
+        git(self.wt, "add", ".")
+        git(self.wt, "commit", "-m", "large recovery fixture")
+        self.disappear_again()
+        digest = self.plan()
+        with mock.patch.object(FINISH, "recovery_blobs", side_effect=FINISH.Retain("recovery-blob-size-limit")):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-blob-size-limit"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        old = self.legacy_receipt()
+        stage = Path(old["stage"])
+        (stage / "file").write_text("original\n")
+        (stage / "file").chmod(0o644)
+        before = (stage / "file").stat().st_ino
+        plan = self.recover("--continue-partial", "--intent-id", old["id"],
+                            "--recovery-sha256", old["digest"])
+        self.assertEqual(plan["recovery_sha256"], old["digest"])
+        result = self.recover("--continue-partial", "--apply", "--intent-id", old["id"],
+                              "--recovery-sha256", old["digest"])
+        self.assertEqual(result["checkout"], "restored")
+        self.assertEqual((self.wt / "file").stat().st_ino, before)
+        self.assertEqual((self.wt / "large").read_bytes(), data)
+        self.assertEqual((self.wt / "large-executable").read_bytes(), data)
+        self.assertEqual(stat_mode(self.wt / "large-executable"), 0o755)
+        self.assertEqual(result["recovery_sha256"], old["digest"])
+        self.assertNotIn("contract", self.record()[0])
+
+    def test_metadata_budget_refuses_before_new_intent(self):
+        native = FINISH.git
+        def oversized(path, *args, **kwargs):
+            raw = native(path, *args, **kwargs)
+            if args[:3] == ("--no-replace-objects", "cat-file", "--batch-check"):
+                first, rest = raw.split(b"\n", 1)
+                oid, kind, _ = first.split(b" ")
+                return oid + b" " + kind + b" " + str(FINISH.safety().PASS_LIMIT).encode() + b"\n" + rest
+            return raw
+        with mock.patch.object(FINISH, "git", side_effect=oversized):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-source-byte-limit"):
+                self.plan()
+        record, retirement = self.record()
+        self.assertIsNone(record)
+        self.assertEqual(retirement["state"], "enrolled")
+        self.assertFalse(list(self.wt.parent.glob(".gwt-recover-*")))
+        self.assertFalse(self.wt.exists())
+
     def test_replaced_staging_parent_symlink_is_not_followed(self):
         stage = self.base / "stage"
         stage.mkdir(mode=0o700)
@@ -2986,7 +3035,7 @@ class MissingRecoveryTests(unittest.TestCase):
         self.assertEqual(result["checkout"], "restored")
         self.assertEqual(result["generation"], 1)
         self.assertEqual(result["entries"], count)
-        self.assertEqual(children, {"metadata": 51, "content": 52})
+        self.assertEqual(children, {"metadata": 102, "content": 52})
         self.assertGreaterEqual(synced.call_count, count)
         self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
         self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
@@ -3091,21 +3140,41 @@ class RecoveryBatchTests(unittest.TestCase):
         self.assertEqual(stat_mode(self.stage / "nested/exec"), 0o755)
         self.assertEqual(os.readlink(self.stage / "link"), "../outside\nname")
 
-    def test_exact_leaf_limit_succeeds_and_one_more_refuses_before_write(self):
-        data = b"x" * FINISH.RECOVERY_BLOB_LIMIT
+    def test_large_regular_and_executable_blobs_stream_and_verify(self):
+        data = b"x" * 17_387_080
         oid = self.blob(data)
-        self.write({"exact": (0o100644, oid)})
-        self.assertEqual((self.stage / "exact").read_bytes(), data)
-        large = self.blob(data + b"x")
-        with self.assertRaisesRegex(FINISH.Retain, "recovery-blob-size-limit"):
-            self.write({"exact": (0o100644, oid), "too-large": (0o100644, large)}, allow_partial=True)
+        entries = {"regular": (0o100644, oid), "executable": (0o100755, oid)}
+        native = FINISH.safety().supervise
+        results = []
+        def supervise(*args, **kwargs):
+            result = native(*args, **kwargs)
+            if kwargs.get("stdout_sink") is not None:
+                results.append(result)
+            return result
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise):
+            self.write(entries)
+            FINISH.recovery_tree(self.stage, entries, str(self.repo / ".git"), self.until)
+        self.assertEqual((self.stage / "regular").read_bytes(), data)
+        self.assertEqual((self.stage / "executable").read_bytes(), data)
+        self.assertEqual(stat_mode(self.stage / "executable"), 0o755)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result.stdout == b"" and result.stdout_bytes > len(data) for result in results))
+
+    def test_large_symlink_still_refuses_before_content_read(self):
+        oid = self.blob(b"x" * (FINISH.RECOVERY_BLOB_LIMIT + 1))
+        with mock.patch.object(FINISH, "git", wraps=FINISH.git) as calls:
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-blob-size-limit"):
+                self.write({"link": (0o120000, oid)})
+        self.assertFalse(any(call.args[-1] == "--batch" for call in calls.call_args_list))
+        self.assertEqual(list(self.stage.iterdir()), [])
 
     def test_1024_and_1025_empty_requests_remain_count_bounded(self):
         oid = self.blob(b"")
         for count in (1024, 1025):
             entries = [(str(i), (0o100644, oid)) for i in range(count)]
             with self.subTest(count=count), mock.patch.object(FINISH, "git", wraps=FINISH.git) as calls:
-                actual = list(FINISH.recovery_blobs(self.repo, entries, self.until, 0))
+                actual = [(name, mode, b"".join(FINISH.recovery_blob_chunks(blob, self.until)))
+                          for name, mode, blob in FINISH.recovery_blobs(self.repo, entries, self.until, 0)]
             self.assertEqual(len(actual), count)
             self.assertTrue(all(data == b"" for _, _, data in actual))
             self.assertEqual(len(calls.call_args_list), 2 if count == 1024 else 4)
@@ -3119,8 +3188,12 @@ class RecoveryBatchTests(unittest.TestCase):
         native = FINISH.git
         def corrupt(change):
             def invoke(path, *args, **kwargs):
+                sink = kwargs.pop("stdout_sink", None)
                 raw = native(path, *args, **kwargs)
-                return change(raw) if args[-1] == "--batch" else raw
+                if args[-1] == "--batch":
+                    sink.write(change(raw))
+                    return b""
+                return raw
             return invoke
         header = second.encode() + b" blob 6\n"
         for change in (lambda raw: raw.replace(header, first.encode() + b" blob 6\n"),
@@ -3181,6 +3254,42 @@ class RecoveryBatchTests(unittest.TestCase):
         with mock.patch.object(FINISH, "run", side_effect=diagnostic):
             with self.assertRaisesRegex(FINISH.Retain, "git-diagnostic"):
                 self.write({"file": (0o100644, oid)})
+        self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_large_corrupt_or_truncated_spool_never_materializes(self):
+        oid = self.blob(b"x" * 17_387_080)
+        native = FINISH.git
+        streams = []
+        def invoke(path, *args, **kwargs):
+            result = native(path, *args, **kwargs)
+            stream = kwargs.get("stdout_sink")
+            if stream is not None:
+                streams.append(stream)
+                if corrupt:
+                    stream.seek(128)
+                    stream.write(b"!")
+                else:
+                    stream.truncate(stream.tell() - 1)
+            return result
+        for corrupt in (True, False):
+            with self.subTest(corrupt=corrupt), mock.patch.object(FINISH, "git", side_effect=invoke):
+                with self.assertRaises(FINISH.Retain):
+                    self.write({"large": (0o100644, oid)})
+            self.assertEqual(list(self.stage.iterdir()), [])
+        self.assertTrue(all(stream.closed for stream in streams))
+
+    def test_copy_failure_closes_spool_without_writing_pointer(self):
+        oid = self.blob(b"source")
+        native, streams = FINISH.tempfile.TemporaryFile, []
+        def temporary(*args, **kwargs):
+            stream = native(*args, **kwargs)
+            streams.append(stream)
+            return stream
+        with mock.patch.object(FINISH.tempfile, "TemporaryFile", side_effect=temporary), \
+                mock.patch.object(FINISH, "recovery_parent", side_effect=OSError("fixture copy")):
+            with self.assertRaisesRegex(OSError, "fixture copy"):
+                self.write({"file": (0o100644, oid)})
+        self.assertTrue(streams and all(stream.closed for stream in streams))
         self.assertEqual(list(self.stage.iterdir()), [])
 
 
