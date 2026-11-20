@@ -3183,22 +3183,64 @@ class MissingRecoveryTests(unittest.TestCase):
         self.assertNotIn("contract", self.record()[0])
 
     def test_metadata_budget_refuses_before_new_intent(self):
+        digest = self.plan()
         native = FINISH.git
+        regular = {git(self.repo, "rev-parse", self.head + ":" + name).encode()
+                   for name in (".gitignore", "file")}
         def oversized(path, *args, **kwargs):
             raw = native(path, *args, **kwargs)
             if args[:3] == ("--no-replace-objects", "cat-file", "--batch-check"):
-                first, rest = raw.split(b"\n", 1)
-                oid, kind, _ = first.split(b" ")
-                return oid + b" " + kind + b" " + str(FINISH.safety().PASS_LIMIT).encode() + b"\n" + rest
+                lines = raw.splitlines()
+                for i, line in enumerate(lines):
+                    oid, kind, _ = line.split(b" ")
+                    if oid in regular:
+                        lines[i] = oid + b" " + kind + b" " + str(FINISH.safety().SOURCE_LIMIT // 2).encode()
+                return b"\n".join(lines) + b"\n"
             return raw
         with mock.patch.object(FINISH, "git", side_effect=oversized):
             with self.assertRaisesRegex(FINISH.Retain, "recovery-source-byte-limit"):
                 self.plan()
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-source-byte-limit"):
+                self.recover("--apply", "--recovery-sha256", digest)
         record, retirement = self.record()
         self.assertIsNone(record)
         self.assertEqual(retirement["state"], "enrolled")
         self.assertFalse(list(self.wt.parent.glob(".gwt-recover-*")))
         self.assertFalse(self.wt.exists())
+
+    def test_metadata_source_budget_is_independent_of_admin_budget(self):
+        native = FINISH.git
+        def sized(path, *args, **kwargs):
+            raw = native(path, *args, **kwargs)
+            if args[:3] == ("--no-replace-objects", "cat-file", "--batch-check"):
+                first, rest = raw.split(b"\n", 1)
+                oid, kind, _ = first.split(b" ")
+                return oid + b" " + kind + b" " + str(FINISH.safety().PASS_LIMIT + 1).encode() + b"\n" + rest
+            return raw
+        self.assertGreater(FINISH.safety().SOURCE_LIMIT, FINISH.safety().PASS_LIMIT)
+        with mock.patch.object(FINISH, "git", side_effect=sized):
+            result = self.recover()
+        self.assertFalse(result["checkout_mutation"])
+        self.assertIsNone(self.record()[0])
+        self.assertFalse(self.wt.exists())
+
+    def test_pending_source_budget_refusal_preserves_exact_intent(self):
+        stage, digest, intent = self.partial_stage()
+        before = self.record()
+        file_inode = (stage / "file").stat().st_ino
+        with mock.patch.object(FINISH.safety(), "SOURCE_LIMIT", 1):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-source-byte-limit"):
+                self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                             "--intent-id", intent)
+        self.assertEqual(self.record(), before)
+        self.assertEqual((stage / "file").stat().st_ino, file_inode)
+        self.assertEqual((stage / "file").read_text(), "original\n")
+        result = self.recover("--continue-partial", "--apply", "--recovery-sha256", digest,
+                              "--intent-id", intent)
+        self.assertEqual(result["recovery_sha256"], digest)
+        self.assertEqual(result["intent_id"], intent)
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual((self.wt / "file").stat().st_ino, file_inode)
 
     def test_replaced_staging_parent_symlink_is_not_followed(self):
         stage = self.base / "stage"
@@ -3215,7 +3257,7 @@ class MissingRecoveryTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("GWT_RECOVERY_SCALE") == "1", "explicit large apply qualification")
     def test_large_batch_recovery_applies_with_original_deadline(self):
-        count, source_bytes, largest = 52034, 432123812, 9516304
+        count, source_bytes, largest = 65771, 742463141, 17387080
         target = b"000/00001"
         size, extra = divmod(source_bytes - largest - len(target), count - 2)
         expected = {}
@@ -3275,7 +3317,7 @@ class MissingRecoveryTests(unittest.TestCase):
         self.assertEqual(result["checkout"], "restored")
         self.assertEqual(result["generation"], 1)
         self.assertEqual(result["entries"], count)
-        self.assertEqual(children, {"metadata": 102, "content": 52})
+        self.assertEqual(children, {"metadata": 130, "content": 66})
         self.assertGreaterEqual(synced.call_count, count)
         self.assertEqual((self.admin / "index").read_bytes(), self.before_index)
         self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
@@ -3958,21 +4000,29 @@ class RecoveryBatchTests(unittest.TestCase):
                     self.write({"first": (0o100644, oid)})
             self.assertEqual(list(self.stage.iterdir()), [])
 
-    def test_pass_budget_counts_duplicates_partial_bytes_and_git_pointer(self):
+    def test_source_budget_counts_duplicates_partial_bytes_and_git_pointer(self):
         oid = self.blob(b"abc")
         entries = {name: (0o100644, oid) for name in ("existing", "first", "second")}
         (self.stage / "existing").write_bytes(b"abc")
         (self.stage / "existing").chmod(0o644)
         before = (self.stage / "existing").stat().st_ino
         pointer = len(os.fsencode("gitdir: " + str(self.repo / ".git") + "\n"))
-        with mock.patch.object(FINISH.safety(), "PASS_LIMIT", pointer + 8), \
+        with mock.patch.object(FINISH.safety(), "SOURCE_LIMIT", pointer + 8), \
                 mock.patch.object(FINISH, "git", wraps=FINISH.git) as calls:
             with self.assertRaisesRegex(FINISH.Retain, "recovery-source-byte-limit"):
                 self.write(entries, allow_partial=True)
         self.assertFalse(any(call.args[-1] == "--batch" for call in calls.call_args_list))
         self.assertEqual(list(self.stage.iterdir()), [self.stage / "existing"])
         self.assertEqual((self.stage / "existing").stat().st_ino, before)
-        with mock.patch.object(FINISH.safety(), "PASS_LIMIT", pointer + 9):
+        with mock.patch.object(FINISH.safety(), "SOURCE_LIMIT", pointer + 9), \
+                mock.patch.object(FINISH.safety(), "PASS_LIMIT", 1):
+            self.write(entries, allow_partial=True)
+        self.assertEqual((self.stage / "existing").stat().st_ino, before)
+        with mock.patch.object(FINISH.safety(), "SOURCE_LIMIT", pointer + 8):
+            with self.assertRaisesRegex(FINISH.Retain, "recovery-source-byte-limit"):
+                FINISH.recovery_tree(self.stage, entries, str(self.repo / ".git"), self.until)
+        with mock.patch.object(FINISH.safety(), "SOURCE_LIMIT", pointer + 9), \
+                mock.patch.object(FINISH.safety(), "PASS_LIMIT", 1):
             self.write(entries, allow_partial=True)
         self.assertEqual((self.stage / "existing").stat().st_ino, before)
 

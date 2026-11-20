@@ -2644,11 +2644,11 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
                     os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
             pointer = os.fsencode("gitdir: " + gitdir + "\n")
             pointer_bytes = 0 if ".git" in present else len(pointer)
-            if present_bytes + pointer_bytes > module.PASS_LIMIT:
+            if present_bytes + pointer_bytes > module.SOURCE_LIMIT:
                 raise Retain("recovery-source-byte-limit")
             with contextlib.closing(recovery_blobs(
                     owner, ((name, value) for name, value in entries.items() if name not in present),
-                    until, module.PASS_LIMIT - present_bytes - pointer_bytes)) as blobs:
+                    until, module.SOURCE_LIMIT - present_bytes - pointer_bytes)) as blobs:
                 source = itertools.chain(blobs, [] if ".git" in present else [(".git", 0o100600, pointer)])
                 for name, mode, data in source:
                     module.tick(until)
@@ -2695,7 +2695,7 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
             else:
                 if not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != mode & 0o777:
                     raise Retain("recovery-file-mode-changed")
-                if details.st_size > module.PASS_LIMIT - total:
+                if details.st_size > module.SOURCE_LIMIT - total:
                     raise Retain("recovery-source-byte-limit")
                 if oid is None:
                     data, _ = module.read_file(path, until, RECOVERY_BLOB_LIMIT)
@@ -2703,10 +2703,10 @@ def recovery_tree(root, entries, gitdir, until, *, write=False, owner=None, allo
                     matched = data == os.fsencode("gitdir: " + gitdir + "\n")
                 else:
                     digest, size = module.tracked_blob(path, until, module.file_identity(details),
-                                                       module.PASS_LIMIT - total)
+                                                       module.SOURCE_LIMIT - total)
                     matched = digest == oid
             total += size
-            if total > module.PASS_LIMIT:
+            if total > module.SOURCE_LIMIT:
                 raise Retain("recovery-source-byte-limit")
             if not matched:
                 raise Retain("recovery-file-content-changed")
@@ -2995,13 +2995,13 @@ def recover_missing(db, row, args):
         digest = recovery_digest(preimage)
         if record and digest != record["digest"]:
             raise Retain("recovery-preimage-drift")
-        # Admit all committed sizes before creating a new durable intent. This
-        # probe also covers legacy continuations without changing their digest.
+        # Admit all source paths before intent using the checkout budget, separate
+        # from admin reads; legacy continuations keep their original digest.
         pointer_bytes = len(os.fsencode("gitdir: " + preimage["identity"]["gitdir"] + "\n"))
-        if pointer_bytes > safety().PASS_LIMIT:
+        if pointer_bytes > safety().SOURCE_LIMIT:
             raise Retain("recovery-source-byte-limit")
         for _ in recovery_blob_metadata(preimage["identity"]["owner"], entries.items(), until,
-                                         safety().PASS_LIMIT - pointer_bytes):
+                                         safety().SOURCE_LIMIT - pointer_bytes):
             pass
         if args.continue_partial:
             if container:
