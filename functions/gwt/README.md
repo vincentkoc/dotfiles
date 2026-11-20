@@ -226,9 +226,10 @@ remains in recovery history; only the verified successor identity is normalized.
 
 Only committed blobs whose tree exactly matches the saved index are written.
 The operation runs no checkout filters, hooks, dependency installation or fetch.
-Recovery streams regular blobs in 64 KiB chunks within the unchanged 512 MiB
-staging-pass budget. Metadata admission counts every restored path, including
-duplicate blobs and the Git pointer, before recording a new recovery intent.
+Recovery streams regular blobs in 64 KiB chunks within the 1 GiB source budget
+per staging pass. Admin and subprocess inventory retain their separate 512 MiB
+budget. Metadata admission counts every restored path, including duplicate blobs
+and the Git pointer, before recording a new recovery intent.
 Symlink contents retain their 16 MiB limit. Tree enumeration uses the native
 32 MiB capture budget,
 including when replacement objects are disabled; other read limits are unchanged.
