@@ -121,6 +121,17 @@ cancellation. A repeated identical cancellation is a no-op.
 Once the task is finalized, use the manual closeout route below to retire the
 checkout. Cancellation alone does not run deletion or clear another owner's pin.
 
+If a natively enrolled checkout directory is already absent (`ENOENT` only),
+a recorded owner can still cancel it from the owning repository with
+`gwt cancel --reason <text> --worktree /absolute/task/path`. The surviving
+registration, native lock, admin directory, branch and owner identities must
+match the enrollment, and the branch tip must be reachable from a
+remote-tracking ref. That tip becomes the recorded cancellation HEAD. When
+every owner is completed or cancelled at that HEAD, the literal
+`gwt rm /absolute/task/path --finalized` closeout below retires the surviving
+registration without PR or release proof; it rechecks the remote, owners and
+pins. Unpushed commits, an appeared directory or a changed registration refuse.
+
 ## Worktrees removed outside GWT
 
 When an explicitly authorized removal already deleted a finished checkout, use
@@ -140,6 +151,24 @@ Existing native removal attempts keep their separate receipt-based reconciliatio
 The record reports `checkout: removed` and `native_attempted: false`; it does not
 claim historical preservation checks that GWT did not perform. History, branches
 and the path reservation remain intact. This command never removes files.
+
+## Orphan creation locks
+
+`gwt new --finish-managed` locks a new registration with
+`gwt-finish.v2:<token>` before enrollment. If the checkout later disappears and
+no lifecycle record ever matched it, ordinary prune skips the locked entry.
+Run `gwt prune --orphan-locks` from the owning repository to list such
+registrations; it changes nothing. `gwt prune --orphan-locks --apply` then
+unlocks and runs one non-force native removal for each listed candidate only.
+
+A candidate needs an absent directory (`ENOENT`) under the managed root, a
+gwt-finish lock token, no lifecycle row, identity, lock reason or failed
+creation that mentions it, and a named branch at its recorded HEAD. Its admin
+directory must pass the closeout admin classification, its index must match
+HEAD, and HEAD plus every admin recovery commit must be reachable from a
+remote-tracking ref. Anything else is reported as retained with its reason.
+Apply rechecks each candidate under the maintainer lock, never deletes
+branches and restores the lock if native removal fails.
 
 ## Missing enrolled checkout recovery
 
@@ -569,6 +598,14 @@ ignored root blocks removal, as do dirty or untracked source, populated submodul
 in-progress Git operations, unrelated locks and live file/CWD holders. Symlink
 targets are never traversed or removed. This is routine task closeout, with no
 evidence archive or additional permission step.
+
+Git never reports an empty directory as untracked or ignored, so such a tree
+needs no `--discard-ignored` root. Every checkout inventory (manual closeout,
+completion checks and release baselines) admits a directory that no tracked
+path needs only while it holds nothing but further directories at every depth.
+A tracked or skip-worktree path replaced by a directory is a deletion and
+refuses. Any file, symlink, special file, `.git` entry or mount inside it still
+blocks removal unless it falls under a declared ignored root.
 
 The common Git directory's `openclaw-main-qualification-fetch.lock` is a
 persistent advisory-lock carrier. GWT admits only its existing empty, regular,

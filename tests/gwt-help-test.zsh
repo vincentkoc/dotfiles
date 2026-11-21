@@ -103,6 +103,8 @@ cases=(
   'rm|rm remove-me -h'
   'remove-alias|remove remove-me --help'
   'prune|prune -h'
+  'prune-orphans|prune --orphan-locks --help'
+  'prune-orphans-apply|prune --orphan-locks --apply -h'
   'sparse|sparse --help'
   'sparse-status|sparse status --help'
   'sparse-show-alias|sparse show -h'
@@ -136,6 +138,7 @@ for test_case in "${cases[@]}"; do
 
   grep -Fq 'Usage: gwt <command> [args]' "$output"
   grep -Fq -- '--dependency-source <absolute-install-root>' "$output"
+  grep -Fq -- 'gwt prune --orphan-locks [--apply]' "$output"
   if [[ -e "$reference_output" ]]; then
     cmp -s "$reference_output" "$output"
   else

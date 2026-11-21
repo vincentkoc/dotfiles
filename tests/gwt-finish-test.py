@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import runpy
 import sqlite3
+import stat
 import shutil
 import struct
 import subprocess
@@ -5678,6 +5679,66 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.remove(".crabbox")
         self.assertTrue(self.wt.exists())
 
+    def test_recursively_empty_unreported_directories_are_removable_structure(self):
+        for leaf in ("formatter-check", "syntax-check"):
+            (self.wt / "target/operations" / leaf).mkdir(parents=True)
+        self.call("cancel", "--reason", "superseded upstream")
+        # Git reports neither untracked nor ignored roots for this empty tree,
+        # so naming one cannot match; no disposal declaration is needed.
+        with self.assertRaisesRegex(FINISH.Retain, "exact-disposable-roots"):
+            self.remove("target")
+        self.assertTrue((self.wt / "target/operations/syntax-check").is_dir())
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "removed", rows[0])
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
+    def test_empty_structure_refuses_any_nested_non_directory_entry(self):
+        nested = self.wt / "target/operations/check"
+        nested.mkdir(parents=True)
+        snap = FINISH.revalidate(ReleaseTests.row(self))
+        until = time.monotonic() + 30
+        self.assertIn("target/operations/check",
+                      FINISH.safety().inventory(snap, FINISH.git, until)["entries"])
+        cases = (
+            ("file", lambda path: path.write_text("payload\n")),
+            ("symlink", lambda path: path.symlink_to(self.base / "missing")),
+            ("fifo", lambda path: os.mkfifo(path)),
+            (".git", lambda path: path.mkdir()),
+        )
+        for name, create in cases:
+            with self.subTest(entry=name):
+                create(nested / name)
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "unclassified-ignored-directory"):
+                        FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 30)
+                finally:
+                    target = nested / name
+                    target.rmdir() if target.is_dir() and not target.is_symlink() else target.unlink()
+        self.assertTrue(nested.is_dir())
+
+    def test_tracked_or_skip_worktree_file_replaced_by_empty_directory_refuses(self):
+        snap = FINISH.revalidate(ReleaseTests.row(self))
+        for skip in (False, True):
+            with self.subTest(skip_worktree=skip):
+                if skip:
+                    git(self.wt, "update-index", "--skip-worktree", "file")
+                (self.wt / "file").unlink()
+                (self.wt / "file/sub").mkdir(parents=True)
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "working-type-changed"):
+                        FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 30)
+                    with mock.patch.object(FINISH, "remove_with_intent") as remove:
+                        with self.assertRaises(FINISH.Retain):
+                            self.remove()
+                    remove.assert_not_called()
+                finally:
+                    shutil.rmtree(self.wt / "file")
+                    git(self.wt, "update-index", "--no-skip-worktree", "file")
+                    git(self.wt, "checkout", "--", "file")
+        self.assertTrue(self.wt.exists())
+
     def test_target_branch_writer_blocks_without_owning_checkout_files(self):
         lock = self.repo / ".git/refs/heads/released-feature.lock"
         lock.write_text(self.head + "\n")
@@ -6223,6 +6284,105 @@ class MissingContainerFinalizedRemovalTests(MissingFinalizedRemovalTests):
     def disappear(self):
         super().disappear()
         self.wt.parent.rmdir()
+
+
+class MissingCancelledRemovalTests(unittest.TestCase):
+    """An active owner's checkout vanished before any finish proof was recorded."""
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        git(self.repo, "update-ref", "refs/remotes/origin/released-feature", self.head)
+        self.before_lock = (self.admin / "locked").read_bytes()
+        self.original = ReleaseTests.row(self)
+        shutil.rmtree(self.wt)
+
+    def cancel(self):
+        return self.call("cancel", "--reason", "superseded upstream")[1][0]
+
+    def assert_not_cancelled(self, reason):
+        with self.assertRaisesRegex(FINISH.Retain, reason):
+            self.cancel()
+        self.assertNotIn("cancelled_owners", self.call("status")[1][0])
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def assert_retained(self, reason):
+        with mock.patch.object(FINISH, "remove_with_intent") as remove:
+            with self.assertRaisesRegex(FINISH.Retain, reason):
+                self.remove()
+        remove.assert_not_called()
+        self.assertTrue(self.admin.exists())
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_recorded_owner_cancels_pushed_tip_then_finalized_closeout_removes_registration(self):
+        self.assertIsNone(self.original["finish_head"])
+        self.assert_retained("missing-closeout-boundary-changed")
+        cancelled = self.cancel()
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(cancelled["cancelled_owners"][0]["head"], self.head)
+        self.assertEqual(self.cancel(), cancelled)
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "removed", rows[0])
+        self.assertFalse(self.admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        status = self.call("status")[1][0]
+        self.assertEqual((status["state"], status["checkout"]), ("cancelled", "removed"))
+        self.assertEqual(status["cancelled_owners"], cancelled["cancelled_owners"])
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            outcome = json.loads(FINISH.retirement(db, row)["result"])
+            self.assertEqual([owner["owner"] for owner in FINISH.owner_rows(db, row["id"])], ["owner-1"])
+        self.assertEqual(outcome["working_tree"], "already-absent-not-audited")
+
+    def test_unpushed_or_unpublished_tip_refuses_cancellation(self):
+        commit = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head, "-m", "local only")
+        git(self.repo, "update-ref", "refs/heads/released-feature", commit, self.head)
+        self.assert_not_cancelled("head-not-on-remote")
+        git(self.repo, "update-ref", "refs/heads/released-feature", self.head, commit)
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/released-feature")
+        self.assert_not_cancelled("head-not-on-remote")
+
+    def test_foreign_owner_appeared_directory_and_changed_registration_refuse(self):
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "other-owner"}):
+            self.assert_not_cancelled("known-owner-required")
+        git(self.repo, "worktree", "unlock", str(self.wt))
+        git(self.repo, "worktree", "lock", "--reason", "gwt-finish.v2:" + str(uuid.uuid4()), str(self.wt))
+        with self.assertRaisesRegex(FINISH.Retain, "registration-changed"):
+            self.cancel()
+        git(self.repo, "worktree", "unlock", str(self.wt))
+        (self.admin / "locked").write_bytes(self.before_lock)
+        self.wt.mkdir()
+        # A present directory takes the ordinary route and its identity check.
+        with self.assertRaisesRegex(FINISH.Retain, "not-a-linked-worktree"):
+            self.cancel()
+        self.wt.rmdir()
+        self.assertEqual(self.cancel()["state"], "cancelled")
+
+    def test_closeout_rechecks_remote_owner_and_terminal_cancellation(self):
+        self.cancel()
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/released-feature")
+        self.assert_retained("head-not-on-remote")
+        git(self.repo, "update-ref", "refs/remotes/origin/released-feature", self.head)
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "other-owner"}):
+            self.assert_retained("recorded-owner")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO owners(worktree_id, owner, completed) VALUES (?, ?, 0)",
+                       (self.original["id"], "owner-2"))
+        self.assert_retained("awaiting-owner-completion")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("DELETE FROM owners WHERE owner='owner-2'")
+            db.execute("INSERT INTO pins VALUES (?, ?, ?)", (self.original["id"], "owner-1", "needed"))
+        self.assert_retained("recovery-pin-present")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("DELETE FROM pins")
+            db.execute("UPDATE owner_cancellations SET head=?", ("b" * 40,))
+        self.assert_retained("boundary-changed|registration-changed|head-changed")
 
 
 class QualificationFetchLeaseTests(unittest.TestCase):
@@ -7009,6 +7169,149 @@ class SiblingRegistrationTests(unittest.TestCase):
             report = FINISH.sibling_comparison(self.before, self.before, identities, after_ids)
             self.assertFalse(report["preserved"])
             self.assertEqual(report["changes"], [{"path": "/sibling", "kind": "identity"}])
+
+
+class OrphanLockTests(unittest.TestCase):
+    """Missing gwt-locked registrations that never reached the lifecycle ledger."""
+    tearDown = LifecycleTests.tearDown
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+
+    def setUp(self):
+        LifecycleTests.setUp(self)
+        (self.home / ".codex").mkdir(mode=0o700)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
+        self.orphans = {}
+
+    def orphan(self, name, *, prepare=None, reason=None):
+        path = self.root / name
+        lock = reason or "gwt-finish.v2:" + str(uuid.uuid4())
+        git(self.repo, "worktree", "add", "--lock", "--reason", lock, "-b", name, str(path))
+        admin = Path(git(path, "rev-parse", "--absolute-git-dir"))
+        if prepare is not None:
+            prepare(path, admin)
+        shutil.rmtree(path)
+        self.orphans[name] = (path, admin, lock)
+        return path, admin, lock
+
+    def survey(self, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = FINISH.main(["orphan-locks", "--worktree", str(self.repo), "--state-dir", str(self.state),
+                                "--managed-root", str(self.root), *args])
+        return code, {item["worktree"]: item for item in json.loads(output.getvalue())}
+
+    def registered(self, path):
+        return [entry for entry in FINISH.records(str(self.repo)) if entry["worktree"] == str(path)]
+
+    def test_dry_run_lists_then_apply_unlocks_and_prunes_only_the_orphan(self):
+        path, admin, lock = self.orphan("orphan-pushed")
+        ledger = (self.state / "lifecycle.sqlite").read_bytes()
+        code, found = self.survey()
+        self.assertEqual(code, 0)
+        self.assertEqual(found[str(path)]["disposition"], "candidate")
+        self.assertEqual(found[str(path)]["head"], self.head)
+        self.assertNotIn(str(self.wt), found)
+        self.assertEqual(self.registered(path)[0]["locked"], lock)
+        code, found = self.survey("--apply")
+        self.assertEqual(code, 0)
+        self.assertEqual(found[str(path)]["disposition"], "pruned", found)
+        self.assertEqual(self.registered(path), [])
+        self.assertFalse(admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "orphan-pushed"), self.head)
+        self.assertTrue(self.wt.exists())
+        self.assertTrue(self.registered(self.wt))
+        self.assertEqual((self.state / "lifecycle.sqlite").read_bytes(), ledger)
+        self.assertEqual(self.survey()[1], {})
+
+    def test_unpublished_staged_recorded_present_and_unknown_admin_state_are_retained(self):
+        def commit(path, admin):
+            (path / "file").write_text("local only\n")
+            git(path, "commit", "-qam", "unpublished")
+        def stage(path, admin):
+            (path / "file").write_text("staged only\n")
+            git(path, "add", "file")
+        def unknown(path, admin):
+            (admin / "private-session").write_text("keep\n")
+        expected = {
+            "orphan-unpushed": ("head-not-on-remote", self.orphan("orphan-unpushed", prepare=commit)),
+            "orphan-staged": ("staged-or-index-only-changes", self.orphan("orphan-staged", prepare=stage)),
+            "orphan-unknown": ("admin-recovery-content-unknown", self.orphan("orphan-unknown", prepare=unknown)),
+            "orphan-recorded": ("orphan-has-lifecycle-record", self.orphan("orphan-recorded")),
+        }
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO worktrees(id, path, identity, created_at, state, reason) "
+                       "VALUES (?, ?, ?, 0, 'active', 'owner-active')",
+                       (str(uuid.uuid4()), str(self.root / "elsewhere"),
+                        json.dumps({"lock_reason": expected["orphan-recorded"][1][2]})))
+        present = self.root / "orphan-present"
+        git(self.repo, "worktree", "add", "--lock", "--reason", "gwt-finish.v2:" + str(uuid.uuid4()),
+            "-b", "orphan-present", str(present))
+        foreign = self.root / "foreign-lock"
+        git(self.repo, "worktree", "add", "--lock", "--reason", "operator hold", "-b", "foreign-lock", str(foreign))
+        shutil.rmtree(foreign)
+        for options in ((), ("--apply",)):
+            with self.subTest(options=options):
+                code, found = self.survey(*options)
+                self.assertEqual(code, 0)
+                for name, (reason, (path, admin, lock)) in expected.items():
+                    self.assertEqual(found[str(path)]["disposition"], "retained")
+                    self.assertRegex(found[str(path)]["reason"], reason)
+                    self.assertEqual(self.registered(path)[0]["locked"], lock)
+                    self.assertTrue(admin.exists())
+                self.assertEqual(found[str(present)]["reason"], "orphan-directory-present")
+                self.assertNotIn(str(foreign), found)
+                self.assertEqual(self.registered(foreign)[0]["locked"], "operator hold")
+
+    def test_missing_path_under_another_device_is_retained(self):
+        container = self.root / "volume"
+        container.mkdir()
+        path = container / "orphan-mounted"
+        lock = "gwt-finish.v2:" + str(uuid.uuid4())
+        git(self.repo, "worktree", "add", "--lock", "--reason", lock, "-b", "orphan-mounted", str(path))
+        shutil.rmtree(path)
+        real = os.lstat
+        def lstat(target, *args, **kwargs):
+            details = real(target, *args, **kwargs)
+            if str(target) == str(container):
+                values = list(details)
+                values[stat.ST_DEV] = details.st_dev + 1
+                return os.stat_result(values)
+            return details
+        with mock.patch.object(FINISH.os, "lstat", side_effect=lstat):
+            code, found = self.survey("--apply")
+        self.assertEqual(code, 0)
+        self.assertEqual(found[str(path)]["reason"], "orphan-ancestor-device-changed")
+        self.assertEqual(self.registered(path)[0]["locked"], lock)
+
+    def test_orphan_locks_needs_owning_checkout_and_lifecycle_state(self):
+        with self.assertRaisesRegex(FINISH.Retain, "owning-checkout"):
+            FINISH.main(["orphan-locks", "--worktree", str(self.wt), "--state-dir", str(self.state),
+                         "--managed-root", str(self.root)])
+        with self.assertRaisesRegex(FINISH.Retain, "one-owning-checkout"):
+            FINISH.main(["orphan-locks", "--worktree", str(self.repo), "--reason", "x",
+                         "--state-dir", str(self.state)])
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-state"):
+            FINISH.main(["orphan-locks", "--worktree", str(self.repo),
+                         "--state-dir", str(self.base / "absent-state")])
+
+    def test_wrapper_forwards_orphan_survey_and_apply_only_with_explicit_flag(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; _gwt_require_worktree_storage() { :; }; '
+                  '_gwt_tmux_sync_context() { :; }; shift 2; gwt prune "$@"')
+        command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), str(self.wt)]
+        for arguments, expected in ((["--orphan-locks"], ["orphan-locks", "--worktree", str(self.repo)]),
+                                    (["--orphan-locks", "--apply"],
+                                     ["orphan-locks", "--worktree", str(self.repo), "--apply"])):
+            result = subprocess.run([*command, *arguments], env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(result.stdout.splitlines(), expected)
+        for arguments in (["--apply"], ["--force"]):
+            result = subprocess.run([*command, *arguments], env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
 
 
 class ExternalRemovalTests(unittest.TestCase):
