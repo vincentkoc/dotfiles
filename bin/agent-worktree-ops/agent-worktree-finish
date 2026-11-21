@@ -628,6 +628,40 @@ def acknowledged_missing_identity(row):
     return {**dict(row), "identity": json.dumps(recorded, sort_keys=True)}
 
 
+def acknowledged_repository_rename(row, value):
+    """Rebind a missing checkout's recorded GitHub slug after an attested rename.
+
+    The operator names both slugs; the old one must equal the enrollment and the
+    new one must be what the unchanged owner's origin resolves to now. The
+    durable enrollment is never rewritten; callers use the rebound copy only.
+    """
+    recorded = json.loads(row["identity"])
+    old, separator, new = (value or "").partition("=")
+    slug = r"[\w.-]+/[\w.-]+"
+    if not separator or not re.fullmatch(slug, old) or not re.fullmatch(slug, new):
+        raise Retain("repository-rename-needs-old-and-new-slug")
+    old, new = old.lower(), new.lower()
+    if old != recorded["repo"]:
+        raise Retain("repository-rename-old-slug-mismatch")
+    owner = recorded["owner"]
+    if (physical(owner) != owner or physical(recorded["common"]) != recorded["common"]
+            or git(owner, "rev-parse", "--path-format=absolute", "--git-common-dir") != recorded["common"]):
+        raise Retain("missing-closeout-owner-binding-changed")
+    if old == new or repository(git(owner, "remote", "get-url", "origin")) != new:
+        raise Retain("repository-rename-new-slug-mismatch")
+    recorded["repo"] = new
+    return {**dict(row), "identity": json.dumps(recorded, sort_keys=True)}
+
+
+def missing_identity_source(row, args):
+    """Apply only the acknowledgments the recorded owner passed explicitly."""
+    if args.acknowledge_device_renumbering:
+        row = acknowledged_missing_identity(row)
+    if args.acknowledge_repository_rename is not None:
+        row = acknowledged_repository_rename(row, args.acknowledge_repository_rename)
+    return row
+
+
 def missing_cancellation_snapshot(row, until):
     """Bind a vanished checkout's surviving registration to its current branch tip."""
     recorded = json.loads(row["identity"])
@@ -683,11 +717,12 @@ def cancel(db, row, args):
         # registered tip once it is on a remote; working files stay unaudited.
         if item is None:
             raise Retain("missing-cancellation-needs-native-enrollment")
-        source = acknowledged_missing_identity(row) if args.acknowledge_device_renumbering else row
-        snap = missing_cancellation_snapshot(source, time.monotonic() + 60)
+        snap = missing_cancellation_snapshot(missing_identity_source(row, args), time.monotonic() + 60)
     else:
         if args.acknowledge_device_renumbering:
             raise Retain("device-acknowledgement-requires-missing-checkout")
+        if args.acknowledge_repository_rename is not None:
+            raise Retain("repository-rename-acknowledgement-requires-missing-checkout")
         snap = revalidate(row)
     for prior in cancellation_rows(db, row["id"]):
         if prior["owner"] == who and prior["head"] == snap["head"] and prior["reason"] == args.reason:
@@ -1648,7 +1683,10 @@ def remove_finalized(db, row, args, *, completed=False):
         # Present checkouts already rebind device-only identity here.
         if not missing or completed:
             raise Retain("device-acknowledgement-requires-missing-checkout")
-        source = acknowledged_missing_identity(source)
+    if getattr(args, "acknowledge_repository_rename", None) is not None and (not missing or completed):
+        raise Retain("repository-rename-acknowledgement-requires-missing-checkout")
+    if missing and not completed:
+        source = missing_identity_source(source, args)
     snap = (missing_finalized_snapshot(source, until, json.loads(row["identity"]).get("lock_reason"))
             if missing else revalidate(row, allow_device_renumbering=not completed,
                                        allow_branch_change=not completed))
@@ -3527,6 +3565,7 @@ def parser():
     result.add_argument("--sudo-holder-scan", action="store_true")
     result.add_argument("--discard-ignored", action="append", default=[])
     result.add_argument("--acknowledge-device-renumbering", action="store_true")
+    result.add_argument("--acknowledge-repository-rename")
     result.add_argument("--intent-id")
     result.add_argument("--generation", type=int)
     result.add_argument("--intent-sha256")
@@ -3697,13 +3736,23 @@ def main(argv=None):
         if args.command == "finish":
             allowed.update({"pr", "target", "wait_for"})
         elif args.command == "cancel":
-            allowed.add("reason")
+            allowed.update({"reason", "acknowledge_repository_rename"})
         elif args.command == "remove":
-            allowed.update({"finalized", "discard_ignored", "sudo_holder_scan"})
+            allowed.update({"finalized", "discard_ignored", "sudo_holder_scan",
+                            "acknowledge_repository_rename"})
         if args.command not in ("resume", "finish", "cancel", "remove") or any(
                 value is not None and value is not False and value != []
                 for name, value in vars(args).items() if name not in allowed):
             raise Retain("device-acknowledgement-requires-explicit-resume-or-retained-finish")
+    if args.acknowledge_repository_rename is not None:
+        allowed = {"command", "worktree", "managed_root", "state_dir", "owner",
+                   "acknowledge_repository_rename", "acknowledge_device_renumbering"}
+        allowed.update({"reason"} if args.command == "cancel" else
+                       {"finalized", "discard_ignored", "sudo_holder_scan"})
+        if (args.command not in ("cancel", "remove") or (args.command == "remove" and not args.finalized)
+                or any(value is not None and value is not False and value != []
+                       for name, value in vars(args).items() if name not in allowed)):
+            raise Retain("repository-rename-acknowledgement-requires-missing-cancel-or-finalized-remove")
     if args.sudo_holder_scan and not (args.command == "remove" and args.finalized):
         raise Retain("sudo-holder-scan-requires-manual-finalized-removal")
     if args.sudo_holder_scan and sys.platform != "linux":
@@ -3900,6 +3949,10 @@ def cli(argv=None):
             diagnostic += ("; if only device numbers changed (same inodes), the recorded owner can "
                            "pass --acknowledge-device-renumbering to gwt cancel or gwt rm --finalized "
                            "for this missing checkout")
+        if reason == "missing-closeout-owner-binding-changed":
+            diagnostic += ("; if the GitHub repository was renamed, the recorded owner can pass "
+                           "--acknowledge-repository-rename <old-owner/old-name>=<new-owner/new-name> "
+                           "to gwt cancel or gwt rm --finalized for this missing checkout")
         if reason == "worktree-identity-changed":
             diagnostic += ("; inspect recorded/current identities first; device-only renumbering "
                            "can be acknowledged by the recorded owner with gwt resume "

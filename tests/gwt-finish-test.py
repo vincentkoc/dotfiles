@@ -7274,6 +7274,102 @@ class MissingDeviceRenumberingTests(unittest.TestCase):
         self.assertNotIn("remove", result.stdout)
 
 
+class MissingRepositoryRenameTests(unittest.TestCase):
+    """The GitHub repository was renamed after a now-missing checkout enrolled."""
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+    setUp = MissingCancelledRemovalTests.setUp
+    remove = MissingDeviceRenumberingTests.remove
+    renumber = MissingDeviceRenumberingTests.renumber
+    stored_identity = MissingDeviceRenumberingTests.stored_identity
+    cancel = MissingDeviceRenumberingTests.cancel
+    rename = ("--acknowledge-repository-rename", "example/repo=example/repo-renamed")
+
+    def rename_origin(self):
+        git(self.repo, "remote", "set-url", "origin", "https://github.com/example/repo-renamed.git")
+
+    def test_acknowledged_rename_cancels_and_closes_without_rewriting_enrollment(self):
+        self.rename_origin()
+        stored = self.stored_identity()
+        with self.assertRaisesRegex(FINISH.Retain, "missing-closeout-owner-binding-changed"):
+            self.cancel()
+        self.assertEqual(self.cancel(*self.rename)["state"], "cancelled")
+        with mock.patch.object(FINISH, "remove_with_intent") as removal:
+            with self.assertRaisesRegex(FINISH.Retain, "owner-binding-changed"):
+                self.remove()
+        removal.assert_not_called()
+        code, rows = self.remove(*self.rename)
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "removed", rows[0])
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertEqual(self.stored_identity(), stored)
+
+    def test_rename_combines_with_device_renumbering(self):
+        self.renumber()
+        self.rename_origin()
+        stored = self.stored_identity()
+        for flags in ((), self.rename, ("--acknowledge-device-renumbering",)):
+            with self.subTest(flags=flags), self.assertRaises(FINISH.Retain):
+                self.cancel(*flags)
+        both = (*self.rename, "--acknowledge-device-renumbering")
+        self.assertEqual(self.cancel(*both)["state"], "cancelled")
+        self.assertEqual(self.remove(*both)[1][0]["checkout"], "removed")
+        self.assertEqual(self.stored_identity(), stored)
+
+    def test_mismatched_or_malformed_slugs_refuse(self):
+        self.rename_origin()
+        for value, reason in (("example/other=example/repo-renamed", "old-slug-mismatch"),
+                              ("example/repo=example/elsewhere", "new-slug-mismatch"),
+                              ("example/repo=example/repo", "new-slug-mismatch"),
+                              ("example/repo", "needs-old-and-new-slug"),
+                              ("example/repo=renamed", "needs-old-and-new-slug")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.cancel("--acknowledge-repository-rename", value)
+                with mock.patch.object(FINISH, "remove_with_intent") as removal:
+                    with self.assertRaisesRegex(FINISH.Retain, reason + "|owner-binding-changed"):
+                        self.remove("--acknowledge-repository-rename", value)
+                removal.assert_not_called()
+        self.assertNotIn("cancelled_owners", self.call("status")[1][0])
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_present_checkout_and_other_commands_refuse(self):
+        self.rename_origin()
+        self.wt.mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "repository-rename-acknowledgement-requires-missing-checkout"):
+            self.cancel(*self.rename)
+        self.wt.rmdir()
+        for command, extra in (("resume", ()), ("pin", ("--reason", "x")), ("status", ()),
+                               ("remove", ()), ("finish", ("--pr", self.url)),
+                               ("cancel", ("--reason", "x", "--pr", self.url)),
+                               ("reconcile", ("--external-removal",))):
+            with self.subTest(command=command), mock.patch.object(FINISH, "ledger") as ledger:
+                with self.assertRaisesRegex(FINISH.Retain, "requires-missing-cancel-or-finalized-remove"):
+                    self.call(command, *self.rename, *extra)
+                ledger.assert_not_called()
+
+    def test_wrapper_forwards_rename_only_with_finalized(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; _gwt_require_worktree_storage() { :; }; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; '
+                  '_gwt_tmux_sync_context() { :; }; shift 2; gwt rm "$@"')
+        command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), str(self.repo)]
+        result = subprocess.run([*command, str(self.wt), "--finalized", *self.rename],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(result.stdout.splitlines(),
+                         ["remove", "--worktree", str(self.wt), "--finalized", *self.rename])
+        for arguments in ([str(self.wt), *self.rename],
+                          [str(self.wt), "--finalized", "--acknowledge-repository-rename", "example/repo"],
+                          [str(self.wt), "--finalized", "--acknowledge-repository-rename"]):
+            result = subprocess.run([*command, *arguments], env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("remove", result.stdout)
+
+
 class OrphanLockTests(unittest.TestCase):
     """Missing gwt-locked registrations that never reached the lifecycle ledger."""
     tearDown = LifecycleTests.tearDown

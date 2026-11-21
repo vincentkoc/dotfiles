@@ -140,6 +140,15 @@ absent checkout's recorded device must map with them and the managed root must
 be on that new device. The durable enrollment is not rewritten. Without the flag,
 or for a present checkout, behavior is unchanged.
 
+If the GitHub repository was renamed after enrollment, the recorded owner can
+add `--acknowledge-repository-rename <old-owner/old-name>=<new-owner/new-name>`
+to the same missing-checkout `gwt cancel` and `gwt rm --finalized` (with or
+without the device acknowledgment). The old slug must equal the enrolled
+repository and the new slug must be what the unchanged owner's `origin`
+resolves to now; the common Git directory must still match. Slugs compare
+case-insensitively, as enrollment records them. The enrollment is not
+rewritten, and remote reachability is checked against the current refs.
+
 ## Worktrees removed outside GWT
 
 When an explicitly authorized removal already deleted a finished checkout, use
