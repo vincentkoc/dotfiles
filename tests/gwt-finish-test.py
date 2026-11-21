@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import runpy
 import sqlite3
+import stat
 import shutil
 import struct
 import subprocess
@@ -7168,6 +7169,149 @@ class SiblingRegistrationTests(unittest.TestCase):
             report = FINISH.sibling_comparison(self.before, self.before, identities, after_ids)
             self.assertFalse(report["preserved"])
             self.assertEqual(report["changes"], [{"path": "/sibling", "kind": "identity"}])
+
+
+class OrphanLockTests(unittest.TestCase):
+    """Missing gwt-locked registrations that never reached the lifecycle ledger."""
+    tearDown = LifecycleTests.tearDown
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+
+    def setUp(self):
+        LifecycleTests.setUp(self)
+        (self.home / ".codex").mkdir(mode=0o700)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
+        self.orphans = {}
+
+    def orphan(self, name, *, prepare=None, reason=None):
+        path = self.root / name
+        lock = reason or "gwt-finish.v2:" + str(uuid.uuid4())
+        git(self.repo, "worktree", "add", "--lock", "--reason", lock, "-b", name, str(path))
+        admin = Path(git(path, "rev-parse", "--absolute-git-dir"))
+        if prepare is not None:
+            prepare(path, admin)
+        shutil.rmtree(path)
+        self.orphans[name] = (path, admin, lock)
+        return path, admin, lock
+
+    def survey(self, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = FINISH.main(["orphan-locks", "--worktree", str(self.repo), "--state-dir", str(self.state),
+                                "--managed-root", str(self.root), *args])
+        return code, {item["worktree"]: item for item in json.loads(output.getvalue())}
+
+    def registered(self, path):
+        return [entry for entry in FINISH.records(str(self.repo)) if entry["worktree"] == str(path)]
+
+    def test_dry_run_lists_then_apply_unlocks_and_prunes_only_the_orphan(self):
+        path, admin, lock = self.orphan("orphan-pushed")
+        ledger = (self.state / "lifecycle.sqlite").read_bytes()
+        code, found = self.survey()
+        self.assertEqual(code, 0)
+        self.assertEqual(found[str(path)]["disposition"], "candidate")
+        self.assertEqual(found[str(path)]["head"], self.head)
+        self.assertNotIn(str(self.wt), found)
+        self.assertEqual(self.registered(path)[0]["locked"], lock)
+        code, found = self.survey("--apply")
+        self.assertEqual(code, 0)
+        self.assertEqual(found[str(path)]["disposition"], "pruned", found)
+        self.assertEqual(self.registered(path), [])
+        self.assertFalse(admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "orphan-pushed"), self.head)
+        self.assertTrue(self.wt.exists())
+        self.assertTrue(self.registered(self.wt))
+        self.assertEqual((self.state / "lifecycle.sqlite").read_bytes(), ledger)
+        self.assertEqual(self.survey()[1], {})
+
+    def test_unpublished_staged_recorded_present_and_unknown_admin_state_are_retained(self):
+        def commit(path, admin):
+            (path / "file").write_text("local only\n")
+            git(path, "commit", "-qam", "unpublished")
+        def stage(path, admin):
+            (path / "file").write_text("staged only\n")
+            git(path, "add", "file")
+        def unknown(path, admin):
+            (admin / "private-session").write_text("keep\n")
+        expected = {
+            "orphan-unpushed": ("head-not-on-remote", self.orphan("orphan-unpushed", prepare=commit)),
+            "orphan-staged": ("staged-or-index-only-changes", self.orphan("orphan-staged", prepare=stage)),
+            "orphan-unknown": ("admin-recovery-content-unknown", self.orphan("orphan-unknown", prepare=unknown)),
+            "orphan-recorded": ("orphan-has-lifecycle-record", self.orphan("orphan-recorded")),
+        }
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO worktrees(id, path, identity, created_at, state, reason) "
+                       "VALUES (?, ?, ?, 0, 'active', 'owner-active')",
+                       (str(uuid.uuid4()), str(self.root / "elsewhere"),
+                        json.dumps({"lock_reason": expected["orphan-recorded"][1][2]})))
+        present = self.root / "orphan-present"
+        git(self.repo, "worktree", "add", "--lock", "--reason", "gwt-finish.v2:" + str(uuid.uuid4()),
+            "-b", "orphan-present", str(present))
+        foreign = self.root / "foreign-lock"
+        git(self.repo, "worktree", "add", "--lock", "--reason", "operator hold", "-b", "foreign-lock", str(foreign))
+        shutil.rmtree(foreign)
+        for options in ((), ("--apply",)):
+            with self.subTest(options=options):
+                code, found = self.survey(*options)
+                self.assertEqual(code, 0)
+                for name, (reason, (path, admin, lock)) in expected.items():
+                    self.assertEqual(found[str(path)]["disposition"], "retained")
+                    self.assertRegex(found[str(path)]["reason"], reason)
+                    self.assertEqual(self.registered(path)[0]["locked"], lock)
+                    self.assertTrue(admin.exists())
+                self.assertEqual(found[str(present)]["reason"], "orphan-directory-present")
+                self.assertNotIn(str(foreign), found)
+                self.assertEqual(self.registered(foreign)[0]["locked"], "operator hold")
+
+    def test_missing_path_under_another_device_is_retained(self):
+        container = self.root / "volume"
+        container.mkdir()
+        path = container / "orphan-mounted"
+        lock = "gwt-finish.v2:" + str(uuid.uuid4())
+        git(self.repo, "worktree", "add", "--lock", "--reason", lock, "-b", "orphan-mounted", str(path))
+        shutil.rmtree(path)
+        real = os.lstat
+        def lstat(target, *args, **kwargs):
+            details = real(target, *args, **kwargs)
+            if str(target) == str(container):
+                values = list(details)
+                values[stat.ST_DEV] = details.st_dev + 1
+                return os.stat_result(values)
+            return details
+        with mock.patch.object(FINISH.os, "lstat", side_effect=lstat):
+            code, found = self.survey("--apply")
+        self.assertEqual(code, 0)
+        self.assertEqual(found[str(path)]["reason"], "orphan-ancestor-device-changed")
+        self.assertEqual(self.registered(path)[0]["locked"], lock)
+
+    def test_orphan_locks_needs_owning_checkout_and_lifecycle_state(self):
+        with self.assertRaisesRegex(FINISH.Retain, "owning-checkout"):
+            FINISH.main(["orphan-locks", "--worktree", str(self.wt), "--state-dir", str(self.state),
+                         "--managed-root", str(self.root)])
+        with self.assertRaisesRegex(FINISH.Retain, "one-owning-checkout"):
+            FINISH.main(["orphan-locks", "--worktree", str(self.repo), "--reason", "x",
+                         "--state-dir", str(self.state)])
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-state"):
+            FINISH.main(["orphan-locks", "--worktree", str(self.repo),
+                         "--state-dir", str(self.base / "absent-state")])
+
+    def test_wrapper_forwards_orphan_survey_and_apply_only_with_explicit_flag(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; _gwt_require_worktree_storage() { :; }; '
+                  '_gwt_tmux_sync_context() { :; }; shift 2; gwt prune "$@"')
+        command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), str(self.wt)]
+        for arguments, expected in ((["--orphan-locks"], ["orphan-locks", "--worktree", str(self.repo)]),
+                                    (["--orphan-locks", "--apply"],
+                                     ["orphan-locks", "--worktree", str(self.repo), "--apply"])):
+            result = subprocess.run([*command, *arguments], env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(result.stdout.splitlines(), expected)
+        for arguments in (["--apply"], ["--force"]):
+            result = subprocess.run([*command, *arguments], env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
 
 
 class ExternalRemovalTests(unittest.TestCase):

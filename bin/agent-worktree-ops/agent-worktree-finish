@@ -3303,6 +3303,141 @@ def summary(db, row, reason=None):
     return result
 
 
+ORPHAN_LOCK = re.compile(r"gwt-finish\.v2:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\Z")
+
+
+def orphan_known(db, path, admin, lock_reason):
+    """Any lifecycle trace of this registration keeps it out of orphan pruning."""
+    for row in db.execute("SELECT path, identity FROM worktrees"):
+        recorded = json.loads(row["identity"])
+        if (row["path"] == path or recorded.get("path") == path or recorded.get("gitdir") == admin
+                or recorded.get("lock_reason") == lock_reason):
+            return True
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='failed_creations'").fetchone():
+        token = ORPHAN_LOCK.fullmatch(lock_reason)[1]
+        if db.execute("SELECT 1 FROM failed_creations WHERE creation_token=?", (token,)).fetchone():
+            return True
+    return False
+
+
+def orphan_candidate(db, snap, entry, admin_index, until):
+    """Admit one missing, unrecorded, gwt-locked registration whose history is on a remote."""
+    path, lock_reason = entry["worktree"], entry.get("locked", "")
+    if not ORPHAN_LOCK.fullmatch(lock_reason):
+        return None
+    if not inside(path, snap["root"]) or path == snap["root"]:
+        raise Retain("orphan-outside-managed-root")
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    else:
+        raise Retain("orphan-directory-present")
+    # ENOENT under an unmounted volume is not a vanished checkout. The nearest
+    # surviving ancestor must share the managed root's device.
+    ancestor = Path(path).parent
+    while True:
+        try:
+            device = os.lstat(ancestor).st_dev
+            break
+        except FileNotFoundError:
+            ancestor = ancestor.parent
+    if device != os.lstat(snap["root"]).st_dev:
+        raise Retain("orphan-ancestor-device-changed")
+    mapped = admin_index.get(os.path.join(path, ".git"))
+    if mapped is None:
+        raise Retain("orphan-admin-unavailable")
+    admin = mapped[0]
+    if orphan_known(db, path, admin, lock_reason):
+        raise Retain("orphan-has-lifecycle-record")
+    branch, head = entry.get("branch", ""), entry.get("HEAD", "")
+    if not branch.startswith("refs/heads/") or not SHA.fullmatch(head):
+        raise Retain("orphan-needs-named-branch")
+    if git(snap["owner"], "rev-parse", branch) != head:
+        raise Retain("orphan-branch-changed")
+    lock, _ = safety().read_file(Path(admin) / "locked", until, 4096)
+    if lock.rstrip(b"\n") != os.fsencode(lock_reason):
+        raise Retain("orphan-lock-changed")
+    # Reuse closeout's admin classification: unknown files, drafts, locks and
+    # in-progress operations refuse. Staged-only index bytes refuse as well.
+    target = {**snap, "path": snap["owner"], "gitdir": admin, "gitdir_id": mapped[1], "head": head}
+    admin_rows = safety().admin_inventory(target, git, until, preserved_oids={head})
+    if "index" in admin_rows:
+        safety().index_inventory(target, git, until, revision=head)
+    oids = {head} | {oid for value in admin_rows.values() if len(value) == 3 for oid in value[2]}
+    if len(oids) > 128:
+        raise Retain("recovery-proof-limit")
+    for oid in sorted(oids):
+        remote_preserved(snap, oid, until)
+    return {"worktree": path, "admin": admin, "admin_id": mapped[1], "branch": branch,
+            "head": head, "lock_reason": lock_reason}
+
+
+def orphan_locks(db, args):
+    owner = physical(args.worktree)
+    listed = records(owner)
+    if not listed or physical(listed[0]["worktree"]) != owner:
+        raise Retain("orphan-locks-needs-owning-checkout")
+    common = physical(git(owner, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    snap = {"owner": owner, "common": common, "common_id": identity(common),
+            "root": physical(args.managed_root)}
+    until = time.monotonic() + 60
+
+    def survey():
+        index = sibling_admin_index(snap, until)
+        result = []
+        for entry in records(owner)[1:]:
+            try:
+                candidate = orphan_candidate(db, snap, entry, index, until)
+            except Retain as error:
+                if ORPHAN_LOCK.fullmatch(entry.get("locked", "")):
+                    result.append({"worktree": entry["worktree"], "disposition": "retained",
+                                   "reason": str(error)})
+                continue
+            if candidate is not None:
+                result.append({**candidate, "disposition": "candidate"})
+        return result
+
+    before = survey()
+    if not args.apply:
+        return before
+    storage_guard()
+    with safety().maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
+        for item in before:
+            if item["disposition"] != "candidate":
+                continue
+            # Recheck this registration alone under the maintainer lock.
+            current = next((entry for entry in survey() if entry["worktree"] == item["worktree"]), None)
+            if current != item:
+                item.update(disposition="retained", reason="orphan-changed-before-prune")
+                continue
+            try:
+                git(owner, "worktree", "unlock", "--", item["worktree"])
+                git(owner, "worktree", "remove", "--", item["worktree"])
+            except Retain:
+                # Restore only this registration's own lock; never retry removal.
+                item.update(disposition="unknown", reason="orphan-native-removal-failed",
+                            native_lock_preserved=False)
+                try:
+                    current = [entry for entry in records(owner) if entry["worktree"] == item["worktree"]]
+                    if current and "locked" not in current[0]:
+                        git(owner, "worktree", "lock", "--reason", item["lock_reason"],
+                            "--", item["worktree"])
+                        current = [entry for entry in records(owner)
+                                   if entry["worktree"] == item["worktree"]]
+                    item["native_lock_preserved"] = bool(current) and current[0].get(
+                        "locked") == item["lock_reason"]
+                except (Retain, OSError):
+                    pass
+                continue
+            absent = (not any(entry["worktree"] == item["worktree"] for entry in records(owner))
+                      and not os.path.lexists(item["admin"]))
+            preserved = git(owner, "rev-parse", item["branch"]) == item["head"]
+            item.update(disposition="pruned" if absent and preserved else "unknown",
+                        registration_absent=absent, branch_preserved=preserved)
+    return before
+
+
 def storage_guard():
     run([str(Path(__file__).resolve().with_name("worktree-storage-guard"))])
 
@@ -3326,6 +3461,7 @@ def parser():
         "creation-token",
         "creation-check",
         "recover-failed-creation",
+        "orphan-locks",
         "guard",
     ))
     result.add_argument("--worktree", default=os.getcwd())
@@ -3494,6 +3630,20 @@ def main(argv=None):
         return 1 if args.apply and result["checkout"] != "removed" else 0
     if args.creation_token or args.acknowledge_unrecorded_creation:
         raise Retain("creation-recovery-options-require-recover-failed-creation")
+    if args.command == "orphan-locks":
+        allowed = {"command", "worktree", "managed_root", "state_dir", "owner", "apply"}
+        if not Path(args.worktree).is_absolute() or any(
+                value is not None and value is not False and value != []
+                for name, value in vars(args).items() if name not in allowed):
+            raise Retain("orphan-locks-needs-one-owning-checkout")
+        # Absent lifecycle state cannot prove that a gwt lock is unrecorded.
+        with (ledger(args.state_dir) if args.apply else read_only_ledger(args.state_dir)) as db:
+            if db is None:
+                raise Retain("orphan-locks-need-lifecycle-state")
+            result = orphan_locks(db, args)
+        print(json.dumps(result, sort_keys=True))
+        return 1 if args.apply and any(item["disposition"] not in ("pruned", "retained")
+                                       for item in result) else 0
     if args.command == "creation-check":
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner"}
         if (not Path(args.worktree).is_absolute() or any(

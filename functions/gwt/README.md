@@ -152,6 +152,24 @@ The record reports `checkout: removed` and `native_attempted: false`; it does no
 claim historical preservation checks that GWT did not perform. History, branches
 and the path reservation remain intact. This command never removes files.
 
+## Orphan creation locks
+
+`gwt new --finish-managed` locks a new registration with
+`gwt-finish.v2:<token>` before enrollment. If the checkout later disappears and
+no lifecycle record ever matched it, ordinary prune skips the locked entry.
+Run `gwt prune --orphan-locks` from the owning repository to list such
+registrations; it changes nothing. `gwt prune --orphan-locks --apply` then
+unlocks and runs one non-force native removal for each listed candidate only.
+
+A candidate needs an absent directory (`ENOENT`) under the managed root, a
+gwt-finish lock token, no lifecycle row, identity, lock reason or failed
+creation that mentions it, and a named branch at its recorded HEAD. Its admin
+directory must pass the closeout admin classification, its index must match
+HEAD, and HEAD plus every admin recovery commit must be reachable from a
+remote-tracking ref. Anything else is reported as retained with its reason.
+Apply rechecks each candidate under the maintainer lock, never deletes
+branches and restores the lock if native removal fails.
+
 ## Missing enrolled checkout recovery
 
 `gwt recover-missing` restores a missing directory only when its original Git

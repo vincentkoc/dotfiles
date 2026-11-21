@@ -1291,6 +1291,9 @@ Commands:
   gwt finish-check [--all] [--policy <path>] [--apply]
                                     Report; --apply requires qualified host activation
   gwt prune                         Prune stale worktree metadata
+  gwt prune --orphan-locks [--apply]
+                                    List (or unlock and prune) missing gwt-locked
+                                    registrations with no lifecycle record
   gwt sparse status                 Show sparse-checkout state for the current worktree
   gwt sparse list                   List available sparse profiles for the current repo
   gwt sparse set <profile>          Apply a sparse profile to the current worktree
@@ -1927,10 +1930,30 @@ gwt() {
             _gwt_require_worktree_storage || return
             # Native registration may already be missing after partial removal.
             # The durable owner ledger, rather than that list, owns the hold.
-            local prune_records prune_owner
+            local prune_records prune_owner prune_orphans=false
+            local -a prune_apply
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --orphan-locks) prune_orphans=true ;;
+                    --apply) prune_apply=(--apply) ;;
+                    *) echo "Usage: gwt prune [--orphan-locks [--apply]]" >&2; return 1 ;;
+                esac
+                shift
+            done
+            if (( ${#prune_apply} )) && ! $prune_orphans; then
+                echo "gwt: --apply requires prune --orphan-locks" >&2
+                return 1
+            fi
             prune_records=$(_gwt_git_probe worktree list --porcelain) || return
             prune_owner="${${(@f)prune_records}[1]}"
             [[ "$prune_owner" == 'worktree '* ]] || return 1
+            if $prune_orphans; then
+                # Only missing gwt-locked registrations with no lifecycle record;
+                # dry-run unless --apply. Branches are never deleted.
+                _gwt_finish_tool orphan-locks --worktree "${prune_owner#worktree }" "${prune_apply[@]}" || return
+                _gwt_tmux_sync_context
+                return 0
+            fi
             _gwt_finish_tool guard --all --worktree "${prune_owner#worktree }" || return
             git worktree prune
             _gwt_tmux_sync_context
