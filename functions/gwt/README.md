@@ -121,6 +121,17 @@ cancellation. A repeated identical cancellation is a no-op.
 Once the task is finalized, use the manual closeout route below to retire the
 checkout. Cancellation alone does not run deletion or clear another owner's pin.
 
+If a natively enrolled checkout directory is already absent (`ENOENT` only),
+a recorded owner can still cancel it from the owning repository with
+`gwt cancel --reason <text> --worktree /absolute/task/path`. The surviving
+registration, native lock, admin directory, branch and owner identities must
+match the enrollment, and the branch tip must be reachable from a
+remote-tracking ref. That tip becomes the recorded cancellation HEAD. When
+every owner is completed or cancelled at that HEAD, the literal
+`gwt rm /absolute/task/path --finalized` closeout below retires the surviving
+registration without PR or release proof; it rechecks the remote, owners and
+pins. Unpushed commits, an appeared directory or a changed registration refuse.
+
 ## Worktrees removed outside GWT
 
 When an explicitly authorized removal already deleted a finished checkout, use

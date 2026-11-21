@@ -6285,6 +6285,105 @@ class MissingContainerFinalizedRemovalTests(MissingFinalizedRemovalTests):
         self.wt.parent.rmdir()
 
 
+class MissingCancelledRemovalTests(unittest.TestCase):
+    """An active owner's checkout vanished before any finish proof was recorded."""
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        git(self.repo, "update-ref", "refs/remotes/origin/released-feature", self.head)
+        self.before_lock = (self.admin / "locked").read_bytes()
+        self.original = ReleaseTests.row(self)
+        shutil.rmtree(self.wt)
+
+    def cancel(self):
+        return self.call("cancel", "--reason", "superseded upstream")[1][0]
+
+    def assert_not_cancelled(self, reason):
+        with self.assertRaisesRegex(FINISH.Retain, reason):
+            self.cancel()
+        self.assertNotIn("cancelled_owners", self.call("status")[1][0])
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def assert_retained(self, reason):
+        with mock.patch.object(FINISH, "remove_with_intent") as remove:
+            with self.assertRaisesRegex(FINISH.Retain, reason):
+                self.remove()
+        remove.assert_not_called()
+        self.assertTrue(self.admin.exists())
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_recorded_owner_cancels_pushed_tip_then_finalized_closeout_removes_registration(self):
+        self.assertIsNone(self.original["finish_head"])
+        self.assert_retained("missing-closeout-boundary-changed")
+        cancelled = self.cancel()
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(cancelled["cancelled_owners"][0]["head"], self.head)
+        self.assertEqual(self.cancel(), cancelled)
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "removed", rows[0])
+        self.assertFalse(self.admin.exists())
+        self.assertNotIn(str(self.wt), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertTrue(self.legacy.exists())
+        status = self.call("status")[1][0]
+        self.assertEqual((status["state"], status["checkout"]), ("cancelled", "removed"))
+        self.assertEqual(status["cancelled_owners"], cancelled["cancelled_owners"])
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            outcome = json.loads(FINISH.retirement(db, row)["result"])
+            self.assertEqual([owner["owner"] for owner in FINISH.owner_rows(db, row["id"])], ["owner-1"])
+        self.assertEqual(outcome["working_tree"], "already-absent-not-audited")
+
+    def test_unpushed_or_unpublished_tip_refuses_cancellation(self):
+        commit = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head, "-m", "local only")
+        git(self.repo, "update-ref", "refs/heads/released-feature", commit, self.head)
+        self.assert_not_cancelled("head-not-on-remote")
+        git(self.repo, "update-ref", "refs/heads/released-feature", self.head, commit)
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/released-feature")
+        self.assert_not_cancelled("head-not-on-remote")
+
+    def test_foreign_owner_appeared_directory_and_changed_registration_refuse(self):
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "other-owner"}):
+            self.assert_not_cancelled("known-owner-required")
+        git(self.repo, "worktree", "unlock", str(self.wt))
+        git(self.repo, "worktree", "lock", "--reason", "gwt-finish.v2:" + str(uuid.uuid4()), str(self.wt))
+        with self.assertRaisesRegex(FINISH.Retain, "registration-changed"):
+            self.cancel()
+        git(self.repo, "worktree", "unlock", str(self.wt))
+        (self.admin / "locked").write_bytes(self.before_lock)
+        self.wt.mkdir()
+        # A present directory takes the ordinary route and its identity check.
+        with self.assertRaisesRegex(FINISH.Retain, "not-a-linked-worktree"):
+            self.cancel()
+        self.wt.rmdir()
+        self.assertEqual(self.cancel()["state"], "cancelled")
+
+    def test_closeout_rechecks_remote_owner_and_terminal_cancellation(self):
+        self.cancel()
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/released-feature")
+        self.assert_retained("head-not-on-remote")
+        git(self.repo, "update-ref", "refs/remotes/origin/released-feature", self.head)
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "other-owner"}):
+            self.assert_retained("recorded-owner")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO owners(worktree_id, owner, completed) VALUES (?, ?, 0)",
+                       (self.original["id"], "owner-2"))
+        self.assert_retained("awaiting-owner-completion")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("DELETE FROM owners WHERE owner='owner-2'")
+            db.execute("INSERT INTO pins VALUES (?, ?, ?)", (self.original["id"], "owner-1", "needed"))
+        self.assert_retained("recovery-pin-present")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("DELETE FROM pins")
+            db.execute("UPDATE owner_cancellations SET head=?", ("b" * 40,))
+        self.assert_retained("boundary-changed|registration-changed|head-changed")
+
+
 class QualificationFetchLeaseTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call

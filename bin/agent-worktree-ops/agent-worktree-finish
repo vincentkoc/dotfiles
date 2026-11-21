@@ -594,8 +594,54 @@ def ensure_cancellation_schema(db):
     """)
 
 
+def remote_preserved(snap, head, until):
+    """Require every commit of an unauditable checkout to exist on a remote-tracking ref."""
+    if not SHA.fullmatch(head or "") or git(
+            snap["owner"], "--no-replace-objects", "rev-list", "--max-count=1", head,
+            "--not", "--remotes", "--", raw=True, strict=True, deadline=until):
+        raise Retain("missing-cancellation-head-not-on-remote")
+
+
+def missing_cancellation_snapshot(row, until):
+    """Bind a vanished checkout's surviving registration to its current branch tip."""
+    recorded = json.loads(row["identity"])
+    lock_reason = recorded.get("lock_reason")
+    if not isinstance(lock_reason, str) or not lock_reason.startswith("gwt-finish.v2:"):
+        raise Retain("missing-cancellation-needs-native-enrollment")
+    for key in ("owner", "common"):
+        if physical(recorded[key]) != recorded[key] or identity(recorded[key]) != recorded[key + "_id"]:
+            raise Retain("missing-closeout-identity-changed")
+    selected = [entry for entry in records(recorded["owner"]) if entry.get("worktree") == recorded["path"]]
+    if len(selected) != 1 or not SHA.fullmatch(selected[0].get("HEAD", "")):
+        raise Retain("missing-closeout-registration-changed")
+    head = selected[0]["HEAD"]
+    # The shared helper rebinds owner, admin, registration, lock and HEAD
+    # identities to the enrollment record before this tip can be cancelled.
+    snap = missing_finalized_snapshot({"identity": row["identity"], "finish_head": head},
+                                      until, lock_reason)
+    if git(snap["owner"], "rev-parse", snap["branch"]) != head:
+        raise Retain("missing-closeout-head-changed")
+    remote_preserved(snap, head, until)
+    return snap
+
+
+def terminal_cancellation_head(db, row):
+    """Return the single cancelled head once every owner is completed or cancelled."""
+    cancellations = cancellation_rows(db, row["id"])
+    if not cancellations:
+        return None
+    cancelled = {entry["owner"] for entry in cancellations}
+    if not all(owner["completed"] or owner["owner"] in cancelled
+               for owner in owner_rows(db, row["id"])):
+        raise Retain("awaiting-owner-completion")
+    heads = {entry["head"] for entry in cancellations}
+    current = db.execute("SELECT finish_head FROM worktrees WHERE id=?", (row["id"],)).fetchone()
+    if len(heads) != 1 or (current["finish_head"] is not None and {current["finish_head"]} != heads):
+        raise Retain("missing-cancellation-head-changed")
+    return heads.pop()
+
+
 def cancel(db, row, args):
-    snap = revalidate(row)
     who = owner_id(args)
     ensure_owner_schema(db)
     if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=?",
@@ -604,6 +650,16 @@ def cancel(db, row, args):
     item = retirement(db, row)
     if item is not None and item["state"] != "enrolled":
         raise Retain("removal-intent-requires-read-only-reconciliation")
+    try:
+        os.lstat(row["path"])
+    except FileNotFoundError:
+        # Only ENOENT selects this route. The recorded owner cancels the
+        # registered tip once it is on a remote; working files stay unaudited.
+        if item is None:
+            raise Retain("missing-cancellation-needs-native-enrollment")
+        snap = missing_cancellation_snapshot(row, time.monotonic() + 60)
+    else:
+        snap = revalidate(row)
     for prior in cancellation_rows(db, row["id"]):
         if prior["owner"] == who and prior["head"] == snap["head"] and prior["reason"] == args.reason:
             return
@@ -1484,8 +1540,15 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
                 "rebase-merge", "rebase-apply", "sequencer")):
             raise Retain("git-operation-in-progress")
     if missing:
-        completion_checks(db, row, local=False)
-        all_released(db, row, retirement(db, row))
+        if row.get("missing_cancellation"):
+            # Cancellation has no PR or release proof; every owner must still be
+            # terminal at this head, and that head must remain on a remote.
+            if terminal_cancellation_head(db, row) != snap["head"]:
+                raise Retain("missing-cancellation-head-changed")
+            remote_preserved(snap, snap["head"], until)
+        else:
+            completion_checks(db, row, local=False)
+            all_released(db, row, retirement(db, row))
         if owner_id(args) not in {owner["owner"] for owner in owner_rows(db, row["id"])}:
             raise Retain("missing-closeout-requires-recorded-owner")
         recovery = missing_recovery_record(db, row)
@@ -1548,7 +1611,11 @@ def remove_finalized(db, row, args, *, completed=False):
     enrolled_branch = json.loads(row["identity"])["branch"]
     missing = not os.path.lexists(row["path"])
     until = time.monotonic() + 120
-    snap = (missing_finalized_snapshot(row, until, json.loads(row["identity"]).get("lock_reason"))
+    # A cancelled checkout has no finish proof; its owners' cancelled head
+    # stands in for it, and admission adds the remote-preservation check.
+    cancelled_head = terminal_cancellation_head(db, row) if missing and not completed else None
+    source = {**dict(row), "finish_head": cancelled_head} if cancelled_head else row
+    snap = (missing_finalized_snapshot(source, until, json.loads(row["identity"]).get("lock_reason"))
             if missing else revalidate(row, allow_device_renumbering=not completed,
                                        allow_branch_change=not completed))
     if "lock_reason" not in snap:
@@ -1556,7 +1623,8 @@ def remove_finalized(db, row, args, *, completed=False):
     # Manual closeout may rebind identity; completion keeps its recorded identity.
     # Keep the durable enrollment and automatic lifecycle qualification unchanged.
     row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True),
-           "finish_head": snap["head"], "missing_worktree": missing}
+           "finish_head": snap["head"], "missing_worktree": missing,
+           "missing_cancellation": cancelled_head is not None}
     storage_guard()
     module = safety()
     until = time.monotonic() + 120
