@@ -49,3 +49,12 @@ The September 8, 2026 source audit pinned these contracts:
 These profiles do not narrow fetch refspecs or change other Git policy. Tests
 apply them to disposable native-Git fixtures; they do not reapply active
 checkouts or fetch repository history.
+
+The November 14 follow-up at OpenClaw
+`518ce920a0532009aeeaa3866208ffc052823695` adds `tools/solid-lint` and the
+`crates/openclaw-iroh-node/package.json` manifest to `core`. Solid lint needs its
+entry point as well as its manifest. GWT dependency qualification reads every
+tracked package manifest, including the Iroh manifest, even when the native
+crate is outside the selected task. The remaining Rust sources stay excluded.
+This fixes source coverage; dependency sharing still requires its own valid
+install receipt and supported link layout.
