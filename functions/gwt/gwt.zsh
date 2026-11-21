@@ -1265,11 +1265,15 @@ Commands:
   gwt rm <branch|name|path> [--force] Remove a worktree safely
   gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...] [--sudo-holder-scan]
                                     Manually close one finalized managed task
+  gwt rm <absolute-path> --finalized --acknowledge-device-renumbering
+                                    Recorded owner: missing checkout after device-only renumbering
   gwt finish --pr <URL> [--worktree <path>] [--target <branch>] [--wait-for <URL>...] [--release]
                                     Complete and sign off this owner's checkout use
   gwt release [--worktree <path>]   Release this already-completed owner
   gwt cancel --reason <text> [--worktree <path>]
                                     End this owner's work without PR proof or removal
+  gwt cancel --reason <text> --worktree <path> --acknowledge-device-renumbering
+                                    Recorded owner: missing checkout after device-only renumbering
   gwt resume [--worktree <path>]    Resume an enrolled worktree
   gwt resume --acknowledge-device-renumbering [--worktree <path>]
                                     Recorded-owner acknowledgment for resume only
@@ -1832,6 +1836,7 @@ gwt() {
                     --force|-f) force_remove=true ;;
                     --finalized) finalized_remove=true ;;
                     --sudo-holder-scan) sudo_holder_scan=true ;;
+                    --acknowledge-device-renumbering) discard_args+=(--acknowledge-device-renumbering) ;;
                     --discard-ignored)
                         [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
                         discard_args+=(--discard-ignored "$2")
@@ -1851,7 +1856,7 @@ gwt() {
                     return 1
                 }
             elif (( ${#discard_args} )); then
-                echo "gwt: --discard-ignored requires --finalized" >&2
+                echo "gwt: --discard-ignored and --acknowledge-device-renumbering require --finalized" >&2
                 return 1
             fi
             if $sudo_holder_scan && ! $finalized_remove; then

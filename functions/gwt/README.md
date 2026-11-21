@@ -132,6 +132,14 @@ every owner is completed or cancelled at that HEAD, the literal
 registration without PR or release proof; it rechecks the remote, owners and
 pins. Unpushed commits, an appeared directory or a changed registration refuse.
 
+After a reboot can renumber an APFS device, the recorded owner can add
+`--acknowledge-device-renumbering` to that missing-checkout `gwt cancel` and
+`gwt rm --finalized`. The surviving owner, common and admin directories must
+keep their exact inodes under one consistent, one-to-one device mapping; the
+absent checkout's recorded device must map with them and the managed root must
+be on that new device. The durable enrollment is not rewritten. Without the flag,
+or for a present checkout, behavior is unchanged.
+
 ## Worktrees removed outside GWT
 
 When an explicitly authorized removal already deleted a finished checkout, use
