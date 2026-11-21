@@ -602,6 +602,32 @@ def remote_preserved(snap, head, until):
         raise Retain("missing-cancellation-head-not-on-remote")
 
 
+def acknowledged_missing_identity(row):
+    """Rebind a missing checkout's recorded devices after an attested renumbering.
+
+    Surviving owner, common and admin directories must keep their exact inodes
+    under one consistent, injective device mapping. The absent checkout's device
+    must map with them, and the managed root must sit on that new device. The
+    durable enrollment is never rewritten; callers use the rebound copy only.
+    """
+    recorded = json.loads(row["identity"])
+    keys = ("owner_id", "common_id", "gitdir_id")
+    current = {}
+    for key in keys:
+        path = recorded[key[:-3]]
+        if physical(path) != path:
+            raise Retain("missing-closeout-identity-changed")
+        current[key] = identity(path)
+    devices = device_renumbering(recorded, current, keys)
+    device = devices.get(recorded["path_id"][0])
+    if device is None:
+        raise Retain("device-renumbering-checkout-device-unmapped")
+    if physical(recorded["root"]) != recorded["root"] or identity(recorded["root"])[0] != device:
+        raise Retain("device-renumbering-root-device-changed")
+    recorded.update(current, path_id=[device, recorded["path_id"][1]])
+    return {**dict(row), "identity": json.dumps(recorded, sort_keys=True)}
+
+
 def missing_cancellation_snapshot(row, until):
     """Bind a vanished checkout's surviving registration to its current branch tip."""
     recorded = json.loads(row["identity"])
@@ -657,8 +683,11 @@ def cancel(db, row, args):
         # registered tip once it is on a remote; working files stay unaudited.
         if item is None:
             raise Retain("missing-cancellation-needs-native-enrollment")
-        snap = missing_cancellation_snapshot(row, time.monotonic() + 60)
+        source = acknowledged_missing_identity(row) if args.acknowledge_device_renumbering else row
+        snap = missing_cancellation_snapshot(source, time.monotonic() + 60)
     else:
+        if args.acknowledge_device_renumbering:
+            raise Retain("device-acknowledgement-requires-missing-checkout")
         snap = revalidate(row)
     for prior in cancellation_rows(db, row["id"]):
         if prior["owner"] == who and prior["head"] == snap["head"] and prior["reason"] == args.reason:
@@ -1615,6 +1644,11 @@ def remove_finalized(db, row, args, *, completed=False):
     # stands in for it, and admission adds the remote-preservation check.
     cancelled_head = terminal_cancellation_head(db, row) if missing and not completed else None
     source = {**dict(row), "finish_head": cancelled_head} if cancelled_head else row
+    if getattr(args, "acknowledge_device_renumbering", False):
+        # Present checkouts already rebind device-only identity here.
+        if not missing or completed:
+            raise Retain("device-acknowledgement-requires-missing-checkout")
+        source = acknowledged_missing_identity(source)
     snap = (missing_finalized_snapshot(source, until, json.loads(row["identity"]).get("lock_reason"))
             if missing else revalidate(row, allow_device_renumbering=not completed,
                                        allow_branch_change=not completed))
@@ -3662,7 +3696,11 @@ def main(argv=None):
                    "acknowledge_device_renumbering"}
         if args.command == "finish":
             allowed.update({"pr", "target", "wait_for"})
-        if args.command not in ("resume", "finish") or any(
+        elif args.command == "cancel":
+            allowed.add("reason")
+        elif args.command == "remove":
+            allowed.update({"finalized", "discard_ignored", "sudo_holder_scan"})
+        if args.command not in ("resume", "finish", "cancel", "remove") or any(
                 value is not None and value is not False and value != []
                 for name, value in vars(args).items() if name not in allowed):
             raise Retain("device-acknowledgement-requires-explicit-resume-or-retained-finish")
@@ -3858,6 +3896,10 @@ def cli(argv=None):
         reason = str(error) if isinstance(error, Retain) else "state-or-proof-unavailable"
         diagnostic = (" " + failure_diagnostic(error)
                       if not isinstance(error, Retain) or hasattr(error, "_gwt_child_diagnostic") else "")
+        if reason in ("missing-closeout-identity-changed", "missing-closeout-boundary-changed"):
+            diagnostic += ("; if only device numbers changed (same inodes), the recorded owner can "
+                           "pass --acknowledge-device-renumbering to gwt cancel or gwt rm --finalized "
+                           "for this missing checkout")
         if reason == "worktree-identity-changed":
             diagnostic += ("; inspect recorded/current identities first; device-only renumbering "
                            "can be acknowledged by the recorded owner with gwt resume "

@@ -7171,6 +7171,109 @@ class SiblingRegistrationTests(unittest.TestCase):
             self.assertEqual(report["changes"], [{"path": "/sibling", "kind": "identity"}])
 
 
+class MissingDeviceRenumberingTests(unittest.TestCase):
+    """A reboot renumbered the volume holding a vanished, recorded checkout."""
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+    setUp = MissingCancelledRemovalTests.setUp
+
+    def remove(self, *flags):
+        with mock.patch.object(FINISH, "manual_holders"):
+            return self.call("remove", "--finalized", *flags)
+
+    def renumber(self, **overrides):
+        # Record an older device number with the same inodes; the live volume
+        # then appears renumbered exactly as after an APFS remount.
+        recorded = json.loads(self.original["identity"])
+        old = recorded["path_id"][0] + 1000
+        for key in ("path_id", "gitdir_id", "common_id", "owner_id"):
+            recorded[key] = [old, recorded[key][1]]
+        for key, value in overrides.items():
+            recorded[key] = value
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE worktrees SET identity=? WHERE id=?",
+                       (json.dumps(recorded, sort_keys=True), self.original["id"]))
+        return recorded
+
+    def stored_identity(self):
+        with FINISH.ledger(self.state) as db:
+            return FINISH.get_row(db, self.wt)["identity"]
+
+    def cancel(self, *flags):
+        return self.call("cancel", "--reason", "superseded upstream", *flags)[1][0]
+
+    def test_acknowledged_renumbering_cancels_and_closes_without_rewriting_enrollment(self):
+        self.renumber()
+        stored = self.stored_identity()
+        with self.assertRaisesRegex(FINISH.Retain, "missing-closeout-identity-changed"):
+            self.cancel()
+        self.assertEqual(self.cancel("--acknowledge-device-renumbering")["state"], "cancelled")
+        with mock.patch.object(FINISH, "remove_with_intent") as removal:
+            with self.assertRaisesRegex(FINISH.Retain, "missing-closeout-boundary-changed"):
+                self.remove()
+        removal.assert_not_called()
+        code, rows = self.remove("--acknowledge-device-renumbering")
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "removed", rows[0])
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertEqual(self.stored_identity(), stored)
+
+    def test_inode_mismatch_inconsistent_mapping_and_unmapped_checkout_refuse(self):
+        recorded = json.loads(self.original["identity"])
+        old = recorded["path_id"][0] + 1000
+        cases = (
+            ("worktree-identity-changed", {"common_id": [old, recorded["common_id"][1] + 1]}),
+            ("worktree-identity-changed", {"owner_id": [old + 1, recorded["owner_id"][1]]}),
+            ("device-renumbering-checkout-device-unmapped", {"path_id": [old + 2, recorded["path_id"][1]]}),
+        )
+        for reason, overrides in cases:
+            with self.subTest(reason=reason, overrides=overrides):
+                self.renumber(**overrides)
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.cancel("--acknowledge-device-renumbering")
+                with mock.patch.object(FINISH, "remove_with_intent") as removal:
+                    with self.assertRaises(FINISH.Retain):
+                        self.remove("--acknowledge-device-renumbering")
+                removal.assert_not_called()
+        self.assertTrue(self.admin.exists())
+        self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
+
+    def test_root_on_other_device_and_present_checkout_refuse(self):
+        recorded = self.renumber()
+        real = FINISH.identity
+        def identity(path):
+            value = real(path)
+            return [value[0] + 1, value[1]] if str(path) == recorded["root"] else value
+        with mock.patch.object(FINISH, "identity", side_effect=identity):
+            with self.assertRaisesRegex(FINISH.Retain, "device-renumbering-root-device-changed"):
+                self.cancel("--acknowledge-device-renumbering")
+        self.wt.mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "requires-missing-checkout"):
+            self.cancel("--acknowledge-device-renumbering")
+        self.wt.rmdir()
+        with self.assertRaisesRegex(FINISH.Retain, "device-acknowledgement-requires"):
+            self.call("pin", "--reason", "x", "--acknowledge-device-renumbering")
+
+    def test_wrapper_forwards_acknowledgement_only_with_finalized(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; _gwt_require_worktree_storage() { :; }; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; '
+                  '_gwt_tmux_sync_context() { :; }; shift 2; gwt rm "$@"')
+        command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), str(self.repo)]
+        result = subprocess.run([*command, str(self.wt), "--finalized", "--acknowledge-device-renumbering"],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(result.stdout.splitlines(), ["remove", "--worktree", str(self.wt), "--finalized",
+                                                      "--acknowledge-device-renumbering"])
+        result = subprocess.run([*command, str(self.wt), "--acknowledge-device-renumbering"],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("remove", result.stdout)
+
+
 class OrphanLockTests(unittest.TestCase):
     """Missing gwt-locked registrations that never reached the lifecycle ledger."""
     tearDown = LifecycleTests.tearDown
@@ -8161,7 +8264,7 @@ class ResumeAcknowledgementTests(unittest.TestCase):
         self.assertEqual(probe.call_count, 2)
 
     def test_flag_rejects_other_actions_and_automatic_or_combined_resume(self):
-        commands = ("enroll", "cancel", "release", "remove", "pin", "unpin",
+        commands = ("enroll", "release", "pin", "unpin",
                     "status", "check", "holder-qualification", "creation-token", "guard",
                     "reconcile", "recover-missing")
         value_options = ("--pr", "--target", "--wait-for", "--reason", "--policy", "--new-token",
@@ -8177,6 +8280,19 @@ class ResumeAcknowledgementTests(unittest.TestCase):
                                *(("resume", option) for option in options)]:
             with self.subTest(command=command, extra=extra), mock.patch.object(FINISH, "ledger") as ledger:
                 with self.assertRaisesRegex(FINISH.Retain, "explicit-resume-or-retained-finish"):
+                    self.call(command, self.flag, *extra)
+                ledger.assert_not_called()
+        # Missing-checkout cancel and finalized removal accept the flag only
+        # with their own operands; anything else refuses before the ledger.
+        for command, extra, reason in (
+                ("cancel", (), "bounded-cancellation-reason-required"),
+                ("remove", (), "use-explicit-owner-release"),
+                ("cancel", ("--reason", "x", "--pr", "fixture"), "explicit-resume-or-retained-finish"),
+                ("cancel", ("--reason", "x", "--finalized"), "explicit-resume-or-retained-finish"),
+                ("remove", ("--finalized", "--apply"), "explicit-resume-or-retained-finish"),
+                ("remove", ("--finalized", "--reason", "x"), "explicit-resume-or-retained-finish")):
+            with self.subTest(command=command, extra=extra), mock.patch.object(FINISH, "ledger") as ledger:
+                with self.assertRaisesRegex(FINISH.Retain, reason):
                     self.call(command, self.flag, *extra)
                 ledger.assert_not_called()
 
