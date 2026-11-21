@@ -578,9 +578,12 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
     discarded_roots = set(discard_ignored)
     discarded_hashes = {root: hashlib.sha256() for root in discarded_roots}
     discarded_counts = dict.fromkeys(discarded_roots, 0)
-    stack = [(Path(snap["path"]), None)]
+    # Git cannot report empty directories as untracked or ignored. A directory
+    # outside tracked parents is admitted only while it holds nothing but
+    # further directories; any other entry at any depth still refuses.
+    stack = [(Path(snap["path"]), None, False)]
     while stack:
-        directory, discarded_root = stack.pop()
+        directory, discarded_root, empty_structure = stack.pop()
         tick(until)
         before = directory.lstat()
         if before.st_dev != snap["path_id"][0]:
@@ -623,7 +626,7 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
                 if ".git" in Path(name).parts or details.st_dev != snap["path_id"][0]:
                     raise Retain("discarded-artifact-contains-repository-or-mount")
                 if stat.S_ISDIR(details.st_mode):
-                    stack.append((path, root))
+                    stack.append((path, root, False))
                 elif stat.S_ISLNK(details.st_mode):
                     destination = str(path.resolve())
                     if not (destination == snap["path"] or destination.startswith(snap["path"] + "/")):
@@ -634,7 +637,13 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
                     raise Retain("discarded-artifact-has-live-or-unknown-file-type")
                 continue
             rows[name] = [*file_identity(details), disposable_metadata(path, until)]
-            if name == ".git":
+            if empty_structure:
+                if (not stat.S_ISDIR(details.st_mode) or ".git" in Path(name).parts
+                        or name in head or name in entries
+                        or details.st_dev != snap["path_id"][0]):
+                    raise Retain("unclassified-ignored-directory")
+                stack.append((path, None, True))
+            elif name == ".git":
                 data, _ = read_file(path, until, 4096)
                 if data != ("gitdir: " + snap["gitdir"] + "\n").encode():
                     raise Retain("worktree-pointer-changed")
@@ -643,9 +652,16 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
                 if proof["state"] != "empty" or list(file_identity(details)) != proof["directories"][name]:
                     raise Retain("gitlink-directory-changed")
             elif stat.S_ISDIR(details.st_mode):
-                if name not in expected_dirs:
+                if name in expected_dirs:
+                    stack.append((path, None, False))
+                elif name in head or name in entries:
+                    # A tracked or skip-worktree path replaced by a directory is
+                    # an uncommitted deletion, never removable empty structure.
+                    raise Retain("working-type-changed")
+                elif ".git" in Path(name).parts or details.st_dev != snap["path_id"][0]:
                     raise Retain("unclassified-ignored-directory")
-                stack.append((path, None))
+                else:
+                    stack.append((path, None, True))
             elif name not in head:
                 if name != "node_modules" or not stat.S_ISLNK(details.st_mode):
                     raise Retain("unclassified-untracked-or-ignored-content")

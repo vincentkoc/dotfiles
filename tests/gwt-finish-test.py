@@ -5678,6 +5678,66 @@ class FinalizedRemovalTests(unittest.TestCase):
             self.remove(".crabbox")
         self.assertTrue(self.wt.exists())
 
+    def test_recursively_empty_unreported_directories_are_removable_structure(self):
+        for leaf in ("formatter-check", "syntax-check"):
+            (self.wt / "target/operations" / leaf).mkdir(parents=True)
+        self.call("cancel", "--reason", "superseded upstream")
+        # Git reports neither untracked nor ignored roots for this empty tree,
+        # so naming one cannot match; no disposal declaration is needed.
+        with self.assertRaisesRegex(FINISH.Retain, "exact-disposable-roots"):
+            self.remove("target")
+        self.assertTrue((self.wt / "target/operations/syntax-check").is_dir())
+        code, rows = self.remove()
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "removed", rows[0])
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
+    def test_empty_structure_refuses_any_nested_non_directory_entry(self):
+        nested = self.wt / "target/operations/check"
+        nested.mkdir(parents=True)
+        snap = FINISH.revalidate(ReleaseTests.row(self))
+        until = time.monotonic() + 30
+        self.assertIn("target/operations/check",
+                      FINISH.safety().inventory(snap, FINISH.git, until)["entries"])
+        cases = (
+            ("file", lambda path: path.write_text("payload\n")),
+            ("symlink", lambda path: path.symlink_to(self.base / "missing")),
+            ("fifo", lambda path: os.mkfifo(path)),
+            (".git", lambda path: path.mkdir()),
+        )
+        for name, create in cases:
+            with self.subTest(entry=name):
+                create(nested / name)
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "unclassified-ignored-directory"):
+                        FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 30)
+                finally:
+                    target = nested / name
+                    target.rmdir() if target.is_dir() and not target.is_symlink() else target.unlink()
+        self.assertTrue(nested.is_dir())
+
+    def test_tracked_or_skip_worktree_file_replaced_by_empty_directory_refuses(self):
+        snap = FINISH.revalidate(ReleaseTests.row(self))
+        for skip in (False, True):
+            with self.subTest(skip_worktree=skip):
+                if skip:
+                    git(self.wt, "update-index", "--skip-worktree", "file")
+                (self.wt / "file").unlink()
+                (self.wt / "file/sub").mkdir(parents=True)
+                try:
+                    with self.assertRaisesRegex(FINISH.Retain, "working-type-changed"):
+                        FINISH.safety().inventory(snap, FINISH.git, time.monotonic() + 30)
+                    with mock.patch.object(FINISH, "remove_with_intent") as remove:
+                        with self.assertRaises(FINISH.Retain):
+                            self.remove()
+                    remove.assert_not_called()
+                finally:
+                    shutil.rmtree(self.wt / "file")
+                    git(self.wt, "update-index", "--no-skip-worktree", "file")
+                    git(self.wt, "checkout", "--", "file")
+        self.assertTrue(self.wt.exists())
+
     def test_target_branch_writer_blocks_without_owning_checkout_files(self):
         lock = self.repo / ".git/refs/heads/released-feature.lock"
         lock.write_text(self.head + "\n")

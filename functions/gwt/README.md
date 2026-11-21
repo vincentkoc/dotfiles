@@ -570,6 +570,14 @@ in-progress Git operations, unrelated locks and live file/CWD holders. Symlink
 targets are never traversed or removed. This is routine task closeout, with no
 evidence archive or additional permission step.
 
+Git never reports an empty directory as untracked or ignored, so such a tree
+needs no `--discard-ignored` root. Every checkout inventory (manual closeout,
+completion checks and release baselines) admits a directory that no tracked
+path needs only while it holds nothing but further directories at every depth.
+A tracked or skip-worktree path replaced by a directory is a deletion and
+refuses. Any file, symlink, special file, `.git` entry or mount inside it still
+blocks removal unless it falls under a declared ignored root.
+
 The common Git directory's `openclaw-main-qualification-fetch.lock` is a
 persistent advisory-lock carrier. GWT admits only its existing empty, regular,
 single-link, current-user file with mode `0600`, opened without following
