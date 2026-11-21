@@ -103,6 +103,8 @@ cases=(
   'rm|rm remove-me -h'
   'remove-alias|remove remove-me --help'
   'prune|prune -h'
+  'rm-rename|rm /fixture --finalized --acknowledge-repository-rename a/b=c/d --help'
+  'cancel-rename|cancel --reason r --acknowledge-repository-rename a/b=c/d -h'
   'prune-orphans|prune --orphan-locks --help'
   'prune-orphans-apply|prune --orphan-locks --apply -h'
   'sparse|sparse --help'
@@ -139,6 +141,7 @@ for test_case in "${cases[@]}"; do
   grep -Fq 'Usage: gwt <command> [args]' "$output"
   grep -Fq -- '--dependency-source <absolute-install-root>' "$output"
   grep -Fq -- 'gwt prune --orphan-locks [--apply]' "$output"
+  grep -Fq -- '--acknowledge-repository-rename <old>=<new>' "$output"
   if [[ -e "$reference_output" ]]; then
     cmp -s "$reference_output" "$output"
   else
