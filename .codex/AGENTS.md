@@ -105,9 +105,10 @@
 ### Safety notices and optional models
 
 - If a request produces `This content can't be shown` or a cybersecurity safety notice, stop the affected request and preserve/report the notice in the conversation, without a new transcript artifact. Do not automatically retry, paraphrase, or delegate blocked content to another model.
-- Use `gpt-daybreak-red-latest` as the preferred specialty model for a separate, independently permitted, explicitly authorized, scoped cybersecurity task on the same approved identity, project, and product surface. It is not a fallback for blocked content.
-- Use `gpt-daybreak-blue-latest` only when explicitly requested for a separate, independently permitted, explicitly authorized, scoped defensive task on the same approved identity, project, and product surface. It is not a fallback for blocked content.
-- Never use model changes to bypass access, content, or tool refusals or weaken sandbox, approval, or review gates. Restore the prior model after the permitted task; if the route is unavailable or another refusal occurs, stop and report it. Keep the configured model preference and default unchanged.
+- Prefer Daybreak Red for a separate, independently permitted, explicitly authorized, scoped cybersecurity task on the same approved identity, project, and product surface. Select a model approved for that project, such as `gpt-5.6-cyber` or, with its additional model approval, `gpt-6-cyber`.
+- Use Daybreak Blue only when explicitly requested for a separate, independently permitted, explicitly authorized, scoped defensive task on the same approved identity, project, and product surface. Select a model approved for Blue on that project, such as `gpt-6-sol`.
+- Select the program for that turn. In Codex use `codex exec -m <approved-model> --cyber-access-program <program>` with `daybreak_red` or `daybreak_blue`. In the Responses API set `access_programs.cyber` to the matching value. [Daybreak model and program combinations](https://developers.openai.com/api/docs/guides/daybreak).
+- Never switch models or access programs to bypass access, content, or tool refusals or weaken sandbox, approval, or review gates. If the route is unavailable or another refusal occurs, stop and report it. Restore the prior model after the permitted task and preserve the configured defaults.
 
 ## Files and artifacts
 
