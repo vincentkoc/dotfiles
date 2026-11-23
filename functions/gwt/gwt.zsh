@@ -1302,6 +1302,10 @@ Commands:
   gwt prune --orphan-locks [--apply]
                                     List (or unlock and prune) missing gwt-locked
                                     registrations with no lifecycle record
+  gwt prune --orphan-locks --path <absolute-path> --creation-token <uuid>
+      --expected-head <sha> --missing-path-id <device:inode>
+      [--apply --recovery-sha256 <hash>]
+                                    Plan or retire only the exact missing registration
   gwt sparse status                 Show sparse-checkout state for the current worktree
   gwt sparse list                   List available sparse profiles for the current repo
   gwt sparse set <profile>          Apply a sparse profile to the current worktree
@@ -1948,17 +1952,28 @@ gwt() {
             # Native registration may already be missing after partial removal.
             # The durable owner ledger, rather than that list, owns the hold.
             local prune_records prune_owner prune_orphans=false
-            local -a prune_apply
+            local -a prune_apply prune_exact
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --orphan-locks) prune_orphans=true ;;
                     --apply) prune_apply=(--apply) ;;
-                    *) echo "Usage: gwt prune [--orphan-locks [--apply]]" >&2; return 1 ;;
+                    --path|--creation-token|--expected-head|--missing-path-id|--recovery-sha256)
+                        [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
+                        local option="$1"
+                        [[ "$option" == --path ]] && option=--orphan-path
+                        (( ${prune_exact[(Ie)$option]} == 0 )) || {
+                            echo "gwt: duplicate orphan recovery option" >&2
+                            return 1
+                        }
+                        prune_exact+=("$option" "$2")
+                        shift
+                        ;;
+                    *) echo "Usage: gwt prune [--orphan-locks [--path <absolute-path> ...] [--apply]]" >&2; return 1 ;;
                 esac
                 shift
             done
-            if (( ${#prune_apply} )) && ! $prune_orphans; then
-                echo "gwt: --apply requires prune --orphan-locks" >&2
+            if (( ${#prune_apply} || ${#prune_exact} )) && ! $prune_orphans; then
+                echo "gwt: orphan recovery options require prune --orphan-locks" >&2
                 return 1
             fi
             prune_records=$(_gwt_git_probe worktree list --porcelain) || return
@@ -1967,7 +1982,7 @@ gwt() {
             if $prune_orphans; then
                 # Only missing gwt-locked registrations with no lifecycle record;
                 # dry-run unless --apply. Branches are never deleted.
-                _gwt_finish_tool orphan-locks --worktree "${prune_owner#worktree }" "${prune_apply[@]}" || return
+                _gwt_finish_tool orphan-locks --worktree "${prune_owner#worktree }" "${prune_exact[@]}" "${prune_apply[@]}" || return
                 _gwt_tmux_sync_context
                 return 0
             fi

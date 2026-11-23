@@ -187,6 +187,30 @@ remote-tracking ref. Anything else is reported as retained with its reason.
 Apply rechecks each candidate under the maintainer lock, never deletes
 branches and restores the lock if native removal fails.
 
+For one audited registration, use exact selection instead of the repository-wide
+candidate set:
+
+```sh
+gwt prune --orphan-locks --path /absolute/missing/checkout \
+  --creation-token <lock-uuid> --expected-head <full-sha> \
+  --missing-path-id <prior-device:prior-inode>
+```
+
+The device/inode must come from an audit while that checkout existed; do not
+guess it from the retained admin directory. This identity keeps references to
+the deleted checkout root in the holder scan. The command checks only the
+selected candidate, binds surviving admin contents and sibling registrations,
+and returns a `recovery_sha256`. Apply the same operands with
+`--apply --recovery-sha256 <reviewed-hash>`. Changed identity, lock, HEAD, contents,
+holders, lifecycle state or sibling proof retains the registration.
+
+Exact apply records its removal intent before unlocking, uses one non-force
+native removal, and verifies registration/admin absence and branch/sibling
+preservation. It creates no enrollment. An interrupted or uncertain attempt
+remains blocked by its receipt; do not retry it or use the batch route to
+bypass that hold. This retires surviving administration only: already missing
+unstaged and untracked files remain unaudited.
+
 ## Missing enrolled checkout recovery
 
 `gwt recover-missing` restores a missing directory only when its original Git
