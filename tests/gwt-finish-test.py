@@ -7370,6 +7370,216 @@ class MissingRepositoryRenameTests(unittest.TestCase):
             self.assertNotIn("remove", result.stdout)
 
 
+class ExactOrphanLockTests(unittest.TestCase):
+    tearDown = LifecycleTests.tearDown
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+
+    def setUp(self):
+        LifecycleTests.setUp(self)
+        (self.home / ".codex").mkdir()
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
+        self.path_ids = {}
+        self.orphans = {}
+        self.output = b"p1\0\nf1\0n/fixture/unrelated\0\n"
+        original = FINISH.run
+
+        def run(command, **kwargs):
+            if Path(command[0]).name == "lsof":
+                return types.SimpleNamespace(stdout=self.output, stderr=b"")
+            return original(command, **kwargs)
+
+        self.scan = mock.patch.object(FINISH, "run", side_effect=run)
+        self.scan.start()
+        self.addCleanup(self.scan.stop)
+
+    def orphan(self, name, *, prepare=None):
+        def capture(path, admin):
+            details = path.lstat()
+            self.path_ids[str(path)] = f"{details.st_dev}:{details.st_ino}"
+            if prepare is not None:
+                prepare(path, admin)
+        return OrphanLockTests.orphan(self, name, prepare=capture)
+
+    def scoped(self, path, lock, *extra):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = FINISH.main([
+                "orphan-locks", "--worktree", str(self.repo), "--state-dir", str(self.state),
+                "--managed-root", str(self.root), "--orphan-path", str(path),
+                "--creation-token", lock.split(":")[1], "--expected-head", self.head,
+                "--missing-path-id", self.path_ids[str(path)], *extra])
+        return code, json.loads(output.getvalue())[0]
+
+    def receipt(self):
+        with FINISH.read_only_ledger(self.state) as db:
+            return dict(db.execute("SELECT * FROM orphan_removals").fetchone())
+
+    def test_exact_plan_and_apply_preserve_second_candidate_and_enrollment(self):
+        path, admin, lock = self.orphan("selected")
+        other, other_admin, other_lock = self.orphan("unselected")
+        ledger = (self.state / "lifecycle.sqlite").read_bytes()
+        code, planned = self.scoped(path, lock)
+        self.assertEqual(code, 0)
+        self.assertEqual(planned["disposition"], "candidate")
+        self.assertEqual((self.state / "lifecycle.sqlite").read_bytes(), ledger)
+        other_before = FINISH.sibling_identity(
+            {"owner": str(self.repo), "common": str(self.repo / ".git"),
+             "common_id": FINISH.identity(self.repo / ".git")}, str(other), float("inf"))
+        code, removed = self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(code, 0, removed)
+        self.assertEqual(removed["disposition"], "pruned", removed)
+        self.assertFalse(admin.exists())
+        self.assertTrue(other_admin.exists())
+        self.assertEqual((other_admin / "locked").read_text().strip(), other_lock)
+        self.assertEqual(git(self.repo, "rev-parse", "selected"), self.head)
+        outcome = removed["result"]
+        self.assertTrue(outcome["siblings_preserved"])
+        self.assertTrue(outcome["branch_reflog_preserved"])
+        self.assertTrue(outcome["child"]["reaped"])
+        self.assertTrue(outcome["child"]["group_absent"])
+        self.assertEqual(outcome["sibling_identities_after"][str(other)], other_before)
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM worktrees").fetchone()[0], 1)
+            self.assertIsNone(db.execute("SELECT 1 FROM worktrees WHERE path=?", (str(path),)).fetchone())
+        self.assertEqual(json.loads(self.receipt()["result"]), outcome)
+
+    def test_exact_selection_rejects_ambiguous_path_and_wrong_proof(self):
+        path, admin, lock = self.orphan("selected")
+        for options, reason in (
+                (["--orphan-path", str(path)], "one-exact-path"),
+                (["--creation-token", str(uuid.uuid4())], "selection-changed"),
+                (["--expected-head", "a" * 40], "selection-changed"),
+                (["--missing-path-id", "not-an-inode"], "exact-path-token-head"),
+                (["--apply"], "reviewed-plan"),
+                (["--apply", "--recovery-sha256", "a" * 64], "preimage-changed")):
+            with self.subTest(options=options), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.scoped(path, lock, *options)
+            self.assertEqual((admin / "locked").read_text().strip(), lock)
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='orphan_removals'").fetchone())
+
+    def test_holders_match_prior_root_and_admin_alias_inodes(self):
+        path, admin, lock = self.orphan("selected")
+        dev, ino = map(int, self.path_ids[str(path)].split(":"))
+        for details in ((dev, ino), (admin.stat().st_dev, (admin / "index").stat().st_ino)):
+            self.output = f"p1\0\nf3\0D0x{details[0]:x}\0i{details[1]}\0n/fixture/alias\0\n".encode()
+            with self.subTest(details=details), self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                self.scoped(path, lock)
+        for output in (b"", b"p1\0\nf3\0n/fixture (stat: Permission denied)\0\n"):
+            self.output = output
+            with self.subTest(output=output), self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+                self.scoped(path, lock)
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+
+    def test_plan_binds_admin_and_sibling_registration(self):
+        path, admin, lock = self.orphan("selected")
+        _, planned = self.scoped(path, lock)
+        self.orphan("new-sibling")
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+        _, planned = self.scoped(path, lock)
+        old = admin / "old-lock"
+        (admin / "locked").rename(old)
+        (admin / "locked").write_text(lock + "\n")
+        old.unlink()
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+
+    def test_reappearance_and_lifecycle_or_maintenance_contention_retain_lock(self):
+        path, admin, lock = self.orphan("selected")
+        with FINISH.ledger(self.state):
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                self.scoped(path, lock)
+        with FINISH.safety().maintainer_lock(self.home / ".codex"):
+            with self.assertRaisesRegex(FINISH.Retain, "maintainer-lock-present"):
+                self.scoped(path, lock)
+        path.mkdir()
+        with self.assertRaisesRegex(FINISH.Retain, "directory-present|native-admin-unavailable"):
+            self.scoped(path, lock)
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+
+    def test_exact_mode_keeps_existing_content_and_enrollment_guards(self):
+        def staged(path, admin):
+            (path / "file").write_text("unpublished index\n")
+            git(path, "add", "file")
+        for name, prepare, reason in (
+                ("staged", staged, "staged-or-index-only-changes"),
+                ("unknown", lambda path, admin: (admin / "private-session").write_text("keep"),
+                 "admin-recovery-content-unknown")):
+            path, admin, lock = self.orphan(name, prepare=prepare)
+            with self.subTest(name=name), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.scoped(path, lock)
+            self.assertTrue(admin.exists())
+        path, admin, lock = self.orphan("recorded")
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO worktrees(id,path,identity,created_at,state,reason) "
+                       "VALUES (?,?,?,0,'active','owner-active')",
+                       (str(uuid.uuid4()), str(path), json.dumps({"gitdir": str(admin)})))
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-record"):
+            self.scoped(path, lock)
+
+    def test_native_failure_is_durable_and_blocks_batch_or_exact_retry(self):
+        path, admin, lock = self.orphan("selected")
+        _, planned = self.scoped(path, lock)
+        original = FINISH.safety().supervise
+        def supervise(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                command = [shutil.which("false")]
+            return original(command, **kwargs)
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise):
+            code, outcome = self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(code, 1)
+        self.assertEqual(outcome["disposition"], "unknown")
+        self.assertTrue(outcome["result"]["native_lock_preserved"], outcome)
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+        self.assertEqual(json.loads(self.receipt()["result"])["checkout"], "unknown")
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-record"):
+            self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        _, rows = OrphanLockTests.survey(self, "--apply")
+        self.assertEqual(rows[str(path)]["reason"], "orphan-has-lifecycle-record")
+
+    def test_interruption_after_intent_leaves_nonretryable_receipt(self):
+        path, admin, lock = self.orphan("selected")
+        _, planned = self.scoped(path, lock)
+        original = FINISH.safety().supervise
+        def supervise(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                raise KeyboardInterrupt()
+            return original(command, **kwargs)
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise), \
+                self.assertRaises(KeyboardInterrupt):
+            self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertIsNone(self.receipt()["result"])
+        self.assertTrue(admin.exists())
+        # Even a later restored lock must not make this uncertain attempt retryable.
+        git(self.repo, "worktree", "lock", "--reason", lock, str(path))
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-record"):
+            self.scoped(path, lock)
+
+    def test_wrapper_forwards_exact_operands_and_rejects_duplicates(self):
+        path, _, lock = self.orphan("selected")
+        env = dict(os.environ, TMUX="")
+        script = ('source "$1"; cd "$2"; _gwt_finish_tool() { printf "%s\\n" "$@"; }; '
+                  '_gwt_require_worktree_storage() { :; }; _gwt_tmux_sync_context() { :; }; '
+                  'shift 2; gwt prune "$@"')
+        command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), str(self.repo)]
+        options = ["--path", str(path), "--creation-token", lock.split(":")[1],
+                   "--expected-head", self.head, "--missing-path-id", self.path_ids[str(path)]]
+        result = subprocess.run([*command, "--orphan-locks", *options], env=env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "orphan-locks", "--worktree", str(self.repo), "--orphan-path", *options[1:]])
+        for extra in (["--path", str(path)], ["--expected-head", self.head]):
+            result = subprocess.run([*command, "--orphan-locks", *options, *extra], env=env,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+
+
 class OrphanLockTests(unittest.TestCase):
     """Missing gwt-locked registrations that never reached the lifecycle ledger."""
     tearDown = LifecycleTests.tearDown
