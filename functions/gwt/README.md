@@ -811,6 +811,10 @@ repository-native worktrees are never adopted. Existing ancestor permissions
 are not changed. The private SQLite ledger remains under
 `~/.local/state/gwt-finish`.
 
+After creating the checkout, enrollment waits up to 10 seconds for another
+lifecycle operation to release the ledger lock. If it stays busy, GWT reports
+`lifecycle-busy` and retains the locked checkout.
+
 Creation rejects a previously enrolled path before creating its Git checkout.
 Older versions could create a new locked checkout there, then fail enrollment.
 For that specific failure, the original sole owner may explicitly attest the
