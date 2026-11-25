@@ -342,7 +342,7 @@ def policy_allows(row, allowed):
 
 
 @contextlib.contextmanager
-def ledger(state_dir, *, create=False):
+def ledger(state_dir, *, create=False, wait_seconds=0):
     root = Path(state_dir).expanduser()
     if not os.path.lexists(root):
         if not create:
@@ -365,10 +365,18 @@ def ledger(state_dir, *, create=False):
     db = None
     try:
         private_file(lock_path)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise Retain("lifecycle-busy") from error
+        deadline = time.monotonic() + wait_seconds if wait_seconds else None
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                remaining = deadline - time.monotonic() if deadline is not None else 0
+                if remaining <= 0:
+                    raise Retain("lifecycle-busy") from error
+                time.sleep(min(0.1, remaining))
+        if wait_seconds and not os.path.samestat(os.fstat(fd), lock_path.lstat()):
+            raise Retain("lifecycle-lock-changed")
         database = root / "lifecycle.sqlite"
         for suffix in ("", "-journal", "-wal", "-shm"):
             candidate = root / ("lifecycle.sqlite" + suffix)
@@ -4039,7 +4047,11 @@ def main(argv=None):
         print(json.dumps(output, sort_keys=True))
         return 0
 
-    with diagnostic_phase("state-session"), ledger(args.state_dir, create=args.command == "enroll") as db:
+    # A new private checkout is already locked in Git. Give its original
+    # enrollment a chance to finish before leaving it without a lifecycle row.
+    with diagnostic_phase("state-session"), ledger(
+        args.state_dir, create=args.command == "enroll", wait_seconds=10 if args.new_token else 0
+    ) as db:
         if args.command == "enroll":
             storage_guard()
             lock_reason = "gwt-finish.v2:" + args.new_token if args.new_token else None

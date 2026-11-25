@@ -169,6 +169,17 @@ class LifecycleTests(unittest.TestCase):
             for path in self.state.iterdir()
         })
 
+    def test_creation_enrollment_still_refuses_when_ledger_stays_busy(self):
+        with (self.state / "lifecycle.lock").open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                with FINISH.ledger(self.state, create=True, wait_seconds=0.01):
+                    self.fail("entered a ledger held by another operation")
+            with mock.patch.object(FINISH.time, "sleep") as wait:
+                with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                    self.call("enroll")
+                wait.assert_not_called()
+
     def test_read_only_status_requires_existing_uncontended_lock_and_clean_database(self):
         lock = self.state / "lifecycle.lock"
         with lock.open("rb") as held:
@@ -1269,7 +1280,14 @@ class ReleaseTests(unittest.TestCase):
         self.admin = Path(git(self.wt, "rev-parse", "--absolute-git-dir"))
         # Run the same deferred enrollment in-process with only storage/PR/
         # native census mocked; no installed host guard or policy is invoked.
-        self.call("enroll", "--new-token", self.token)
+        with (self.state / "lifecycle.lock").open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            def release(_):
+                fcntl.flock(held, fcntl.LOCK_UN)
+
+            with mock.patch.object(FINISH.time, "sleep", side_effect=release) as wait:
+                self.call("enroll", "--new-token", self.token)
+                wait.assert_called_once()
         self.assertFalse((self.wt / "apps/macos/omitted.txt").exists())
         self.assertTrue((self.admin / "config.worktree").is_file())
         self.assertTrue((self.admin / "info/sparse-checkout").is_file())
