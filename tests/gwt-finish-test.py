@@ -8293,6 +8293,218 @@ class ExternalRemovalTests(unittest.TestCase):
         self.assertNotIn("external_removal", result)
 
 
+class UnstartedRemovalTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = ReleaseTests.finish
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        with mock.patch.object(FINISH, "evaluate_release", return_value="fixture-retained"):
+            self.finish("--release")
+        native = FINISH.finalized_admission
+        calls = 0
+
+        def expire(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise FINISH.Retain("admission-deadline")
+            return native(*args, **kwargs)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=expire), \
+                mock.patch.object(FINISH, "git", wraps=FINISH.git) as native_git:
+            result = self.remove()[1][0]
+        self.assertFalse(any("unlock" in call.args for call in native_git.call_args_list))
+        self.assertEqual(calls, 2)
+        self.assertEqual((result["checkout"], result["retirement_state"]), ("unknown", "incomplete"))
+        self.original = self.receipt()
+        self.assertIs(json.loads(self.original["result"])["native_attempted"], False)
+
+    def receipt(self):
+        with FINISH.ledger(self.state) as db:
+            return dict(FINISH.retirement(db, FINISH.get_row(db, self.wt)))
+
+    def arguments(self):
+        item = self.receipt()
+        args = ["--unstarted-removal", "--intent-id", json.loads(item["intent"])["id"],
+                "--generation", str(item["generation"])]
+        for key in ("intent", "result"):
+            args += ["--" + key + "-sha256", hashlib.sha256(item[key].encode()).hexdigest()]
+        return args
+
+    def recover(self, *extra):
+        with mock.patch.object(FINISH, "manual_holders"):
+            return self.call("reconcile", *self.arguments(), *extra)
+
+    def rewrite_result(self, result):
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE retirement SET result=? WHERE worktree_id=?",
+                       (json.dumps(result, indent=2) + "\n", self.original["worktree_id"]))
+
+    def test_inspector_is_read_only_and_exposes_exact_hashes_without_inventory(self):
+        before = {p.name: (p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns)
+                  for p in self.state.iterdir()}
+        with mock.patch.object(FINISH, "git", side_effect=AssertionError("read-only inspector ran Git")), \
+                mock.patch.object(FINISH, "manual_holders", side_effect=AssertionError("holder census")):
+            result = self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]
+        self.assertEqual(result["intent_id"], json.loads(self.original["intent"])["id"])
+        self.assertIs(result["result"]["child"], None)
+        for key in ("intent", "result"):
+            self.assertEqual(result[key + "_sha256"], hashlib.sha256(self.original[key].encode()).hexdigest())
+        self.assertLess(len(json.dumps(result)), 2048)
+        self.assertEqual(before, {p.name: (p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns)
+                                  for p in self.state.iterdir()})
+
+    def test_recovery_archives_bytes_invalidates_releases_and_never_removes(self):
+        result = json.loads(self.original["result"])
+        result.pop("native_attempted")  # Existing deadline receipts predate the producer fact.
+        self.rewrite_result(result)
+        original, args = self.receipt(), self.arguments()
+        with mock.patch.object(FINISH, "remove_with_intent", side_effect=AssertionError("removal")):
+            code, rows = self.recover()
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["checkout"], "retained")
+        self.assertEqual(rows[0]["generation"], original["generation"] + 1)
+        self.assertEqual(rows[0]["released_owners"], [])
+        self.assertEqual(rows[0]["owners"], [{"owner": "owner-1", "completed": 1}])
+        self.assertTrue(self.wt.exists())
+        with FINISH.ledger(self.state) as db:
+            archive = db.execute("SELECT * FROM unstarted_removal_recoveries").fetchone()
+            self.assertEqual((archive["intent"], archive["result"]), (original["intent"], original["result"]))
+        view = self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]
+        self.assertIs(view["reconciled"], True)
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("INSERT INTO owner_releases VALUES (?, ?, ?)",
+                       (original["worktree_id"], "owner-1", original["generation"] + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "exact-incomplete-intent"):
+            self.call("reconcile", *args)
+        self.assertEqual(self.receipt()["generation"], original["generation"] + 1)
+        self.assertEqual(self.call("status")[1][0]["released_owners"], ["owner-1"])
+        self.assertEqual(self.remove()[1][0]["checkout"], "removed")
+
+    def test_new_explicit_unstarted_fact_qualifies(self):
+        self.assertEqual(self.recover()[1][0]["retirement_state"], "enrolled")
+
+    def test_recovery_fits_one_scan_budget_without_repeating_the_expired_second_scan(self):
+        clock, elapsed = FINISH.time.monotonic(), 0
+        native = FINISH.finalized_admission
+
+        def slow_admission(*args, **kwargs):
+            nonlocal elapsed
+            result = native(*args, **kwargs)
+            elapsed += 65
+            FINISH.safety().tick(args[3])
+            return result
+
+        with mock.patch.object(FINISH.time, "monotonic", side_effect=lambda: clock + elapsed), \
+                mock.patch.object(FINISH, "finalized_admission", side_effect=slow_admission):
+            self.assertEqual(self.recover()[1][0]["retirement_state"], "enrolled")
+        self.assertEqual(elapsed, 65)
+
+    def failed_unlock(self, *, after):
+        self.recover()
+        native = FINISH.git
+
+        def expire(*args, **kwargs):
+            if "unlock" in args:
+                if after:
+                    native(*args, **kwargs)
+                raise FINISH.Retain("admission-deadline")
+            return native(*args, **kwargs)
+
+        with mock.patch.object(FINISH, "git", side_effect=expire):
+            result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "unknown")
+        outcome = json.loads(self.receipt()["result"])
+        self.assertIs(outcome["native_attempted"], True)
+        self.assertIs(outcome["native_lock_preserved"], True)
+        self.assertIs(outcome["child"], None)
+        with self.assertRaisesRegex(FINISH.Retain, "not-proven-unstarted"):
+            self.recover()
+
+    def test_unlock_failure_is_attempted_even_before_unlock_returns(self):
+        self.failed_unlock(after=False)
+
+    def test_unlock_followed_by_failure_stays_attempted_after_lock_restoration(self):
+        self.failed_unlock(after=True)
+
+    def test_completion_and_release_proof_are_still_required(self):
+        self.proofs[self.url]["merged"] = False
+        with self.assertRaisesRegex(FINISH.Retain, "pr-closed-unmerged"):
+            self.recover()
+        self.proofs[self.url]["merged"] = True
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("DELETE FROM owner_releases WHERE worktree_id=?", (self.original["worktree_id"],))
+        with self.assertRaisesRegex(FINISH.Retain, "awaiting-owner-release"):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_inspector_preserves_sidecar_refusal(self):
+        sidecar = self.state / "lifecycle.sqlite-journal"
+        sidecar.write_bytes(b"pending")
+        sidecar.chmod(0o600)
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-sidecar-requires-recovery"):
+            self.call("status", "--read-only", "--removal-receipt")
+        self.assertEqual(sidecar.read_bytes(), b"pending")
+        sidecar.unlink()
+
+    def test_missing_dispatched_or_contradictory_child_facts_stay_held(self):
+        original = json.loads(self.original["result"])
+        variants = [{**original, "native_attempted": value} for value in (True, 0, None)]
+        variants += [{**original, "child": value} for value in ({}, False, {"pid": 42, "reaped": True})]
+        variants += [{k: v for k, v in original.items() if k != "child"},
+                     {**original, "path_absent": False}, {**original, "reason": "removal-incomplete"}]
+        for result in variants:
+            with self.subTest(result=result):
+                self.rewrite_result(result)
+                before = self.receipt()
+                with self.assertRaisesRegex(FINISH.Retain, "not-proven-unstarted"):
+                    self.recover()
+                self.assertEqual(self.receipt(), before)
+
+    def test_exact_owner_generation_and_receipt_are_required(self):
+        for extra in (("--owner", "foreign"), ("--generation", "99"), ("--result-sha256", "0" * 64)):
+            with self.subTest(extra=extra), self.assertRaises(FINISH.Retain):
+                self.recover(*extra)
+            self.assertEqual(self.receipt(), self.original)
+
+    def test_source_holder_and_preimage_changes_refuse(self):
+        with mock.patch.object(FINISH, "manual_holders", side_effect=FINISH.Retain("live-holder")):
+            with self.assertRaisesRegex(FINISH.Retain, "live-holder"):
+                self.call("reconcile", *self.arguments())
+        (self.wt / "file").write_text("changed\n")
+        with self.assertRaisesRegex(FINISH.Retain, "dirty-or-untracked"):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_historical_sibling_departure_does_not_authorize_or_block_metadata_recovery(self):
+        git(self.repo, "worktree", "remove", str(self.legacy))
+        self.assertEqual(self.recover()[1][0]["retirement_state"], "enrolled")
+        self.assertTrue(self.wt.exists())
+
+    def test_archive_and_cas_failure_roll_back_together(self):
+        with FINISH.ledger(self.state) as db:
+            db.execute("CREATE TRIGGER fail_recovery BEFORE UPDATE ON retirement "
+                       "WHEN NEW.state='enrolled' BEGIN SELECT RAISE(ABORT, 'fixture-failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+        with FINISH.ledger(self.state) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='unstarted_removal_recoveries'").fetchone():
+                self.assertEqual(db.execute("SELECT count(*) FROM unstarted_removal_recoveries").fetchone()[0], 0)
+
+    def test_receipt_flags_do_not_broaden_other_commands(self):
+        for args in (("status", "--removal-receipt"), ("status", "--read-only", "--all", "--removal-receipt"),
+                     ("remove", "--finalized", "--unstarted-removal"),
+                     ("reconcile", "--unstarted-removal", "--external-removal")):
+            with self.subTest(args=args), self.assertRaises(FINISH.Retain):
+                self.call(*args)
+        self.assertEqual(self.receipt(), self.original)
+
+
 class ReconciliationTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
