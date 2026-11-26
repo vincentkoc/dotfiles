@@ -3610,7 +3610,11 @@ def recover_orphan(db, args, owner_snapshot):
             raise Retain("orphan-identity-changed")
         if preserved_refs(current_snap, refs, until) != refs:
             raise Retain("preserved-refs-changed")
-        siblings = [entry for entry in rows if entry["worktree"] != args.orphan_path]
+        # Sibling progress is independent; registration fields and identities
+        # remain bound. Native removal separately records the full current rows.
+        siblings = [{key: value for key, value in entry.items()
+                     if key not in {"HEAD", "branch", "detached"}}
+                    for entry in rows if entry["worktree"] != args.orphan_path]
         return {"snapshot": current_snap, "admin": admin, "contents": contents,
                 "boundaries": [module.access_boundary(current_snap["path_absence"]["parent"], until),
                                module.access_boundary(current_snap["gitdir"], until)],

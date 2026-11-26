@@ -7515,14 +7515,17 @@ class ExactOrphanLockTests(unittest.TestCase):
                 prepare(path, admin)
         return OrphanLockTests.orphan(self, name, prepare=capture)
 
+    def scoped_arguments(self, path, lock, *extra):
+        return [
+            "orphan-locks", "--worktree", str(self.repo), "--state-dir", str(self.state),
+            "--managed-root", str(self.root), "--orphan-path", str(path),
+            "--creation-token", lock.split(":")[1], "--expected-head", self.head,
+            "--missing-path-id", self.path_ids[str(path)], *extra]
+
     def scoped(self, path, lock, *extra):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = FINISH.main([
-                "orphan-locks", "--worktree", str(self.repo), "--state-dir", str(self.state),
-                "--managed-root", str(self.root), "--orphan-path", str(path),
-                "--creation-token", lock.split(":")[1], "--expected-head", self.head,
-                "--missing-path-id", self.path_ids[str(path)], *extra])
+            code = FINISH.main(self.scoped_arguments(path, lock, *extra))
         return code, json.loads(output.getvalue())[0]
 
     def receipt(self):
@@ -7827,13 +7830,16 @@ class ExactOrphanLockTests(unittest.TestCase):
         self.assertEqual((admin / "locked").read_text().strip(), lock)
 
     def test_plan_rejects_head_index_and_admin_reflog_drift(self):
-        for surface in ("head", "index", "logs/HEAD"):
+        for surface in ("head", "branch", "index", "logs/HEAD"):
             name = "drift-" + surface.replace("/", "-")
             path, admin, lock = self.orphan(name)
             _, planned = self.scoped(path, lock)
             if surface == "head":
                 commit = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "later")
                 git(self.repo, "update-ref", "refs/heads/" + name, commit)
+            elif surface == "branch":
+                git(self.repo, "branch", name + "-moved", self.head)
+                git(self.repo, "--git-dir=" + str(admin), "symbolic-ref", "HEAD", "refs/heads/" + name + "-moved")
             elif surface == "index":
                 git(self.repo, "--git-dir=" + str(admin), "update-index", "--cacheinfo",
                     "100644", git(self.repo, "rev-parse", "HEAD:.gitignore"), "file")
@@ -7917,6 +7923,141 @@ class ExactOrphanLockTests(unittest.TestCase):
         old.unlink()
         with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
             self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+
+    def test_separate_processes_preserve_plan_across_sibling_progress(self):
+        path, admin, lock, source, _ = self.prior_orphan()
+        options = self.prior_options(source)
+        # Separate interpreters exercise native admission and serialization without
+        # a profiling hook. Only host storage/holder observations use fixture data.
+        code = '''import importlib.util, sys, types
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from unittest import mock
+spec = importlib.util.spec_from_loader("finish", SourceFileLoader("finish", sys.argv[1]))
+finish = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(finish)
+original = finish.run
+def run(command, **kwargs):
+    if Path(command[0]).name == "lsof":
+        return types.SimpleNamespace(stdout=b"p1\\0\\nf1\\0n/fixture/unrelated\\0\\n", stderr=b"")
+    return original(command, **kwargs)
+with mock.patch.object(finish, "storage_guard"), mock.patch.object(finish, "run", side_effect=run):
+    sys.exit(finish.main(sys.argv[2:]))
+'''
+        def process(seed, *extra):
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", code, str(TOOL),
+                 *self.scoped_arguments(path, lock, *options, *extra)],
+                env=dict(os.environ, PYTHONHASHSEED=str(seed)),
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+            return json.loads(result.stdout)[0]
+
+        planned = process(1)
+        self.assertEqual(process(2), planned)
+        git(self.wt, "commit", "--allow-empty", "-m", "sibling progress")
+        progress = [process(3)]
+        git(self.wt, "checkout", "--detach")
+        progress.append(process(4))
+        git(self.wt, "checkout", "-b", "sibling-progress")
+        progress.append(process(5))
+        raw = FINISH.records(str(self.repo))
+        removed = process(6, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(progress, [planned] * 3)
+        self.assertEqual(removed["disposition"], "pruned", removed)
+        self.assertFalse(admin.exists())
+        self.assertTrue(removed["result"]["siblings_preserved"])
+        self.assertTrue(removed["result"]["branch_reflog_preserved"])
+        self.assertTrue(removed["result"]["child"]["reaped"])
+        self.assertTrue(removed["result"]["child"]["group_absent"])
+        intent = json.loads(self.receipt()["intent"])
+        self.assertEqual(intent["siblings"], [row for row in raw if row["worktree"] != str(path)])
+        self.assertTrue(all(not {"HEAD", "branch", "detached"}.intersection(row)
+                            for row in intent["before"]["siblings"]))
+
+    def test_sibling_progress_during_both_rechecks_keeps_raw_removal_receipt(self):
+        path, _, lock = self.orphan("selected")
+        _, planned = self.scoped(path, lock)
+        original, observations = FINISH.orphan_candidate, []
+        native, removals = FINISH.safety().supervise, []
+        def candidate(*args, **kwargs):
+            observations.append(len(observations) + 1)
+            if len(observations) in (2, 3):
+                git(self.wt, "commit", "--allow-empty", "-m", "concurrent sibling progress")
+            return original(*args, **kwargs)
+        def supervise(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                removals.append(command)
+            return native(command, **kwargs)
+        with mock.patch.object(FINISH, "orphan_candidate", side_effect=candidate), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise):
+            code, result = self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(code, 0, result)
+        self.assertEqual(observations, [1, 2, 3])
+        self.assertEqual(len(removals), 1)
+        self.assertNotIn("--force", removals[0])
+        self.assertNotIn("-f", removals[0])
+        report = result["result"]["sibling_comparison"]
+        self.assertTrue(report["preserved"])
+        self.assertEqual(report["changes"][0]["kind"], "operational")
+        self.assertEqual(set(report["changes"][0]["fields"]), {"HEAD"})
+        intent = json.loads(self.receipt()["intent"])
+        self.assertEqual(next(row for row in intent["siblings"] if row["worktree"] == str(self.wt))["HEAD"],
+                         self.head)
+
+    def test_plan_keeps_every_nonoperational_sibling_field_and_order_bound(self):
+        path, admin, lock = self.orphan("selected")
+        self.orphan("other")
+        _, planned = self.scoped(path, lock)
+        original = FINISH.records
+        raw = original(str(self.repo))
+        native, mutations = FINISH.safety().supervise, []
+        def supervise(command, **kwargs):
+            if "worktree" in command and ("unlock" in command or "remove" in command):
+                mutations.append(command)
+            return native(command, **kwargs)
+        for change in ("missing", "order", "locked", "prunable", "future-field"):
+            def records(owner):
+                rows = [dict(row) for row in original(owner)]
+                if change == "missing":
+                    return [row for row in rows if row["worktree"] != str(self.wt)]
+                if change == "order":
+                    return rows[:1] + list(reversed(rows[1:]))
+                next(row for row in rows if row["worktree"] == str(self.wt))[change] = "changed"
+                return rows
+            with self.subTest(change=change), \
+                    mock.patch.object(FINISH, "records", side_effect=records), \
+                    mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise), \
+                    self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+            self.assertEqual(mutations, [])
+            self.assertEqual((admin / "locked").read_text().strip(), lock)
+            self.assertEqual(original(str(self.repo)), raw)
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='orphan_removals'").fetchone())
+
+    def test_plan_rejects_sibling_lock_and_pointer_identity_replacement(self):
+        path, admin, lock = self.orphan("selected")
+        sibling_admin = Path(git(self.wt, "rev-parse", "--absolute-git-dir"))
+        git(self.repo, "worktree", "lock", "--reason", "sibling-owner", str(self.wt))
+        native, mutations = FINISH.safety().supervise, []
+        def supervise(command, **kwargs):
+            if "worktree" in command and ("unlock" in command or "remove" in command):
+                mutations.append(command)
+            return native(command, **kwargs)
+        for marker in (sibling_admin / "locked", self.wt / ".git"):
+            _, planned = self.scoped(path, lock)
+            previous = marker.with_name(marker.name + ".previous")
+            marker.rename(previous)
+            marker.write_bytes(previous.read_bytes())
+            previous.unlink()
+            with self.subTest(marker=marker.name), \
+                    mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise), \
+                    self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+            self.assertEqual(mutations, [])
+            self.assertEqual((admin / "locked").read_text().strip(), lock)
 
     def test_reappearance_and_lifecycle_or_maintenance_contention_retain_lock(self):
         path, admin, lock = self.orphan("selected")

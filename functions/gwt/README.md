@@ -201,8 +201,12 @@ guess it from the retained admin directory. This identity keeps references to
 the deleted checkout root in the holder scan. The command checks only the
 selected candidate, binds surviving admin contents and sibling registrations,
 and returns a `recovery_sha256`. Apply the same operands with
-`--apply --recovery-sha256 <reviewed-hash>`. Changed identity, lock, HEAD, contents,
-holders, lifecycle state or sibling proof retains the registration.
+`--apply --recovery-sha256 <reviewed-hash>`. Changed identity, lock, target HEAD,
+contents, holders, lifecycle state or sibling proof retains the registration.
+Sibling HEAD advances, branch switches and detached checkout transitions do not
+change this proof. Sibling registration paths, order, other fields and physical
+identities remain bound; additions or removals require a fresh plan. Native
+removal separately records full current sibling rows and verifies preservation.
 
 Exact selection still requires HEAD on a remote-tracking ref. Earlier admin
 recovery commits may instead use the selected task branch's surviving common
