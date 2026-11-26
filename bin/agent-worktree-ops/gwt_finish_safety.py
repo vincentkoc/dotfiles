@@ -111,16 +111,14 @@ def read_file(path, until, limit=LEAF_LIMIT):
 def tracked_blob(path, until, expected, limit):
     """Hash a tracked source leaf without buffering it or relaxing admin bounds."""
     tick(until)
-    named = os.lstat(path)
-    if not stat.S_ISREG(named.st_mode) or not 0 <= named.st_size <= limit:
+    mode, size = expected[2], expected[6]
+    if not stat.S_ISREG(mode) or not 0 <= size <= limit:
         raise Retain("file-type-or-size-unsupported")
-    if file_identity(named) != expected:
-        raise Retain("file-replaced")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if file_identity(os.fstat(fd)) != expected:
             raise Retain("file-replaced")
-        size = named.st_size
+        # Bind the caller's stat to this FD, but prove EOF independently of metadata size.
         digest = hashlib.sha1(b"blob " + str(size).encode() + b"\0")
         count = 0
         while True:
@@ -132,6 +130,7 @@ def tracked_blob(path, until, expected, limit):
             if count > size:
                 raise Retain("file-size-changed")
             digest.update(chunk)
+        tick(until)
         if (count != size or file_identity(os.fstat(fd)) != expected
                 or file_identity(os.lstat(path)) != expected):
             raise Retain("file-changed")

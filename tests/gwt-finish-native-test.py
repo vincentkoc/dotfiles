@@ -120,13 +120,42 @@ class ReaderTests(unittest.TestCase):
                 replacement.write_bytes(b"source")
                 opened = os.open
                 def replace_then_open(path, flags):
-                    replacement.replace(path)
+                    if during_open:
+                        replacement.replace(path)
                     return opened(path, flags)
                 if not during_open:
                     replacement.replace(self.file)
-                with mock.patch.object(NATIVE.os, "open", side_effect=replace_then_open):
+                with mock.patch.object(NATIVE.os, "open", side_effect=replace_then_open), \
+                        mock.patch.object(NATIVE.os, "read", wraps=os.read) as reads:
                     with self.assertRaisesRegex(NATIVE.Retain, "file-replaced"):
                         NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 6)
+                reads.assert_not_called()
+
+    def test_tracked_blob_collects_fragmented_positive_reads(self):
+        expected = NATIVE.file_identity(self.file.lstat())
+        read = os.read
+        with mock.patch.object(NATIVE.os, "read", side_effect=lambda fd, size: read(fd, min(size, 2))):
+            digest, size = NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 6)
+        self.assertEqual((digest, size), (hashlib.sha1(b"blob 6\0source").hexdigest(), 6))
+
+    def test_empty_tracked_blob_checks_deadline_after_eof(self):
+        self.file.write_bytes(b"")
+        expected = NATIVE.file_identity(self.file.lstat())
+        read = os.read
+        def expire(fd, size):
+            result = read(fd, size)
+            NATIVE.DEADLINE = time.monotonic() - 1
+            return result
+        with mock.patch.object(NATIVE.os, "read", side_effect=expire):
+            with self.assertRaisesRegex(NATIVE.Retain, "deadline"):
+                NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 0)
+
+    def test_tracked_blob_rejects_readable_bytes_beyond_unchanged_metadata_size(self):
+        self.file.write_bytes(b"")
+        expected = NATIVE.file_identity(self.file.lstat())
+        with mock.patch.object(NATIVE.os, "read", return_value=b"x"):
+            with self.assertRaisesRegex(NATIVE.Retain, "file-size-changed"):
+                NATIVE.tracked_blob(self.file, time.monotonic() + 2, expected, 0)
 
     def test_tracked_blob_changes_during_read_refuse(self):
         for change in ("replace", "grow", "truncate", "rewrite"):
