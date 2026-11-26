@@ -7989,6 +7989,20 @@ class ExactOrphanLockTests(unittest.TestCase):
                                     planned["recovery_sha256"])[0], 0)
         self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/other"), oid)
 
+    def test_direct_recovery_roots_skip_remote_walk_but_head_still_requires_it(self):
+        path, _, lock = self.orphan("selected", prepare=self.recovery_commit)
+        original, checked = FINISH.remote_preserved, []
+        def remote(snap, oid, until):
+            checked.append(oid)
+            return original(snap, oid, until)
+        with mock.patch.object(FINISH, "remote_preserved", side_effect=remote):
+            _, planned = self.scoped(path, lock)
+        self.assertEqual(planned["disposition"], "candidate")
+        self.assertEqual(checked, [self.head])
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        with self.assertRaisesRegex(FINISH.Retain, "head-not-on-remote"):
+            self.scoped(path, lock)
+
     def test_reflog_membership_does_not_admit_missing_or_noncommit_recovery_objects(self):
         path, admin, lock = self.orphan("selected")
         reflog = self.repo / ".git/logs/refs/heads/selected"
@@ -8098,6 +8112,25 @@ class ExactOrphanLockTests(unittest.TestCase):
         old.unlink()
         with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
             self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+
+    def test_plan_binds_sibling_created_before_final_observation(self):
+        path, _, lock = self.orphan("selected")
+        sibling = self.root / "late-sibling"
+        original_holders, original_digest = FINISH.manual_holders, FINISH.recovery_digest
+        proofs = []
+        def holders(*args, **kwargs):
+            original_holders(*args, **kwargs)
+            git(self.repo, "worktree", "add", "-b", "late-sibling", str(sibling))
+        def digest(proof):
+            proofs.append(json.loads(json.dumps(proof)))
+            return original_digest(proof)
+        with mock.patch.object(FINISH, "manual_holders", side_effect=holders), \
+                mock.patch.object(FINISH, "recovery_digest", side_effect=digest):
+            _, first = self.scoped(path, lock)
+        _, second = self.scoped(path, lock)
+        self.assertEqual(first["recovery_sha256"], second["recovery_sha256"])
+        self.assertIn(str(sibling), [row["worktree"] for row in proofs[0]["siblings"]])
+        self.assertIn(str(sibling), proofs[0]["sibling_identities"])
 
     def test_separate_processes_preserve_plan_across_sibling_progress(self):
         path, admin, lock, source, _ = self.prior_orphan()

@@ -3655,7 +3655,7 @@ def orphan_candidate(db, snap, entry, admin_index, until, *, attempt=None, prese
             if git(snap["owner"], "--no-replace-objects", "cat-file", "-t", oid,
                    deadline=until) != "commit":
                 raise Retain("orphan-recovery-not-a-commit")
-            if oid != head:
+            if oid != head and oid not in roots:
                 try:
                     remote_preserved(snap, oid, until)
                 except Retain as error:
@@ -3730,7 +3730,7 @@ def recover_orphan(db, args, owner_snapshot):
         contents = {**proof, "entries": {}, "dependency": None, "missing_worktree": True,
                     "discarded_inodes": [current_snap["path_id"]]}
         manual_holders(current_snap, contents, admin, until)
-        final_snap, _, final_prior = observe()
+        final_snap, final_rows, final_prior = observe()
         if final_snap != current_snap or final_prior != prior:
             raise Retain("orphan-identity-changed")
         if preserved_refs(current_snap, refs, until) != refs:
@@ -3739,7 +3739,7 @@ def recover_orphan(db, args, owner_snapshot):
         # remain bound. Native removal separately records the full current rows.
         siblings = [{key: value for key, value in entry.items()
                      if key not in {"HEAD", "branch", "detached"}}
-                    for entry in rows if entry["worktree"] != args.orphan_path]
+                    for entry in final_rows if entry["worktree"] != args.orphan_path]
         return {"snapshot": current_snap, "admin": admin, "contents": contents,
                 "boundaries": [module.access_boundary(current_snap["path_absence"]["parent"], until),
                                module.access_boundary(current_snap["gitdir"], until)],
