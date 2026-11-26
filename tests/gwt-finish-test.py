@@ -5286,6 +5286,155 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertTrue(self.wt.exists())
         self.assertEqual(path.read_text(), unrelated + "\t\tunrecorded remote branch\n")
 
+    def other_recovery_branch(self):
+        ancestor = git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "other fetched work")
+        tip = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", ancestor, "-m", "other branch tip")
+        branch = "refs/heads/recovery"
+        git(self.repo, "update-ref", "--create-reflog", branch, tip)
+        (self.admin / "FETCH_HEAD").write_text(ancestor + "\t\tother fetched work\n")
+        return branch, ancestor, tip
+
+    def test_preserve_ref_anchors_other_branch_ancestor_and_preserves_all_refs(self):
+        branch, ancestor, tip = self.other_recovery_branch()
+        log = self.repo / ".git/logs" / branch
+        before = log.read_bytes()
+        self.assertNotIn(ancestor.encode(), before)
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.remove()
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.call("remove", "--finalized", "--preserve-ref", "refs/heads/main")
+        with mock.patch.object(FINISH, "manual_holders"):
+            code, rows = self.call("remove", "--finalized", "--preserve-ref", branch,
+                                   "--preserve-ref", branch)
+        self.assertEqual((code, rows[0]["checkout"]), (0, "removed"), rows)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertTrue(self.legacy.exists())
+        self.assertEqual(git(self.repo, "rev-parse", branch), tip)
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertEqual(log.read_bytes(), before)
+        self.assertEqual(git(self.repo, "cat-file", "-t", ancestor), "commit")
+        with FINISH.ledger(self.state) as db:
+            outcome = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertEqual(set(outcome["preserved_refs_after"]), {branch, "refs/heads/released-feature"})
+
+    def test_preserve_ref_rejects_nonliteral_missing_symbolic_and_noncommit_refs(self):
+        branch, _, tip = self.other_recovery_branch()
+        git(self.repo, "update-ref", "refs/remotes/origin/recovery", tip)
+        git(self.repo, "tag", "recovery", tip)
+        git(self.repo, "symbolic-ref", "refs/heads/alias", branch)
+        (self.repo / ".git/refs/heads/noncommit").write_text(git(self.repo, "rev-parse", "HEAD:file") + "\n")
+        for value in ("recovery", "HEAD", "refs/tags/recovery", "refs/remotes/origin/recovery",
+                      branch + "~1", "refs/heads/*", "refs/heads/missing", "refs/heads/alias",
+                      "refs/heads/noncommit", "refs/heads/../recovery", "refs/heads/"):
+            with self.subTest(value=value), mock.patch.object(FINISH, "manual_holders"):
+                with self.assertRaisesRegex(FINISH.Retain, "preserve-ref-needs-"):
+                    self.call("remove", "--finalized", "--preserve-ref", value)
+            self.assertTrue(self.wt.exists())
+            self.assertTrue((self.admin / "locked").exists())
+            with FINISH.ledger(self.state) as db:
+                self.assertIsNone(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+
+    def test_preserve_ref_is_only_accepted_by_explicit_finalized_remove(self):
+        for command in ("finish", "release", "cancel", "check", "status", "guard", "resume",
+                        "enroll", "creation-token", "holder-qualification", "remove", "orphan-locks"):
+            with self.subTest(command=command), mock.patch.object(FINISH, "ledger") as ledger, \
+                    mock.patch.object(FINISH.safety(), "supervise") as child:
+                with self.assertRaisesRegex(FINISH.Retain, "preserve-ref-requires-manual-finalized"):
+                    FINISH.main([command, "--preserve-ref", "refs/heads/recovery"])
+                ledger.assert_not_called()
+                child.assert_not_called()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            FINISH.main(["remove", "--finalized", "--preserve-ref"])
+
+    def test_preserve_ref_drift_during_admission_retains_before_intent(self):
+        branch, _, tip = self.other_recovery_branch()
+        ref = self.repo / ".git" / branch
+        log = self.repo / ".git/logs" / branch
+        for change in ("lock", "move", "delete", "symbolic", "log-create", "log-delete",
+                       "log-replace", "log-content"):
+            git(self.repo, "update-ref", "--no-deref", branch, tip)
+            ref.write_text(tip + "\n")
+            if not log.exists():
+                git(self.repo, "reflog", "create", branch)
+            ref_bytes, log_bytes = ref.read_bytes(), log.read_bytes()
+            if change == "log-create":
+                log.unlink()
+
+            def drift(*args):
+                if change == "lock":
+                    Path(str(ref) + ".lock").write_text("writer\n")
+                elif change == "move":
+                    git(self.repo, "update-ref", branch, self.head)
+                elif change == "delete":
+                    git(self.repo, "update-ref", "-d", branch)
+                elif change == "symbolic":
+                    git(self.repo, "symbolic-ref", branch, "refs/heads/released-feature")
+                elif change == "log-create":
+                    log.write_bytes(log_bytes)
+                elif change == "log-delete":
+                    log.unlink()
+                elif change == "log-replace":
+                    log.rename(log.with_name("old-log"))
+                    log.write_bytes(log_bytes)
+                else:
+                    log.write_bytes(log_bytes.replace(b"\n", b"\tchanged\n", 1))
+
+            try:
+                with self.subTest(change=change), mock.patch.object(FINISH, "manual_holders", side_effect=drift):
+                    with self.assertRaisesRegex(FINISH.Retain, "preserved-|preserve-ref-"):
+                        self.call("remove", "--finalized", "--preserve-ref", branch)
+                self.assertTrue(self.wt.exists())
+                self.assertTrue((self.admin / "locked").exists())
+                with FINISH.ledger(self.state) as db:
+                    self.assertIsNone(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
+            finally:
+                Path(str(ref) + ".lock").unlink(missing_ok=True)
+                ref.write_bytes(ref_bytes)
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_bytes(log_bytes)
+                log.with_name("old-log").unlink(missing_ok=True)
+
+    def test_preserve_ref_drift_after_intent_never_dispatches_removal(self):
+        branch, _, _ = self.other_recovery_branch()
+        admission, calls = FINISH.finalized_admission, []
+
+        def drift(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 2:
+                git(self.repo, "update-ref", branch, self.head)
+            return admission(*args, **kwargs)
+
+        with mock.patch.object(FINISH, "manual_holders"), \
+                mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
+            code, rows = self.call("remove", "--finalized", "--preserve-ref", branch)
+        self.assertEqual(rows[0]["reason"], "preserved-refs-changed")
+        self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
+                             for call in children.call_args_list))
+        self.assert_incomplete_locked(code, rows)
+
+    def test_preserve_ref_drift_after_native_removal_keeps_outcome_unresolved(self):
+        branch, _, _ = self.other_recovery_branch()
+        native = FINISH.safety().supervise
+
+        def drift(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                git(self.repo, "update-ref", branch, self.head)
+            return result
+
+        with mock.patch.object(FINISH, "manual_holders"), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=drift):
+            code, rows = self.call("remove", "--finalized", "--preserve-ref", branch)
+        self.assertEqual(rows[0]["checkout"], "unknown", rows)
+        self.assertEqual(rows[0]["retirement_state"], "incomplete", rows)
+        self.assertFalse(self.wt.exists())
+        with FINISH.ledger(self.state) as db:
+            outcome = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertTrue(outcome["registration_absent"])
+        self.assertFalse(outcome["branch_preserved"])
+
     def test_empty_fetch_head_requires_explicit_manual_proof(self):
         (self.admin / "FETCH_HEAD").write_bytes(b"")
         with FINISH.ledger(self.state) as db:
@@ -6137,6 +6286,32 @@ class FinalizedRemovalTests(unittest.TestCase):
             "remove", "--worktree", str(self.wt), "--finalized", "--sudo-holder-scan"])
         self.assertTrue(self.wt.exists())
         self.assertTrue((self.admin / "locked").exists())
+
+    def test_wrapper_forwards_preserve_ref_only_to_finalized_helper(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; shift 2; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; gwt "$@"')
+        command = ["zsh", "-f", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"),
+                   str(self.repo)]
+        branch = "refs/heads/recovery"
+        for args in (("rm", str(self.wt)), ("rm", str(self.wt), "--force"),
+                     ("finish",), ("status",), ("root",), ("new", "branch")):
+            result = subprocess.run([*command, *args, "--preserve-ref", branch],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0, (args, result.stdout))
+            self.assertNotIn("remove\n", result.stdout)
+        result = subprocess.run([*command, "rm", str(self.wt), "--finalized", "--preserve-ref"],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        result = subprocess.run([*command, "rm", str(self.wt), "--finalized",
+                                 "--preserve-ref", branch, "--preserve-ref", branch],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "remove", "--worktree", str(self.wt), "--finalized",
+            "--preserve-ref", branch, "--preserve-ref", branch])
+        self.assertTrue(self.wt.exists())
 
     def test_sudo_scan_does_not_elevate_git_or_lifecycle_and_preserves_admission_guards(self):
         native = FINISH.safety().supervise
