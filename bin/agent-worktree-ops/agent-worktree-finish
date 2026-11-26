@@ -2140,6 +2140,23 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
     intent = {"id": str(uuid.uuid4()), "generation": item["generation"],
               "head": snap["head"], "branch": snap["branch"], "before": before,
               "siblings": siblings, "sibling_identities": sibling_ids, "qualification": qualification}
+    # Prepare the enrollment receipt before admission so a large encoding cannot
+    # hide new files until after the intent has already been committed.
+    encoded = json.dumps(intent, sort_keys=True) if record_intent is None else None
+
+    def check_admission():
+        final = recheck()
+        if any(final[key] != before[key] for key in (
+                "snapshot", "boundaries", "contents", "admin", "branch_reflog")) or (
+                final.get("preserved_refs") != before.get("preserved_refs")):
+            raise Retain("removal-preimage-changed")
+        # Leave time for child reap and readback before committing or unlocking.
+        if time.monotonic() >= module.DEADLINE - 32:
+            raise Retain("removal-budget-exhausted")
+        if fetch_lease is not None:
+            fetch_lease.validate()
+
+    check_admission()
     # Keep ownership durable before unlocking. A partial native result must
     # never become a retryable ordinary checkout, even for older consumers.
     if record_intent is not None:
@@ -2148,7 +2165,7 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
         with db:
             changed = db.execute("UPDATE retirement SET state='intent', intent=? "
                                  "WHERE worktree_id=? AND generation=? AND state='enrolled'",
-                                 (json.dumps(intent, sort_keys=True), row["id"], item["generation"])).rowcount
+                                 (encoded, row["id"], item["generation"])).rowcount
             if changed != 1:
                 raise Retain("release-generation-changed")
     outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None,
@@ -2158,18 +2175,10 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
     if "resolve_undo" in before["contents"]:
         outcome["resolve_undo"] = before["contents"]["resolve_undo"]
     try:
-        final = recheck()
-        if any(final[key] != before[key] for key in (
-                "snapshot", "boundaries", "contents", "admin", "branch_reflog")) or (
-                final.get("preserved_refs") != before.get("preserved_refs")):
-            raise Retain("removal-preimage-changed")
-        # Recursive deletion needs its own phase, not admission's remaining time.
-        # Keep two seconds to reap and thirty for readbacks inside the owner clock.
+        # SQLite commit can outlast the observation. Keep the native unlock
+        # behind fresh holder, filesystem and lease checks even with a receipt.
+        check_admission()
         removal_until = min(time.monotonic() + 180, module.DEADLINE - 32)
-        if time.monotonic() >= removal_until:
-            raise Retain("removal-budget-exhausted")
-        if fetch_lease is not None:
-            fetch_lease.validate()
         # Include unlock in this fact: a returned preparation failure must not
         # masquerade as an attempt that never touched native lifecycle state.
         outcome["native_attempted"] = True
@@ -3763,7 +3772,6 @@ def recover_orphan(db, args, owner_snapshot):
 
             def persist_intent(intent):
                 nonlocal attempt
-                recheck()
                 # This receipt owns only registration retirement. No worktree or
                 # owner row is fabricated, and an interrupted attempt stays blocked.
                 with db:
