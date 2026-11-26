@@ -3525,7 +3525,7 @@ def summary(db, row, reason=None):
 ORPHAN_LOCK = re.compile(r"gwt-finish\.v2:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\Z")
 
 
-def orphan_known(db, path, admin, lock_reason, attempt=None):
+def orphan_known(db, path, admin, lock_reason, attempt=None, *, reconciled=None):
     """Any lifecycle trace of this registration keeps it out of orphan pruning."""
     for row in db.execute("SELECT path, identity FROM worktrees"):
         recorded = json.loads(row["identity"])
@@ -3540,9 +3540,96 @@ def orphan_known(db, path, admin, lock_reason, attempt=None):
         for recorded in db.execute(
                 "SELECT id, result FROM orphan_removals WHERE path=? OR admin=? OR lock_reason=?",
                 (path, admin, lock_reason)):
+            if recorded["id"] == reconciled:
+                continue
             if recorded["id"] != attempt or recorded["result"] is not None:
                 return True
     return False
+
+
+def orphan_target_digest(proof):
+    return recovery_digest({key: value for key, value in proof.items()
+                            if key not in {"siblings", "sibling_identities"}})
+
+
+def orphan_reconciliation(db, args, snap, attempt=None):
+    """Bind one proven zero-attempt receipt; callers still owe fresh admission."""
+    reconciling = args.command == "reconcile-orphan"
+    rows = []
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='orphan_removals'").fetchone():
+        rows = [row for row in db.execute(
+            "SELECT * FROM orphan_removals WHERE path=? OR admin=? OR lock_reason=?",
+            (snap["path"], snap["gitdir"], snap["lock_reason"]))
+                if row["id"] != attempt or row["result"] is not None]
+    if len(rows) != 1:
+        if reconciling:
+            raise Retain("orphan-reconciliation-needs-one-exact-receipt")
+        return None
+    row = rows[0]
+    fact_row = None
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='orphan_unstarted_reconciliations'").fetchone():
+        fact_row = db.execute("SELECT fact FROM orphan_unstarted_reconciliations WHERE id=?", (row["id"],)).fetchone()
+    if not reconciling and fact_row is None:
+        return None
+    if reconciling and fact_row is not None:
+        raise Retain("orphan-receipt-already-reconciled")
+    if (row["path"] != snap["path"] or row["admin"] != snap["gitdir"]
+            or row["lock_reason"] != snap["lock_reason"] or not row["intent"] or not row["result"]):
+        raise Retain("orphan-reconciliation-scope-mismatch")
+    hashes = {name + "_sha256": hashlib.sha256(row[name].encode()).hexdigest()
+              for name in ("intent", "result")}
+    if reconciling and (row["id"] != args.intent_id or hashes != {
+            "intent_sha256": args.intent_sha256, "result_sha256": args.result_sha256}):
+        raise Retain("orphan-reconciliation-receipt-mismatch")
+
+    def fields(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate receipt field")
+            value[key] = item
+        return value
+
+    try:
+        intent, result = (json.loads(row[name], object_pairs_hook=fields) for name in ("intent", "result"))
+        if (set(intent) != {"id", "generation", "head", "branch", "before", "siblings",
+                            "sibling_identities", "qualification"}
+                or intent["id"] != row["id"] or str(uuid.UUID(row["id"])) != row["id"]
+                or type(intent["generation"]) is not int or intent["generation"] != 0
+                or not isinstance(intent["siblings"], list) or not isinstance(intent["sibling_identities"], dict)
+                or intent["head"] != snap["head"] or intent["branch"] != snap["branch"]
+                or intent["qualification"] != {"mode": "exact-orphan-registration", "operator": owner_id(args)}):
+            raise ValueError("receipt identity or operator")
+        before = intent["before"]
+        required = {"snapshot", "admin", "contents", "boundaries", "branch_reflog",
+                    "preserved_refs", "siblings", "sibling_identities"}
+        expected = {"checkout", "reason", "native_attempted", "child", "native_lock_preserved", "working_tree"}
+        if "resolve_undo" in before["contents"]:
+            expected.add("resolve_undo")
+        if (not required <= set(before) <= required | {"orphan_identity"}
+                or not isinstance(before["siblings"], list) or not isinstance(before["sibling_identities"], dict)
+                or before["contents"].get("missing_worktree") is not True or set(result) != expected
+                or result["checkout"] != "unknown" or result["reason"] != "orphan-preimage-changed"
+                or result["native_attempted"] is not False or result["child"] is not None
+                or result["native_lock_preserved"] is not True
+                or result["working_tree"] != "already-absent-not-audited"
+                or result.get("resolve_undo") != before["contents"].get("resolve_undo")):
+            raise ValueError("receipt does not prove zero native attempt")
+        binding = {"id": row["id"], **hashes, "operator": owner_id(args),
+                   "target_sha256": orphan_target_digest(before)}
+        if fact_row is not None:
+            fact = json.loads(fact_row["fact"], object_pairs_hook=fields)
+            if (set(fact) != set(binding) | {"schema", "observed_at", "recovery_sha256"}
+                    or fact["schema"] != "gwt-orphan-unstarted-reconciliation.v1"
+                    or any(fact[key] != value for key, value in binding.items())
+                    or type(fact["observed_at"]) is not int or fact["observed_at"] < 0
+                    or fact["recovery_sha256"] != recovery_digest({
+                        "schema": "gwt-orphan-unstarted-reconciliation.v1", "reconciliation": binding})):
+                raise ValueError("reconciliation fact mismatch")
+            binding["fact_sha256"] = hashlib.sha256(fact_row["fact"].encode()).hexdigest()
+        return binding
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise Retain("orphan-reconciliation-proof-invalid") from error
 
 
 def orphan_prior_identity(args, snap, path_id, until, *, locked, admitted):
@@ -3605,7 +3692,8 @@ def orphan_prior_identity(args, snap, path_id, until, *, locked, admitted):
     }
 
 
-def orphan_candidate(db, snap, entry, admin_index, until, *, attempt=None, preserved_oids=None):
+def orphan_candidate(db, snap, entry, admin_index, until, *, attempt=None, preserved_oids=None,
+                     reconciled=None):
     """Admit a missing unrecorded registration with remote HEAD and preserved recovery history."""
     path, lock_reason = entry["worktree"], entry.get("locked", "")
     if not ORPHAN_LOCK.fullmatch(lock_reason):
@@ -3633,7 +3721,7 @@ def orphan_candidate(db, snap, entry, admin_index, until, *, attempt=None, prese
     if mapped is None:
         raise Retain("orphan-admin-unavailable")
     admin = mapped[0]
-    if orphan_known(db, path, admin, lock_reason, attempt):
+    if orphan_known(db, path, admin, lock_reason, attempt, reconciled=reconciled):
         raise Retain("orphan-has-lifecycle-record")
     branch, head = entry.get("branch", ""), entry.get("HEAD", "")
     if not branch.startswith("refs/heads/") or not SHA.fullmatch(head):
@@ -3684,6 +3772,7 @@ def recover_orphan(db, args, owner_snapshot):
     snap = None
     identity_proof = None
     restored_lock = None
+    reconciliation = None
     if (not inside(args.orphan_path, owner_snapshot["root"])
             or args.orphan_path == owner_snapshot["root"]):
         raise Retain("orphan-outside-managed-root")
@@ -3719,10 +3808,13 @@ def recover_orphan(db, args, owner_snapshot):
 
     def admit():
         current_snap, rows, prior = observe()
+        if orphan_reconciliation(db, args, current_snap, attempt) != reconciliation:
+            raise Retain("orphan-reconciliation-changed")
         refs, roots = release_refs(current_snap, None, until)
         entry = next(entry for entry in rows if entry["worktree"] == args.orphan_path)
         if orphan_candidate(db, current_snap, entry, sibling_admin_index(current_snap, until),
-                            until, attempt=attempt, preserved_oids=roots) is None:
+                            until, attempt=attempt, preserved_oids=roots,
+                            reconciled=reconciliation["id"] if reconciliation else None) is None:
             raise Retain("orphan-lock-changed")
         for key in ("common", "gitdir"):
             directory = Path(current_snap[key])
@@ -3749,26 +3841,48 @@ def recover_orphan(db, args, owner_snapshot):
         siblings = [{key: value for key, value in entry.items()
                      if key not in {"HEAD", "branch", "detached"}}
                     for entry in final_rows if entry["worktree"] != args.orphan_path]
-        return {"snapshot": current_snap, "admin": admin, "contents": contents,
+        proof = {"snapshot": current_snap, "admin": admin, "contents": contents,
                 "boundaries": [module.access_boundary(current_snap["path_absence"]["parent"], until),
                                module.access_boundary(current_snap["gitdir"], until)],
                 "branch_reflog": refs[current_snap["branch"]]["reflog"], "preserved_refs": refs,
                 "siblings": siblings, "sibling_identities": sibling_identities(current_snap, siblings, until),
                 **({"orphan_identity": prior} if prior is not None else {})}
+        if reconciliation and orphan_target_digest(proof) != reconciliation["target_sha256"]:
+            raise Retain("orphan-reconciliation-target-changed")
+        return proof
 
     owner_snapshot = {**owner_snapshot, "owner_id": identity(owner_snapshot["owner"])}
     storage_guard()
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
         snap, _, identity_proof = observe()
         with QualificationFetchLease(snap) as lease:
+            reconciliation = orphan_reconciliation(db, args, snap)
             before = admit()
-            digest = recovery_digest(before)
+            reconciling = args.command == "reconcile-orphan"
+            preimage = ({"schema": "gwt-orphan-unstarted-reconciliation.v1",
+                         "reconciliation": reconciliation} if reconciling else
+                        {"admission": before, "reconciliation": reconciliation} if reconciliation else before)
+            digest = recovery_digest(preimage)
             output = {"worktree": args.orphan_path, "disposition": "candidate",
                       "recovery_sha256": digest, "working_tree": "already-absent-not-audited"}
             if not args.apply:
                 return output
             if digest != args.recovery_sha256:
                 raise Retain("orphan-preimage-changed")
+            if reconciling:
+                admit()
+                lease.validate()
+                with db:
+                    if orphan_reconciliation(db, args, snap) != reconciliation:
+                        raise Retain("orphan-reconciliation-changed")
+                    db.execute("CREATE TABLE IF NOT EXISTS orphan_unstarted_reconciliations ("
+                               "id TEXT PRIMARY KEY REFERENCES orphan_removals(id), fact TEXT NOT NULL)")
+                    fact = {"schema": "gwt-orphan-unstarted-reconciliation.v1", **reconciliation,
+                            "observed_at": int(time.time()), "recovery_sha256": digest}
+                    db.execute("INSERT INTO orphan_unstarted_reconciliations VALUES (?, ?)",
+                               (reconciliation["id"], json.dumps(fact, sort_keys=True)))
+                return {**output, "disposition": "reconciled", "receipt_id": reconciliation["id"],
+                        "native_attempted": False}
 
             def persist_intent(intent):
                 nonlocal attempt
@@ -3818,7 +3932,8 @@ def recover_orphan(db, args, owner_snapshot):
 
             remove_with_intent(
                 db, {}, {"generation": 0}, before, recheck,
-                {"mode": "exact-orphan-registration", "operator": owner_id(args)},
+                {"mode": "exact-orphan-registration", "operator": owner_id(args),
+                 **({"reconciled_orphan": reconciliation} if reconciliation else {})},
                 restore_lock=True, fetch_lease=lease,
                 record_intent=persist_intent, record_outcome=persist_outcome,
                 snapshotter=lambda _path, _root, lock=None: observe(lock)[0],
@@ -3920,6 +4035,7 @@ def parser():
         "creation-check",
         "recover-failed-creation",
         "orphan-locks",
+        "reconcile-orphan",
         "guard",
     ))
     result.add_argument("--worktree", default=os.getcwd())
@@ -4102,15 +4218,21 @@ def main(argv=None):
             result = recover_failed_creation(db, get_row(db, args.worktree), args)
         print(json.dumps([result], sort_keys=True))
         return 1 if args.apply and result["checkout"] != "removed" else 0
-    if args.command != "orphan-locks" and (args.orphan_path or args.missing_path_id
+    if args.command not in ("orphan-locks", "reconcile-orphan") and (args.orphan_path or args.missing_path_id
                                            or args.prior_identity_file is not None):
         raise Retain("orphan-options-require-orphan-locks")
-    if (args.creation_token or args.acknowledge_unrecorded_creation) and args.command != "orphan-locks":
+    if (args.creation_token or args.acknowledge_unrecorded_creation) and args.command not in ("orphan-locks", "reconcile-orphan"):
         raise Retain("creation-recovery-options-require-recover-failed-creation")
-    if args.command == "orphan-locks":
+    if args.command in ("orphan-locks", "reconcile-orphan"):
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner", "apply",
                    "orphan_path", "missing_path_id", "creation_token", "expected_head", "recovery_sha256",
                    "allow_device_renumbering", "prior_identity_file"}
+        if args.command == "reconcile-orphan":
+            allowed.update(("intent_id", "intent_sha256", "result_sha256"))
+            if (args.orphan_path is None or not args.intent_id or str(uuid.UUID(args.intent_id)) != args.intent_id
+                    or any(not value or not re.fullmatch(r"[0-9a-f]{64}", value)
+                           for value in (args.intent_sha256, args.result_sha256))):
+                raise Retain("orphan-reconciliation-needs-exact-receipt-hashes")
         if not Path(args.worktree).is_absolute() or any(
                 value is not None and value is not False and value != []
                 for name, value in vars(args).items() if name not in allowed):
@@ -4142,7 +4264,7 @@ def main(argv=None):
                 raise Retain("orphan-locks-need-lifecycle-state")
             result = orphan_locks(db, args)
         print(json.dumps(result, sort_keys=True))
-        return 1 if args.apply and any(item["disposition"] not in ("pruned", "retained")
+        return 1 if args.apply and any(item["disposition"] not in ("pruned", "retained", "reconciled")
                                        for item in result) else 0
     if args.command == "creation-check":
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner"}

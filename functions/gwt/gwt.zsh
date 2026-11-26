@@ -1317,6 +1317,10 @@ Commands:
       [--allow-device-renumbering --prior-identity-file <absolute-json-path>]
       [--apply --recovery-sha256 <hash>]
                                     Plan or retire only the exact missing registration
+  gwt reconcile-orphan --worktree <owner> --orphan-path <missing-path> <exact-orphan-proof>
+      --intent-id <uuid> --intent-sha256 <hash> --result-sha256 <hash>
+      [--apply --recovery-sha256 <hash>]
+                                    Reconcile one proven unstarted orphan attempt; never remove
   gwt sparse status                 Show sparse-checkout state for the current worktree
   gwt sparse list                   List available sparse profiles for the current repo
   gwt sparse set <profile>          Apply a sparse profile to the current worktree
@@ -1382,7 +1386,7 @@ gwt() {
         root)
             _gwt_worktrees_root
             ;;
-        recover-failed-creation)
+        recover-failed-creation|reconcile-orphan)
             _gwt_finish_tool "$subcommand" "$@"
             return $?
             ;;
