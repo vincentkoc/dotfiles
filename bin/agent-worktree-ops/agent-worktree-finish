@@ -1307,6 +1307,23 @@ def preserved_refs(snap, branches, until):
     return result
 
 
+def manual_preserved_branches(snap, branches, until):
+    """Admit only exact, existing local commit branches selected for this removal."""
+    result = sorted(set(branches))
+    for branch in result:
+        if not branch.startswith("refs/heads/"):
+            raise Retain("preserve-ref-needs-literal-local-branch")
+        try:
+            git(snap["owner"], "check-ref-format", branch, strict=True, deadline=until)
+        except Retain:
+            raise Retain("preserve-ref-needs-literal-local-branch") from None
+        value = git(snap["owner"], "for-each-ref", "--format=%(refname)%00%(objecttype)%00%(symref)",
+                    branch, strict=True, deadline=until)
+        if value != branch + "\0commit\0":
+            raise Retain("preserve-ref-needs-existing-direct-commit-branch")
+    return result
+
+
 def deletion_admission(row, item, qualification, until, fetch_lease=None):
     if not automatic_holder_contract(item):
         raise Retain("automatic-holder-contract-not-enrolled")
@@ -1669,6 +1686,7 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
                                   preserved_oids, until)
     holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
     manual_holders(snap, contents, admin, until, **holder_options)
+    manual_preserved_branches(snap, args.preserve_ref, until)
     refs = preserved_refs(snap, row["finalized_refs"], until)
     if refs != row["finalized_refs"]:
         raise Retain("preserved-refs-changed")
@@ -1716,7 +1734,9 @@ def remove_finalized(db, row, args, *, completed=False):
             QualificationFetchLease(snap) as fetch_lease:
         # A fetched target may retain history absent from either task branch.
         # Reuse release roots so manual closeout binds that ref to the same drift checks.
-        row["finalized_refs"], _ = release_refs(snap, row["target"], until, branches=(enrolled_branch,))
+        selected = manual_preserved_branches(snap, args.preserve_ref, until)
+        row["finalized_refs"], _ = release_refs(snap, row["target"], until,
+                                               branches=(enrolled_branch, *selected))
         def admit():
             if completed:
                 current = get_row(db, snap["path"])
@@ -1735,7 +1755,8 @@ def remove_finalized(db, row, args, *, completed=False):
             db, row, item, before,
             admit,
             {"mode": "explicit-finalized-task", "operator": owner_id(args),
-             "discard_ignored": sorted(args.discard_ignored)},
+             "discard_ignored": sorted(args.discard_ignored),
+             **({"preserve_ref": selected} if selected else {})},
             restore_lock=True, fetch_lease=fetch_lease,
             snapshotter=observe if missing else snapshot)
 
@@ -2185,6 +2206,7 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
                        branch_preserved=git(snap["owner"], "rev-parse", snap["branch"]) == snap["head"],
                        branch_reflog_preserved=preserved_branch_reflog(snap, module.DEADLINE) == before["branch_reflog"])
         if "preserved_refs" in before:
+            manual_preserved_branches(snap, qualification.get("preserve_ref", ()), module.DEADLINE)
             refs = preserved_refs(snap, before["preserved_refs"], module.DEADLINE)
             outcome["preserved_refs_after"] = refs
             outcome["branch_preserved"] &= all(
@@ -2400,7 +2422,8 @@ def reconcile_unstarted(db, row, args):
     if not snap.get("lock_reason", "").startswith("gwt-finish.v2:"):
         raise Retain("reconciliation-needs-native-enrollment")
     source = {**dict(row), "finalized_refs": before["preserved_refs"]}
-    disposal = types.SimpleNamespace(discard_ignored=qualification["discard_ignored"], sudo_holder_scan=False)
+    disposal = types.SimpleNamespace(discard_ignored=qualification["discard_ignored"],
+                                     preserve_ref=qualification.get("preserve_ref", []), sudo_holder_scan=False)
     until = min(time.monotonic() + 120, module.DEADLINE)
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))), \
             QualificationFetchLease(snap) as fetch_lease:
@@ -3712,7 +3735,11 @@ def recover_orphan(db, args, owner_snapshot):
             raise Retain("orphan-identity-changed")
         if preserved_refs(current_snap, refs, until) != refs:
             raise Retain("preserved-refs-changed")
-        siblings = [entry for entry in rows if entry["worktree"] != args.orphan_path]
+        # Sibling progress is independent; registration fields and identities
+        # remain bound. Native removal separately records the full current rows.
+        siblings = [{key: value for key, value in entry.items()
+                     if key not in {"HEAD", "branch", "detached"}}
+                    for entry in rows if entry["worktree"] != args.orphan_path]
         return {"snapshot": current_snap, "admin": admin, "contents": contents,
                 "boundaries": [module.access_boundary(current_snap["path_absence"]["parent"], until),
                                module.access_boundary(current_snap["gitdir"], until)],
@@ -3917,6 +3944,7 @@ def parser():
     result.add_argument("--finalized", action="store_true")
     result.add_argument("--sudo-holder-scan", action="store_true")
     result.add_argument("--discard-ignored", action="append", default=[])
+    result.add_argument("--preserve-ref", action="append", default=[])
     result.add_argument("--acknowledge-device-renumbering", action="store_true")
     result.add_argument("--acknowledge-repository-rename")
     result.add_argument("--intent-id")
@@ -4043,6 +4071,8 @@ def main(argv=None):
         raise Retain("removal-receipt-requires-one-read-only-status")
     if args.unstarted_removal and (args.command != "reconcile" or args.external_removal):
         raise Retain("unstarted-removal-requires-exact-reconciliation")
+    if args.preserve_ref and not (args.command == "remove" and args.finalized):
+        raise Retain("preserve-ref-requires-manual-finalized-removal")
     if args.command == "recover-failed-creation":
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner", "worktree_id",
                    "generation", "result_sha256", "expected_head", "creation_token",
@@ -4127,7 +4157,7 @@ def main(argv=None):
         elif args.command == "cancel":
             allowed.update({"reason", "acknowledge_repository_rename"})
         elif args.command == "remove":
-            allowed.update({"finalized", "discard_ignored", "sudo_holder_scan",
+            allowed.update({"finalized", "discard_ignored", "preserve_ref", "sudo_holder_scan",
                             "acknowledge_repository_rename"})
         if args.command not in ("resume", "finish", "cancel", "remove") or any(
                 value is not None and value is not False and value != []
@@ -4137,7 +4167,7 @@ def main(argv=None):
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner",
                    "acknowledge_repository_rename", "acknowledge_device_renumbering"}
         allowed.update({"reason"} if args.command == "cancel" else
-                       {"finalized", "discard_ignored", "sudo_holder_scan"})
+                       {"finalized", "discard_ignored", "preserve_ref", "sudo_holder_scan"})
         if (args.command not in ("cancel", "remove") or (args.command == "remove" and not args.finalized)
                 or any(value is not None and value is not False and value != []
                        for name, value in vars(args).items() if name not in allowed)):

@@ -201,8 +201,12 @@ guess it from the retained admin directory. This identity keeps references to
 the deleted checkout root in the holder scan. The command checks only the
 selected candidate, binds surviving admin contents and sibling registrations,
 and returns a `recovery_sha256`. Apply the same operands with
-`--apply --recovery-sha256 <reviewed-hash>`. Changed identity, lock, HEAD, contents,
-holders, lifecycle state or sibling proof retains the registration.
+`--apply --recovery-sha256 <reviewed-hash>`. Changed identity, lock, target HEAD,
+contents, holders, lifecycle state or sibling proof retains the registration.
+Sibling HEAD advances, branch switches and detached checkout transitions do not
+change this proof. Sibling registration paths, order, other fields and physical
+identities remain bound; additions or removals require a fresh plan. Native
+removal separately records full current sibling rows and verifies preservation.
 
 Exact selection still requires HEAD on a remote-tracking ref. Earlier admin
 recovery commits may instead use the selected task branch's surviving common
@@ -753,6 +757,15 @@ admission and removal. Malformed or unanchored records block closeout.
 New automatic release baselines use the same recovery proof. Release-time OIDs
 remain required even if a later fetch overwrites or removes `FETCH_HEAD`. Legacy
 full inventories continue to reject it.
+
+If recovery data belongs to another existing local branch, explicitly bind it
+with `gwt rm /absolute/task/path --finalized --preserve-ref refs/heads/branch`.
+Repeat `--preserve-ref` for additional branches. Only literal, non-symbolic local
+branches pointing directly to commits are accepted; tags, remote refs and revision
+expressions are not. Their tips and reflog identities and contents must remain
+unchanged through admission and removal. This preserves source branches and adds
+recovery roots for this manual attempt only; default and automatic closeout do not
+search other branches.
 
 Manual closeout also accepts a strictly parsed `REUC` resolve-undo index
 extension. Each recorded stage must be a regular-file or symlink blob reachable
