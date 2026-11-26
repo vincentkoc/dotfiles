@@ -4284,6 +4284,102 @@ class FinalizedRemovalTests(unittest.TestCase):
         (evidence / "test.log").write_text("finalized test output\n")
         return evidence
 
+    def commit_crlf_fixture(self, rule="*.cmd text eol=crlf"):
+        path = self.wt / "fixture.cmd"
+        (self.wt / ".gitattributes").write_text(rule + "\n")
+        path.write_bytes(b"left\r\nright\r\nlast")
+        git(self.wt, "add", ".gitattributes", path.name)
+        git(self.wt, "commit", "-m", "synthetic Windows text")
+        return path
+
+    def test_explicit_crlf_removal_preserves_the_committed_source(self):
+        path = self.commit_crlf_fixture()
+        head = git(self.wt, "rev-parse", "HEAD")
+        result = self.remove()[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), head)
+        self.assertEqual(git(self.repo, "show", head + ":" + path.name), "left\nright\nlast")
+
+    def test_crlf_mixed_endings_are_preserved_even_when_git_reports_clean(self):
+        path = self.commit_crlf_fixture()
+        data = b"left\nright\r\nlast"
+        path.write_bytes(data)
+        # Git stages the same canonical LF blob and records the new stat data.
+        git(self.wt, "add", path.name)
+        self.assertEqual(git(self.wt, "status", "--porcelain"), "")
+        with self.assertRaisesRegex(FINISH.Retain, "working-bytes-changed-or-limit"):
+            self.remove()
+        self.assertEqual(path.read_bytes(), data)
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_info_attributes_cannot_authorize_crlf_projection(self):
+        path = self.commit_crlf_fixture("*.cmd text eol=lf")
+        (self.repo / ".git/info/attributes").write_text("*.cmd text eol=crlf\n")
+        self.assertEqual(git(self.wt, "status", "--porcelain"), "")
+        with self.assertRaisesRegex(FINISH.Retain, "working-bytes-changed-or-limit"):
+            self.remove()
+        self.assertEqual(path.read_bytes(), b"left\r\nright\r\nlast")
+        self.assertTrue((self.admin / "locked").exists())
+
+    def test_info_attributes_can_veto_committed_crlf(self):
+        path = self.commit_crlf_fixture()
+        for rule in ("eol=lf", "filter=example", "working-tree-encoding=UTF-8"):
+            with self.subTest(rule=rule):
+                (self.repo / ".git/info/attributes").write_text("*.cmd " + rule + "\n")
+                with self.assertRaisesRegex(FINISH.Retain, "working-bytes-changed-or-limit"):
+                    self.remove()
+                self.assertEqual(path.read_bytes(), b"left\r\nright\r\nlast")
+
+    def test_nested_committed_rule_can_veto_crlf(self):
+        path = self.commit_crlf_fixture()
+        nested = self.wt / "nested"
+        nested.mkdir()
+        path = path.rename(nested / path.name)
+        (nested / ".gitattributes").write_text("*.cmd eol=lf\n")
+        git(self.wt, "add", "-A")
+        git(self.wt, "commit", "-m", "nested fixture policy")
+        with self.assertRaisesRegex(FINISH.Retain, "working-bytes-changed-or-limit"):
+            self.remove()
+        self.assertEqual(path.read_bytes(), b"left\r\nright\r\nlast")
+
+    def test_crlf_rule_change_between_admissions_preserves_checkout(self):
+        path = self.commit_crlf_fixture()
+        admit = FINISH.finalized_admission
+        def change_rule(*args, **kwargs):
+            result = admit(*args, **kwargs)
+            (self.repo / ".git/info/attributes").write_text("*.cmd eol=lf\n")
+            return result
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=change_rule):
+            result = self.remove()[1][0]
+        self.assertEqual(result["retirement_state"], "incomplete", result)
+        self.assertTrue((self.admin / "locked").exists())
+        self.assertEqual(path.read_bytes(), b"left\r\nright\r\nlast")
+
+    def test_raw_lf_blob_still_uses_exact_byte_verification(self):
+        path = self.commit_crlf_fixture()
+        path.write_bytes(b"left\nright\nlast")
+        git(self.wt, "add", path.name)
+        with mock.patch.object(FINISH.safety(), "verify_committed_crlf") as projection:
+            self.assertEqual(self.remove()[1][0]["checkout"], "removed")
+        projection.assert_not_called()
+
+    def test_crlf_with_other_committed_conversions_retains(self):
+        for attr in ("ident", "filter=example", "working-tree-encoding=UTF-8", "crlf=input"):
+            with self.subTest(attr=attr):
+                path = self.commit_crlf_fixture("*.cmd text eol=crlf " + attr)
+                with self.assertRaisesRegex(FINISH.Retain, "working-bytes-changed-or-limit"):
+                    self.remove()
+                self.assertEqual(path.read_bytes(), b"left\r\nright\r\nlast")
+
+    def test_crlf_with_a_content_edit_retains(self):
+        path = self.commit_crlf_fixture()
+        path.write_bytes(b"edit\r\nright\r\nlast")
+        with self.assertRaisesRegex(FINISH.Retain, "dirty-or-untracked-worktree"):
+            self.remove()
+        self.assertEqual(path.read_bytes(), b"edit\r\nright\r\nlast")
+
     def test_fast_forwarded_committed_message_allows_finalized_removal(self):
         authored, _ = self.fast_forwarded_task()
         self.artifacts()

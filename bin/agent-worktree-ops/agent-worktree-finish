@@ -102,13 +102,15 @@ def safety():
 
 
 def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, deadline=None,
-        stdout_sink=None):
+        stdout_sink=None, attribute_objects=None):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("DYLD_", "LD_"))}
     if Path(command[0]).name == "git":
         env = {key: value for key, value in env.items() if not key.startswith("GIT_")}
         env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
                    GIT_ALLOW_PROTOCOL="")
+        if attribute_objects is not None:
+            env.update(GIT_OBJECT_DIRECTORY=str(attribute_objects), GIT_ATTR_NOSYSTEM="1")
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
                GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1", LC_ALL="C")
     result = safety().supervise(command, cwd=cwd, env=env, limit=limit, input_data=input_data,
@@ -128,7 +130,7 @@ def run(command, *, cwd=None, allowed=(0,), limit=1024 * 1024, input_data=None, 
 
 
 def git(path, *args, input_data=None, raw=False, strict=False, deadline=None, capture_limit=None,
-        stdout_sink=None):
+        stdout_sink=None, attribute_objects=None):
     result = run([
         NATIVE_GIT or "git",
         "-c", "core.hooksPath=/dev/null",
@@ -142,7 +144,8 @@ def git(path, *args, input_data=None, raw=False, strict=False, deadline=None, ca
     ], limit=(capture_limit if capture_limit is not None else
               32 * 1024 * 1024 if args and args[0] == "ls-tree" else
               safety().LEAF_LIMIT if args and args[0] in ("show", "stripspace") else 1024 * 1024),
-        input_data=input_data, deadline=deadline, stdout_sink=stdout_sink)
+        input_data=input_data, deadline=deadline, stdout_sink=stdout_sink,
+        attribute_objects=attribute_objects)
     if strict and result.stderr:
         raise Retain("git-diagnostic")
     return result.stdout if raw else result.stdout.decode(errors="surrogateescape").rstrip("\n")
@@ -1656,7 +1659,8 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
                     "discarded_inodes": [snap["path_id"]]}
     else:
         contents = module.inventory(snap, git, until, discard_ignored=disposable, compact_discarded=True,
-                                    allow_empty_gitlinks=True, preserved_oids=preserved_oids)
+                                    allow_empty_gitlinks=True, preserved_oids=preserved_oids,
+                                    allow_committed_crlf=True)
     admin = module.admin_inventory({**snap, "path": snap["owner"]} if missing else snap,
                                    git, until, preserved_oids=preserved_oids)
     if missing:

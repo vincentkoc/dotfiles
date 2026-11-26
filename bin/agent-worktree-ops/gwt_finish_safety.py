@@ -19,6 +19,7 @@ import signal
 import stat
 import struct
 import subprocess
+import tempfile
 import time
 
 
@@ -137,6 +138,68 @@ def tracked_blob(path, until, expected, limit):
         return digest.hexdigest(), size
     finally:
         os.close(fd)
+
+
+class CrlfProjection:
+    """Hash both the immutable blob and its exact expected checkout bytes."""
+
+    def __init__(self, blob_size, checkout_size):
+        self.original = hashlib.sha1(b"blob " + str(blob_size).encode() + b"\0")
+        self.checkout = hashlib.sha1(b"blob " + str(checkout_size).encode() + b"\0")
+        self.remaining = checkout_size
+        self.canonical = True
+
+    def write(self, chunk):
+        if b"\r" in chunk or b"\0" in chunk:
+            self.canonical = False
+        self.remaining -= len(chunk) + chunk.count(b"\n")
+        self.original.update(chunk)
+        if self.canonical and self.remaining >= 0:
+            self.checkout.update(chunk.replace(b"\n", b"\r\n"))
+        return len(chunk)
+
+    def matches(self, oid, digest):
+        return (self.canonical and self.remaining == 0 and self.original.hexdigest() == oid
+                and self.checkout.hexdigest() == digest)
+
+
+def verify_committed_crlf(snap, git, until, candidates):
+    # A source tree alone does not exclude info/attributes, user or system rules.
+    # The empty bare view shares only the object store. No conversion driver runs.
+    off = (b"unspecified", b"unset")
+    attrs = {"text": (b"set",), "eol": (b"crlf",), "filter": off, "ident": off,
+             "working-tree-encoding": off, "crlf": off}
+    with tempfile.TemporaryDirectory(prefix="gwt-attributes-") as view:
+        git(view, "init", "--bare", "--template=", "--quiet", strict=True, deadline=until)
+        read = functools.partial(git, view, "--no-replace-objects", "-c",
+                                 "core.attributesFile=/dev/null", strict=True, raw=True,
+                                 deadline=until, attribute_objects=Path(snap["common"]) / "objects")
+        for name, oid, size, digest in candidates:
+            tick(until)
+            path = os.fsencode(name)
+            query = ("-z", *attrs, "--", name)
+            committed = read("check-attr", "--source=" + snap["head"], *query)
+            # Local and working-tree overrides may veto, but never authorize,
+            # this representation. check-attr reports attributes without running filters.
+            if git(snap["path"], "check-attr", *query, raw=True, strict=True, deadline=until) != committed:
+                raise Retain("working-bytes-changed-or-limit")
+            fields = committed.split(b"\0")
+            if len(fields) != 3 * len(attrs) + 1 or fields[-1] != b"":
+                raise Retain("working-bytes-changed-or-limit")
+            for i, (key, allowed) in enumerate(attrs.items()):
+                attr_path, attr, value = fields[3 * i:3 * i + 3]
+                if attr_path != path or attr != key.encode() or value not in allowed:
+                    raise Retain("working-bytes-changed-or-limit")
+            # Bind the exact path to its preserved blob, including paths with LF.
+            info = read("cat-file", "--batch-check", "-Z",
+                        input_data=snap["head"].encode() + b":" + path + b"\0")
+            match = re.fullmatch(oid.encode() + rb" blob ([0-9]{1,12})\x00", info)
+            if not match or not 0 < (blob_size := int(match[1])) < size:
+                raise Retain("working-bytes-changed-or-limit")
+            projection = CrlfProjection(blob_size, size)
+            read("cat-file", "blob", oid, stdout_sink=projection, capture_limit=blob_size)
+            if not projection.matches(oid, digest):
+                raise Retain("working-bytes-changed-or-limit")
 
 
 def supervise(command, *, cwd, env, timeout=30, limit=1024 * 1024, input_data=None,
@@ -552,7 +615,8 @@ def index_inventory(snap, git, until, *, allow_empty_gitlinks=False, preserved_o
 
 
 def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
-              allow_empty_gitlinks=False, preserved_oids=None, logical_index=False):
+              allow_empty_gitlinks=False, preserved_oids=None, logical_index=False,
+              allow_committed_crlf=False):
     index_proof, entries, head = index_inventory(snap, git, until,
                                          allow_empty_gitlinks=allow_empty_gitlinks,
                                          preserved_oids=preserved_oids)
@@ -573,6 +637,7 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
     rows = {"": [*file_identity(Path(snap["path"]).lstat()),
                   disposable_metadata(snap["path"], until)]}
     used, dependency = 0, None
+    crlf_candidates = []
     discarded_links, discarded_inodes = {}, set()
     discarded_count = 0
     discarded_roots = set(discard_ignored)
@@ -686,10 +751,20 @@ def inventory(snap, git, until, *, discard_ignored=(), compact_discarded=False,
                 else:
                     raise Retain("working-type-changed")
                 used += size
-                if used > SOURCE_LIMIT or digest != oid:
+                if used > SOURCE_LIMIT:
                     raise Retain("working-bytes-changed-or-limit")
+                if digest != oid:
+                    if not allow_committed_crlf or not stat.S_ISREG(details.st_mode):
+                        raise Retain("working-bytes-changed-or-limit")
+                    crlf_candidates.append((name, oid, size, digest))
         if file_identity(directory.lstat()) != file_identity(before):
             raise Retain("inventory-directory-changed")
+    if crlf_candidates:
+        verify_committed_crlf(snap, git, until, crlf_candidates)
+        for name, *_ in crlf_candidates:
+            tick(until)
+            if list(file_identity((Path(snap["path"]) / name).lstat())) != rows[name][:-1]:
+                raise Retain("file-changed")
     if not {name for name, entry in entries.items() if not entry[2] and name not in gitlinks}.issubset(rows):
         raise Retain("working-file-missing")
     if any(empty_gitlink(snap, name, until) != proof for name, proof in gitlink_proof.items()):
