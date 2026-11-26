@@ -2101,7 +2101,8 @@ def siblings_preserved(before, after):
 
 
 def remove_with_intent(db, row, item, before, recheck, qualification, *, restore_lock=False,
-                       fetch_lease=None, record_intent=None, record_outcome=None, snapshotter=None):
+                       fetch_lease=None, record_intent=None, record_outcome=None, snapshotter=None,
+                       restored_snapshotter=None):
     if (record_intent is None) != (record_outcome is None):
         raise Retain("removal-persistence-callbacks-must-be-paired")
     module, snap = safety(), before["snapshot"]
@@ -2212,7 +2213,7 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
                 current = snapshotter(snap["path"], snap["root"])
                 if {**current, "lock_reason": snap["lock_reason"]} == snap:
                     git(snap["owner"], "worktree", "lock", "--reason", snap["lock_reason"], "--", snap["path"])
-                    outcome["native_lock_preserved"] = snapshotter(
+                    outcome["native_lock_preserved"] = (restored_snapshotter or snapshotter)(
                         snap["path"], snap["root"], snap["lock_reason"]) == snap
             except (Retain, OSError, ValueError):
                 pass
@@ -3410,8 +3411,68 @@ def orphan_known(db, path, admin, lock_reason, attempt=None):
     return False
 
 
-def orphan_candidate(db, snap, entry, admin_index, until, *, attempt=None):
-    """Admit one missing, unrecorded, gwt-locked registration whose history is on a remote."""
+def orphan_prior_identity(args, snap, path_id, until, *, locked, admitted):
+    if not args.prior_identity_file:
+        if path_id[0] != identity(snap["root"])[0]:
+            raise Retain("orphan-prior-device-changed")
+        return path_id, None
+    source = Path(args.prior_identity_file)
+    if (not source.is_absolute() or physical(source) != str(source)
+            or any(inside(str(source), snap[key]) for key in ("path", "gitdir"))):
+        raise Retain("orphan-prior-identity-source-unsafe")
+    source_before = safety().file_identity(private_file(source))
+    raw, source_id = safety().read_file(source, until, 16384)
+    if source_id != source_before or safety().file_identity(private_file(source)) != source_id:
+        raise Retain("orphan-prior-identity-source-changed")
+
+    def unique(pairs):
+        value = dict(pairs)
+        if len(value) != len(pairs):
+            raise ValueError("duplicate identity field")
+        return value
+
+    try:
+        recorded = json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, UnicodeError):
+        raise Retain("orphan-prior-identity-invalid") from None
+    paths = ("path", "root", "owner", "common", "gitdir")
+    ids = ("path_id", "owner_id", "common_id", "gitdir_id", "lock_id")
+    if (not isinstance(recorded, dict)
+            or set(recorded) != {"schema", "uid", "lock_reason", *paths, *ids}
+            or recorded["schema"] != "gwt-orphan-prior-identity.v1"
+            or type(recorded["uid"]) is not int or recorded["uid"] != os.getuid()
+            or any(recorded[key] != snap[key] for key in paths)
+            or recorded["lock_reason"] != "gwt-finish.v2:" + args.creation_token
+            or any(not isinstance(recorded[key], list) or len(recorded[key]) != 2
+                   or any(type(value) is not int for value in recorded[key])
+                   or not 0 <= recorded[key][0] < 2**64 or not 0 < recorded[key][1] < 2**64
+                   for key in ids)
+            or recorded["path_id"] != path_id):
+        raise Retain("orphan-prior-identity-invalid")
+    observed = {key: snap[key] for key in ids if key not in ("path_id", "lock_id")}
+    if locked:
+        details = private_file(Path(snap["gitdir"]) / "locked")
+        observed["lock_id"] = [details.st_dev, details.st_ino]
+    else:
+        # Only native removal/rollback reaches unlocked or successor-lock reads.
+        observed["lock_id"] = admitted["observed_identity"]["lock_id"]
+    devices = device_renumbering(recorded, observed, tuple(observed))
+    if (path_id[0] not in devices
+            or devices[path_id[0]] != identity(snap["root"])[0]
+            or devices[path_id[0]] != identity(snap["path_absence"]["parent"])[0]):
+        raise Retain("orphan-prior-parent-volume-unmapped-or-changed")
+    observed["path_id"] = [devices[path_id[0]], path_id[1]]
+    return observed["path_id"], {
+        "original_identity": recorded, "observed_identity": observed,
+        "allow_device_renumbering": args.allow_device_renumbering,
+        "device_map": [[old, devices[old]] for old in sorted(devices)],
+        "input": {"path": str(source), "identity": list(source_id),
+                  "sha256": hashlib.sha256(raw).hexdigest()},
+    }
+
+
+def orphan_candidate(db, snap, entry, admin_index, until, *, attempt=None, preserved_oids=None):
+    """Admit a missing unrecorded registration with remote HEAD and preserved recovery history."""
     path, lock_reason = entry["worktree"], entry.get("locked", "")
     if not ORPHAN_LOCK.fullmatch(lock_reason):
         return None
@@ -3451,14 +3512,31 @@ def orphan_candidate(db, snap, entry, admin_index, until, *, attempt=None):
     # Reuse closeout's admin classification: unknown files, drafts, locks and
     # in-progress operations refuse. Staged-only index bytes refuse as well.
     target = {**snap, "path": snap["owner"], "gitdir": admin, "gitdir_id": mapped[1], "head": head}
-    admin_rows = safety().admin_inventory(target, git, until, preserved_oids={head})
+    roots = {head} if preserved_oids is None else preserved_oids
+    admin_rows = safety().admin_inventory(target, git, until, preserved_oids=roots)
     if "index" in admin_rows:
         safety().index_inventory(target, git, until, revision=head)
     oids = {head} | {oid for value in admin_rows.values() if len(value) == 3 for oid in value[2]}
     if len(oids) > 128:
         raise Retain("recovery-proof-limit")
-    for oid in sorted(oids):
-        remote_preserved(snap, oid, until)
+    remote_preserved(snap, head, until)
+    if preserved_oids is None:
+        for oid in sorted(oids - {head}):
+            remote_preserved(snap, oid, until)
+    else:
+        for oid in sorted(oids):
+            if not SHA.fullmatch(oid):
+                raise Retain("recovery-reference-invalid")
+            if git(snap["owner"], "--no-replace-objects", "cat-file", "-t", oid,
+                   deadline=until) != "commit":
+                raise Retain("orphan-recovery-not-a-commit")
+            if oid != head:
+                try:
+                    remote_preserved(snap, oid, until)
+                except Retain as error:
+                    if str(error) != "missing-cancellation-head-not-on-remote":
+                        raise
+                    preserve_release_recovery(snap, [oid], roots, until)
     return {"worktree": path, "admin": admin, "admin_id": mapped[1], "branch": branch,
             "head": head, "lock_reason": lock_reason}
 
@@ -3470,11 +3548,13 @@ def recover_orphan(db, args, owner_snapshot):
     lock_reason = "gwt-finish.v2:" + args.creation_token
     attempt = None
     snap = None
+    identity_proof = None
+    restored_lock = None
     if (not inside(args.orphan_path, owner_snapshot["root"])
             or args.orphan_path == owner_snapshot["root"]):
         raise Retain("orphan-outside-managed-root")
 
-    def observe(lock=lock_reason):
+    def observe(lock=lock_reason, *, restored=False):
         current = records(owner_snapshot["owner"])
         sibling_rows(current)
         selected = [entry for entry in current if entry["worktree"] == args.orphan_path]
@@ -3484,14 +3564,15 @@ def recover_orphan(db, args, owner_snapshot):
         observed = sibling_identity(owner_snapshot, args.orphan_path, until)
         if observed["path_id"] is not None:
             raise Retain("orphan-directory-present")
-        if path_id[0] != identity(owner_snapshot["root"])[0]:
-            raise Retain("orphan-prior-device-changed")
         current_snap = {**owner_snapshot, "path": args.orphan_path, "path_id": path_id,
                         "gitdir": observed["gitdir"], "gitdir_id": observed["gitdir_id"],
                         "branch": selected[0].get("branch"), "head": args.expected_head,
                         "path_absence": observed["path_absence"]}
         if lock is not None:
             current_snap["lock_reason"] = lock
+        current_snap["path_id"], prior = orphan_prior_identity(
+            args, current_snap, path_id, until, locked=lock is not None and not restored,
+            admitted=identity_proof)
         if snap is not None and any(current_snap[key] != snap[key] for key in (
                 "owner", "owner_id", "common", "common_id", "root", "path", "path_id",
                 "gitdir", "gitdir_id", "branch", "head", "path_absence")):
@@ -3500,13 +3581,14 @@ def recover_orphan(db, args, owner_snapshot):
             if (physical(current_snap[key]) != current_snap[key]
                     or identity(current_snap[key]) != current_snap[key + "_id"]):
                 raise Retain("orphan-identity-changed")
-        return current_snap, current
+        return current_snap, current, prior
 
     def admit():
-        current_snap, rows = observe()
+        current_snap, rows, prior = observe()
+        refs, roots = release_refs(current_snap, None, until)
         entry = next(entry for entry in rows if entry["worktree"] == args.orphan_path)
         if orphan_candidate(db, current_snap, entry, sibling_admin_index(current_snap, until),
-                            until, attempt=attempt) is None:
+                            until, attempt=attempt, preserved_oids=roots) is None:
             raise Retain("orphan-lock-changed")
         for key in ("common", "gitdir"):
             directory = Path(current_snap[key])
@@ -3516,26 +3598,30 @@ def recover_orphan(db, args, owner_snapshot):
                     "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG",
                     "rebase-merge", "rebase-apply", "sequencer")):
                 raise Retain("git-operation-in-progress")
-        refs = preserved_refs(current_snap, [current_snap["branch"]], until)
         target = {**current_snap, "path": current_snap["owner"]}
-        proof, _, _ = module.index_inventory(target, git, until, revision=current_snap["head"])
-        admin = module.admin_inventory(target, git, until, preserved_oids={current_snap["head"]})
+        proof, _, _ = module.index_inventory(target, git, until, revision=current_snap["head"],
+                                              preserved_oids=roots)
+        admin = module.admin_inventory(target, git, until, preserved_oids=roots)
         contents = {**proof, "entries": {}, "dependency": None, "missing_worktree": True,
-                    "discarded_inodes": [path_id]}
+                    "discarded_inodes": [current_snap["path_id"]]}
         manual_holders(current_snap, contents, admin, until)
-        if observe()[0] != current_snap:
+        final_snap, _, final_prior = observe()
+        if final_snap != current_snap or final_prior != prior:
             raise Retain("orphan-identity-changed")
+        if preserved_refs(current_snap, refs, until) != refs:
+            raise Retain("preserved-refs-changed")
         siblings = [entry for entry in rows if entry["worktree"] != args.orphan_path]
         return {"snapshot": current_snap, "admin": admin, "contents": contents,
                 "boundaries": [module.access_boundary(current_snap["path_absence"]["parent"], until),
                                module.access_boundary(current_snap["gitdir"], until)],
                 "branch_reflog": refs[current_snap["branch"]]["reflog"], "preserved_refs": refs,
-                "siblings": siblings, "sibling_identities": sibling_identities(current_snap, siblings, until)}
+                "siblings": siblings, "sibling_identities": sibling_identities(current_snap, siblings, until),
+                **({"orphan_identity": prior} if prior is not None else {})}
 
     owner_snapshot = {**owner_snapshot, "owner_id": identity(owner_snapshot["owner"])}
     storage_guard()
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))):
-        snap, _ = observe()
+        snap, _, identity_proof = observe()
         with QualificationFetchLease(snap) as lease:
             before = admit()
             digest = recovery_digest(before)
@@ -3548,6 +3634,7 @@ def recover_orphan(db, args, owner_snapshot):
 
             def persist_intent(intent):
                 nonlocal attempt
+                recheck()
                 # This receipt owns only registration retirement. No worktree or
                 # owner row is fabricated, and an interrupted attempt stays blocked.
                 with db:
@@ -3566,6 +3653,8 @@ def recover_orphan(db, args, owner_snapshot):
                 return latest
 
             def persist_outcome(outcome):
+                if restored_lock is not None:
+                    outcome["restored_lock"] = restored_lock
                 with db:
                     changed = db.execute("UPDATE orphan_removals SET result=? "
                                          "WHERE id=? AND result IS NULL",
@@ -3573,12 +3662,30 @@ def recover_orphan(db, args, owner_snapshot):
                     if changed != 1:
                         raise Retain("orphan-result-conflict")
 
+            def restored_snapshot(_path, _root, lock):
+                nonlocal restored_lock
+                # Called only after this attempt successfully recreates its lock.
+                # Its successor inode is rollback evidence, never new admission.
+                marker = Path(snap["gitdir"]) / "locked"
+                raw, details = module.read_file(marker, until, 4096)
+                if (raw != os.fsencode(lock + "\n") or details[3] != os.getuid()
+                        or details[5] != 1 or details[2] & 0o022
+                        or details[0] != snap["gitdir_id"][0]):
+                    raise Retain("orphan-restored-lock-unqualified")
+                current = observe(lock, restored=True)[0]
+                if module.read_file(marker, until, 4096) != (raw, details):
+                    raise Retain("orphan-restored-lock-changed")
+                if current == snap:
+                    restored_lock = {"identity": list(details), "sha256": hashlib.sha256(raw).hexdigest()}
+                return current
+
             remove_with_intent(
                 db, {}, {"generation": 0}, before, recheck,
                 {"mode": "exact-orphan-registration", "operator": owner_id(args)},
                 restore_lock=True, fetch_lease=lease,
                 record_intent=persist_intent, record_outcome=persist_outcome,
-                snapshotter=lambda _path, _root, lock=None: observe(lock)[0])
+                snapshotter=lambda _path, _root, lock=None: observe(lock)[0],
+                restored_snapshotter=restored_snapshot)
             outcome = json.loads(db.execute(
                 "SELECT result FROM orphan_removals WHERE id=?", (attempt,)).fetchone()["result"])
             return {**output, "disposition": "pruned" if outcome["checkout"] == "removed" else "unknown",
@@ -3723,6 +3830,7 @@ def parser():
     result.add_argument("--acknowledge-unrecorded-creation", action="store_true")
     result.add_argument("--orphan-path", action="append")
     result.add_argument("--missing-path-id")
+    result.add_argument("--prior-identity-file", action="append")
     return result
 
 
@@ -3845,13 +3953,15 @@ def main(argv=None):
             result = recover_failed_creation(db, get_row(db, args.worktree), args)
         print(json.dumps([result], sort_keys=True))
         return 1 if args.apply and result["checkout"] != "removed" else 0
-    if args.command != "orphan-locks" and (args.orphan_path or args.missing_path_id):
+    if args.command != "orphan-locks" and (args.orphan_path or args.missing_path_id
+                                           or args.prior_identity_file is not None):
         raise Retain("orphan-options-require-orphan-locks")
     if (args.creation_token or args.acknowledge_unrecorded_creation) and args.command != "orphan-locks":
         raise Retain("creation-recovery-options-require-recover-failed-creation")
     if args.command == "orphan-locks":
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner", "apply",
-                   "orphan_path", "missing_path_id", "creation_token", "expected_head", "recovery_sha256"}
+                   "orphan_path", "missing_path_id", "creation_token", "expected_head", "recovery_sha256",
+                   "allow_device_renumbering", "prior_identity_file"}
         if not Path(args.worktree).is_absolute() or any(
                 value is not None and value is not False and value != []
                 for name, value in vars(args).items() if name not in allowed):
@@ -3860,6 +3970,12 @@ def main(argv=None):
             if len(args.orphan_path) != 1:
                 raise Retain("orphan-needs-one-exact-path")
             args.orphan_path = args.orphan_path[0]
+            if args.allow_device_renumbering != (args.prior_identity_file is not None):
+                raise Retain("orphan-renumbering-needs-opt-in-and-prior-identity")
+            if args.prior_identity_file is not None:
+                if len(args.prior_identity_file) != 1 or not Path(args.prior_identity_file[0]).is_absolute():
+                    raise Retain("orphan-needs-one-absolute-prior-identity-file")
+                args.prior_identity_file = args.prior_identity_file[0]
             if (not Path(args.orphan_path).is_absolute()
                     or os.path.normpath(args.orphan_path) != args.orphan_path
                     or not args.creation_token or str(uuid.UUID(args.creation_token)) != args.creation_token
@@ -3868,7 +3984,8 @@ def main(argv=None):
                     or (args.apply and not args.recovery_sha256)
                     or (args.recovery_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.recovery_sha256))):
                 raise Retain("orphan-needs-exact-path-token-head-inode-and-reviewed-plan")
-        elif any((args.creation_token, args.expected_head, args.missing_path_id, args.recovery_sha256)):
+        elif any((args.creation_token, args.expected_head, args.missing_path_id, args.recovery_sha256,
+                  args.allow_device_renumbering, args.prior_identity_file is not None)):
             raise Retain("orphan-proof-requires-exact-path")
         # Absent lifecycle state cannot prove that a gwt lock is unrecorded.
         with (ledger(args.state_dir) if args.apply else read_only_ledger(args.state_dir)) as db:

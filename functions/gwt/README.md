@@ -204,11 +204,55 @@ and returns a `recovery_sha256`. Apply the same operands with
 `--apply --recovery-sha256 <reviewed-hash>`. Changed identity, lock, HEAD, contents,
 holders, lifecycle state or sibling proof retains the registration.
 
+Exact selection still requires HEAD on a remote-tracking ref. Earlier admin
+recovery commits may instead use the selected task branch's surviving common
+reflog, as finalized closeout does. Each recovery OID must name an existing
+commit. The plan binds the common reflog's identity, bytes and OIDs, rechecks
+them before intent and unlock, and verifies their preservation after removal.
+Batch selection keeps its remote-only requirement.
+
+If the filesystem device number changed, exact selection additionally accepts
+`--allow-device-renumbering --prior-identity-file /absolute/private-record.json`.
+Both options are required together, even for a same-device record. The default
+device check remains strict. Supply an authentic historical operator record,
+captured while the checkout existed, with exactly these JSON fields:
+
+```json
+{
+  "schema": "gwt-orphan-prior-identity.v1",
+  "path": "/managed/repo/task",
+  "root": "/managed/repo",
+  "owner": "/repos/repo",
+  "common": "/repos/repo/.git",
+  "gitdir": "/repos/repo/.git/worktrees/task",
+  "path_id": [100, 101],
+  "owner_id": [100, 102],
+  "common_id": [100, 103],
+  "gitdir_id": [100, 104],
+  "lock_id": [100, 105],
+  "uid": 1000,
+  "lock_reason": "gwt-finish.v2:00000000-0000-4000-8000-000000000001"
+}
+```
+
+Use original canonical paths and `[device, inode]` pairs, including the original
+missing checkout identity; never substitute current values to manufacture a
+record. The file must be caller-owned, private, regular, singly linked, at most
+16 KiB and outside the checkout/admin deletion domains. Surviving owner,
+common, admin and lock inodes and ownership must match. Their device mapping
+must be consistent and one-to-one; the missing checkout's mapped device must
+match both the current managed root and nearest surviving parent. The plan and
+intent bind the original and observed identities, mapping, opt-in, and input
+file identity and bytes. The holder scan uses the mapped checkout identity.
+Apply must repeat the same options and unchanged record.
+
 Exact apply records its removal intent before unlocking, uses one non-force
 native removal, and verifies registration/admin absence and branch/sibling
 preservation. It creates no enrollment. An interrupted or uncertain attempt
 remains blocked by its receipt; do not retry it or use the batch route to
-bypass that hold. This retires surviving administration only: already missing
+bypass that hold. A lock recreated after native failure is recorded only as
+rollback evidence; it does not replace the historical admission identity.
+This retires surviving administration only: already missing
 unstaged and untracked files remain unaudited.
 
 ## Missing enrolled checkout recovery
