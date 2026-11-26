@@ -640,6 +640,11 @@ in-progress Git operations, unrelated locks and live file/CWD holders. Symlink
 targets are never traversed or removed. This is routine task closeout, with no
 evidence archive or additional permission step.
 
+For a tracked regular file with committed `text eol=crlf`, foreground closeout
+can verify the exact CRLF checkout bytes against the preserved LF blob. Mixed
+line endings, other changes, and unsupported conversions retain the checkout.
+The committed and effective checkout attributes must agree on this conversion.
+
 Git never reports an empty directory as untracked or ignored, so such a tree
 needs no `--discard-ignored` root. Every checkout inventory (manual closeout,
 completion checks and release baselines) admits a directory that no tracked

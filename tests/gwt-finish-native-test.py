@@ -61,6 +61,29 @@ class ReaderTests(unittest.TestCase):
                 NATIVE.read_file(self.file, time.monotonic() + 10)
             opened.assert_not_called()
 
+    def test_crlf_projection_matches_exact_bytes_across_chunks(self):
+        raw = b"x" * 65535 + b"\n\nlast"
+        expected = b"x" * 65535 + b"\r\n\r\nlast"
+        projection = NATIVE.CrlfProjection(len(raw), len(expected))
+        self.assertEqual(projection.write(raw[:65536]), 65536)
+        self.assertEqual(projection.write(raw[65536:]), len(raw) - 65536)
+        for digest, data in ((projection.original, raw), (projection.checkout, expected)):
+            self.assertEqual(digest.hexdigest(), hashlib.sha1(
+                b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest())
+        self.assertEqual(projection.remaining, 0)
+
+    def test_crlf_projection_rejects_noncanonical_blobs_and_physical_size_overflow(self):
+        for raw in (b"lone\r", b"already\r\n", b"binary\0\n"):
+            with self.subTest(raw=raw):
+                projection = NATIVE.CrlfProjection(len(raw), len(raw) + raw.count(b"\n"))
+                projection.write(raw)
+                self.assertFalse(projection.matches(projection.original.hexdigest(),
+                                                    projection.checkout.hexdigest()))
+        projection = NATIVE.CrlfProjection(1, 1)
+        projection.write(b"\n")
+        self.assertFalse(projection.matches(projection.original.hexdigest(),
+                                            projection.checkout.hexdigest()))
+
     def test_tracked_blob_streams_with_exact_size_and_chunk_bound(self):
         for data in (b"", b"source" * 32768):
             with self.subTest(size=len(data)):
