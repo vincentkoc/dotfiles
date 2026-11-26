@@ -1270,6 +1270,8 @@ Commands:
   gwt rm <branch|name|path> [--force] Remove a worktree safely
   gwt rm <absolute-path> --finalized [--discard-ignored <relative-root> ...] [--sudo-holder-scan]
                                     Manually close one finalized managed task
+  gwt rm <absolute-path> --finalized [--preserve-ref refs/heads/<branch> ...]
+                                    Bind additional local recovery branches
   gwt rm <absolute-path> --finalized --acknowledge-device-renumbering
                                     Recorded owner: missing checkout after device-only renumbering
   gwt rm <absolute-path> --finalized --acknowledge-repository-rename <old>=<new>
@@ -1360,6 +1362,10 @@ gwt() {
         for help_arg in "$@"; do
             if [[ "$help_arg" == --sudo-holder-scan ]]; then
                 echo "gwt: --sudo-holder-scan requires rm --finalized" >&2
+                return 1
+            fi
+            if [[ "$help_arg" == --preserve-ref || "$help_arg" == --preserve-ref=* ]]; then
+                echo "gwt: --preserve-ref requires rm --finalized" >&2
                 return 1
             fi
         done
@@ -1859,9 +1865,9 @@ gwt() {
                         discard_args+=(--acknowledge-repository-rename "$2")
                         shift
                         ;;
-                    --discard-ignored)
+                    --discard-ignored|--preserve-ref)
                         [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
-                        discard_args+=(--discard-ignored "$2")
+                        discard_args+=("$1" "$2")
                         shift
                         ;;
                     -*) echo "gwt: unknown removal option: $1" >&2; return 1 ;;
@@ -1878,7 +1884,7 @@ gwt() {
                     return 1
                 }
             elif (( ${#discard_args} )); then
-                echo "gwt: --discard-ignored and --acknowledge-* options require --finalized" >&2
+                echo "gwt: --discard-ignored, --preserve-ref and --acknowledge-* options require --finalized" >&2
                 return 1
             fi
             if $sudo_holder_scan && ! $finalized_remove; then
