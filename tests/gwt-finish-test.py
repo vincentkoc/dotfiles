@@ -8912,6 +8912,7 @@ class UnstartedRemovalTests(unittest.TestCase):
 
     def setUp(self):
         ReleaseTests.setUp(self)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
         with mock.patch.object(FINISH, "evaluate_release", return_value="fixture-retained"):
             self.finish("--release")
         with self.expire_after_intent(), mock.patch.object(FINISH, "git", wraps=FINISH.git) as native_git:
@@ -8920,6 +8921,21 @@ class UnstartedRemovalTests(unittest.TestCase):
         self.assertEqual((result["checkout"], result["retirement_state"]), ("unknown", "incomplete"))
         self.original = self.receipt()
         self.assertIs(json.loads(self.original["result"])["native_attempted"], False)
+
+    def advance_ref(self, name="refs/remotes/origin/main"):
+        path = self.repo / "upstream"
+        path.write_text((path.read_text() if path.exists() else "") + "independent progress\n")
+        git(self.repo, "add", path.name)
+        git(self.repo, "commit", "-m", "upstream progress")
+        head = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", name, head)
+        return head
+
+    def append_reflog(self, ref):
+        path = self.repo / git(self.repo, "rev-parse", "--git-path", "logs/" + ref)
+        with path.open("ab") as output:
+            output.write(f"{self.head} {self.head} Fixture <fixture@example.test> "
+                         "1800000000 +0000\tindependent observation\n".encode())
 
     @contextlib.contextmanager
     def expire_after_intent(self):
@@ -8998,6 +9014,85 @@ class UnstartedRemovalTests(unittest.TestCase):
     def test_new_explicit_unstarted_fact_qualifies(self):
         self.assertEqual(self.recover()[1][0]["retirement_state"], "enrolled")
 
+    def test_tracking_ref_progress_is_observed_without_reusing_old_release_authority(self):
+        head = self.advance_ref()
+        with mock.patch.object(FINISH, "remove_with_intent", side_effect=AssertionError("removal")):
+            result = self.recover()[1][0]
+        self.assertEqual(result["released_owners"], [])
+        self.assertEqual(result["generation"], self.original["generation"] + 1)
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        with FINISH.ledger(self.state) as db:
+            archive = db.execute("SELECT * FROM unstarted_removal_recoveries").fetchone()
+            self.assertEqual((archive["intent"], archive["result"]),
+                             (self.original["intent"], self.original["result"]))
+            refs = json.loads(archive["fact"])["preserved_refs"]
+        self.assertEqual(refs["refs/remotes/origin/main"]["head"], head)
+        receipt = self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]
+        self.assertEqual(receipt["ref_observation"]["sha256"], FINISH.recovery_digest(refs))
+        self.assertEqual(receipt["ref_observation"]["changed_count"], 1)
+        self.assertEqual(receipt["ref_observation"]["changes"][0]["head_observed"], head)
+
+    def test_tracking_reflog_only_progress_is_reported(self):
+        self.append_reflog("refs/remotes/origin/main")
+        self.recover()
+        receipt = self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]
+        observation = receipt["ref_observation"]
+        self.assertEqual(observation["changed_count"], 1)
+        self.assertEqual(observation["changes"], [{"ref": "refs/remotes/origin/main",
+                         "head_before": self.head, "head_observed": self.head, "reflog_changed": True}])
+
+    def test_archives_without_current_ref_observations_remain_readable(self):
+        self.recover()
+        with FINISH.ledger(self.state) as db, db:
+            row = db.execute("SELECT worktree_id, fact FROM unstarted_removal_recoveries").fetchone()
+            fact = json.loads(row["fact"])
+            fact.pop("preserved_refs")
+            db.execute("UPDATE unstarted_removal_recoveries SET fact=? WHERE worktree_id=?",
+                       (json.dumps(fact), row["worktree_id"]))
+        receipt = self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]
+        self.assertIs(receipt["reconciled"], True)
+        self.assertNotIn("ref_observation", receipt)
+
+    def test_missing_ref_or_task_reflog_change_cannot_be_reconciled(self):
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        with self.assertRaises(FINISH.Retain):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
+        self.append_reflog("refs/heads/released-feature")
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_ref_progress_during_recovery_refuses_before_archiving(self):
+        native = FINISH.finalized_admission
+
+        def progress(*args, **kwargs):
+            result = native(*args, **kwargs)
+            self.advance_ref()
+            return result
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=progress):
+            with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_historical_roots_cannot_attest_current_recovery_data(self):
+        self.recover()
+        head = self.advance_ref()
+        with mock.patch.object(FINISH, "evaluate_release", return_value="fixture-retained"):
+            self.finish("--release")
+        (self.admin / "FETCH_HEAD").write_text(head + "\t\tbranch 'main' of https://example.test/repo\n")
+        with self.expire_after_intent():
+            self.remove()
+        original = self.receipt()
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
+        git(self.repo, "reflog", "expire", "--expire=now", "--expire-unreachable=now", "refs/remotes/origin/main")
+        with self.assertRaisesRegex(FINISH.Retain, "fetch-head-recovery-required"):
+            self.recover()
+        self.assertEqual(self.receipt(), original)
+
     def test_recovery_reuses_original_explicit_preserved_branches(self):
         self.recover()
         with mock.patch.object(FINISH, "evaluate_release", return_value="fixture-retained"):
@@ -9007,10 +9102,11 @@ class UnstartedRemovalTests(unittest.TestCase):
         native = FINISH.finalized_admission
         with mock.patch.object(FINISH, "manual_holders"), self.expire_after_intent():
             self.call("remove", "--finalized", "--preserve-ref", branch)
+        head = self.advance_ref(branch)
         with mock.patch.object(FINISH, "finalized_admission", wraps=native) as admission:
             self.assertEqual(self.recover()[1][0]["retirement_state"], "enrolled")
         self.assertEqual(admission.call_args.args[2].preserve_ref, [branch])
-        self.assertEqual(git(self.repo, "rev-parse", branch), self.head)
+        self.assertEqual(git(self.repo, "rev-parse", branch), head)
 
     def test_recovery_fits_one_scan_budget_without_repeating_the_expired_admission(self):
         clock, elapsed = FINISH.time.monotonic(), 0

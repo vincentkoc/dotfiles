@@ -1134,6 +1134,11 @@ gwt finish-reconcile --unstarted-removal --worktree /absolute/task/checkout \
 This mode requires the original recorded operator, completed and released
 owners, merged PR proof, no pins, the unchanged native lock, and fresh admission
 matching the original source/admin/index, preserved refs and disposal scope.
+The original ref names must still exist. Recovery qualifies their current tips
+and reflogs as custody roots; it does not require independent refs to retain
+their historical values. The checkout's HEAD, own branch reflog and complete
+source/admin proof remain exact. Historical OIDs are never added to current
+custody roots, so ref progress that loses required recovery data still refuses.
 It accepts only a pre-unlock `admission-deadline` result with explicit
 `child: null`. New receipts must record literal `native_attempted=false`;
 legacy receipts must match the known pre-dispatch shape with no postcheck
@@ -1142,6 +1147,10 @@ remain blocked.
 
 Recovery archives the original text unchanged, advances the generation and
 clears releases atomically. It never removes files or unlocks the checkout.
+The archive records the current ref observation beside the original receipt.
+Read-only inspection includes its full-proof digest and changed-ref count,
+plus up to eight head/reflog change summaries with ref names capped at 160
+characters. Reflog-only changes count even when the tip is unchanged.
 Historical sibling evidence remains archived; it cannot authorize deletion.
 After successful reconciliation, an explicitly invoked
 `gwt rm <literal-path> --finalized` performs new admission and sibling checks.

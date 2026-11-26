@@ -2396,7 +2396,7 @@ def removal_receipt(db, row):
         child = {"invalid_type": type(child).__name__}
     # Inventory bodies can cover an entire checkout. Expose binding hashes and
     # bounded producer facts; raw historical bytes remain in the owner database.
-    return {"worktree_id": row["id"], "generation": item["generation"],
+    result = {"worktree_id": row["id"], "generation": item["generation"],
             "intent_id": intent["id"], "reconciled": archived,
             **{key + "_sha256": hashlib.sha256(item[key].encode()).hexdigest()
                for key in ("intent", "result")},
@@ -2404,6 +2404,17 @@ def removal_receipt(db, row):
             "result": {**{key: outcome[key] for key in (
                 "checkout", "reason", "native_attempted", "native_lock_preserved") if key in outcome},
                 **({"child": child} if "child" in outcome else {})}}
+    refs = json.loads(item["fact"]).get("preserved_refs") if archived else None
+    if refs is not None:
+        prior = intent["before"]["preserved_refs"]
+        changed = [name for name in sorted(refs) if refs[name] != prior[name]]
+        result["ref_observation"] = {
+            "sha256": recovery_digest(refs), "changed_count": len(changed),
+            "changes": [{"ref": name[:160], "head_before": prior[name]["head"],
+                         "head_observed": refs[name]["head"],
+                         "reflog_changed": refs[name]["reflog"] != prior[name]["reflog"]}
+                        for name in changed[:8]]}
+    return result
 
 
 def reconcile_unstarted(db, row, args):
@@ -2430,18 +2441,21 @@ def reconcile_unstarted(db, row, args):
     snap, module = before["snapshot"], safety()
     if not snap.get("lock_reason", "").startswith("gwt-finish.v2:"):
         raise Retain("reconciliation-needs-native-enrollment")
-    source = {**dict(row), "finalized_refs": before["preserved_refs"]}
     disposal = types.SimpleNamespace(discard_ignored=qualification["discard_ignored"],
                                      preserve_ref=qualification.get("preserve_ref", []), sudo_holder_scan=False)
     until = min(time.monotonic() + 120, module.DEADLINE)
     with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))), \
             QualificationFetchLease(snap) as fetch_lease:
+        # Shared custody refs can advance after an unstarted attempt. Prove
+        # recovery data against current roots; historical roots grant no custody.
+        refs = preserved_refs(snap, before["preserved_refs"], until)
+        source = {**dict(row), "finalized_refs": refs}
         observed = finalized_admission(db, source, disposal, until, completed=True, fetch_lease=fetch_lease)
-        if json.dumps(observed, sort_keys=True) != json.dumps(before, sort_keys=True):
+        if json.dumps(observed, sort_keys=True) != json.dumps({**before, "preserved_refs": refs}, sort_keys=True):
             raise Retain("reconciliation-unstarted-preimage-changed")
         # Metadata recovery needs one fresh inventory; a second full scan could
         # repeat the admission timeout. Actual removal still admits twice.
-        if revalidate(source) != snap or preserved_refs(snap, before["preserved_refs"], until) != before["preserved_refs"]:
+        if revalidate(source) != snap or preserved_refs(snap, refs, until) != refs:
             raise Retain("reconciliation-unstarted-preimage-changed")
         fetch_lease.validate()
         # A distinct archive cannot be read as the existing target-removed fact.
@@ -2454,6 +2468,7 @@ def reconcile_unstarted(db, row, args):
                        "PRIMARY KEY(worktree_id, generation))")
             fact = {"operator": owner_id(args), "observed_at": int(time.time()),
                     "intent_id": args.intent_id, "receipt_sha256": hashes,
+                    "preserved_refs": refs,
                     "successor_generation": item["generation"] + 1}
             db.execute("INSERT INTO unstarted_removal_recoveries VALUES (?, ?, ?, ?, ?)",
                        (row["id"], item["generation"], item["intent"], item["result"], json.dumps(fact, sort_keys=True)))
