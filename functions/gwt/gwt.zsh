@@ -1291,6 +1291,8 @@ Commands:
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all] [--read-only]  Show local completion state
+  gwt finish-status --worktree <path> --read-only --removal-receipt
+                                    Inspect bounded removal facts and exact receipt hashes
   gwt recover-failed-creation --worktree <path> --worktree-id <id> --generation <n>
       --result-sha256 <hash> --creation-token <uuid> --expected-head <sha>
       --acknowledge-unrecorded-creation [--apply --recovery-sha256 <hash>]
@@ -1301,6 +1303,7 @@ Commands:
                                     Plan or restore an exact missing enrolled checkout
   gwt finish-reconcile --worktree <path> --intent-id <id> --generation <n>
       --intent-sha256 <hash> --result-sha256 <hash>  Reconcile removed target; preserve original proof
+      [--unstarted-removal]          Reconcile a proven pre-unlock deadline; never remove
   gwt finish-reconcile --external-removal --worktree <path> --worktree-id <id>
       --generation <n> --reason <text>           Record an already removed, finished checkout
   gwt finish-check [--all] [--policy <path>] [--apply]

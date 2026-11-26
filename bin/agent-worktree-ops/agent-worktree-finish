@@ -2151,7 +2151,8 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
                                  (json.dumps(intent, sort_keys=True), row["id"], item["generation"])).rowcount
             if changed != 1:
                 raise Retain("release-generation-changed")
-    outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None}
+    outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None,
+               "native_attempted": False}
     if before["contents"].get("missing_worktree"):
         outcome["working_tree"] = "already-absent-not-audited"
     if "resolve_undo" in before["contents"]:
@@ -2169,6 +2170,9 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
             raise Retain("removal-budget-exhausted")
         if fetch_lease is not None:
             fetch_lease.validate()
+        # Include unlock in this fact: a returned preparation failure must not
+        # masquerade as an attempt that never touched native lifecycle state.
+        outcome["native_attempted"] = True
         git(snap["owner"], "worktree", "unlock", "--", snap["path"])
         command = [native_git, "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                    "-c", "maintenance.auto=false", "-c", "core.fsmonitor=false",
@@ -2344,8 +2348,8 @@ def reconcile_external(db, row, args):
                    (outcome["reason"], outcome["observed_at"], row["id"]))
 
 
-def reconcile(db, row, args):
-    """Append current preservation evidence; never retry removal or rewrite history."""
+def incomplete_removal(db, row, args):
+    """Bind recovery to the original stored bytes, not a reserialized receipt."""
     item = retirement(db, row)
     if (args.worktree != row["path"] or item is None or item["state"] != "incomplete"
             or item["generation"] != args.generation or not item["intent"] or not item["result"]):
@@ -2359,6 +2363,105 @@ def reconcile(db, row, args):
     if not db.execute("SELECT 1 FROM owners WHERE worktree_id=? AND owner=?",
                       (row["id"], owner_id(args))).fetchone():
         raise Retain("reconciliation-requires-recorded-owner")
+    return item, intent, outcome, hashes
+
+
+def removal_receipt(db, row):
+    item = retirement(db, row)
+    archived = False
+    if item is None:
+        raise Retain("removal-receipt-needs-native-enrollment")
+    if not item["intent"] and db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unstarted_removal_recoveries'").fetchone():
+        prior = db.execute("SELECT * FROM unstarted_removal_recoveries WHERE worktree_id=? "
+                           "ORDER BY generation DESC LIMIT 1", (row["id"],)).fetchone()
+        if prior is not None:
+            item, archived = prior, True
+    if not item["intent"] or not item["result"]:
+        return None
+    intent, outcome = (json.loads(item[key]) for key in ("intent", "result"))
+    child = outcome.get("child")
+    if isinstance(child, dict):
+        child = {key: child[key] for key in ("pid", "returncode", "reaped", "group_absent") if key in child}
+    elif child is not None:
+        child = {"invalid_type": type(child).__name__}
+    # Inventory bodies can cover an entire checkout. Expose binding hashes and
+    # bounded producer facts; raw historical bytes remain in the owner database.
+    return {"worktree_id": row["id"], "generation": item["generation"],
+            "intent_id": intent["id"], "reconciled": archived,
+            **{key + "_sha256": hashlib.sha256(item[key].encode()).hexdigest()
+               for key in ("intent", "result")},
+            "qualification": {key: intent["qualification"].get(key) for key in ("mode", "operator")},
+            "result": {**{key: outcome[key] for key in (
+                "checkout", "reason", "native_attempted", "native_lock_preserved") if key in outcome},
+                **({"child": child} if "child" in outcome else {})}}
+
+
+def reconcile_unstarted(db, row, args):
+    item, intent, outcome, hashes = incomplete_removal(db, row, args)
+    qualification = intent["qualification"]
+    before = intent["before"]
+    expected = {"checkout", "reason", "child", "native_attempted", "native_lock_preserved", "resolve_undo"}
+    # Historical receipts predate native_attempted. Only this exact pre-dispatch
+    # shape and deadline reason are known to precede unlock in that producer;
+    # git preparation failures were wrapped as git-failed, not admission-deadline.
+    if (outcome.get("checkout") != "unknown" or outcome.get("reason") != "admission-deadline"
+            or "child" not in outcome or outcome["child"] is not None
+            or not set(outcome) <= expected
+            or ("native_attempted" in outcome and outcome["native_attempted"] is not False)
+            or ("native_lock_preserved" in outcome and type(outcome["native_lock_preserved"]) is not bool)
+            or ("resolve_undo" in outcome and outcome["resolve_undo"] != before["contents"].get("resolve_undo"))
+            or qualification.get("mode") != "explicit-finalized-task"
+            or qualification.get("operator") != owner_id(args)
+            or before["contents"].get("missing_worktree")
+            or cancellation_rows(db, row["id"])):
+        raise Retain("reconciliation-removal-was-not-proven-unstarted")
+    completion_checks(db, row, local=False)
+    all_released(db, row, item)
+    snap, module = before["snapshot"], safety()
+    if not snap.get("lock_reason", "").startswith("gwt-finish.v2:"):
+        raise Retain("reconciliation-needs-native-enrollment")
+    source = {**dict(row), "finalized_refs": before["preserved_refs"]}
+    disposal = types.SimpleNamespace(discard_ignored=qualification["discard_ignored"],
+                                     preserve_ref=qualification.get("preserve_ref", []), sudo_holder_scan=False)
+    until = min(time.monotonic() + 120, module.DEADLINE)
+    with module.maintainer_lock(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))), \
+            QualificationFetchLease(snap) as fetch_lease:
+        observed = finalized_admission(db, source, disposal, until, completed=True, fetch_lease=fetch_lease)
+        if json.dumps(observed, sort_keys=True) != json.dumps(before, sort_keys=True):
+            raise Retain("reconciliation-unstarted-preimage-changed")
+        # Metadata recovery needs one fresh inventory; a second full scan could
+        # repeat the admission timeout. Actual removal still admits twice.
+        if revalidate(source) != snap or preserved_refs(snap, before["preserved_refs"], until) != before["preserved_refs"]:
+            raise Retain("reconciliation-unstarted-preimage-changed")
+        fetch_lease.validate()
+        # A distinct archive cannot be read as the existing target-removed fact.
+        # Reset release authority, never source or history; removal is a separate
+        # explicit operation with new admission and its own sibling census.
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS unstarted_removal_recoveries ("
+                       "worktree_id TEXT NOT NULL REFERENCES worktrees(id), generation INTEGER NOT NULL, "
+                       "intent TEXT NOT NULL, result TEXT NOT NULL, fact TEXT NOT NULL, "
+                       "PRIMARY KEY(worktree_id, generation))")
+            fact = {"operator": owner_id(args), "observed_at": int(time.time()),
+                    "intent_id": args.intent_id, "receipt_sha256": hashes,
+                    "successor_generation": item["generation"] + 1}
+            db.execute("INSERT INTO unstarted_removal_recoveries VALUES (?, ?, ?, ?, ?)",
+                       (row["id"], item["generation"], item["intent"], item["result"], json.dumps(fact, sort_keys=True)))
+            changed = db.execute("UPDATE retirement SET state='enrolled', generation=generation+1, "
+                                 "intent=NULL, result=NULL, inventory=NULL WHERE worktree_id=? "
+                                 "AND generation=? AND state='incomplete' AND intent=? AND result=?",
+                                 (row["id"], item["generation"], item["intent"], item["result"])).rowcount
+            if changed != 1:
+                raise Retain("reconciliation-attempt-changed")
+            db.execute("DELETE FROM owner_releases WHERE worktree_id=?", (row["id"],))
+            db.execute("UPDATE worktrees SET reason='unstarted-removal-reconciled', checked_at=? WHERE id=?",
+                       (int(time.time()), row["id"]))
+
+
+def reconcile(db, row, args):
+    """Append current preservation evidence; never retry removal or rewrite history."""
+    item, intent, outcome, hashes = incomplete_removal(db, row, args)
     child = outcome.get("child") or {}
     required = ("path_absent", "admin_absent", "registration_absent", "branch_preserved",
                 "branch_reflog_preserved", "dependency_preserved", "discarded_link_targets_preserved")
@@ -3833,6 +3936,8 @@ def parser():
     result.add_argument("--if-enrolled", action="store_true")
     result.add_argument("--all", action="store_true")
     result.add_argument("--read-only", action="store_true")
+    result.add_argument("--removal-receipt", action="store_true")
+    result.add_argument("--unstarted-removal", action="store_true")
     result.add_argument("--apply", action="store_true")
     result.add_argument("--release", action="store_true")
     result.add_argument("--new-token")
@@ -3865,6 +3970,9 @@ def process_one(db, row, args):
     if args.command == "recover-missing":
         return recover_missing(db, row, args)
     if args.command == "reconcile":
+        if args.unstarted_removal:
+            reconcile_unstarted(db, row, args)
+            return summary(db, get_row(db, args.worktree))
         if args.external_removal:
             reconcile_external(db, row, args)
             return summary(db, row)
@@ -3959,6 +4067,10 @@ def process_one(db, row, args):
 def main(argv=None):
     args = parser().parse_args(argv)
     safety().DEADLINE = time.monotonic() + 238
+    if args.removal_receipt and (args.command != "status" or not args.read_only or args.all):
+        raise Retain("removal-receipt-requires-one-read-only-status")
+    if args.unstarted_removal and (args.command != "reconcile" or args.external_removal):
+        raise Retain("unstarted-removal-requires-exact-reconciliation")
     if args.preserve_ref and not (args.command == "remove" and args.finalized):
         raise Retain("preserve-ref-requires-manual-finalized-removal")
     if args.command == "recover-failed-creation":
@@ -4165,6 +4277,8 @@ def main(argv=None):
                     "SELECT * FROM worktrees ORDER BY path")]
             else:
                 output = [summary(db, get_row(db, args.worktree))]
+                if args.removal_receipt:
+                    output[0]["removal_receipt"] = removal_receipt(db, get_row(db, args.worktree))
         print(json.dumps(output, sort_keys=True))
         return 0
     if args.all:

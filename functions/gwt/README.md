@@ -1005,6 +1005,11 @@ SQLite without creating files or performing recovery. It refuses a busy or
 missing lock and any journal/WAL sidecar; use the normal owner workflow to
 resolve those states before retrying the audit. The flag also works for one
 enrolled checkout and does not change normal `finish-status` behavior.
+For one enrolled checkout, add `--removal-receipt` to this read-only command
+to inspect bounded producer facts and SHA-256 hashes of the exact stored
+intent/result text. Large inventory bodies remain in the ledger. After an
+unstarted-attempt reconciliation, the inspector labels the archived receipt
+`reconciled=true`; its generation is the original attempt's generation.
 
 The evaluator removes one exact checkout at a time with native non-force
 `git worktree remove`. It preserves local branches, siblings and external
@@ -1082,6 +1087,34 @@ readback therefore remains `unknown`/`incomplete`, never an automatic retry.
 Updated manual removal, prune, cleaner and quarantine consumers respect the
 ledger hold even after registration disappears. Never repeat removal to resolve
 an incomplete result.
+
+A foreground finalized attempt can expire during its repeated admission,
+before native unlock or removal begins. To reconcile this specific case,
+inspect the receipt, then bind the explicit recovery to those exact hashes:
+
+```sh
+gwt finish-status --worktree /absolute/task/checkout --read-only --removal-receipt
+gwt finish-reconcile --unstarted-removal --worktree /absolute/task/checkout \
+  --intent-id <uuid> --generation <number> \
+  --intent-sha256 <original-intent-hash> --result-sha256 <original-result-hash>
+```
+
+This mode requires the original recorded operator, completed and released
+owners, merged PR proof, no pins, the unchanged native lock, and fresh admission
+matching the original source/admin/index, preserved refs and disposal scope.
+It accepts only a pre-unlock `admission-deadline` result with explicit
+`child: null`. New receipts must record literal `native_attempted=false`;
+legacy receipts must match the known pre-dispatch shape with no postcheck
+fields. Missing child proof, attempted unlock, cancellation and partial removal
+remain blocked.
+
+Recovery archives the original text unchanged, advances the generation and
+clears releases atomically. It never removes files or unlocks the checkout.
+Historical sibling evidence remains archived; it cannot authorize deletion.
+After successful reconciliation, an explicitly invoked
+`gwt rm <literal-path> --finalized` performs new admission and sibling checks.
+Old releases cannot authorize automatic removal, and repeating recovery cannot
+change a successor attempt. Admission and owner deadlines remain unchanged.
 
 Current removal receipts report sibling preservation failure as
 `siblings_preserved=false`; older receipts used `siblings_unchanged=false`.
