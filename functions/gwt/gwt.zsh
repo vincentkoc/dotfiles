@@ -1,6 +1,11 @@
 [[ -n "${DOTFILES_GWT_LOADED:-}" ]] && return 0
 typeset -g DOTFILES_GWT_LOADED=1
 
+# Path lookups must not emit CDPATH matches or run interactive zsh chpwd hooks.
+_gwt_path_cd() {
+    builtin cd ${ZSH_VERSION:+-q} "$@" >/dev/null
+}
+
 _gwt_physical_source_path() {
     local source_path="$1"
     local source_target=""
@@ -19,7 +24,7 @@ _gwt_physical_source_path() {
         fi
     done
 
-    source_dir=$(builtin cd -P -- "$(dirname "$source_path")" 2>/dev/null && pwd -P) || return 1
+    source_dir=$(_gwt_path_cd -P -- "$(dirname "$source_path")" 2>/dev/null && builtin pwd -P) || return 1
     printf '%s/%s\n' "$source_dir" "$(basename "$source_path")"
 }
 
@@ -30,7 +35,7 @@ else
 fi
 DOTFILES_GWT_SOURCE_PATH=$(_gwt_physical_source_path "$_gwt_loaded_source") || return 1
 DOTFILES_GWT_CHECKOUT_ROOT=$(
-    builtin cd -P -- "$(dirname "$DOTFILES_GWT_SOURCE_PATH")/../.." 2>/dev/null && pwd -P
+    _gwt_path_cd -P -- "$(dirname "$DOTFILES_GWT_SOURCE_PATH")/../.." 2>/dev/null && builtin pwd -P
 ) || return 1
 unset _gwt_loaded_source
 unset -f _gwt_physical_source_path 2>/dev/null || true
@@ -503,7 +508,7 @@ _gwt_common_dir() {
 
     common_dir=$(_gwt_git_probe -C "$repo_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
     [[ -n "$common_dir" ]] || return 1
-    (cd "$common_dir" 2>/dev/null && pwd -P)
+    (_gwt_path_cd -- "$common_dir" 2>/dev/null && builtin pwd -P)
 }
 
 _gwt_registered_worktree_path() {
@@ -511,14 +516,14 @@ _gwt_registered_worktree_path() {
     local target_path="$2"
     local repo_common target_common registered_path
 
-    target_path=$(cd "$target_path" 2>/dev/null && pwd -P) || return 1
+    target_path=$(_gwt_path_cd -- "$target_path" 2>/dev/null && builtin pwd -P) || return 1
     repo_common=$(_gwt_common_dir "$repo_root") || return 1
     target_common=$(_gwt_common_dir "$target_path") || return 1
     [[ "$repo_common" == "$target_common" ]] || return 1
 
     while IFS= read -r registered_path; do
         [[ -d "$registered_path" ]] || continue
-        registered_path=$(cd "$registered_path" 2>/dev/null && pwd -P) || continue
+        registered_path=$(_gwt_path_cd -- "$registered_path" 2>/dev/null && builtin pwd -P) || continue
         if [[ "$registered_path" == "$target_path" ]]; then
             printf '%s\n' "$target_path"
             return 0
@@ -545,7 +550,7 @@ _gwt_gitdir_for_path() {
     [[ -n "$gitdir" ]] || return 1
 
     if [[ "$gitdir" != /* ]]; then
-        gitdir="$(cd "$(dirname "$gitfile")" && cd "$gitdir" && pwd)"
+        gitdir="$(_gwt_path_cd -- "$(dirname "$gitfile")" && _gwt_path_cd -- "$gitdir" && builtin pwd)"
     fi
 
     printf '%s\n' "$gitdir"
@@ -1455,7 +1460,7 @@ gwt() {
             fi
 
             git "${clone_args[@]}" -- "$repo_url" "$dest" || return 1
-            dest=$(cd "$dest" && pwd) || return 1
+            dest=$(_gwt_path_cd -- "$dest" && builtin pwd) || return 1
 
             if [[ -n "$profile" ]]; then
                 _gwt_sparse_apply_profile "$dest" "$profile" || return 1
@@ -1616,7 +1621,7 @@ gwt() {
                         ;;
                     --cow-from)
                         [[ $# -ge 2 && -d "$2" ]] || { echo "gwt: missing CoW seed directory" >&2; return 1; }
-                        cow_source=$(builtin cd -- "$2" && pwd -P) || return 1
+                        cow_source=$(_gwt_path_cd -- "$2" && builtin pwd -P) || return 1
                         shift 2
                         ;;
                     --profile|--checkout)
@@ -1909,13 +1914,13 @@ gwt() {
                 _gwt_finish_tool guard --worktree "$target_path" || return
             fi
             main_worktree=$(_gwt_git_probe worktree list --porcelain | awk '/^worktree / {print substr($0, 10); exit}')
-            main_worktree=$(cd "$main_worktree" 2>/dev/null && pwd -P) || return 1
+            main_worktree=$(_gwt_path_cd -- "$main_worktree" 2>/dev/null && builtin pwd -P) || return 1
             if [[ "$target_path" == "$main_worktree" ]]; then
                 echo "gwt: refusing to remove the main worktree ($target_path)"
                 return 1
             fi
 
-            current_path=$(pwd -P) || return 1
+            current_path=$(builtin pwd -P) || return 1
             if [[ "$current_path/" == "$target_path/"* ]]; then
                 echo "gwt: cannot remove the worktree you are currently in"
                 return 1
