@@ -1101,7 +1101,9 @@ modes and verbose/scissors residue retain.
 Tracked regular source files are hashed in chunks of at most 64KiB, bounded by
 1GiB of verified working bytes per pass and 131072 source entries including
 directories. Other leaf reads retain the 8MiB limit. Subprocess and admin reads keep
-the separate 512MiB bound. A retained owner release captures its baseline once;
+the separate 512MiB bound. Tracked reads bind admitted metadata to the opened
+descriptor; independent EOF, final identity and deadline checks still apply.
+A retained owner release captures its baseline once;
 apply repeats its inventory before and after committing the removal intent. Successful foreground closeout does
 not capture an automatic baseline. Neither route expands sparse checkouts or
 installs tools.
