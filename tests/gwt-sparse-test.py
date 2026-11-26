@@ -139,6 +139,42 @@ os.execv(os.environ["GWT_TEST_REAL_GIT"], [os.environ["GWT_TEST_REAL_GIT"], *arg
     def config(self, key, repo=None):
         return self.git("config", "--get", key, cwd=repo, check=False).decode().strip()
 
+    def test_path_probes_skip_chpwd_hooks(self):
+        alias = self.root / "linked owner"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        calls = self.root / "chpwd calls"
+        result = self.shell(r'''
+            marker="$3"
+            chpwd() { printf '\033]0;fixture\007'; print -r -- called >> "$marker"; }
+            _gwt_common_dir "$1" || exit 1
+            _gwt_registered_worktree_path "$1" "$1" || exit 1
+            unset DOTFILES_GWT_LOADED
+            source "$2" || exit 1
+            print -r -- "$DOTFILES_GWT_CHECKOUT_ROOT"
+            builtin cd -- "$1" > /dev/null
+        ''', alias, self.source, calls)
+        self.assertEqual(result.stdout.splitlines(),
+                         [str(self.repo / ".git"), str(self.repo), str(self.fixture)])
+        self.assertEqual(calls.read_text().splitlines(), ["called"])
+
+    def test_path_probe_ignores_cdpath(self):
+        local = self.repo / "same name"
+        local.mkdir()
+        decoy = self.root / "cdpath"
+        (decoy / local.name).mkdir(parents=True)
+        script = r'''
+            source "$1" || exit 1
+            CDPATH="$2"
+            _gwt_path_cd -- "$3" || exit 1
+            printf '%s\n' "$PWD" "$CDPATH"
+        '''
+        for shell in ("bash", "zsh"):
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, "-c", script, shell, str(self.source), str(decoy), local.name],
+                                        cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [str(local), str(decoy)])
+
     def test_physical_profile_authority_and_override(self):
         expected = str(self.fixture / "git-sparse") + "\n"
         self.assertEqual(self.shell("_gwt_sparse_root").stdout, expected)
