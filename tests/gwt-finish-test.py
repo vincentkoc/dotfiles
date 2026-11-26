@@ -7529,6 +7529,322 @@ class ExactOrphanLockTests(unittest.TestCase):
         with FINISH.read_only_ledger(self.state) as db:
             return dict(db.execute("SELECT * FROM orphan_removals").fetchone())
 
+    def prior_orphan(self, name="selected", *, same_device=False, prepare=None):
+        record = {}
+        def capture(path, admin):
+            if prepare is not None:
+                prepare(path, admin)
+            # Native finish-managed creation uses umask 077.
+            (admin / "locked").chmod(0o600)
+            paths = {"path": path, "root": self.root, "owner": self.repo,
+                     "common": self.repo / ".git", "gitdir": admin}
+            record.update(schema="gwt-orphan-prior-identity.v1", uid=os.getuid(),
+                          lock_reason=(admin / "locked").read_text().strip(),
+                          **{key: str(value) for key, value in paths.items()})
+            for key in ("path", "owner", "common", "gitdir", "lock"):
+                details = (admin / "locked" if key == "lock" else paths[key]).lstat()
+                record[key + "_id"] = [details.st_dev + (0 if same_device else 10000), details.st_ino]
+        path, admin, lock = self.orphan(name, prepare=capture)
+        self.path_ids[str(path)] = ":".join(map(str, record["path_id"]))
+        source = self.base / (name + ".prior.json")
+        source.write_text(json.dumps(record))
+        source.chmod(0o600)
+        return path, admin, lock, source, record
+
+    def prior_options(self, source):
+        return ("--allow-device-renumbering", "--prior-identity-file", str(source))
+
+    def test_prior_identity_maps_holders_and_preserves_original_in_intent(self):
+        path, admin, lock, source, record = self.prior_orphan()
+        self.orphan("sibling")
+        options = self.prior_options(source)
+        with self.assertRaisesRegex(FINISH.Retain, "prior-device-changed"):
+            self.scoped(path, lock)
+        _, planned = self.scoped(path, lock, *options)
+        actual_dev = admin.stat().st_dev
+        self.output = f"p1\0\nf3\0D0x{actual_dev:x}\0i{record['path_id'][1]}\0n/alias\0\n".encode()
+        with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+            self.scoped(path, lock, *options)
+        self.output = b""
+        with self.assertRaisesRegex(FINISH.Retain, "visibility-unknown"):
+            self.scoped(path, lock, *options)
+        self.output = b"p1\0\nf1\0n/fixture/unrelated\0\n"
+        original, removals = FINISH.safety().supervise, []
+        def supervise(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                removals.append(command)
+            return original(command, **kwargs)
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise):
+            code, result = self.scoped(path, lock, *options, "--apply",
+                                       "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(code, 0, result)
+        self.assertEqual(len(removals), 1)
+        self.assertNotIn("--force", removals[0])
+        self.assertNotIn("-f", removals[0])
+        before = json.loads(self.receipt()["intent"])["before"]
+        self.assertEqual(before["orphan_identity"]["original_identity"], record)
+        self.assertEqual(before["orphan_identity"]["device_map"], [[record["path_id"][0], actual_dev]])
+        self.assertEqual(before["snapshot"]["path_id"], [actual_dev, record["path_id"][1]])
+        self.assertEqual(json.loads(source.read_text()), record)
+        self.assertTrue(result["result"]["siblings_preserved"])
+        self.assertTrue(result["result"]["branch_reflog_preserved"])
+        self.assertEqual(git(self.repo, "rev-parse", "selected"), self.head)
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM worktrees WHERE path=?", (str(path),)).fetchone())
+
+    def test_identity_options_are_exact_paired_and_bound_even_on_same_device(self):
+        path, _, lock, source, _ = self.prior_orphan(same_device=True)
+        options = self.prior_options(source)
+        for extra in ((options[0],), options[1:], (*options, *options[1:])):
+            with self.subTest(extra=extra), self.assertRaises(FINISH.Retain):
+                self.scoped(path, lock, *extra)
+        for command in ("status", "recover-missing", "recover-failed-creation"):
+            with self.subTest(command=command), self.assertRaises(FINISH.Retain):
+                self.call(command, *options)
+        with self.assertRaises(FINISH.Retain):
+            OrphanLockTests.survey(self, *options)
+        _, planned = self.scoped(path, lock, *options)
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(self.scoped(path, lock, *options, "--apply",
+                                    "--recovery-sha256", planned["recovery_sha256"])[0], 0)
+
+    def test_prior_record_schema_paths_and_surviving_identities_fail_closed(self):
+        path, admin, lock, source, record = self.prior_orphan()
+        cases = [dict(record, schema="unknown"), dict(record, extra=True),
+                 {key: value for key, value in record.items() if key != "lock_id"},
+                 dict(record, uid=True), dict(record, uid=-1), dict(record, uid=os.getuid() + 1),
+                 dict(record, lock_reason="gwt-finish.v2:not-a-uuid")]
+        cases += [dict(record, **{key: record[key] + "/other"})
+                  for key in ("path", "root", "owner", "common", "gitdir")]
+        cases += [dict(record, owner_id=value) for value in
+                  ([True, 1], [1.0, 1], [-1, 1], [1, 0], [1, -1], [1], "1:2")]
+        cases += [dict(record, **{key: [record[key][0], record[key][1] + 1]})
+                  for key in ("owner_id", "common_id", "gitdir_id", "lock_id")]
+        cases += [dict(record, owner_id=[record["owner_id"][0] + 1, record["owner_id"][1]])]
+        for changed in cases:
+            source.write_text(json.dumps(changed))
+            with self.subTest(changed=changed), self.assertRaises(FINISH.Retain):
+                self.scoped(path, lock, *self.prior_options(source))
+        for raw in ('{"schema":1,"schema":2}', '[]', '{', '"record"'):
+            source.write_text(raw)
+            with self.subTest(raw=raw), self.assertRaises(FINISH.Retain):
+                self.scoped(path, lock, *self.prior_options(source))
+        source.write_text(json.dumps(record))
+        self.path_ids[str(path)] = f"{record['path_id'][0] + 1}:{record['path_id'][1]}"
+        record["path_id"][0] += 1
+        source.write_text(json.dumps(record))
+        with self.assertRaisesRegex(FINISH.Retain, "volume-unmapped-or-changed"):
+            self.scoped(path, lock, *self.prior_options(source))
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+
+    def test_prior_source_is_private_and_outside_deletion_domains(self):
+        path, admin, lock, source, record = self.prior_orphan()
+        options = self.prior_options(source)
+        with self.assertRaises((FINISH.Retain, OSError)):
+            self.scoped(path, lock, *self.prior_options(self.base / "missing.json"))
+        source.write_bytes(b" " * 16385)
+        with self.assertRaisesRegex(FINISH.Retain, "size"):
+            self.scoped(path, lock, *options)
+        source.write_text(json.dumps(record))
+        source.chmod(0o644)
+        with self.assertRaises(FINISH.Retain):
+            self.scoped(path, lock, *options)
+        source.chmod(0o600)
+        alias = self.base / "alias"
+        alias.symlink_to(source)
+        with self.assertRaises(FINISH.Retain):
+            self.scoped(path, lock, *self.prior_options(alias))
+        alias.unlink()
+        os.link(source, alias)
+        with self.assertRaises(FINISH.Retain):
+            self.scoped(path, lock, *options)
+        alias.unlink()
+        unsafe = admin / "prior.json"
+        source.rename(unsafe)
+        with self.assertRaisesRegex(FINISH.Retain, "source-unsafe"):
+            self.scoped(path, lock, *self.prior_options(unsafe))
+
+    def test_identity_record_and_volume_changes_invalidate_plan(self):
+        path, admin, lock, source, _ = self.prior_orphan()
+        options = self.prior_options(source)
+        for replace in (False, True):
+            _, planned = self.scoped(path, lock, *options)
+            raw = source.read_bytes()
+            if replace:
+                old = source.with_suffix(".old")
+                source.rename(old)
+                source.write_bytes(raw)
+                source.chmod(0o600)
+                old.unlink()
+            else:
+                source.write_bytes(raw + b"\n")
+            with self.subTest(replace=replace), self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                self.scoped(path, lock, *options, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        original = FINISH.identity
+        def wrong_volume(value):
+            result = original(value)
+            return [result[0] + 1, result[1]] if str(value) == str(self.root) else result
+        with mock.patch.object(FINISH, "identity", side_effect=wrong_volume):
+            with self.assertRaisesRegex(FINISH.Retain, "volume-unmapped-or-changed"):
+                self.scoped(path, lock, *options)
+        def inconsistent_mapping(value):
+            result = original(value)
+            return [result[0] + 1, result[1]] if str(value) == str(self.repo / ".git") else result
+        with mock.patch.object(FINISH, "identity", side_effect=inconsistent_mapping):
+            with self.assertRaisesRegex(FINISH.Retain, "identity-changed"):
+                self.scoped(path, lock, *options)
+        old_lock = admin / "old-lock"
+        (admin / "locked").rename(old_lock)
+        (admin / "locked").write_text(lock + "\n")
+        (admin / "locked").chmod(0o600)
+        old_lock.unlink()
+        with self.assertRaisesRegex(FINISH.Retain, "identity-changed"):
+            self.scoped(path, lock, *options)
+
+    def test_record_mutation_is_checked_before_intent_and_before_unlock(self):
+        original = FINISH.remove_with_intent
+        for after_intent in (False, True):
+            path, admin, lock, source, _ = self.prior_orphan("race-" + str(after_intent))
+            options = self.prior_options(source)
+            _, planned = self.scoped(path, lock, *options)
+            def remove(*args, **kwargs):
+                callback = kwargs["record_intent"]
+                def record(intent):
+                    if after_intent:
+                        callback(intent)
+                    source.write_bytes(source.read_bytes() + b"\n")
+                    if not after_intent:
+                        callback(intent)
+                kwargs["record_intent"] = record
+                return original(*args, **kwargs)
+            with mock.patch.object(FINISH, "remove_with_intent", side_effect=remove):
+                if after_intent:
+                    code, result = self.scoped(path, lock, *options, "--apply",
+                                               "--recovery-sha256", planned["recovery_sha256"])
+                    self.assertEqual(code, 1)
+                    self.assertIsNone(result["result"]["child"])
+                    with self.assertRaisesRegex(FINISH.Retain, "lifecycle-record"):
+                        self.scoped(path, lock, *options)
+                else:
+                    with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                        self.scoped(path, lock, *options, "--apply",
+                                    "--recovery-sha256", planned["recovery_sha256"])
+                    with FINISH.read_only_ledger(self.state) as db:
+                        self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='orphan_removals'").fetchone())
+            self.assertEqual((admin / "locked").read_text().strip(), lock)
+
+    def test_renumbered_failure_records_successor_lock_without_changing_admission(self):
+        path, admin, lock, source, record = self.prior_orphan()
+        options = self.prior_options(source)
+        _, planned = self.scoped(path, lock, *options)
+        original = FINISH.safety().supervise
+        def supervise(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                command = [shutil.which("false")]
+            return original(command, **kwargs)
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise):
+            code, result = self.scoped(path, lock, *options, "--apply",
+                                       "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(code, 1)
+        self.assertTrue(result["result"]["native_lock_preserved"], result)
+        self.assertEqual(result["result"]["restored_lock"]["identity"][1], (admin / "locked").stat().st_ino)
+        self.assertEqual(json.loads(self.receipt()["intent"])["before"]["orphan_identity"]["original_identity"], record)
+        with self.assertRaisesRegex(FINISH.Retain, "identity-changed|lifecycle-record|private-file-permissions"):
+            self.scoped(path, lock, *options)
+        _, batch = OrphanLockTests.survey(self, "--apply")
+        self.assertEqual(batch[str(path)]["reason"], "orphan-has-lifecycle-record")
+
+    def recovery_commit(self, path, admin):
+        (path / "file").write_text("earlier unpublished work\n")
+        git(path, "commit", "-qam", "earlier task state")
+        git(path, "reset", "--hard", self.head)
+
+    def test_exact_custody_preserves_common_branch_reflog_but_batch_stays_strict(self):
+        path, admin, lock = self.orphan("selected", prepare=self.recovery_commit)
+        reflog = self.repo / ".git/logs/refs/heads/selected"
+        before = reflog.read_bytes()
+        _, batch = OrphanLockTests.survey(self)
+        self.assertIn(batch[str(path)]["reason"], ("head-not-on-remote", "commit-message-recovery-required"))
+        _, planned = self.scoped(path, lock)
+        code, removed = self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        self.assertEqual(code, 0, removed)
+        self.assertEqual(reflog.read_bytes(), before)
+        self.assertTrue(removed["result"]["branch_reflog_preserved"])
+        self.assertFalse(admin.exists())
+
+    def test_recovery_requires_surviving_commit_custody_and_remote_head(self):
+        path, admin, lock = self.orphan("selected", prepare=self.recovery_commit)
+        reflog = self.repo / ".git/logs/refs/heads/selected"
+        raw = reflog.read_bytes()
+        _, planned = self.scoped(path, lock)
+        reflog.write_bytes(raw + raw.splitlines(keepends=True)[-1])
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+        reflog.unlink()
+        (admin / "COMMIT_EDITMSG").unlink()
+        with self.assertRaisesRegex(FINISH.Retain, "unpreserved|not-preserved|not-on-remote"):
+            self.scoped(path, lock)
+        reflog.write_bytes(raw)
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        with self.assertRaisesRegex(FINISH.Retain, "head-not-on-remote"):
+            self.scoped(path, lock)
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+
+    def test_remote_only_recovery_commit_remains_admitted(self):
+        path, admin, lock = self.orphan("selected")
+        oid = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "remote task")
+        git(self.repo, "update-ref", "refs/remotes/origin/other", oid)
+        (admin / "ORIG_HEAD").write_text(oid + "\n")
+        reflog = self.repo / ".git/logs/refs/heads/selected"
+        self.assertNotIn(oid, reflog.read_text())
+        original = FINISH.remote_preserved
+        def unavailable(snap, candidate, until):
+            if candidate == oid:
+                raise FINISH.Retain("git-failed")
+            return original(snap, candidate, until)
+        with mock.patch.object(FINISH, "remote_preserved", side_effect=unavailable):
+            with self.assertRaisesRegex(FINISH.Retain, "git-failed"):
+                self.scoped(path, lock)
+        _, planned = self.scoped(path, lock)
+        self.assertEqual(self.scoped(path, lock, "--apply", "--recovery-sha256",
+                                    planned["recovery_sha256"])[0], 0)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/remotes/origin/other"), oid)
+
+    def test_reflog_membership_does_not_admit_missing_or_noncommit_recovery_objects(self):
+        path, admin, lock = self.orphan("selected")
+        reflog = self.repo / ".git/logs/refs/heads/selected"
+        raw = reflog.read_bytes()
+        for oid, reason in (("a" * 40, "git-failed"),
+                            ("--help", "recovery-reference-invalid"),
+                            (git(self.repo, "rev-parse", "HEAD:file"), "recovery-not-a-commit"),
+                            (git(self.repo, "rev-parse", "HEAD^{tree}"), "recovery-not-a-commit")):
+            (admin / "ORIG_HEAD").write_text(oid + "\n")
+            reflog.write_bytes(raw if oid == "--help" else
+                              raw + f"{self.head} {oid} Fixture <fixture@example.test> 1 +0000\tfixture\n".encode())
+            with self.subTest(oid=oid), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.scoped(path, lock)
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+
+    def test_plan_rejects_head_index_and_admin_reflog_drift(self):
+        for surface in ("head", "index", "logs/HEAD"):
+            name = "drift-" + surface.replace("/", "-")
+            path, admin, lock = self.orphan(name)
+            _, planned = self.scoped(path, lock)
+            if surface == "head":
+                commit = git(self.repo, "commit-tree", "HEAD^{tree}", "-p", self.head, "-m", "later")
+                git(self.repo, "update-ref", "refs/heads/" + name, commit)
+            elif surface == "index":
+                git(self.repo, "--git-dir=" + str(admin), "update-index", "--cacheinfo",
+                    "100644", git(self.repo, "rev-parse", "HEAD:.gitignore"), "file")
+            else:
+                log = admin / surface
+                log.write_bytes(log.read_bytes() * 2)
+            with self.subTest(surface=surface), self.assertRaisesRegex(
+                    FINISH.Retain, "selection-changed|staged-or-index-only|preimage-changed"):
+                self.scoped(path, lock, "--apply", "--recovery-sha256", planned["recovery_sha256"])
+            self.assertEqual((admin / "locked").read_text().strip(), lock)
+
     def test_exact_plan_and_apply_preserve_second_candidate_and_enrollment(self):
         path, admin, lock = self.orphan("selected")
         other, other_admin, other_lock = self.orphan("unselected")
@@ -7681,14 +7997,22 @@ class ExactOrphanLockTests(unittest.TestCase):
                   'shift 2; gwt prune "$@"')
         command = ["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), str(self.repo)]
         options = ["--path", str(path), "--creation-token", lock.split(":")[1],
-                   "--expected-head", self.head, "--missing-path-id", self.path_ids[str(path)]]
+                   "--expected-head", self.head, "--missing-path-id", self.path_ids[str(path)],
+                   *self.prior_options(self.base / "prior.json")]
         result = subprocess.run([*command, "--orphan-locks", *options], env=env,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
             "orphan-locks", "--worktree", str(self.repo), "--orphan-path", *options[1:]])
-        for extra in (["--path", str(path)], ["--expected-head", self.head]):
+        for extra in (["--path", str(path)], ["--expected-head", self.head],
+                      ["--allow-device-renumbering"], ["--prior-identity-file", str(self.base / "prior.json")]):
             result = subprocess.run([*command, "--orphan-locks", *options, *extra], env=env,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+        for partial in (["--allow-device-renumbering"], ["--prior-identity-file", str(self.base / "prior.json")],
+                        list(self.prior_options(self.base / "prior.json"))):
+            result = subprocess.run([*command, "--orphan-locks", *partial], env=env,
                                     capture_output=True, text=True, timeout=30)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")

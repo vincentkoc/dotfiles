@@ -1309,6 +1309,7 @@ Commands:
                                     registrations with no lifecycle record
   gwt prune --orphan-locks --path <absolute-path> --creation-token <uuid>
       --expected-head <sha> --missing-path-id <device:inode>
+      [--allow-device-renumbering --prior-identity-file <absolute-json-path>]
       [--apply --recovery-sha256 <hash>]
                                     Plan or retire only the exact missing registration
   gwt sparse status                 Show sparse-checkout state for the current worktree
@@ -1962,7 +1963,11 @@ gwt() {
                 case "$1" in
                     --orphan-locks) prune_orphans=true ;;
                     --apply) prune_apply=(--apply) ;;
-                    --path|--creation-token|--expected-head|--missing-path-id|--recovery-sha256)
+                    --allow-device-renumbering)
+                        (( ${prune_exact[(Ie)$1]} == 0 )) || return 1
+                        prune_exact+=("$1")
+                        ;;
+                    --path|--creation-token|--expected-head|--missing-path-id|--recovery-sha256|--prior-identity-file)
                         [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
                         local option="$1"
                         [[ "$option" == --path ]] && option=--orphan-path
@@ -1980,6 +1985,12 @@ gwt() {
             if (( ${#prune_apply} || ${#prune_exact} )) && ! $prune_orphans; then
                 echo "gwt: orphan recovery options require prune --orphan-locks" >&2
                 return 1
+            fi
+            if (( ${prune_exact[(Ie)--allow-device-renumbering]} || ${prune_exact[(Ie)--prior-identity-file]} )); then
+                if (( ! ${prune_exact[(Ie)--orphan-path]} || ! ${prune_exact[(Ie)--allow-device-renumbering]} || ! ${prune_exact[(Ie)--prior-identity-file]} )); then
+                    echo "gwt: device renumbering requires an exact orphan path and prior identity file" >&2
+                    return 1
+                fi
             fi
             prune_records=$(_gwt_git_probe worktree list --porcelain) || return
             prune_owner="${${(@f)prune_records}[1]}"
