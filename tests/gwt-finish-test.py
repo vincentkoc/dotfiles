@@ -7770,6 +7770,229 @@ class ExactOrphanLockTests(unittest.TestCase):
     def prior_options(self, source):
         return ("--allow-device-renumbering", "--prior-identity-file", str(source))
 
+    def unstarted_orphan(self, name="selected"):
+        path, admin, lock, source, record = self.prior_orphan(name, prepare=self.recovery_commit)
+        sibling = self.root / (name + "-sibling")
+        git(self.repo, "worktree", "add", "-b", name + "-sibling", str(sibling))
+        _, plan = self.scoped(path, lock, *self.prior_options(source))
+        original, scans = FINISH.manual_holders, []
+        def holders(*args, **kwargs):
+            original(*args, **kwargs)
+            scans.append(1)
+            if len(scans) == 3:
+                with contextlib.closing(sqlite3.connect(
+                        f"file:{self.state / 'lifecycle.sqlite'}?mode=ro", uri=True)) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM orphan_removals "
+                                                "WHERE path=? AND result IS NULL", (str(path),)).fetchone()[0], 1)
+                (sibling / ".git").unlink()
+        with mock.patch.object(FINISH, "manual_holders", side_effect=holders):
+            code, outcome = self.scoped(path, lock, *self.prior_options(source),
+                                        "--apply", "--recovery-sha256", plan["recovery_sha256"])
+        self.assertEqual(code, 1)
+        self.assertEqual(outcome["result"]["reason"], "orphan-preimage-changed")
+        self.assertIs(outcome["result"]["native_attempted"], False)
+        self.assertIsNone(outcome["result"]["child"])
+        self.assertIs(outcome["result"]["native_lock_preserved"], True)
+        return path, admin, lock, source, record
+
+    def orphan_receipt(self, path):
+        with FINISH.read_only_ledger(self.state) as db:
+            return dict(db.execute("SELECT * FROM orphan_removals WHERE path=?", (str(path),)).fetchone())
+
+    def reconcile_orphan(self, path, lock, source, *extra):
+        receipt = self.orphan_receipt(path)
+        arguments = self.scoped_arguments(path, lock, *self.prior_options(source))
+        arguments[0] = "reconcile-orphan"
+        arguments.extend(("--intent-id", receipt["id"],
+                          "--intent-sha256", hashlib.sha256(receipt["intent"].encode()).hexdigest(),
+                          "--result-sha256", hashlib.sha256(receipt["result"].encode()).hexdigest(), *extra))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = FINISH.main(arguments)
+        return code, json.loads(output.getvalue())[0]
+
+    def test_orphan_reconciliation_preserves_receipt_and_requires_fresh_exact_plan(self):
+        path, admin, lock, source, _ = self.unstarted_orphan()
+        receipt = self.orphan_receipt(path)
+        with self.assertRaisesRegex(FINISH.Retain, "lifecycle-record"):
+            self.scoped(path, lock, *self.prior_options(source))
+        lock_before = FINISH.safety().file_identity((admin / "locked").lstat())
+        ledger = (self.state / "lifecycle.sqlite").read_bytes()
+        _, plan = self.reconcile_orphan(path, lock, source)
+        self.assertEqual((self.state / "lifecycle.sqlite").read_bytes(), ledger)
+        self.orphan("later-sibling")
+        original, mutations = FINISH.safety().supervise, []
+        def supervise(command, **kwargs):
+            if "worktree" in command and ("unlock" in command or "remove" in command):
+                mutations.append(command)
+            return original(command, **kwargs)
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise):
+            code, result = self.reconcile_orphan(path, lock, source, "--apply",
+                                                "--recovery-sha256", plan["recovery_sha256"])
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["disposition"], "reconciled")
+        self.assertNotIn("checkout", result)
+        self.assertEqual(mutations, [])
+        self.assertEqual(self.orphan_receipt(path), receipt)
+        self.assertEqual(FINISH.safety().file_identity((admin / "locked").lstat()), lock_before)
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertTrue(FINISH.orphan_known(db, str(path), str(admin), lock))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM worktrees").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM orphan_unstarted_reconciliations").fetchone()[0], 1)
+        _, batch = OrphanLockTests.survey(self)
+        self.assertEqual(batch[str(path)]["reason"], "orphan-has-lifecycle-record")
+        with self.assertRaisesRegex(FINISH.Retain, "already-reconciled"):
+            self.reconcile_orphan(path, lock, source)
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.scoped(path, lock, *self.prior_options(source), "--apply",
+                        "--recovery-sha256", plan["recovery_sha256"])
+        _, fresh = self.scoped(path, lock, *self.prior_options(source))
+        code, removed = self.scoped(path, lock, *self.prior_options(source), "--apply",
+                                    "--recovery-sha256", fresh["recovery_sha256"])
+        self.assertEqual(code, 0, removed)
+        self.assertFalse(admin.exists())
+        self.assertTrue(removed["result"]["siblings_preserved"])
+        self.assertTrue(removed["result"]["branch_reflog_preserved"])
+        self.assertEqual(self.orphan_receipt(path), receipt)
+
+    def test_orphan_reconciliation_rejects_unknown_producer_shapes(self):
+        path, _, lock, source, _ = self.unstarted_orphan()
+        original = self.orphan_receipt(path)
+        cases = (("native_attempted", None), ("native_attempted", True), ("native_attempted", 0),
+                 ("child", "missing"), ("child", {}), ("native_lock_preserved", False),
+                 ("reason", "admission-deadline"), ("restored_lock", {}), ("path_absent", True))
+        for key, value in cases:
+            result = json.loads(original["result"])
+            if value is None or value == "missing":
+                result.pop(key)
+            else:
+                result[key] = value
+            with FINISH.ledger(self.state) as db, db:
+                db.execute("UPDATE orphan_removals SET result=? WHERE id=?", (json.dumps(result), original["id"]))
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(FINISH.Retain, "proof-invalid"):
+                self.reconcile_orphan(path, lock, source)
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE orphan_removals SET result=? WHERE id=?", (original["result"], original["id"]))
+        self.assertEqual(self.orphan_receipt(path), original)
+
+    def test_orphan_reconciliation_binds_hashes_operator_and_receipt_scope(self):
+        path, _, lock, source, _ = self.unstarted_orphan()
+        original = self.orphan_receipt(path)
+        for option, value in (("--intent-id", str(uuid.uuid4())), ("--intent-sha256", "0" * 64),
+                              ("--result-sha256", "0" * 64), ("--owner", "another-operator")):
+            with self.subTest(option=option), self.assertRaisesRegex(FINISH.Retain, "receipt-mismatch|proof-invalid"):
+                self.reconcile_orphan(path, lock, source, option, value)
+        for field, value in (("path", str(self.root / "other")), ("admin", str(self.repo / ".git/other")),
+                             ("lock_reason", "gwt-finish.v2:" + str(uuid.uuid4()))):
+            with FINISH.ledger(self.state) as db, db:
+                db.execute(f"UPDATE orphan_removals SET {field}=? WHERE id=?", (value, original["id"]))
+            with self.subTest(field=field), self.assertRaisesRegex(FINISH.Retain, "scope-mismatch"):
+                # The original hash operands do not authorize another registration.
+                args = self.scoped_arguments(path, lock, *self.prior_options(source))
+                args[0] = "reconcile-orphan"
+                FINISH.main([*args, "--intent-id", original["id"], "--intent-sha256",
+                             hashlib.sha256(original["intent"].encode()).hexdigest(), "--result-sha256",
+                             hashlib.sha256(original["result"].encode()).hexdigest()])
+            with FINISH.ledger(self.state) as db, db:
+                db.execute(f"UPDATE orphan_removals SET {field}=? WHERE id=?", (original[field], original["id"]))
+        for raw in ('{"checkout":"unknown","checkout":"unknown"}', 'null', '{'):
+            with FINISH.ledger(self.state) as db, db:
+                db.execute("UPDATE orphan_removals SET result=? WHERE id=?", (raw, original["id"]))
+            with self.subTest(raw=raw), self.assertRaisesRegex(FINISH.Retain, "proof-invalid"):
+                self.reconcile_orphan(path, lock, source)
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE orphan_removals SET result=? WHERE id=?", (original["result"], original["id"]))
+        self.assertEqual(self.orphan_receipt(path), original)
+
+    def test_orphan_reconciliation_keeps_target_holders_and_coordination_guards(self):
+        path, admin, lock, source, record = self.unstarted_orphan()
+        _, plan = self.reconcile_orphan(path, lock, source)
+        marker = self.repo / ".git/index.lock"
+        cases = ((f"p1\0\nf3\0D0x{admin.stat().st_dev:x}\0i{record['path_id'][1]}\0n/alias\0\n".encode(),
+                  "pending-departure"), (b"", "visibility-unknown"))
+        for output, reason in cases:
+            self.output = output
+            with self.subTest(reason=reason), self.assertRaisesRegex(FINISH.Retain, reason):
+                self.reconcile_orphan(path, lock, source, "--apply", "--recovery-sha256", plan["recovery_sha256"])
+        self.output = b"p1\0\nf1\0n/fixture/unrelated\0\n"
+        with FINISH.ledger(self.state):
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                self.reconcile_orphan(path, lock, source)
+        with FINISH.safety().maintainer_lock(self.home / ".codex"):
+            with self.assertRaisesRegex(FINISH.Retain, "maintainer-lock-present"):
+                self.reconcile_orphan(path, lock, source)
+        marker.touch()
+        with self.assertRaisesRegex(FINISH.Retain, "git-lock-present"):
+            self.reconcile_orphan(path, lock, source)
+        marker.unlink()
+        # Even changing only the qualified input file's metadata invalidates it.
+        details = source.stat()
+        os.utime(source, ns=(details.st_atime_ns, details.st_mtime_ns + 1))
+        with self.assertRaisesRegex(FINISH.Retain, "target-changed"):
+            self.reconcile_orphan(path, lock, source, "--apply", "--recovery-sha256", plan["recovery_sha256"])
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='orphan_unstarted_reconciliations'")
+                              .fetchone())
+        self.assertEqual((admin / "locked").read_text().strip(), lock)
+
+    def test_orphan_reconciliation_fact_and_new_attempt_never_bypass_history(self):
+        path, admin, lock, source, _ = self.unstarted_orphan()
+        original = self.orphan_receipt(path)
+        _, plan = self.reconcile_orphan(path, lock, source)
+        self.reconcile_orphan(path, lock, source, "--apply", "--recovery-sha256", plan["recovery_sha256"])
+        with FINISH.read_only_ledger(self.state) as db:
+            raw_fact = db.execute("SELECT fact FROM orphan_unstarted_reconciliations").fetchone()[0]
+        for key, value in (("recovery_sha256", "0" * 64), ("operator", "another-operator"),
+                           ("target_sha256", "0" * 64), ("observed_at", False)):
+            fact = json.loads(raw_fact)
+            fact[key] = value
+            with FINISH.ledger(self.state) as db, db:
+                db.execute("UPDATE orphan_unstarted_reconciliations SET fact=?", (json.dumps(fact),))
+            with self.subTest(key=key), self.assertRaisesRegex(FINISH.Retain, "proof-invalid"):
+                self.scoped(path, lock, *self.prior_options(source))
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE orphan_unstarted_reconciliations SET fact=?", (raw_fact,))
+            db.execute("UPDATE orphan_removals SET result=result || ' ' WHERE id=?", (original["id"],))
+        with self.assertRaisesRegex(FINISH.Retain, "proof-invalid"):
+            self.scoped(path, lock, *self.prior_options(source))
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE orphan_removals SET result=? WHERE id=?", (original["result"], original["id"]))
+        _, fresh = self.scoped(path, lock, *self.prior_options(source))
+        original_supervise = FINISH.safety().supervise
+        def supervise(command, **kwargs):
+            if "worktree" in command and "remove" in command:
+                command = [shutil.which("false")]
+            return original_supervise(command, **kwargs)
+        with mock.patch.object(FINISH.safety(), "supervise", side_effect=supervise):
+            code, result = self.scoped(path, lock, *self.prior_options(source), "--apply",
+                                       "--recovery-sha256", fresh["recovery_sha256"])
+        self.assertEqual(code, 1)
+        self.assertEqual(result["disposition"], "unknown")
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM orphan_removals WHERE path=?", (str(path),)).fetchone()[0], 2)
+            snap = json.loads(original["intent"])["before"]["snapshot"]
+            args = FINISH.parser().parse_args(self.scoped_arguments(path, lock, *self.prior_options(source)))
+            self.assertIsNone(FINISH.orphan_reconciliation(db, args, snap))
+            self.assertTrue(FINISH.orphan_known(db, str(path), str(admin), lock, reconciled=original["id"]))
+        self.assertEqual(self.orphan_receipt(path), original)
+
+    def test_reconcile_orphan_wrapper_and_exact_only_cli(self):
+        env = dict(os.environ, TMUX="")
+        script = ('source "$1"; _gwt_finish_tool() { printf "%s\\n" "$@"; }; '
+                  'shift; gwt reconcile-orphan "$@"')
+        operands = ["--worktree", str(self.repo), "--orphan-path", str(self.root / "missing"),
+                    "--intent-id", str(uuid.uuid4()), "--intent-sha256", "a" * 64, "--result-sha256", "b" * 64]
+        result = subprocess.run(["zsh", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"), *operands],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["reconcile-orphan", *operands])
+        for args in (["reconcile-orphan"], ["reconcile-orphan", "--intent-id", str(uuid.uuid4())],
+                     ["orphan-locks", "--worktree", str(self.repo), "--intent-id", str(uuid.uuid4())]):
+            with self.subTest(args=args), mock.patch.object(FINISH, "read_only_ledger") as ledger:
+                with self.assertRaisesRegex(FINISH.Retain, "exact-receipt-hashes|one-owning-checkout"):
+                    FINISH.main(args)
+                ledger.assert_not_called()
+
     def test_prior_identity_maps_holders_and_preserves_original_in_intent(self):
         path, admin, lock, source, record = self.prior_orphan()
         self.orphan("sibling")

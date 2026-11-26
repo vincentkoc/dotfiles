@@ -262,6 +262,34 @@ rollback evidence; it does not replace the historical admission identity.
 This retires surviving administration only: already missing
 unstaged and untracked files remain unaudited.
 
+A narrowly proven unstarted exact-orphan attempt can be reconciled separately:
+
+```sh
+gwt reconcile-orphan --worktree /absolute/owning/checkout \
+  --orphan-path /absolute/missing/checkout \
+  --creation-token <lock-uuid> --expected-head <full-sha> \
+  --missing-path-id <prior-device:prior-inode> \
+  --intent-id <receipt-uuid> --intent-sha256 <raw-intent-hash> \
+  --result-sha256 <raw-result-hash>
+```
+
+Repeat any original device-renumbering options and unchanged private identity
+record. The selected receipt must explicitly record `native_attempted: false`,
+`child: null`, a preserved native lock, and `orphan-preimage-changed` for the
+missing exact registration. The operator, UUID, raw receipt hashes and current
+target proof must match. Fresh admission still checks holders, locks, index,
+admin contents and recovery custody. Only historical sibling observations are
+excluded from this reconciliation proof; unrelated sibling progress does not
+change the target's no-attempt evidence.
+
+Review the returned digest, then repeat with
+`--apply --recovery-sha256 <reviewed-hash>`. This appends one reconciliation fact;
+it never unlocks, removes, enrolls, or changes the original UNKNOWN receipt.
+Batch and older clients remain blocked. A subsequent exact-orphan plan can
+honor only this verified receipt and fact, with fresh complete admission and
+its own removal digest. Any other attempt, receipt corruption or target drift
+still blocks it. Reconciliation never automatically starts removal.
+
 ## Missing enrolled checkout recovery
 
 `gwt recover-missing` restores a missing directory only when its original Git
