@@ -169,6 +169,114 @@ class LifecycleTests(unittest.TestCase):
             for path in self.state.iterdir()
         })
 
+    def test_bulk_inventory_is_read_only_additive_and_does_not_query_git(self):
+        flags = ("--all", "--read-only", "--inventory-json")
+        old = self.call("status", "--all", "--read-only")
+        with mock.patch.object(FINISH, "git", side_effect=AssertionError("unexpected Git invocation")):
+            code, view = self.call("status", *flags)
+            self.assertEqual(code, 0)
+            self.assertEqual(view["schema"], "gwt-finish-inventory.v1")
+            self.assertEqual(view["ledger"], "present")
+            self.assertEqual(view["source"], "gwt finish-status --all --read-only --inventory-json")
+            row, = view["records"]
+            self.assertEqual(row["owner_signoff"], "report-only")
+            self.assertEqual(row["owner_count"], 1)
+            self.assertNotIn("owner-1", json.dumps(view))
+            self.assertEqual(row["identity"]["checkout"], {
+                "path": str(self.wt), "dev": str(self.wt.stat().st_dev), "ino": str(self.wt.stat().st_ino)})
+            self.assertIsNone(row["lock_reason"])
+            self.assertEqual(self.call("status", "--all", "--read-only"), old)
+        for command in (("status", "--inventory-json"), ("status", "--all", "--inventory-json"),
+                        ("check", *flags), ("enroll", *flags)):
+            with self.subTest(command=command), self.assertRaisesRegex(FINISH.Retain, "inventory-json-requires"):
+                self.call(*command)
+        with (self.state / "lifecycle.lock").open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                self.call("status", *flags)
+        absent = self.state / "no-ledger"
+        self.assertEqual(self.call("status", *flags, "--state-dir", str(absent))[1],
+                         {**view, "ledger": "absent", "records": []})
+        self.assertFalse(absent.exists())
+
+    def test_bulk_inventory_projects_current_generation_exact_heads_and_private_identities(self):
+        flags = ("--all", "--read-only", "--inventory-json")
+        token = "gwt-finish.v2:" + str(uuid.uuid4())
+        with FINISH.ledger(self.state) as db:
+            source = dict(FINISH.get_row(db, self.wt))
+            key, snap = source["id"], json.loads(source["identity"])
+            snap.update(lock_reason=token, path_id=[1 << 53, (1 << 63) + 3])
+            db.execute("UPDATE worktrees SET state='finished', finish_head=?, identity=? WHERE id=?",
+                       (self.head, json.dumps(snap), key))
+            db.execute("UPDATE owners SET completed=1 WHERE worktree_id=?", (key,))
+            db.execute("INSERT INTO retirement(worktree_id,generation,state,inventory) VALUES (?,7,'enrolled',?)",
+                       (key, "PRIVATE retirement payload"))
+            db.execute("INSERT INTO owner_releases VALUES (?, 'owner-1', 6)", (key,))
+            db.commit()
+        def projected():
+            row, = self.call("status", *flags)[1]["records"]
+            return row
+        row = projected()
+        self.assertEqual(row["identity"]["checkout"]["ino"], str((1 << 63) + 3))
+        self.assertEqual(row["identity"]["root"], str(self.root))
+        self.assertEqual(row["identity"]["repo"], "example/repo")
+        self.assertIsNone(FINISH.inventory_identity('{"path":"/one","path_id":[true,2]}')[0]["checkout"])
+        self.assertEqual((row["finish_head"], row["branch"], row["lock_reason"]),
+                         (self.head, "refs/heads/feature", token))
+        self.assertEqual((row["generation"], row["released_count"], row["owner_signoff"]), (7, 0, "pending"))
+        self.assertNotIn("PRIVATE", json.dumps(row))
+        with FINISH.ledger(self.state) as db:
+            db.execute("UPDATE owner_releases SET generation=7 WHERE worktree_id=?", (key,))
+            db.commit()
+        self.assertEqual(projected()["owner_signoff"], "released")
+        with FINISH.ledger(self.state) as db:
+            db.execute("UPDATE retirement SET intent=?, result=? WHERE worktree_id=?",
+                       ("PRIVATE intent", "PRIVATE result", key))
+            db.commit()
+        row = projected()
+        self.assertTrue(row["has_intent"] and row["has_result"])
+        self.assertEqual(row["checkout"], "unknown")
+        self.assertNotIn("PRIVATE", json.dumps(row))
+        with FINISH.ledger(self.state) as db:
+            FINISH.ensure_cancellation_schema(db)
+            db.execute("UPDATE owners SET completed=0 WHERE worktree_id=?", (key,))
+            db.execute("INSERT INTO owner_cancellations VALUES (?, 'owner-1', ?, 'private reason', 1)", (key, self.head))
+            db.commit()
+        row = projected()
+        self.assertEqual((row["cancelled_count"], row["cancellation_head"], row["owner_signoff"]),
+                         (1, self.head, "cancelled"))
+        with FINISH.ledger(self.state) as db:
+            db.execute("UPDATE owner_cancellations SET head=? WHERE worktree_id=?", ("d" * 40, key))
+            db.commit()
+        row = projected()
+        self.assertIsNone(row["cancellation_head"])
+        self.assertEqual(row["owner_signoff"], "pending")
+        with FINISH.ledger(self.state) as db:
+            db.execute("UPDATE worktrees SET finish_head=? WHERE id=?", ("e" * 40, key))
+            db.commit()
+        self.assertEqual(projected()["cancelled_count"], 0)
+
+    def test_bulk_inventory_query_count_does_not_grow_with_rows(self):
+        with FINISH.ledger(self.state) as db:
+            def queries():
+                sql = []
+                db.set_trace_callback(sql.append)
+                try:
+                    data = FINISH.inventory_status(db)["records"]
+                finally:
+                    db.set_trace_callback(None)
+                return sql, len(data)
+            first, n = queries()
+            source = dict(FINISH.get_row(db, self.wt))
+            for i in range(12):
+                row = {**source, "id": str(uuid.uuid4()), "path": str(self.root / f"inventory-{i}")}
+                db.execute("INSERT INTO worktrees (" + ",".join(row) + ") VALUES ("
+                           + ",".join("?" for _ in row) + ")", tuple(row.values()))
+            second, count = queries()
+            self.assertEqual(count, n + 12)
+            self.assertEqual(first, second)
+            self.assertLessEqual(len(second), 12)
+
     def test_creation_enrollment_still_refuses_when_ledger_stays_busy(self):
         with (self.state / "lifecycle.lock").open("rb") as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)

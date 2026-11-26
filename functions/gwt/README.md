@@ -1026,10 +1026,28 @@ Only explicit installation and qualified activation let that consumer remove tre
 ```sh
 gwt finish-status --all
 gwt finish-status --all --read-only      # Audit without opening the ledger for writes
+gwt finish-status --all --read-only --inventory-json  # Compact bulk inventory
 gwt finish-check --all                   # Refresh proof only
 # Only after explicit host activation:
 gwt finish-check --all --apply --policy /absolute/private/policy.json
 ```
+
+`--inventory-json` emits a `gwt-finish-inventory.v1` object with a source,
+ledger presence, and records ordered by checkout path. The bulk reader uses the
+same guarded snapshot as ordinary read-only status. Each row contains recorded
+checkout, Git administrative directory, common directory and repository-owner
+paths with device and inode as decimal strings. It includes the recorded branch,
+enrollment lock reason, finish HEAD, agreed cancellation HEAD, generation, pin
+count, intent/result flags and owner signoff counts. Release counts use the
+current retirement generation. Cancellations use the native proof-invalidated
+owner records and their agreed HEAD. Owner identifiers, pin reasons and
+retirement payloads stay private.
+
+The projection describes recorded state. Inventory consumers must match the
+current Git registration, physical directory identities, lock and HEAD before
+classifying a checkout for native closeout review. Missing identity evidence
+leaves that classification unknown. The ordinary status JSON array remains
+available for existing callers.
 
 `finish-status --read-only` uses the existing shared lifecycle lock and opens
 SQLite without creating files or performing recovery. It refuses a busy or
