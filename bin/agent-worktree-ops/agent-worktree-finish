@@ -2,6 +2,7 @@
 """Finish managed work, explicitly release its owners, and retain unknown state."""
 
 import argparse
+from collections import defaultdict
 import contextlib
 import ctypes
 import fcntl
@@ -3447,6 +3448,118 @@ def recover_missing(db, row, args):
         return result
 
 
+def inventory_identity(raw):
+    """Project enrollment-time facts only. Never resolve or stat a checkout here."""
+    try:
+        snap = json.loads(raw)
+    except (ValueError, TypeError):
+        snap = {}
+    if not isinstance(snap, dict):
+        snap = {}
+
+    def absolute(value):
+        return (isinstance(value, str) and os.path.isabs(value)
+                and os.path.normpath(value) == value and "\0" not in value)
+
+    identity = {}
+    for name, key in (("checkout", "path"), ("admin", "gitdir"), ("common", "common"), ("owner", "owner")):
+        path, pair = snap.get(key), snap.get(key + "_id")
+        identity[name] = None
+        if (absolute(path) and isinstance(pair, list) and len(pair) == 2
+                and all(type(n) is int for n in pair) and pair[0] >= 0 and pair[1] > 0):
+            identity[name] = {"path": path, "dev": str(pair[0]), "ino": str(pair[1])}
+    root, repo = snap.get("root"), snap.get("repo")
+    identity["root"] = root if absolute(root) else None
+    identity["repo"] = repo if isinstance(repo, str) and re.fullmatch(r"[\w.-]+/[\w.-]+", repo) else None
+    branch, lock = snap.get("branch"), snap.get("lock_reason")
+    return (identity, branch if isinstance(branch, str) and branch.startswith("refs/heads/") else None,
+            lock if isinstance(lock, str) and re.fullmatch(
+                r"gwt-finish\.v2:[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}", lock) else None)
+
+
+def inventory_status(db):
+    """Use a fixed number of bulk reads under read_only_ledger's shared snapshot."""
+    records = []
+    report = {"schema": "gwt-finish-inventory.v1",
+              "source": "gwt finish-status --all --read-only --inventory-json",
+              "ledger": "present" if db is not None else "absent", "records": records}
+    if db is None:
+        return report
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    columns = {row[1] for row in db.execute("PRAGMA table_info(owners)")}
+    # Old ownership rows predate completion evidence. Their membership still matters.
+    completed = "completed" if "completed" in columns else "0"
+    owners = defaultdict(dict)
+    for key, owner, done in db.execute(f"SELECT worktree_id, owner, {completed} FROM owners"):
+        owners[key][owner] = done
+    pins = dict(db.execute("SELECT worktree_id, COUNT(*) FROM pins GROUP BY worktree_id"))
+    retirement_rows = {}
+    releases = defaultdict(set)
+    if "retirement" in tables:
+        retirement_rows = {r["worktree_id"]: r for r in db.execute(
+            "SELECT worktree_id, state, generation, intent IS NOT NULL AS has_intent, "
+            "result IS NOT NULL AS has_result FROM retirement")}
+        if "owner_releases" in tables:
+            for key, owner in db.execute(
+                    "SELECT r.worktree_id, r.owner FROM owner_releases r JOIN retirement t "
+                    "ON r.worktree_id=t.worktree_id AND r.generation=t.generation"):
+                releases[key].add(owner)
+    cancellations = defaultdict(dict)
+    if "owner_cancellations" in tables:
+        for key, owner, head in db.execute("SELECT worktree_id, owner, head FROM owner_cancellations"):
+            cancellations[key][owner] = head
+    pending = set()
+    if "failed_creations" in tables:
+        pending.update(r[0] for r in db.execute("SELECT DISTINCT worktree_id FROM failed_creations WHERE result IS NULL"))
+    if "missing_recoveries" in tables:
+        pending.update(r[0] for r in db.execute(
+            "SELECT worktree_id FROM missing_recoveries WHERE CASE WHEN json_valid(fact) "
+            "THEN json_type(fact, '$.result') IS NULL OR json_type(fact, '$.result')='null' ELSE 1 END"))
+    for row in db.execute("SELECT id, path, state, finish_head, identity FROM worktrees ORDER BY path"):
+        key = row["id"]
+        members, released, cancelled = owners[key], releases[key], cancellations[key]
+        complete = {name for name, done in members.items() if done == 1}
+        terminal = bool(cancelled) and set(members) <= complete | cancelled.keys()
+        heads = set(cancelled.values())
+        finish_head = row["finish_head"]
+        cancel_head = next(iter(heads)) if terminal and len(heads) == 1 else None
+        if not isinstance(cancel_head, str) or not SHA.fullmatch(cancel_head) or finish_head not in (None, cancel_head):
+            cancel_head = None
+        item = retirement_rows.get(key)
+        retire_state = item["state"] if item else "report-only"
+        has_intent = bool(key in pending or (item and item["has_intent"]))
+        has_result = bool(item and item["has_result"])
+        state = row["state"]
+        if cancelled:
+            state = "cancelled" if terminal else "active"
+        if item is None:
+            signoff = "report-only"
+        elif (not members or not released.issubset(members) or not cancelled.keys() <= members.keys()
+              or any(done not in (0, 1) for done in members.values())):
+            signoff = "unknown"
+        elif cancel_head and members.keys() <= (complete & released) | cancelled.keys():
+            signoff = "cancelled"
+        elif not cancelled and members.keys() == complete == released:
+            signoff = "released"
+        else:
+            signoff = "pending"
+        identity, branch, lock = inventory_identity(row["identity"])
+        checkout = "unknown" if has_intent or has_result else "retained"
+        if retire_state == "removed":
+            checkout = "removed"
+        records.append({
+            "worktree": row["path"], "state": state, "checkout": checkout, "retirement_state": retire_state,
+            "generation": item["generation"] if item else None,
+            "finish_head": finish_head if isinstance(finish_head, str) and SHA.fullmatch(finish_head) else None,
+            "cancellation_head": cancel_head, "branch": branch, "lock_reason": lock,
+            "pin_count": pins.get(key, 0), "has_intent": has_intent, "has_result": has_result,
+            "owner_count": len(members), "completed_count": len(complete),
+            "released_count": len(released & members.keys()), "cancelled_count": len(cancelled.keys() & members.keys()),
+            "owner_signoff": signoff, "identity": identity,
+        })
+    return report
+
+
 def summary(db, row, reason=None):
     item = retirement(db, row)
     outcome = json.loads(item["result"]) if item is not None and item["result"] else None
@@ -4075,6 +4188,7 @@ def parser():
     result.add_argument("--if-enrolled", action="store_true")
     result.add_argument("--all", action="store_true")
     result.add_argument("--read-only", action="store_true")
+    result.add_argument("--inventory-json", action="store_true")
     result.add_argument("--removal-receipt", action="store_true")
     result.add_argument("--unstarted-removal", action="store_true")
     result.add_argument("--apply", action="store_true")
@@ -4205,6 +4319,8 @@ def process_one(db, row, args):
 @diagnostic_phase("dispatch")
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.inventory_json and not (args.command == "status" and args.all and args.read_only):
+        raise Retain("inventory-json-requires-all-read-only-status")
     safety().DEADLINE = time.monotonic() + 238
     if args.removal_receipt and (args.command != "status" or not args.read_only or args.all):
         raise Retain("removal-receipt-requires-one-read-only-status")
@@ -4413,7 +4529,9 @@ def main(argv=None):
         return 0
     if args.read_only:
         with diagnostic_phase("state-session"), read_only_ledger(args.state_dir) as db:
-            if db is None:
+            if args.inventory_json:
+                output = inventory_status(db)
+            elif db is None:
                 if not args.all:
                     raise Retain("not-enrolled")
                 output = []

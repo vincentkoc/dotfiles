@@ -1291,6 +1291,8 @@ Commands:
   gwt finish-pin --reason <text>    Pin recovery evidence or dependent work
   gwt finish-unpin --reason <text>  Clear this owner's exact pin
   gwt finish-status [--all] [--read-only]  Show local completion state
+  gwt finish-status --all --read-only --inventory-json
+                                           Export recorded identities and owner signoff counts
   gwt finish-status --worktree <path> --read-only --removal-receipt
                                     Inspect bounded removal facts and exact receipt hashes
   gwt recover-failed-creation --worktree <path> --worktree-id <id> --generation <n>
