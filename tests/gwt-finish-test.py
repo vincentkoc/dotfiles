@@ -8706,6 +8706,8 @@ class UnstartedRemovalTests(unittest.TestCase):
 
     def test_recovery_reuses_original_explicit_preserved_branches(self):
         self.recover()
+        with mock.patch.object(FINISH, "evaluate_release", return_value="fixture-retained"):
+            self.finish("--release")
         branch = "refs/heads/saved-recovery"
         git(self.repo, "branch", "saved-recovery", self.head)
         native, calls = FINISH.finalized_admission, []
