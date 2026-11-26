@@ -705,16 +705,16 @@ The common Git directory's `openclaw-main-qualification-fetch.lock` is a
 persistent advisory-lock carrier. GWT admits only its existing empty, regular,
 single-link, current-user file with mode `0600`, opened without following
 symlinks. It pins the common directory and holds a nonblocking exclusive flock
-through both admission passes, native removal and outcome verification. A busy,
+through all admission passes, native removal and outcome verification. A busy,
 malformed, replaced or newly appearing carrier retains the checkout; drift after
 removal starts leaves an incomplete outcome. GWT never creates, writes, changes
 permissions on or unlinks this carrier. Every other Git lock remains blocking.
 Native removal inherits only the carrier descriptor, so parent death cannot
 release its flock while the removal child still runs.
 
-This route consumes only a matching native managed enrollment. It records a
-removal intent, rechecks the tree, unlocks only its own enrollment marker and
-runs one non-force Git removal. It preserves the branch, shared owner and
+This route consumes only a matching native managed enrollment. It rechecks the
+tree before committing a removal intent and again before unlocking its own
+enrollment marker for one non-force Git removal. It preserves the branch, shared owner and
 external dependencies. A partial failure holds the intent and restores the
 matching native lock when its original registration still exists; it never
 replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
@@ -773,14 +773,14 @@ at its literal path from those same retained commit roots. Bounded Git queries
 must complete without diagnostics or fetching objects. Duplicate, malformed,
 unsupported, missing, or unanchored records block closeout. Closeout stores the
 decoded path/stage/mode/OID mapping in the removal intent and terminal result.
-The full index and retained refs must match across both admissions.
+The full index and retained refs must match at each admission.
 New automatic release baselines preserve this decoded mapping and revalidate its
 roots. Legacy full inventories continue to reject `REUC`.
 
 Manual admission also accepts unpopulated gitlinks when index and HEAD paths,
 modes and commit IDs match exactly. It does not resolve or fetch those commits.
 Each gitlink must be absent or a real empty directory. No-follow descriptor
-checks bind directory identities, emptiness and absence through both admissions;
+checks bind directory identities, emptiness and absence at each admission;
 existing directories remain part of holder checks. Populated or linked paths,
 mounts, unreadable state and a candidate worktree's `modules` admin entry block
 removal. The normal dirty-tree check still applies: missing non-sparse gitlinks
@@ -1053,13 +1053,14 @@ Tracked regular source files are hashed in chunks of at most 64KiB, bounded by
 1GiB of verified working bytes per pass and 131072 source entries including
 directories. Other leaf reads retain the 8MiB limit. Subprocess and admin reads keep
 the separate 512MiB bound. A retained owner release captures its baseline once;
-apply uses two fresh admission inventories. Successful foreground closeout does
+apply repeats its inventory before and after committing the removal intent. Successful foreground closeout does
 not capture an automatic baseline. Neither route expands sparse checkouts or
 installs tools.
 
-Before unlocking its unique native lock, the owner durably commits a removal
-intent. It then repeats admission and observes checkout, admin, registration,
-branch and sibling outcomes independently. Existing sibling registration paths,
+The owner repeats admission before committing the removal intent. A refusal
+at that point leaves the enrollment and lock intact. After committing, the
+owner repeats admission before unlocking and observes checkout, admin,
+registration, branch and sibling outcomes independently. Existing sibling registration paths,
 root/admin inode identities, common-directory backlinks and lock fields must
 survive. Another owner's HEAD advance, branch switch or detached checkout is an
 operational change, recorded separately; it does not invalidate preservation.
@@ -1185,7 +1186,7 @@ VM coverage. Apple's [native implementation](https://github.com/apple-oss-distri
 returns `EINVAL` for both enumeration exhaustion and a lost vnode, and can hide
 vnode-info errors. The accepted blind spot is a mapping missed through those
 native omissions, including a still-live mapping after its FD closes. Existing
-two admission observations reduce exposure but do not eliminate that gap or
+repeated admission observations reduce exposure but do not eliminate that gap or
 prevent a noncooperative later opener. No external receipt can improve the
 reader's actual coverage.
 

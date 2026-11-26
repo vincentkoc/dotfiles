@@ -1232,7 +1232,7 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(FINISH.Retain, "finish-lifecycle"):
             self.call("guard", "--all", "--worktree", str(self.repo))
 
-    def test_late_payload_after_first_admission_keeps_intent_and_target(self):
+    def test_late_payload_after_first_admission_retains_enrollment_and_target(self):
         count = 0
         def observe(*args):
             nonlocal count
@@ -1242,8 +1242,8 @@ class ReleaseTests(unittest.TestCase):
             return {"holders": [], "mapping_coverage": "bounded-native"}
         self.observer.observe.side_effect = observe
         result = self.finish("--release")[1][0]
-        self.assertEqual(result["checkout"], "unknown")
-        self.assertEqual(result["retirement_state"], "incomplete")
+        self.assertEqual(result["checkout"], "retained")
+        self.assertEqual(result["retirement_state"], "enrolled")
         self.assertEqual((self.wt / "late-recovery").read_text(), "retain")
         self.assertTrue((self.admin / "locked").exists())
 
@@ -1862,6 +1862,8 @@ class ForegroundCompletionTests(unittest.TestCase):
         with mock.patch.object(FINISH, "deletion_admission", side_effect=advance), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
             result = self.call("check", "--apply")[1][0]
+        self.assertEqual(result["checkout"], "retained")
+        self.assertEqual(result["retirement_state"], "enrolled")
         self.assertEqual(result["reason"], "removal-preimage-changed", result)
         self.assertFalse(any("worktree" in call.args[0] and ("unlock" in call.args[0] or "remove" in call.args[0])
                              for call in children.call_args_list))
@@ -1885,7 +1887,7 @@ class ForegroundCompletionTests(unittest.TestCase):
         with mock.patch.object(FINISH, "manual_holders"), \
                 mock.patch.object(FINISH, "finalized_admission", side_effect=revoke):
             result = self.finish("--owner", "owner-2")[1][0]
-        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(result["checkout"], "retained", result)
         self.assertEqual(result["reason"], "awaiting-owner-release")
         self.assertTrue(self.wt.exists())
         self.assertTrue((self.admin / "locked").exists())
@@ -4352,8 +4354,8 @@ class FinalizedRemovalTests(unittest.TestCase):
             (self.repo / ".git/info/attributes").write_text("*.cmd eol=lf\n")
             return result
         with mock.patch.object(FINISH, "finalized_admission", side_effect=change_rule):
-            result = self.remove()[1][0]
-        self.assertEqual(result["retirement_state"], "incomplete", result)
+            with self.assertRaisesRegex(FINISH.Retain, "working-bytes-changed-or-limit"):
+                self.remove()
         self.assertTrue((self.admin / "locked").exists())
         self.assertEqual(path.read_bytes(), b"left\r\nright\r\nlast")
 
@@ -4454,9 +4456,8 @@ class FinalizedRemovalTests(unittest.TestCase):
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=change_after_admission), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
-            result = self.remove()[1][0]
-        self.assertEqual(result["checkout"], "unknown", result)
-        self.assertEqual(result["reason"], "commit-message-recovery-required", result)
+            with self.assertRaisesRegex(FINISH.Retain, "commit-message-recovery-required"):
+                self.remove()
         self.assertFalse(any("worktree" in call.args[0] and ("unlock" in call.args[0] or "remove" in call.args[0])
                              for call in children.call_args_list))
         self.assertEqual((self.admin / "COMMIT_EDITMSG").read_bytes(), draft)
@@ -4614,6 +4615,41 @@ class FinalizedRemovalTests(unittest.TestCase):
                 self.inventory(allow_empty_gitlinks=True)
         self.assertTrue(missing.is_dir())
 
+    def test_new_ignored_payload_during_intent_encoding_blocks_removal(self):
+        (self.repo / ".git/info/exclude").write_text("late.log\n")
+        payload = self.wt / "late.log"
+        encode = json.dumps
+        def write_during_encoding(value, **options):
+            result = encode(value, **options)
+            if isinstance(value, dict) and "sibling_identities" in value and "qualification" in value:
+                payload.write_text("retained")
+            return result
+
+        with mock.patch.object(json, "dumps", side_effect=write_during_encoding):
+            with self.assertRaisesRegex(FINISH.Retain, "ignored"):
+                self.remove()
+        self.assertEqual(payload.read_text(), "retained")
+        self.assert_enrolled_locked()
+
+    def test_new_ignored_payload_after_intent_retains_receipt_and_original_lock(self):
+        (self.repo / ".git/info/exclude").write_text("late.log\n")
+        payload = self.wt / "late.log"
+        marker = self.admin / "locked"
+        inode = marker.stat().st_ino
+        admission = FINISH.finalized_admission
+        def publish_after_commit(db, row, *args, **kwargs):
+            if FINISH.retirement(db, row)["state"] == "intent":
+                self.assertFalse(db.in_transaction)
+                payload.write_text("retained")
+            return admission(db, row, *args, **kwargs)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=publish_after_commit):
+            code, rows = self.remove()
+        self.assertEqual(rows[0]["reason"], "ignored-content-needs-exact-disposable-roots")
+        self.assertEqual(payload.read_text(), "retained")
+        self.assertEqual(marker.stat().st_ino, inode)
+        self.assert_incomplete_locked(code, rows)
+
     def test_gitlink_replacement_between_admissions_never_dispatches_removal(self):
         self.gitlinks()
         empty = self.wt / "vendor/empty"
@@ -4628,11 +4664,11 @@ class FinalizedRemovalTests(unittest.TestCase):
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=replace), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
-            code, rows = self.remove()
-        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+            with self.assertRaisesRegex(FINISH.Retain, "removal-preimage-changed"):
+                self.remove()
         self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
                              for call in children.call_args_list))
-        self.assert_incomplete_locked(code, rows)
+        self.assert_enrolled_locked()
 
     def test_gitlink_population_during_second_holder_scan_never_dispatches_removal(self):
         self.gitlinks()
@@ -4646,15 +4682,15 @@ class FinalizedRemovalTests(unittest.TestCase):
 
         with mock.patch.object(FINISH, "manual_holders", side_effect=populate), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
-            code, rows = self.call("remove", "--finalized")
+            with self.assertRaisesRegex(FINISH.Retain, "gitlink-directory-not-empty"):
+                self.call("remove", "--finalized")
         self.assertEqual(len(scans), 2)
         self.assertFalse(any("worktree" in call.args[0] and
                              ("remove" in call.args[0] or "unlock" in call.args[0])
                              for call in children.call_args_list),
                          "native removal dispatched after the second holder scan populated a gitlink")
-        self.assertEqual(rows[0]["reason"], "gitlink-directory-not-empty")
         self.assertEqual(late.read_text(), "must retain\n")
-        self.assert_incomplete_locked(code, rows)
+        self.assert_enrolled_locked()
 
     def test_real_dependency_tree_above_source_limit_removes_with_compact_holder_proof(self):
         (self.repo / ".git/info/exclude").write_text("node_modules\n")
@@ -5397,13 +5433,13 @@ class FinalizedRemovalTests(unittest.TestCase):
 
     def test_preserve_ref_drift_after_intent_never_dispatches_removal(self):
         branch, _, _ = self.other_recovery_branch()
-        admission, calls = FINISH.finalized_admission, []
+        admission = FINISH.finalized_admission
 
-        def drift(*args, **kwargs):
-            calls.append(args)
-            if len(calls) == 2:
+        def drift(db, row, *args, **kwargs):
+            if FINISH.retirement(db, row)["state"] == "intent":
+                self.assertFalse(db.in_transaction)
                 git(self.repo, "update-ref", branch, self.head)
-            return admission(*args, **kwargs)
+            return admission(db, row, *args, **kwargs)
 
         with mock.patch.object(FINISH, "manual_holders"), \
                 mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
@@ -5518,7 +5554,7 @@ class FinalizedRemovalTests(unittest.TestCase):
                     self.assertEqual(item["state"], "enrolled")
                     self.assertIsNone(item["intent"])
 
-    def test_fetch_head_drift_after_intent_never_dispatches_removal(self):
+    def test_fetch_head_drift_between_admissions_never_dispatches_removal(self):
         path = self.admin / "FETCH_HEAD"
         path.write_text(self.head + "\t\toriginal note\n")
         admission, calls = FINISH.finalized_admission, []
@@ -5531,11 +5567,11 @@ class FinalizedRemovalTests(unittest.TestCase):
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
-            code, rows = self.remove()
-        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+            with self.assertRaisesRegex(FINISH.Retain, "removal-preimage-changed"):
+                self.remove()
         self.assertFalse(any("worktree" in call.args[0] and ("remove" in call.args[0] or "unlock" in call.args[0])
                              for call in children.call_args_list))
-        self.assert_incomplete_locked(code, rows)
+        self.assert_enrolled_locked()
         self.assertEqual(path.read_text(), self.head + "\t\tchanged note\n")
 
     def resolve_undo_fixture(self):
@@ -5675,7 +5711,7 @@ class FinalizedRemovalTests(unittest.TestCase):
             item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
             self.assertEqual(json.loads(item["result"])["resolve_undo"], expected)
 
-    def test_resolve_undo_index_drift_after_intent_never_unlocks(self):
+    def test_resolve_undo_index_drift_between_admissions_never_unlocks(self):
         expected = self.resolve_undo_fixture()
         admission, calls = FINISH.finalized_admission, []
 
@@ -5687,14 +5723,11 @@ class FinalizedRemovalTests(unittest.TestCase):
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
-            code, rows = self.remove()
-        self.assertEqual(rows[0]["reason"], "removal-preimage-changed")
+            with self.assertRaisesRegex(FINISH.Retain, "removal-preimage-changed"):
+                self.remove()
         self.assertFalse(any("worktree" in call.args[0] and ("remove" in call.args[0] or "unlock" in call.args[0])
                              for call in children.call_args_list))
-        self.assert_incomplete_locked(code, rows)
-        with FINISH.ledger(self.state) as db:
-            intent = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
-            self.assertEqual(intent["before"]["contents"]["resolve_undo"], expected)
+        self.assert_enrolled_locked()
 
     def test_resolve_undo_reflog_drift_during_admission_retains_before_intent(self):
         self.resolve_undo_fixture()
@@ -5795,7 +5828,7 @@ class FinalizedRemovalTests(unittest.TestCase):
                 self.assertEqual(item["state"], "enrolled")
                 self.assertIsNone(item["intent"])
 
-    def test_head_drift_after_intent_never_dispatches_removal(self):
+    def test_head_drift_between_admissions_never_dispatches_removal(self):
         git(self.wt, "checkout", "-b", "reviewed-current")
         admission, calls = FINISH.finalized_admission, []
 
@@ -5807,15 +5840,12 @@ class FinalizedRemovalTests(unittest.TestCase):
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=FINISH.safety().supervise) as children:
-            code, rows = self.remove()
-        self.assertEqual(rows[0]["reason"], "finalized-head-changed")
+            with self.assertRaisesRegex(FINISH.Retain, "finalized-head-changed"):
+                self.remove()
         self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
                              for call in children.call_args_list))
-        self.assert_incomplete_locked(code, rows)
-        with FINISH.ledger(self.state) as db:
-            intent = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["intent"])
-        self.assertEqual(set(intent["before"]["preserved_refs"]),
-                         {"refs/heads/released-feature", "refs/heads/reviewed-current"})
+        self.assert_enrolled_locked()
+        self.assertNotEqual(git(self.wt, "rev-parse", "HEAD"), self.head)
 
     def test_original_ref_drift_during_admission_retains_before_intent(self):
         git(self.wt, "checkout", "-b", "reviewed-current")
@@ -6118,6 +6148,14 @@ class FinalizedRemovalTests(unittest.TestCase):
                 self.assertEqual(item["state"], "enrolled")
                 self.assertIsNone(item["intent"])
 
+    def assert_enrolled_locked(self):
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.read_only_ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "enrolled")
+            self.assertIsNone(item["intent"])
+            self.assertIsNone(item["result"])
+
     def assert_incomplete_locked(self, code, rows):
         self.assertEqual(code, 1, rows)
         self.assertEqual(rows[0]["checkout"], "unknown")
@@ -6191,11 +6229,11 @@ class FinalizedRemovalTests(unittest.TestCase):
         with mock.patch.object(FINISH, "finalized_admission", side_effect=exhausted_owner), \
                 mock.patch.object(FINISH, "git", wraps=native) as commands, \
                 mock.patch.object(FINISH.safety(), "supervise", wraps=supervise) as children:
-            code, rows = self.remove()
-        self.assertEqual(rows[0]["reason"], "removal-budget-exhausted")
+            with self.assertRaisesRegex(FINISH.Retain, "removal-budget-exhausted"):
+                self.remove()
         self.assertFalse(any(call.args[1:3] == ("worktree", "unlock") for call in commands.call_args_list))
         self.assertFalse(any("remove" in call.args[0] for call in children.call_args_list))
-        self.assert_incomplete_locked(code, rows)
+        self.assert_enrolled_locked()
 
     def test_budget_expiring_after_unlock_restores_lock_without_dispatch(self):
         native, clock = FINISH.git, time.monotonic
@@ -6339,7 +6377,7 @@ class FinalizedRemovalTests(unittest.TestCase):
             code, rows = self.call("remove", "--finalized", "--sudo-holder-scan")
         self.assertEqual(code, 0, rows)
         self.assertEqual(rows[0]["checkout"], "removed")
-        self.assertEqual(len(scans), 2)
+        self.assertEqual(len(scans), 3)
         for command, kwargs in scans:
             self.assertEqual(command, [
                 "/fixture/sudo", "-n", "-u", "#0", "--", "/fixture/lsof", "-nP", "+w", "-F0pfnDi"])
@@ -6542,8 +6580,8 @@ class MissingFinalizedRemovalTests(unittest.TestCase):
                 self.wt.symlink_to(self.legacy)
             return admit(*args, **kwargs)
         with mock.patch.object(FINISH, "finalized_admission", side_effect=appear):
-            result = self.remove()[1][0]
-        self.assertEqual(result["checkout"], "unknown")
+            with self.assertRaisesRegex(FINISH.Retain, "directory-identity-unsafe"):
+                self.remove()
         self.assertTrue(self.wt.is_symlink())
         self.assertTrue((self.legacy / "file").exists())
         self.assertEqual((self.admin / "locked").read_bytes(), self.before_lock)
@@ -6895,28 +6933,28 @@ with tool["QualificationFetchLease"](snap) as lease:
             return result
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=replace):
-            result = self.remove()[1][0]
-        self.assertEqual(result["checkout"], "unknown", result)
-        self.assertEqual(result["reason"], "qualification-fetch-carrier-changed")
+            with self.assertRaisesRegex(FINISH.Retain, "qualification-fetch-carrier-changed"):
+                self.remove()
         self.assertTrue((self.admin / "locked").exists())
         self.assertTrue(self.wt.exists())
 
-    def test_late_carrier_appearance_never_unlocks(self):
+    def test_carrier_appearance_after_final_admission_keeps_intent_absent(self):
         admission = FINISH.finalized_admission
         calls = []
 
         def appear(*args, **kwargs):
             result = admission(*args, **kwargs)
-            if not calls:
+            if calls:
                 self.carrier()
             calls.append(None)
             return result
 
         with mock.patch.object(FINISH, "finalized_admission", side_effect=appear):
-            result = self.remove()[1][0]
-        self.assertEqual(result["checkout"], "unknown", result)
-        self.assertEqual(result["reason"], "qualification-fetch-carrier-changed")
-        self.assertTrue((self.admin / "locked").exists())
+            with self.assertRaisesRegex(FINISH.Retain, "qualification-fetch-carrier-changed"):
+                self.remove()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.call("status", "--read-only")[1][0]["retirement_state"], "enrolled")
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
 
     def test_carrier_drift_after_native_removal_is_incomplete(self):
         path = self.carrier()
@@ -7889,11 +7927,11 @@ class ExactOrphanLockTests(unittest.TestCase):
             def remove(*args, **kwargs):
                 callback = kwargs["record_intent"]
                 def record(intent):
+                    callback(intent)
                     if after_intent:
-                        callback(intent)
+                        source.write_bytes(source.read_bytes() + b"\n")
+                if not after_intent:
                     source.write_bytes(source.read_bytes() + b"\n")
-                    if not after_intent:
-                        callback(intent)
                 kwargs["record_intent"] = record
                 return original(*args, **kwargs)
             with mock.patch.object(FINISH, "remove_with_intent", side_effect=remove):
@@ -8620,24 +8658,24 @@ class UnstartedRemovalTests(unittest.TestCase):
         ReleaseTests.setUp(self)
         with mock.patch.object(FINISH, "evaluate_release", return_value="fixture-retained"):
             self.finish("--release")
-        native = FINISH.finalized_admission
-        calls = 0
-
-        def expire(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise FINISH.Retain("admission-deadline")
-            return native(*args, **kwargs)
-
-        with mock.patch.object(FINISH, "finalized_admission", side_effect=expire), \
-                mock.patch.object(FINISH, "git", wraps=FINISH.git) as native_git:
+        with self.expire_after_intent(), mock.patch.object(FINISH, "git", wraps=FINISH.git) as native_git:
             result = self.remove()[1][0]
         self.assertFalse(any("unlock" in call.args for call in native_git.call_args_list))
-        self.assertEqual(calls, 2)
         self.assertEqual((result["checkout"], result["retirement_state"]), ("unknown", "incomplete"))
         self.original = self.receipt()
         self.assertIs(json.loads(self.original["result"])["native_attempted"], False)
+
+    @contextlib.contextmanager
+    def expire_after_intent(self):
+        native = FINISH.finalized_admission
+        def expire(db, row, *args, **kwargs):
+            if FINISH.retirement(db, row)["state"] == "intent":
+                self.assertFalse(db.in_transaction)
+                raise FINISH.Retain("admission-deadline")
+            return native(db, row, *args, **kwargs)
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=expire):
+            yield
 
     def receipt(self):
         with FINISH.ledger(self.state) as db:
@@ -8710,23 +8748,15 @@ class UnstartedRemovalTests(unittest.TestCase):
             self.finish("--release")
         branch = "refs/heads/saved-recovery"
         git(self.repo, "branch", "saved-recovery", self.head)
-        native, calls = FINISH.finalized_admission, []
-
-        def expire(*args, **kwargs):
-            calls.append(args)
-            if len(calls) == 2:
-                raise FINISH.Retain("admission-deadline")
-            return native(*args, **kwargs)
-
-        with mock.patch.object(FINISH, "manual_holders"), \
-                mock.patch.object(FINISH, "finalized_admission", side_effect=expire):
+        native = FINISH.finalized_admission
+        with mock.patch.object(FINISH, "manual_holders"), self.expire_after_intent():
             self.call("remove", "--finalized", "--preserve-ref", branch)
         with mock.patch.object(FINISH, "finalized_admission", wraps=native) as admission:
             self.assertEqual(self.recover()[1][0]["retirement_state"], "enrolled")
         self.assertEqual(admission.call_args.args[2].preserve_ref, [branch])
         self.assertEqual(git(self.repo, "rev-parse", branch), self.head)
 
-    def test_recovery_fits_one_scan_budget_without_repeating_the_expired_second_scan(self):
+    def test_recovery_fits_one_scan_budget_without_repeating_the_expired_admission(self):
         clock, elapsed = FINISH.time.monotonic(), 0
         native = FINISH.finalized_admission
 
@@ -9845,7 +9875,7 @@ class FailedCreationTests(unittest.TestCase):
         with self.assertRaisesRegex(FINISH.Retain, "already-recorded-no-retry"):
             self.recover("--apply", "--recovery-sha256", plan["recovery_sha256"])
 
-    def test_incomplete_attempt_retains_lock_and_prior_history_without_retry(self):
+    def test_final_admission_refusal_preserves_lock_without_a_failed_creation_receipt(self):
         digest = self.recover()[1][0]["recovery_sha256"]
         native = FINISH.finalized_admission
         calls = []
@@ -9855,6 +9885,21 @@ class FailedCreationTests(unittest.TestCase):
                 raise FINISH.Retain("pending-departure")
             return native(*args, **kwargs)
         with mock.patch.object(FINISH, "finalized_admission", side_effect=admit):
+            with self.assertRaisesRegex(FINISH.Retain, "pending-departure"):
+                self.recover("--apply", "--recovery-sha256", digest)
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.new_token)
+        self.assert_history_unchanged()
+        with FINISH.read_only_ledger(self.state) as db:
+            self.assertIsNone(FINISH.failed_creation_record(db, self.old, self.new_token))
+
+    def test_incomplete_attempt_retains_lock_and_prior_history_without_retry(self):
+        digest = self.recover()[1][0]["recovery_sha256"]
+        native = FINISH.git
+        def fail_unlock(path, *args, **kwargs):
+            if args[:2] == ("worktree", "unlock"):
+                raise FINISH.Retain("native-unlock-failed")
+            return native(path, *args, **kwargs)
+        with mock.patch.object(FINISH, "git", side_effect=fail_unlock):
             result = self.recover("--apply", "--recovery-sha256", digest)
         self.assertEqual(result[0], 1)
         self.assertEqual(result[1][0]["checkout"], "unknown")
