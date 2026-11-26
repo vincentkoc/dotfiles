@@ -1,9 +1,9 @@
 [[ -n "${DOTFILES_GWT_LOADED:-}" ]] && return 0
 typeset -g DOTFILES_GWT_LOADED=1
 
-# Path lookups must not emit CDPATH matches or run interactive zsh chpwd hooks.
+# Resolve literal paths without consulting CDPATH or running interactive zsh chpwd hooks.
 _gwt_path_cd() {
-    builtin cd ${ZSH_VERSION:+-q} "$@" >/dev/null
+    CDPATH= builtin cd ${ZSH_VERSION:+-q} "$@" >/dev/null
 }
 
 _gwt_physical_source_path() {

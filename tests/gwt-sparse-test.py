@@ -157,6 +157,24 @@ os.execv(os.environ["GWT_TEST_REAL_GIT"], [os.environ["GWT_TEST_REAL_GIT"], *arg
                          [str(self.repo / ".git"), str(self.repo), str(self.fixture)])
         self.assertEqual(calls.read_text().splitlines(), ["called"])
 
+    def test_path_probe_ignores_cdpath(self):
+        local = self.repo / "same name"
+        local.mkdir()
+        decoy = self.root / "cdpath"
+        (decoy / local.name).mkdir(parents=True)
+        script = r'''
+            source "$1" || exit 1
+            CDPATH="$2"
+            _gwt_path_cd -- "$3" || exit 1
+            printf '%s\n' "$PWD" "$CDPATH"
+        '''
+        for shell in ("bash", "zsh"):
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, "-c", script, shell, str(self.source), str(decoy), local.name],
+                                        cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [str(local), str(decoy)])
+
     def test_physical_profile_authority_and_override(self):
         expected = str(self.fixture / "git-sparse") + "\n"
         self.assertEqual(self.shell("_gwt_sparse_root").stdout, expected)
