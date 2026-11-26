@@ -205,14 +205,17 @@ and returns a `recovery_sha256`. Apply the same operands with
 contents, holders, lifecycle state or sibling proof retains the registration.
 Sibling HEAD advances, branch switches and detached checkout transitions do not
 change this proof. Sibling registration paths, order, other fields and physical
-identities remain bound; additions or removals require a fresh plan. Native
-removal separately records full current sibling rows and verifies preservation.
+identities remain bound to the final registration observation during admission;
+later additions or removals require a fresh plan. Native removal separately
+records full current sibling rows and verifies preservation.
 
 Exact selection still requires HEAD on a remote-tracking ref. Earlier admin
 recovery commits may instead use the selected task branch's surviving common
 reflog, as finalized closeout does. Each recovery OID must name an existing
-commit. The plan binds the common reflog's identity, bytes and OIDs, rechecks
-them before intent and unlock, and verifies their preservation after removal.
+commit. Validated commits named directly in these qualified roots need no extra
+remote reachability walk. The plan binds the common reflog's identity, bytes and
+OIDs, rechecks them before intent and unlock, and verifies their preservation
+after removal.
 Batch selection keeps its remote-only requirement.
 
 If the filesystem device number changed, exact selection additionally accepts
