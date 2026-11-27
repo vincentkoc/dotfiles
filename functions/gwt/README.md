@@ -763,6 +763,14 @@ external dependencies. A partial failure holds the intent and restores the
 matching native lock when its original registration still exists; it never
 replays deletion. Unenrolled task trees continue to use plain `gwt rm`.
 
+Explicit `gwt rm --finalized` waits up to 30 seconds for another lifecycle
+operation to release the ledger lock, within the existing 238-second operation
+budget. Expiry still reports `lifecycle-busy` without reading SQLite or starting
+removal. After acquisition, GWT rechecks the lock identity and private permissions
+and reads the current lifecycle state. The 120-second admission budget and all
+three admission passes remain unchanged. Other commands keep immediate lock
+refusal; new-checkout enrollment keeps its existing 10-second wait.
+
 If the checkout directory is already absent, the same literal `--finalized`
 command can retire its surviving registration. This requires all recorded
 owners completed and released, exact merged PR proof, no pending recovery,
