@@ -2434,11 +2434,18 @@ def reconcile_unstarted(db, row, args):
             or ("resolve_undo" in outcome and outcome["resolve_undo"] != before["contents"].get("resolve_undo"))
             or qualification.get("mode") != "explicit-finalized-task"
             or qualification.get("operator") != owner_id(args)
-            or before["contents"].get("missing_worktree")
-            or cancellation_rows(db, row["id"])):
+            or before["contents"].get("missing_worktree")):
         raise Retain("reconciliation-removal-was-not-proven-unstarted")
-    completion_checks(db, row, local=False)
-    all_released(db, row, item)
+    cancelled_head = terminal_cancellation_head(db, row)
+    if cancelled_head is not None:
+        if outcome.get("native_attempted") is not False:
+            raise Retain("reconciliation-removal-was-not-proven-unstarted")
+        if (cancelled_head != intent["head"] or cancelled_head != before["snapshot"]["head"]
+                or intent["branch"] != before["snapshot"]["branch"]):
+            raise Retain("reconciliation-cancellation-head-changed")
+    else:
+        completion_checks(db, row, local=False)
+        all_released(db, row, item)
     snap, module = before["snapshot"], safety()
     if not snap.get("lock_reason", "").startswith("gwt-finish.v2:"):
         raise Retain("reconciliation-needs-native-enrollment")
@@ -2451,7 +2458,12 @@ def reconcile_unstarted(db, row, args):
         # recovery data against current roots; historical roots grant no custody.
         refs = preserved_refs(snap, before["preserved_refs"], until)
         source = {**dict(row), "finalized_refs": refs}
-        observed = finalized_admission(db, source, disposal, until, completed=True, fetch_lease=fetch_lease)
+        if cancelled_head is not None:
+            # Bind admission to terminal cancellation without inventing durable
+            # finish/PR proof or enabling completion's dependency-link exception.
+            source["finish_head"] = cancelled_head
+        observed = finalized_admission(db, source, disposal, until,
+                                       completed=cancelled_head is None, fetch_lease=fetch_lease)
         if json.dumps(observed, sort_keys=True) != json.dumps({**before, "preserved_refs": refs}, sort_keys=True):
             raise Retain("reconciliation-unstarted-preimage-changed")
         # Metadata recovery needs one fresh inventory; a second full scan could
