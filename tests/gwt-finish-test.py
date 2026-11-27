@@ -9333,6 +9333,215 @@ class UnstartedRemovalTests(unittest.TestCase):
         self.assertEqual(self.receipt(), self.original)
 
 
+class CancelledUnstartedRemovalTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+    expire_after_intent = UnstartedRemovalTests.expire_after_intent
+    receipt = UnstartedRemovalTests.receipt
+    arguments = UnstartedRemovalTests.arguments
+    recover = UnstartedRemovalTests.recover
+    rewrite_result = UnstartedRemovalTests.rewrite_result
+    advance_ref = UnstartedRemovalTests.advance_ref
+    append_reflog = UnstartedRemovalTests.append_reflog
+    test_missing_dispatched_or_contradictory_child_facts_stay_held = (
+        UnstartedRemovalTests.test_missing_dispatched_or_contradictory_child_facts_stay_held)
+    test_exact_owner_generation_and_receipt_are_required = (
+        UnstartedRemovalTests.test_exact_owner_generation_and_receipt_are_required)
+    test_source_holder_and_preimage_changes_refuse = (
+        UnstartedRemovalTests.test_source_holder_and_preimage_changes_refuse)
+    test_archive_and_cas_failure_roll_back_together = (
+        UnstartedRemovalTests.test_archive_and_cas_failure_roll_back_together)
+
+    def setUp(self):
+        ReleaseTests.setUp(self)
+        no_pr = mock.patch.object(FINISH, "pr", side_effect=AssertionError("cancelled task requested PR proof"))
+        no_pr.start()
+        self.addCleanup(no_pr.stop)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
+        self.call("cancel", "--reason", "superseded without a PR")
+        with self.expire_after_intent():
+            result = self.remove()[1][0]
+        self.assertEqual((result["checkout"], result["retirement_state"]), ("unknown", "incomplete"))
+        self.original = self.receipt()
+
+    def disposition(self):
+        with FINISH.ledger(self.state) as db:
+            row = FINISH.get_row(db, self.wt)
+            return ({key: row[key] for key in ("identity", "finish_head", "primary_pr", "target", "dependencies")},
+                    FINISH.owner_rows(db, row["id"]), FINISH.cancellation_rows(db, row["id"]))
+
+    def test_cancelled_recovery_preserves_disposition_then_separate_closeout_removes(self):
+        before = self.disposition()
+        self.assertTrue(all(before[0][key] is None for key in ("finish_head", "primary_pr", "target", "dependencies")))
+        self.assertEqual(before[1], [{"owner": "owner-1", "completed": 0}])
+        self.assertEqual(len(before[2]), 1)
+        with mock.patch.object(FINISH, "remove_with_intent", side_effect=AssertionError("removal")), \
+                mock.patch.object(FINISH, "git", wraps=FINISH.git) as native_git, \
+                mock.patch.object(FINISH, "finalized_admission", wraps=FINISH.finalized_admission) as admission:
+            result = self.recover()[1][0]
+        self.assertFalse(any("unlock" in call.args or "remove" in call.args
+                             for call in native_git.call_args_list))
+        self.assertIs(admission.call_args.kwargs["completed"], False)
+        self.assertEqual(result["generation"], self.original["generation"] + 1)
+        self.assertEqual((result["state"], result["retirement_state"]), ("cancelled", "enrolled"))
+        self.assertEqual(result["released_owners"], [])
+        self.assertEqual(self.disposition(), before)
+        with FINISH.ledger(self.state) as db:
+            archive = db.execute("SELECT * FROM unstarted_removal_recoveries").fetchone()
+            self.assertEqual((archive["intent"], archive["result"]),
+                             (self.original["intent"], self.original["result"]))
+        self.assertTrue(self.wt.exists())
+        self.assertTrue(self.admin.exists())
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        self.assertEqual(self.remove()[1][0]["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+        self.assertEqual(self.disposition(), before)
+
+    def test_cancelled_recovery_requires_explicit_native_attempted_false(self):
+        result = json.loads(self.original["result"])
+        result.pop("native_attempted")
+        self.rewrite_result(result)
+        before = self.receipt()
+        with self.assertRaisesRegex(FINISH.Retain, "not-proven-unstarted"):
+            self.recover()
+        self.assertEqual(self.receipt(), before)
+
+    def test_cancelled_head_and_intent_headers_must_match_snapshot(self):
+        original = json.loads(self.original["intent"])
+        variants = [{**original, "head": "b" * 40}, {**original, "branch": "refs/heads/other"},
+                    {**original, "before": {**original["before"],
+                        "snapshot": {**original["before"]["snapshot"], "head": "b" * 40}}}]
+        for intent in variants:
+            with self.subTest(intent_head=intent["head"], branch=intent["branch"]):
+                with FINISH.ledger(self.state) as db, db:
+                    db.execute("UPDATE retirement SET intent=? WHERE worktree_id=?",
+                               (json.dumps(intent), self.original["worktree_id"]))
+                before = self.receipt()
+                with self.assertRaisesRegex(FINISH.Retain, "cancellation-head-changed"):
+                    self.recover()
+                self.assertEqual(self.receipt(), before)
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE retirement SET intent=? WHERE worktree_id=?",
+                       (self.original["intent"], self.original["worktree_id"]))
+            db.execute("UPDATE owner_cancellations SET head=? WHERE worktree_id=?",
+                       ("b" * 40, self.original["worktree_id"]))
+        with self.assertRaisesRegex(FINISH.Retain, "cancellation-head-changed"):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_active_owner_and_pin_remain_blocking(self):
+        # Model inconsistent older/out-of-band state while preserving the exact
+        # incomplete receipt. Native owner and pin commands already reject it.
+        for statement, reason in (
+                ("INSERT INTO owners VALUES (?, 'owner-2', 0)", "awaiting-owner-completion"),
+                ("INSERT INTO pins VALUES (?, 'owner-1', 'still needed')", "recovery-pin-present")):
+            with self.subTest(reason=reason):
+                with FINISH.ledger(self.state) as db, db:
+                    db.execute("UPDATE retirement SET state='enrolled' WHERE worktree_id=?",
+                               (self.original["worktree_id"],))
+                    db.execute(statement, (self.original["worktree_id"],))
+                    db.execute("UPDATE retirement SET state='incomplete', generation=? WHERE worktree_id=?",
+                               (self.original["generation"], self.original["worktree_id"]))
+                with self.assertRaisesRegex(FINISH.Retain, reason):
+                    self.recover()
+                self.assertEqual(self.receipt(), self.original)
+                with FINISH.ledger(self.state) as db, db:
+                    db.execute("UPDATE retirement SET state='enrolled' WHERE worktree_id=?",
+                               (self.original["worktree_id"],))
+                    db.execute("DELETE FROM owners WHERE owner='owner-2'")
+                    db.execute("DELETE FROM pins")
+                    db.execute("UPDATE retirement SET state='incomplete', generation=? WHERE worktree_id=?",
+                               (self.original["generation"], self.original["worktree_id"]))
+
+    def test_admin_index_and_lock_changes_remain_blocking(self):
+        for name, contents in (("index", b"invalid index"), ("locked", b"unrelated lock\n"),
+                               ("MERGE_HEAD", (self.head + "\n").encode())):
+            path = self.admin / name
+            original = path.read_bytes() if path.exists() else None
+            with self.subTest(name=name):
+                path.write_bytes(contents)
+                with self.assertRaises(FINISH.Retain):
+                    self.recover()
+                self.assertEqual(self.receipt(), self.original)
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(original)
+
+    def test_missing_ref_or_task_reflog_change_cannot_be_reconciled(self):
+        branch = "refs/heads/released-feature"
+        git(self.repo, "update-ref", "-d", branch)
+        with self.assertRaises(FINISH.Retain):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+        git(self.repo, "update-ref", branch, self.head)
+        self.append_reflog(branch)
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_ref_progress_during_recovery_refuses_before_archiving(self):
+        native = FINISH.finalized_admission
+
+        def progress(*args, **kwargs):
+            result = native(*args, **kwargs)
+            self.append_reflog("refs/heads/released-feature")
+            return result
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=progress):
+            with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_absent_checkout_stays_blocked(self):
+        shutil.rmtree(self.wt)
+        with self.assertRaises(FileNotFoundError) as failure:
+            self.recover()
+        self.assertEqual(failure.exception.errno, errno.ENOENT)
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_current_head_and_branch_drift_stay_blocked(self):
+        head = self.advance_ref()
+        git(self.repo, "update-ref", "refs/heads/released-feature", head)
+        with self.assertRaisesRegex(FINISH.Retain, "finalized-head-changed"):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+        git(self.repo, "branch", "other", head)
+        git(self.wt, "symbolic-ref", "HEAD", "refs/heads/other")
+        with self.assertRaisesRegex(FINISH.Retain, "worktree-identity-changed"):
+            self.recover()
+        self.assertEqual(self.receipt(), self.original)
+
+    def test_stale_recovery_cannot_change_successor_attempt(self):
+        original_args = self.arguments()
+        self.recover()
+        with self.expire_after_intent():
+            self.remove()
+        successor = self.receipt()
+        self.assertEqual(successor["generation"], self.original["generation"] + 1)
+        with self.assertRaisesRegex(FINISH.Retain, "exact-incomplete-intent"):
+            self.call("reconcile", *original_args)
+        self.assertEqual(self.receipt(), successor)
+
+    def test_another_terminal_owner_cannot_reconcile_original_operators_attempt(self):
+        self.recover()
+        self.call("resume", "--owner", "owner-2")
+        self.call("cancel", "--owner", "owner-2", "--reason", "also superseded")
+        with self.expire_after_intent():
+            self.remove()
+        original, before = self.receipt(), self.disposition()
+        self.assertEqual({row["owner"] for row in before[2]}, {"owner-1", "owner-2"})
+        with self.assertRaisesRegex(FINISH.Retain, "not-proven-unstarted"):
+            self.recover("--owner", "owner-2")
+        self.assertEqual(self.receipt(), original)
+        self.recover()
+        self.assertEqual(self.disposition(), before)
+
+
 class ReconciliationTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call

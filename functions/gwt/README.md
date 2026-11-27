@@ -1151,9 +1151,16 @@ gwt finish-reconcile --unstarted-removal --worktree /absolute/task/checkout \
   --intent-sha256 <original-intent-hash> --result-sha256 <original-result-hash>
 ```
 
-This mode requires the original recorded operator, completed and released
-owners, merged PR proof, no pins, the unchanged native lock, and fresh admission
-matching the original source/admin/index, preserved refs and disposal scope.
+This mode requires the original recorded operator, no pins, the unchanged
+native lock, and fresh admission matching the original source/admin/index,
+preserved refs and disposal scope.
+Completed work still requires completed and released owners with merged PR
+proof. Cancelled work can instead use its recorded cancellation HEAD when every
+owner is completed or cancelled. That HEAD must match both the original intent
+and snapshot, and the intent branch must match the snapshot. This route requires
+literal `native_attempted=false`; a legacy receipt without that field cannot
+qualify cancelled work. It preserves cancellation records and does not invent
+finish, PR or release proof.
 The original ref names must still exist. Recovery qualifies their current tips
 and reflogs as custody roots; it does not require independent refs to retain
 their historical values. The checkout's HEAD, own branch reflog and complete
@@ -1162,7 +1169,7 @@ custody roots, so ref progress that loses required recovery data still refuses.
 It accepts only a pre-unlock `admission-deadline` result with explicit
 `child: null`. New receipts must record literal `native_attempted=false`;
 legacy receipts must match the known pre-dispatch shape with no postcheck
-fields. Missing child proof, attempted unlock, cancellation and partial removal
+fields. Missing child proof, attempted unlock, active owners and partial removal
 remain blocked.
 
 Recovery archives the original text unchanged, advances the generation and
