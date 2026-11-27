@@ -346,7 +346,7 @@ def policy_allows(row, allowed):
 
 
 @contextlib.contextmanager
-def ledger(state_dir, *, create=False, wait_seconds=0):
+def ledger(state_dir, *, create=False, wait_seconds=0, operation_deadline=None):
     root = Path(state_dir).expanduser()
     if not os.path.lexists(root):
         if not create:
@@ -370,16 +370,22 @@ def ledger(state_dir, *, create=False, wait_seconds=0):
     try:
         private_file(lock_path)
         deadline = time.monotonic() + wait_seconds if wait_seconds else None
+        if operation_deadline is not None:
+            deadline = min(deadline, operation_deadline) if deadline is not None else operation_deadline
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise Retain("lifecycle-busy")
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError as error:
-                remaining = deadline - time.monotonic() if deadline is not None else 0
+                remaining = deadline - time.monotonic() if wait_seconds and deadline is not None else 0
                 if remaining <= 0:
                     raise Retain("lifecycle-busy") from error
                 time.sleep(min(0.1, remaining))
-        if wait_seconds and not os.path.samestat(os.fstat(fd), lock_path.lstat()):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise Retain("lifecycle-busy")
+        if wait_seconds and not os.path.samestat(os.fstat(fd), private_file(lock_path)):
             raise Retain("lifecycle-lock-changed")
         database = root / "lifecycle.sqlite"
         for suffix in ("", "-journal", "-wal", "-shm"):
@@ -4752,8 +4758,13 @@ def main(argv=None):
 
     # A new private checkout is already locked in Git. Give its original
     # enrollment a chance to finish before leaving it without a lifecycle row.
+    wait_options = {"wait_seconds": 10 if args.new_token else 0}
+    if args.command == "remove" and args.finalized:
+        # Manual closeout may wait for another lifecycle owner, within the
+        # original operation budget. Its row and admission are read afterwards.
+        wait_options = {"wait_seconds": 30, "operation_deadline": safety().DEADLINE}
     with diagnostic_phase("state-session"), ledger(
-        args.state_dir, create=args.command == "enroll", wait_seconds=10 if args.new_token else 0
+        args.state_dir, create=args.command == "enroll", **wait_options
     ) as db:
         if args.command == "enroll":
             storage_guard()

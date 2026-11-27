@@ -43,6 +43,169 @@ def git(repo, *args):
     ).stdout.strip()
 
 
+class LedgerWaitTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name).resolve() / "state"
+        with FINISH.ledger(self.state, create=True):
+            pass
+        self.lock = self.state / "lifecycle.lock"
+
+    @contextlib.contextmanager
+    def held(self):
+        with self.lock.open("rb") as descriptor:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield descriptor
+
+    def test_real_short_handoff_acquires_existing_ledger(self):
+        with self.held() as held:
+            released = []
+            native_sleep = time.sleep
+
+            def release(delay):
+                fcntl.flock(held, fcntl.LOCK_UN)
+                released.append(delay)
+                native_sleep(delay)
+
+            with mock.patch.object(FINISH.time, "sleep", side_effect=release):
+                with FINISH.ledger(self.state, wait_seconds=2, operation_deadline=time.monotonic() + 3) as db:
+                    self.assertIsNotNone(db)
+                    self.assertTrue(released)
+            self.assertTrue(all(0 < delay <= 0.1 for delay in released))
+
+    def test_wait_and_operation_deadlines_bound_retries_and_sleep(self):
+        for seconds, operation_deadline in ((0.25, 200), (30, 100.25)):
+            with self.subTest(seconds=seconds), self.held():
+                now, attempts, delays = [100.0], [], []
+                native_flock = fcntl.flock
+
+                def acquire(*args):
+                    attempts.append(now[0])
+                    return native_flock(*args)
+
+                def advance(delay):
+                    delays.append(delay)
+                    now[0] += delay
+
+                with mock.patch.object(FINISH.time, "monotonic", side_effect=lambda: now[0]), \
+                        mock.patch.object(FINISH.time, "sleep", side_effect=advance), \
+                        mock.patch.object(FINISH.fcntl, "flock", side_effect=acquire), \
+                        mock.patch.object(FINISH.sqlite3, "connect") as connect:
+                    with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                        with FINISH.ledger(self.state, wait_seconds=seconds, operation_deadline=operation_deadline):
+                            self.fail("expired wait entered SQLite")
+                self.assertAlmostEqual(now[0], 100.25)
+                self.assertTrue(all(attempt < 100.25 for attempt in attempts))
+                self.assertTrue(all(0 < delay <= 0.1 for delay in delays))
+                connect.assert_not_called()
+
+    def test_expired_operation_does_not_attempt_lock_or_sqlite(self):
+        with mock.patch.object(FINISH.time, "monotonic", return_value=100), \
+                mock.patch.object(FINISH.fcntl, "flock") as acquire, \
+                mock.patch.object(FINISH.sqlite3, "connect") as connect:
+            with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                with FINISH.ledger(self.state, wait_seconds=30, operation_deadline=100):
+                    self.fail("expired operation entered SQLite")
+        acquire.assert_not_called()
+        connect.assert_not_called()
+
+    def test_acquisition_at_either_deadline_refuses_before_sqlite_and_releases_lock(self):
+        for seconds, operation_deadline, boundary in ((30, 200, 130), (30, 100.5, 100.5)):
+            now = [100.0]
+            native_flock = fcntl.flock
+
+            def acquire(*args):
+                native_flock(*args)
+                now[0] = boundary
+
+            with self.subTest(boundary=boundary), \
+                    mock.patch.object(FINISH.time, "monotonic", side_effect=lambda: now[0]), \
+                    mock.patch.object(FINISH.fcntl, "flock", side_effect=acquire), \
+                    mock.patch.object(FINISH.sqlite3, "connect") as connect:
+                with self.assertRaisesRegex(FINISH.Retain, "lifecycle-busy"):
+                    with FINISH.ledger(self.state, wait_seconds=seconds, operation_deadline=operation_deadline):
+                        self.fail("late acquisition entered SQLite")
+            connect.assert_not_called()
+            with self.held():
+                pass
+
+    def changed_lock(self, replace):
+        with self.held() as held:
+            def change(unused_delay):
+                if replace:
+                    self.lock.unlink()
+                    descriptor = os.open(self.lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    os.close(descriptor)
+                else:
+                    self.lock.chmod(0o644)
+                fcntl.flock(held, fcntl.LOCK_UN)
+
+            with mock.patch.object(FINISH.time, "sleep", side_effect=change), \
+                    mock.patch.object(FINISH.sqlite3, "connect") as connect:
+                with self.assertRaisesRegex(FINISH.Retain, "lifecycle-lock-changed" if replace else
+                                            "private-file-permissions-required"):
+                    with FINISH.ledger(self.state, wait_seconds=1):
+                        self.fail("changed lock entered SQLite")
+            connect.assert_not_called()
+
+    def test_replaced_lock_after_wait_refuses(self):
+        self.changed_lock(True)
+
+    def test_private_mode_is_requalified_after_wait(self):
+        self.changed_lock(False)
+
+    def test_lock_failure_and_wait_interrupt_close_the_descriptor(self):
+        native_open = os.open
+        for failure in (OSError(errno.EIO, "fixture lock failure"), KeyboardInterrupt()):
+            opened = []
+
+            def open_file(*args, **kwargs):
+                descriptor = native_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+
+            with self.subTest(failure=type(failure).__name__), self.held(), \
+                    mock.patch.object(FINISH.os, "open", side_effect=open_file), \
+                    mock.patch.object(FINISH.sqlite3, "connect") as connect:
+                patch = (mock.patch.object(FINISH.fcntl, "flock", side_effect=failure)
+                         if isinstance(failure, OSError) else
+                         mock.patch.object(FINISH.time, "sleep", side_effect=failure))
+                with patch, self.assertRaises(type(failure)):
+                    with FINISH.ledger(self.state, wait_seconds=1):
+                        self.fail("failed lock entered SQLite")
+                self.assertEqual(len(opened), 1)
+                with self.assertRaises(OSError) as closed:
+                    os.fstat(opened[0])
+                self.assertEqual(closed.exception.errno, errno.EBADF)
+                connect.assert_not_called()
+
+    def test_only_finalized_remove_gets_operation_bounded_wait(self):
+        class ReachedLedger(Exception):
+            pass
+
+        cases = ((["remove", "--finalized"], 30),
+                 (["enroll", "--new-token", str(uuid.uuid4())], 10),
+                 (["enroll"], 0), (["finish", "--pr", "https://github.com/example/repo/pull/1"], 0),
+                 (["status", "--read-only"], 0))
+        for args, seconds in cases:
+            with self.subTest(args=args), mock.patch.object(FINISH.time, "monotonic", return_value=100), \
+                    mock.patch.object(FINISH, "ledger", side_effect=ReachedLedger) as writable, \
+                    mock.patch.object(FINISH, "read_only_ledger", side_effect=ReachedLedger) as readonly:
+                with self.assertRaises(ReachedLedger):
+                    FINISH.main([*args, "--worktree", str(self.state), "--state-dir", str(self.state)])
+                selected = readonly if "--read-only" in args else writable
+                other = writable if "--read-only" in args else readonly
+                selected.assert_called_once()
+                other.assert_not_called()
+                self.assertEqual(selected.call_args.kwargs.get("wait_seconds", 0), seconds)
+                self.assertEqual(FINISH.safety().DEADLINE, 338)
+                if seconds == 30:
+                    self.assertEqual(selected.call_args.kwargs["operation_deadline"], 338)
+                else:
+                    self.assertNotIn("operation_deadline", selected.call_args.kwargs)
+
+
 class PullRequestProofTests(unittest.TestCase):
     def read(self, head_repo, *, base="upstream/repo"):
         data = {"number": 1, "base": {"repo": {"full_name": base}, "ref": "main"},
@@ -6757,6 +6920,54 @@ class MissingContainerFinalizedRemovalTests(MissingFinalizedRemovalTests):
     def disappear(self):
         super().disappear()
         self.wt.parent.rmdir()
+
+
+class FinalizedLedgerWaitTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    setUp = ReleaseTests.setUp
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+
+    def test_real_handoff_allows_one_fresh_finalized_closeout(self):
+        with (self.state / "lifecycle.lock").open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            released = []
+            native_sleep = time.sleep
+
+            def release(delay):
+                if not released:
+                    fcntl.flock(held, fcntl.LOCK_UN)
+                    released.append(delay)
+                native_sleep(delay)
+
+            with mock.patch.object(FINISH.time, "sleep", side_effect=release):
+                result = self.remove()[1][0]
+            self.assertTrue(released)
+        self.assertEqual(result["checkout"], "removed")
+        self.assertFalse(self.wt.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "released-feature"), self.head)
+
+    def test_retirement_changed_during_wait_is_read_fresh_before_admission(self):
+        with (self.state / "lifecycle.lock").open("rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def change_retirement(unused_delay):
+                with contextlib.closing(sqlite3.connect(self.state / "lifecycle.sqlite")) as db, db:
+                    db.execute("UPDATE retirement SET state='incomplete', intent='{}', result='{}'")
+                fcntl.flock(held, fcntl.LOCK_UN)
+
+            with mock.patch.object(FINISH.time, "sleep", side_effect=change_retirement), \
+                    mock.patch.object(FINISH, "finalized_admission") as admission:
+                with self.assertRaisesRegex(FINISH.Retain, "removal-intent"):
+                    self.remove()
+                admission.assert_not_called()
+        self.assertTrue(self.wt.exists())
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual((item["state"], item["intent"], item["result"]), ("incomplete", "{}", "{}"))
 
 
 class MissingCancelledRemovalTests(unittest.TestCase):
