@@ -1053,6 +1053,17 @@ setup_openclaw_symlinks() {
     fi
 }
 
+setup_mac_laptop_power() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        return
+    fi
+
+    local helper
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin/mac-laptop-power"
+    info "Applying laptop AC sleep policy..."
+    "$helper" --apply
+}
+
 main() {
     echo ""
     info "Platform: $(platform_name)"
@@ -1096,6 +1107,7 @@ main() {
     setup_terminal_glyph_font
     setup_ghostty_config
     setup_iterm_preferences
+    setup_mac_laptop_power
     setup_openclaw_symlinks
 
     echo ""

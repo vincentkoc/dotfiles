@@ -12,11 +12,13 @@ on:
       - ".mackup.cfg"
       - ".mackup/portable-tool-preferences.cfg"
       - "bin/mac-preferences"
+      - "bin/mac-laptop-power"
       - "bin/crabbox"
       - "bin/boat-install"
       - "tests/crabbox-boat-test.py"
       - "profiles/macos/**"
       - "tests/mac-preferences-test.py"
+      - "tests/mac-laptop-power-test.py"
       - "tests/optional-shell-hooks-test.py"
       - "bin/linux-server-bootstrap"
       - "profiles/linux-server/**"
@@ -74,6 +76,7 @@ jobs:
           python3 tests/optional-shell-hooks-test.py
           python3 tests/crabbox-boat-test.py
           python3 tests/mac-preferences-test.py
+          python3 tests/mac-laptop-power-test.py
           python3 tests/linux-server-startup-test.py
           bash tests/install-foundations-test.sh
           bash tests/install-tt-recovery-guidance-test.sh
