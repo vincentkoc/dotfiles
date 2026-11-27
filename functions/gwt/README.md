@@ -1161,6 +1161,15 @@ and snapshot, and the intent branch must match the snapshot. This route requires
 literal `native_attempted=false`; a legacy receipt without that field cannot
 qualify cancelled work. It preserves cancellation records and does not invent
 finish, PR or release proof.
+With literal `native_attempted=false`, only the Git admin root directory's
+historical mtime and ctime may differ. Its identity, mode, ownership, size, flags
+and extended attributes, every admin leaf and nested directory, and the rest of
+the preimage remain exact. Recovery freezes one fresh admission, then strictly
+rechecks its admin inventory and root, including both timestamps, before
+archiving. Any further drift refuses. The archive adds the current root proof
+and timestamp delta beside the unchanged original receipt. Legacy receipts
+without the native-attempt field still require an exact historical preimage;
+actual removal keeps its existing exact admission checks.
 The original ref names must still exist. Recovery qualifies their current tips
 and reflogs as custody roots; it does not require independent refs to retain
 their historical values. The checkout's HEAD, own branch reflog and complete

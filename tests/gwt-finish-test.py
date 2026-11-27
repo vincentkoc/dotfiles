@@ -9542,6 +9542,208 @@ class CancelledUnstartedRemovalTests(unittest.TestCase):
         self.assertEqual(self.disposition(), before)
 
 
+class UnstartedAdminPreimageTests(unittest.TestCase):
+    def preimage(self):
+        directory = [1, 2, stat.S_IFDIR | 0o700, 501, 20, 4, 256, 100, 200, 0, []]
+        leaf = [1, 3, stat.S_IFREG | 0o600, 501, 20, 1, 10, 100, 200, 0, []]
+        return {"admin": {"": [directory, None], "HEAD": [leaf, "hash"],
+                          "index": [list(leaf), "index-hash"], "logs": [list(directory), None]},
+                "snapshot": {"head": "a" * 40}, "contents": {"index": "proof", "source": "proof"}}
+
+    def changed(self):
+        before = self.preimage()
+        observed = json.loads(json.dumps(before))
+        observed["admin"][""][0][7:9] = [101, 202]
+        return before, observed
+
+    def test_only_directory_root_times_can_differ(self):
+        before, observed = self.changed()
+        expected = json.loads(json.dumps(observed))
+        change = FINISH.unstarted_preimage_change(before, observed, False)
+        self.assertEqual(change, {"proof": observed["admin"][""],
+                                 "timestamp_delta_ns": {"mtime_ns": 1, "ctime_ns": 2}})
+        self.assertEqual(observed, expected)
+        self.assertIsNone(FINISH.unstarted_preimage_change(before, before, None))
+
+    def test_other_root_fields_and_xattrs_stay_exact(self):
+        for index in (*range(7), 9, 10):
+            before, observed = self.changed()
+            observed["admin"][""][0][index] = (["com.apple.provenance"] if index == 10
+                                                else observed["admin"][""][0][index] + 1)
+            with self.subTest(index=index), self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                FINISH.unstarted_preimage_change(before, observed, False)
+
+    def test_malformed_root_proofs_refuse(self):
+        root = self.preimage()["admin"][""]
+        variants = [None, [], root[:1], [root[0], "hash"], [root[0][:-1], None],
+                    [root[0] + [0], None], [root[0][:7] + [False] + root[0][8:], None],
+                    [root[0][:2] + [stat.S_IFREG | 0o600] + root[0][3:], None],
+                    [root[0][:10] + [{}], None], [root[0][:10] + [["unknown"]], None]]
+        for side in (0, 1):
+            for root in variants:
+                pair = self.changed()
+                pair[side]["admin"][""] = root
+                with self.subTest(side=side, root=root), self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                    FINISH.unstarted_preimage_change(*pair, False)
+
+    def test_leaf_nested_directory_source_and_index_drift_refuse(self):
+        for name, index in (("HEAD", 0), ("HEAD", 1), ("index", 0), ("index", 1), ("logs", 0)):
+            before, observed = self.changed()
+            if index == 0:
+                observed["admin"][name][0][7] += 1
+            else:
+                observed["admin"][name][1] += "changed"
+            with self.subTest(name=name, index=index), self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                FINISH.unstarted_preimage_change(before, observed, False)
+        for mutation in (lambda value: value["admin"].pop("HEAD"),
+                         lambda value: value["admin"].update(extra=value["admin"]["HEAD"]),
+                         lambda value: value["contents"].update(source="changed"),
+                         lambda value: value["contents"].update(index="changed"),
+                         lambda value: value["snapshot"].update(head="b" * 40)):
+            before, observed = self.changed()
+            mutation(observed)
+            with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                FINISH.unstarted_preimage_change(before, observed, False)
+
+    def test_relaxation_requires_literal_native_attempted_false(self):
+        for attempted in (None, True, 0, "false"):
+            with self.subTest(attempted=attempted), self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                FINISH.unstarted_preimage_change(*self.changed(), attempted)
+
+
+class UnstartedAdminTimestampTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    finish = ReleaseTests.finish
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+    setUp = UnstartedRemovalTests.setUp
+    expire_after_intent = UnstartedRemovalTests.expire_after_intent
+    receipt = UnstartedRemovalTests.receipt
+    arguments = UnstartedRemovalTests.arguments
+    recover = UnstartedRemovalTests.recover
+    rewrite_result = UnstartedRemovalTests.rewrite_result
+    disposition = CancelledUnstartedRemovalTests.disposition
+
+    def touch(self, path):
+        before = path.stat()
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000))
+
+    def assert_unarchived(self):
+        self.assertEqual(self.receipt(), self.original)
+        with FINISH.ledger(self.state) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='unstarted_removal_recoveries'").fetchone():
+                self.assertEqual(db.execute("SELECT count(*) FROM unstarted_removal_recoveries").fetchone()[0], 0)
+
+    def test_root_timestamp_recovery_preserves_receipt_and_disposition_without_removing(self):
+        before = self.disposition()
+        self.touch(self.admin)
+        with mock.patch.object(FINISH, "remove_with_intent", side_effect=AssertionError("removal")), \
+                mock.patch.object(FINISH, "git", wraps=FINISH.git) as native_git:
+            result = self.recover()[1][0]
+        self.assertFalse(any("unlock" in call.args or "remove" in call.args
+                             for call in native_git.call_args_list))
+        self.assertEqual(result["generation"], self.original["generation"] + 1)
+        self.assertEqual(result["released_owners"], [])
+        self.assertEqual(self.disposition(), before)
+        self.assertEqual((self.admin / "locked").read_text().strip(), "gwt-finish.v2:" + self.token)
+        with FINISH.ledger(self.state) as db:
+            archive = db.execute("SELECT * FROM unstarted_removal_recoveries").fetchone()
+            self.assertEqual((archive["intent"], archive["result"]),
+                             (self.original["intent"], self.original["result"]))
+            observation = json.loads(archive["fact"])["admin_root_observation"]
+        self.assertEqual(observation["proof"][0][:10], list(FINISH.safety().file_identity(self.admin.stat())))
+        self.assertEqual(observation["timestamp_delta_ns"]["mtime_ns"], 1000000)
+        self.assertTrue(self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]["reconciled"])
+        self.assertTrue(self.wt.exists())
+
+    def drift_after_admission(self, path):
+        self.touch(self.admin)
+        native = FINISH.finalized_admission
+
+        def drift(*args, **kwargs):
+            observed = native(*args, **kwargs)
+            self.touch(path)
+            return observed
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                self.recover()
+        self.assert_unarchived()
+
+    def test_root_drift_after_admission_refuses_without_archiving(self):
+        self.drift_after_admission(self.admin)
+
+    def test_leaf_drift_after_admission_refuses_without_archiving(self):
+        self.drift_after_admission(self.admin / "HEAD")
+
+    def test_root_is_rechecked_after_all_admin_leaves(self):
+        self.touch(self.admin)
+        native = FINISH.safety().admin_inventory
+        calls = 0
+
+        def drift(*args, **kwargs):
+            nonlocal calls
+            observed = native(*args, **kwargs)
+            calls += 1
+            if calls == 2:
+                self.touch(self.admin)
+            return observed
+
+        with mock.patch.object(FINISH.safety(), "admin_inventory", side_effect=drift):
+            with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+                self.recover()
+        self.assertEqual(calls, 2)
+        self.assert_unarchived()
+
+    def test_legacy_receipt_cannot_relax_root_timestamps(self):
+        result = json.loads(self.original["result"])
+        result.pop("native_attempted")
+        self.rewrite_result(result)
+        self.original = self.receipt()
+        self.touch(self.admin)
+        with self.assertRaisesRegex(FINISH.Retain, "preimage-changed"):
+            self.recover()
+        self.assert_unarchived()
+
+    def test_actual_removal_keeps_exact_admin_root_comparison(self):
+        self.recover()
+        native = FINISH.finalized_admission
+        calls = 0
+
+        def drift(*args, **kwargs):
+            nonlocal calls
+            observed = native(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                self.touch(self.admin)
+            return observed
+
+        with mock.patch.object(FINISH, "finalized_admission", side_effect=drift), \
+                mock.patch.object(FINISH, "git", wraps=FINISH.git) as native_git:
+            with self.assertRaisesRegex(FINISH.Retain, "removal-preimage-changed"):
+                self.remove()
+        self.assertFalse(any("unlock" in call.args for call in native_git.call_args_list))
+        self.assertTrue(self.wt.exists())
+        self.assertEqual(self.receipt()["state"], "enrolled")
+
+
+class CancelledUnstartedAdminTimestampTests(unittest.TestCase):
+    proof = LifecycleTests.proof
+    call = LifecycleTests.call
+    tearDown = ReleaseTests.tearDown
+    remove = FinalizedRemovalTests.remove
+    setUp = CancelledUnstartedRemovalTests.setUp
+    expire_after_intent = UnstartedRemovalTests.expire_after_intent
+    receipt = UnstartedRemovalTests.receipt
+    arguments = UnstartedRemovalTests.arguments
+    recover = UnstartedRemovalTests.recover
+    disposition = CancelledUnstartedRemovalTests.disposition
+    touch = UnstartedAdminTimestampTests.touch
+    test_root_timestamp_recovery_preserves_receipt_and_disposition_without_removing = (
+        UnstartedAdminTimestampTests.test_root_timestamp_recovery_preserves_receipt_and_disposition_without_removing)
+
+
 class ReconciliationTests(unittest.TestCase):
     proof = LifecycleTests.proof
     call = LifecycleTests.call
