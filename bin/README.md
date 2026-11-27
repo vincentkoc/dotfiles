@@ -17,6 +17,7 @@ Top-level wrappers:
 - `retire-agent-worktree-scheduler`
 - `local-ai-setup` - share one pinned Ollama GGUF with LM Studio and Llama; defaults to a file-only check
 - `mac-preferences` - check or apply the small typed macOS preferences profile without restarting apps
+- `mac-laptop-power` - keep macOS laptops awake on AC without changing display or battery sleep
 - `mtt` - local mobile tmux helper that opens the pane picker on this machine; `mtt restore` unzooms/retiles if layout gets weird
 - `mttc` - connect over `mosh`, then jump into remote `mtt` or `tt`
 - `quickssh` - connect to a saved SSH/Mosh host; restores local tty settings and disables mouse reporting after disconnects
@@ -127,6 +128,35 @@ Run the focused, fake-storage tests with:
 ```sh
 python3 -B tests/mac-preferences-test.py
 ```
+
+## Laptop power
+
+`mac-laptop-power` defaults to a read-only check and needs Python 3.9+.
+The main installer also calls its apply mode. It identifies a Mac laptop through
+the native internal battery report, not its model name.
+
+```sh
+mac-laptop-power --check --json
+mac-laptop-power --apply
+```
+
+Apply runs only `sudo /usr/bin/pmset -c sleep 0` when AC sleep is enabled,
+then verifies that every other power setting is unchanged. It may prompt for
+administrator authentication; unavailable authentication is an error, not success.
+An already matching laptop, a desktop or another operating system needs no sudo.
+Display timeout, battery sleep, network wake, lid behavior and thermal protection
+are preserved. This does not prevent manual, lid-triggered or thermal sleep.
+The equivalent manual setting is **System Settings → Battery → Options →
+Prevent automatic sleeping on power adapter when the display is off**.
+
+Exit status is 0 for a match, successful apply or a skipped platform; 1 for
+check-mode drift; and 2 for a native command, parsing or readback error. A failed
+apply can have changed the AC setting; JSON reports whether a change was
+attempted, and uses `changed: null` when readback could not establish the result.
+It never retries or rolls back automatically. To undo, restore the prior AC sleep
+timer with `sudo /usr/bin/pmset -c sleep <previous-minutes>`.
+
+Run the fake-native regression tests with `python3 -B tests/mac-laptop-power-test.py`.
 
 ## Claude managed settings
 

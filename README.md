@@ -111,6 +111,20 @@ accounts, credentials, privacy permissions, network or hardware identity setting
 Verification covers stored values; the current UI may need a later login to
 adopt them. See [the command's scope and exit codes](bin/README.md#portable-macos-preferences).
 
+## Laptop power
+
+The installer keeps macOS laptops awake on AC power so SSH and background work
+continue when the display turns off. To check or apply just this setting:
+
+```sh
+~/.dotfiles/bin/mac-laptop-power --check --json
+~/.dotfiles/bin/mac-laptop-power --apply
+```
+
+Apply elevates only `pmset -c sleep 0` and may ask for your administrator password.
+Battery sleep, display timeout, lid behavior and thermal protection stay unchanged.
+Desktops and other operating systems are skipped. See [details](bin/README.md#laptop-power).
+
 Keep machine-specific shell paths in `~/.exports.local` and Git overrides in
 `~/.gitconfig.local`; both load after the tracked defaults. Set `DOTFILES_ENV_FILE`
 in the local exports file to choose a persistent local dotenv path. The core
