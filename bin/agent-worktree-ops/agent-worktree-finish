@@ -603,7 +603,60 @@ def ensure_cancellation_schema(db):
         BEGIN
             DELETE FROM owner_cancellations WHERE worktree_id=OLD.id;
         END;
+        CREATE TABLE IF NOT EXISTS local_checkpoint_custody (
+            worktree_id TEXT NOT NULL, owner TEXT NOT NULL, proof TEXT NOT NULL,
+            PRIMARY KEY(worktree_id, owner),
+            FOREIGN KEY(worktree_id, owner) REFERENCES owner_cancellations(worktree_id, owner)
+                ON DELETE CASCADE);
     """)
+
+
+def checkpoint_custody(db, row, owner):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='local_checkpoint_custody'").fetchone():
+        return None
+    record = db.execute("SELECT proof FROM local_checkpoint_custody WHERE worktree_id=? AND owner=?",
+                        (row["id"], owner)).fetchone()
+    return json.loads(record["proof"]) if record else None
+
+
+def local_checkpoint_proof(db, row, snap, owner, branch, head, index_sha256, until):
+    """Keep the exact enrolled branch and index as custody for a lost working tree."""
+    if (owner_rows(db, row["id"]) != [{"owner": owner, "completed": 0}]
+            or db.execute("SELECT 1 FROM pins WHERE worktree_id=?", (row["id"],)).fetchone()):
+        raise Retain("local-checkpoint-needs-sole-unpinned-owner")
+    recovery = missing_recovery_record(db, row)
+    if recovery is not None and not recovery["result"]:
+        raise Retain("missing-recovery-intent-present")
+    if failed_creation_record(db, row) is not None:
+        raise Retain("failed-creation-recovery-present")
+    if (branch != snap["branch"] or head != snap["head"]
+            or not SHA.fullmatch(head or "")
+            or not re.fullmatch(r"[0-9a-f]{64}", index_sha256 or "")):
+        raise Retain("local-checkpoint-needs-exact-branch-head-index")
+    if manual_preserved_branches(snap, [branch], until) != [branch]:
+        raise Retain("local-checkpoint-branch-changed")
+    refs = preserved_refs(snap, [branch], until)
+    if refs[branch]["head"] != head:
+        raise Retain("local-checkpoint-branch-changed")
+    roots = {head}
+    if refs[branch]["reflog"] is not None:
+        roots.update(refs[branch]["reflog"]["oids"])
+    module = safety()
+    indexed, _, _ = module.index_inventory({**snap, "path": snap["owner"]}, git, until,
+                                            preserved_oids=roots, revision=head)
+    if indexed["index_sha256"] != index_sha256:
+        raise Retain("local-checkpoint-index-changed")
+    admin = module.admin_inventory({**snap, "path": snap["owner"]}, git, until,
+                                   preserved_oids=roots)
+    preserve_release_recovery({**snap, "path": snap["owner"]}, sorted({oid for value in admin.values()
+                              if len(value) == 3 for oid in value[2]}), roots, until)
+    if preserved_refs(snap, refs, until) != refs:
+        raise Retain("local-checkpoint-branch-changed")
+    if sibling_absence(snap["path"], until) != snap["path_absence"]:
+        raise Retain("local-checkpoint-path-appeared")
+    return {"ref": branch, "head": head, "index_sha256": index_sha256,
+            "branch_reflog": refs[branch]["reflog"], "working_tree": "already-absent-not-audited"}
 
 
 def remote_preserved(snap, head, until):
@@ -674,7 +727,7 @@ def missing_identity_source(row, args):
     return row
 
 
-def missing_cancellation_snapshot(row, until):
+def missing_cancellation_snapshot(row, until, *, local_checkpoint=False):
     """Bind a vanished checkout's surviving registration to its current branch tip."""
     recorded = json.loads(row["identity"])
     lock_reason = recorded.get("lock_reason")
@@ -693,7 +746,8 @@ def missing_cancellation_snapshot(row, until):
                                       until, lock_reason)
     if git(snap["owner"], "rev-parse", snap["branch"]) != head:
         raise Retain("missing-closeout-head-changed")
-    remote_preserved(snap, head, until)
+    if not local_checkpoint:
+        remote_preserved(snap, head, until)
     return snap
 
 
@@ -722,6 +776,8 @@ def cancel(db, row, args):
     item = retirement(db, row)
     if item is not None and item["state"] != "enrolled":
         raise Retain("removal-intent-requires-read-only-reconciliation")
+    local = args.keep_local_checkpoint is not None
+    proof = None
     try:
         os.lstat(row["path"])
     except FileNotFoundError:
@@ -729,8 +785,14 @@ def cancel(db, row, args):
         # registered tip once it is on a remote; working files stay unaudited.
         if item is None:
             raise Retain("missing-cancellation-needs-native-enrollment")
-        snap = missing_cancellation_snapshot(missing_identity_source(row, args), time.monotonic() + 60)
+        until = time.monotonic() + 60
+        snap = missing_cancellation_snapshot(missing_identity_source(row, args), until,
+                                             local_checkpoint=local)
+        proof = (local_checkpoint_proof(db, row, snap, who, args.keep_local_checkpoint,
+                                       args.expected_head, args.index_sha256, until) if local else None)
     else:
+        if local:
+            raise Retain("local-checkpoint-requires-missing-checkout")
         if args.acknowledge_device_renumbering:
             raise Retain("device-acknowledgement-requires-missing-checkout")
         if args.acknowledge_repository_rename is not None:
@@ -738,7 +800,9 @@ def cancel(db, row, args):
         snap = revalidate(row)
     for prior in cancellation_rows(db, row["id"]):
         if prior["owner"] == who and prior["head"] == snap["head"] and prior["reason"] == args.reason:
-            return
+            if checkpoint_custody(db, row, who) == proof:
+                return
+            raise Retain("local-checkpoint-cancellation-proof-conflict")
     ensure_cancellation_schema(db)
     with db:
         # Old consumers must also refuse removal. Existing retirement triggers
@@ -749,6 +813,9 @@ def cancel(db, row, args):
                    (row["id"],))
         db.execute("INSERT INTO owner_cancellations VALUES (?, ?, ?, ?, ?)",
                    (row["id"], who, snap["head"], args.reason, int(time.time())))
+        if local:
+            db.execute("INSERT INTO local_checkpoint_custody VALUES (?, ?, ?)",
+                       (row["id"], who, json.dumps(proof, sort_keys=True)))
 
 
 def get_row(db, worktree):
@@ -1634,11 +1701,17 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
             raise Retain("git-operation-in-progress")
     if missing:
         if row.get("missing_cancellation"):
-            # Cancellation has no PR or release proof; every owner must still be
-            # terminal at this head, and that head must remain on a remote.
+            # Local-only cancellation has separately recorded branch/index custody.
+            # Ordinary cancellation still needs remote proof on every admission.
             if terminal_cancellation_head(db, row) != snap["head"]:
                 raise Retain("missing-cancellation-head-changed")
-            remote_preserved(snap, snap["head"], until)
+            custody = row.get("local_checkpoint_custody")
+            if custody is None:
+                remote_preserved(snap, snap["head"], until)
+            elif local_checkpoint_proof(db, row, snap, row["local_checkpoint_owner"],
+                                        custody["ref"], custody["head"],
+                                        custody["index_sha256"], until) != custody:
+                raise Retain("local-checkpoint-custody-changed")
         else:
             completion_checks(db, row, local=False)
             all_released(db, row, retirement(db, row))
@@ -1687,16 +1760,23 @@ def finalized_admission(db, row, args, until, *, completed=False, fetch_lease=No
                                   preserved_oids, until)
     holder_options = {"sudo_holder_scan_enabled": True} if args.sudo_holder_scan else {}
     manual_holders(snap, contents, admin, until, **holder_options)
-    manual_preserved_branches(snap, args.preserve_ref, until)
+    manual_preserved_branches(snap, [row["local_checkpoint_custody"]["ref"]]
+                              if row.get("local_checkpoint_custody") else args.preserve_ref, until)
     refs = preserved_refs(snap, row["finalized_refs"], until)
     if refs != row["finalized_refs"]:
         raise Retain("preserved-refs-changed")
+    if row.get("local_checkpoint_custody"):
+        raw, _ = module.read_file(Path(snap["gitdir"]) / "index", until, module.INDEX_LIMIT)
+        if hashlib.sha256(raw).hexdigest() != row["local_checkpoint_custody"]["index_sha256"]:
+            raise Retain("local-checkpoint-index-changed")
     # Holder and ref probes can outlive the empty-directory observation.
     for name, proof in contents.get("gitlinks", {}).items():
         if module.empty_gitlink(snap, name, until) != proof:
             raise Retain("gitlink-state-changed")
     boundaries = ([module.access_boundary(snap["path_absence"]["parent"], until),
                    module.access_boundary(snap["gitdir"], until)] if missing else [])
+    if missing and sibling_absence(snap["path"], until) != snap["path_absence"]:
+        raise Retain("missing-closeout-target-changed")
     return {"snapshot": snap, "boundaries": boundaries, "contents": contents, "admin": admin,
             "branch_reflog": refs[snap["branch"]]["reflog"], "preserved_refs": refs}
 
@@ -1709,6 +1789,15 @@ def remove_finalized(db, row, args, *, completed=False):
     # A cancelled checkout has no finish proof; its owners' cancelled head
     # stands in for it, and admission adds the remote-preservation check.
     cancelled_head = terminal_cancellation_head(db, row) if missing and not completed else None
+    local_owner = owner_id(args) if args.keep_local_checkpoint is not None else None
+    custody = checkpoint_custody(db, row, local_owner) if local_owner else None
+    if args.keep_local_checkpoint is not None:
+        if (completed or not missing or not cancelled_head or custody is None
+                or custody["ref"] != args.keep_local_checkpoint or args.preserve_ref):
+            raise Retain("local-checkpoint-closeout-needs-recorded-custody")
+    elif cancelled_head and any(checkpoint_custody(db, row, owner["owner"])
+                                for owner in owner_rows(db, row["id"])):
+        raise Retain("local-checkpoint-closeout-needs-explicit-option")
     source = {**dict(row), "finish_head": cancelled_head} if cancelled_head else row
     if getattr(args, "acknowledge_device_renumbering", False):
         # Present checkouts already rebind device-only identity here.
@@ -1727,7 +1816,8 @@ def remove_finalized(db, row, args, *, completed=False):
     # Keep the durable enrollment and automatic lifecycle qualification unchanged.
     row = {**dict(row), "identity": json.dumps(immutable(snap), sort_keys=True),
            "finish_head": snap["head"], "missing_worktree": missing,
-           "missing_cancellation": cancelled_head is not None}
+           "missing_cancellation": cancelled_head is not None,
+           "local_checkpoint_custody": custody, "local_checkpoint_owner": local_owner}
     storage_guard()
     module = safety()
     until = time.monotonic() + 120
@@ -1735,7 +1825,8 @@ def remove_finalized(db, row, args, *, completed=False):
             QualificationFetchLease(snap) as fetch_lease:
         # A fetched target may retain history absent from either task branch.
         # Reuse release roots so manual closeout binds that ref to the same drift checks.
-        selected = manual_preserved_branches(snap, args.preserve_ref, until)
+        selected = manual_preserved_branches(snap, [custody["ref"]] if custody else args.preserve_ref,
+                                             until)
         row["finalized_refs"], _ = release_refs(snap, row["target"], until,
                                                branches=(enrolled_branch, *selected))
         def admit():
@@ -1755,8 +1846,10 @@ def remove_finalized(db, row, args, *, completed=False):
         return remove_with_intent(
             db, row, item, before,
             admit,
-            {"mode": "explicit-finalized-task", "operator": owner_id(args),
+            {"mode": "explicit-local-checkpoint" if custody else "explicit-finalized-task",
+             "operator": owner_id(args),
              "discard_ignored": sorted(args.discard_ignored),
+             **({"local_checkpoint_custody": custody} if custody else {}),
              **({"preserve_ref": selected} if selected else {})},
             restore_lock=True, fetch_lease=fetch_lease,
             snapshotter=observe if missing else snapshot)
@@ -2171,6 +2264,9 @@ def remove_with_intent(db, row, item, before, recheck, qualification, *, restore
                 raise Retain("release-generation-changed")
     outcome = {"checkout": "unknown", "reason": "removal-incomplete", "child": None,
                "native_attempted": False}
+    if qualification.get("local_checkpoint_custody"):
+        outcome["local_checkpoint_custody"] = {**qualification["local_checkpoint_custody"],
+                                                "operator": qualification["operator"]}
     if before["contents"].get("missing_worktree"):
         outcome["working_tree"] = "already-absent-not-audited"
     if "resolve_undo" in before["contents"]:
@@ -3652,6 +3748,15 @@ def summary(db, row, reason=None):
     }
     if cancellations:
         result["cancelled_owners"] = cancellations
+        custody = [{"owner": entry["owner"], **{key: proof[key] for key in (
+                    "ref", "head", "index_sha256", "working_tree")}} for entry in cancellations
+                   if (proof := checkpoint_custody(db, row, entry["owner"])) is not None]
+        if custody:
+            result["local_checkpoint_custody"] = custody
+    if outcome and outcome.get("local_checkpoint_custody"):
+        proof = outcome["local_checkpoint_custody"]
+        result["local_checkpoint_closeout"] = {key: proof[key] for key in (
+            "operator", "ref", "head", "index_sha256", "working_tree")}
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='failed_creations'").fetchone():
         attempts = db.execute("SELECT creation_token, intent, result FROM failed_creations "
                               "WHERE worktree_id=? ORDER BY rowid DESC LIMIT 8", (row["id"],))
@@ -4250,6 +4355,7 @@ def parser():
     result.add_argument("--sudo-holder-scan", action="store_true")
     result.add_argument("--discard-ignored", action="append", default=[])
     result.add_argument("--preserve-ref", action="append", default=[])
+    result.add_argument("--keep-local-checkpoint")
     result.add_argument("--acknowledge-device-renumbering", action="store_true")
     result.add_argument("--acknowledge-repository-rename")
     result.add_argument("--intent-id")
@@ -4380,6 +4486,10 @@ def main(argv=None):
         raise Retain("unstarted-removal-requires-exact-reconciliation")
     if args.preserve_ref and not (args.command == "remove" and args.finalized):
         raise Retain("preserve-ref-requires-manual-finalized-removal")
+    if args.keep_local_checkpoint is not None and (args.command not in ("cancel", "remove")
+            or (args.command == "remove" and not args.finalized)
+            or not args.keep_local_checkpoint.startswith("refs/heads/")):
+        raise Retain("local-checkpoint-requires-cancel-or-finalized-remove-and-literal-branch")
     if args.command == "recover-failed-creation":
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner", "worktree_id",
                    "generation", "result_sha256", "expected_head", "creation_token",
@@ -4468,10 +4578,11 @@ def main(argv=None):
         if args.command == "finish":
             allowed.update({"pr", "target", "wait_for"})
         elif args.command == "cancel":
-            allowed.update({"reason", "acknowledge_repository_rename"})
+            allowed.update({"reason", "acknowledge_repository_rename", "keep_local_checkpoint",
+                            "expected_head", "index_sha256"})
         elif args.command == "remove":
             allowed.update({"finalized", "discard_ignored", "preserve_ref", "sudo_holder_scan",
-                            "acknowledge_repository_rename"})
+                            "acknowledge_repository_rename", "keep_local_checkpoint"})
         if args.command not in ("resume", "finish", "cancel", "remove") or any(
                 value is not None and value is not False and value != []
                 for name, value in vars(args).items() if name not in allowed):
@@ -4479,8 +4590,10 @@ def main(argv=None):
     if args.acknowledge_repository_rename is not None:
         allowed = {"command", "worktree", "managed_root", "state_dir", "owner",
                    "acknowledge_repository_rename", "acknowledge_device_renumbering"}
-        allowed.update({"reason"} if args.command == "cancel" else
-                       {"finalized", "discard_ignored", "preserve_ref", "sudo_holder_scan"})
+        allowed.update({"reason", "keep_local_checkpoint", "expected_head", "index_sha256"}
+                       if args.command == "cancel" else
+                       {"finalized", "discard_ignored", "preserve_ref", "sudo_holder_scan",
+                        "keep_local_checkpoint"})
         if (args.command not in ("cancel", "remove") or (args.command == "remove" and not args.finalized)
                 or any(value is not None and value is not False and value != []
                        for name, value in vars(args).items() if name not in allowed)):
@@ -4504,7 +4617,9 @@ def main(argv=None):
                 or (args.recovery_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.recovery_sha256))
                 or (args.intent_id and str(uuid.UUID(args.intent_id)) != args.intent_id)):
             raise Retain("recovery-needs-exact-record-head-index-generation")
-    elif (args.expected_head or args.index_sha256 or args.recovery_sha256
+    elif ((args.expected_head or args.index_sha256) and not (
+            args.command == "cancel" and args.keep_local_checkpoint is not None)) or (
+            args.recovery_sha256
           or args.allow_device_renumbering or args.continue_partial):
         raise Retain("recovery-options-require-recover-missing")
     elif args.command == "reconcile":
@@ -4530,6 +4645,10 @@ def main(argv=None):
             raise Retain("cancellation-does-not-accept-completion-or-removal-options")
         if not args.reason or not args.reason.strip() or len(args.reason) > 500:
             raise Retain("bounded-cancellation-reason-required")
+        if args.keep_local_checkpoint is not None and (
+                not SHA.fullmatch(args.expected_head or "")
+                or not re.fullmatch(r"[0-9a-f]{64}", args.index_sha256 or "")):
+            raise Retain("local-checkpoint-needs-exact-head-index")
     if args.command == "creation-token":
         print(uuid.uuid4())
         return 0

@@ -6459,6 +6459,21 @@ class FinalizedRemovalTests(unittest.TestCase):
             "--preserve-ref", branch, "--preserve-ref", branch])
         self.assertTrue(self.wt.exists())
 
+    def test_wrapper_forwards_local_checkpoint_to_finalized_helper(self):
+        env = dict(os.environ, DOTFILES_WORKTREES_ROOT=str(self.root),
+                   DOTFILES_GWT_FINISH_STATE=str(self.state), TMUX="")
+        script = ('source "$1"; cd "$2"; shift 2; '
+                  '_gwt_finish_tool() { printf "%s\\n" "$@"; }; gwt "$@"')
+        command = ["zsh", "-f", "-c", script, "fixture", str(ROOT / "functions/gwt/gwt.zsh"),
+                   str(self.repo)]
+        branch = "refs/heads/released-feature"
+        result = subprocess.run([*command, "rm", str(self.wt), "--finalized",
+                                 "--keep-local-checkpoint", branch],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "remove", "--worktree", str(self.wt), "--finalized", "--keep-local-checkpoint", branch])
+
     def test_sudo_scan_does_not_elevate_git_or_lifecycle_and_preserves_admission_guards(self):
         native = FINISH.safety().supervise
         commands, scans = [], []
@@ -6782,6 +6797,224 @@ class MissingCancelledRemovalTests(unittest.TestCase):
         git(self.repo, "update-ref", "refs/heads/released-feature", self.head, commit)
         git(self.repo, "update-ref", "-d", "refs/remotes/origin/released-feature")
         self.assert_not_cancelled("head-not-on-remote")
+
+    def test_local_only_checkpoint_requires_explicit_custody_and_preserves_branch(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        args = ("--keep-local-checkpoint", branch, "--expected-head", head,
+                "--index-sha256", index_sha)
+        self.assert_not_cancelled("head-not-on-remote")
+        cancelled = self.call("cancel", "--reason", "superseded upstream", *args)[1][0]
+        self.assertEqual(cancelled["local_checkpoint_custody"][0]["head"], head)
+        self.assertEqual(self.call("cancel", "--reason", "superseded upstream", *args)[1][0],
+                         cancelled)
+        with mock.patch.object(FINISH, "remove_with_intent") as remove:
+            with self.assertRaisesRegex(FINISH.Retain, "explicit-option"):
+                self.remove()
+        remove.assert_not_called()
+        reflog = self.repo / ".git/logs/refs/heads/released-feature"
+        prior_log = reflog.read_bytes()
+        with mock.patch.object(FINISH, "manual_holders"):
+            result = self.call("remove", "--finalized", "--keep-local-checkpoint", branch)[1][0]
+        self.assertEqual(result["checkout"], "removed", result)
+        self.assertEqual(git(self.repo, "rev-parse", branch), head)
+        self.assertEqual(reflog.read_bytes(), prior_log)
+        self.assertEqual(result["local_checkpoint_closeout"]["working_tree"],
+                         "already-absent-not-audited")
+
+    def test_local_checkpoint_rejects_wrong_owner_and_index_drift(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index = self.admin / "index"
+        index_sha = hashlib.sha256(index.read_bytes()).hexdigest()
+        args = ("--keep-local-checkpoint", branch, "--expected-head", head,
+                "--index-sha256", index_sha)
+        with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "other-owner"}):
+            with self.assertRaisesRegex(FINISH.Retain, "known-owner"):
+                self.call("cancel", "--reason", "superseded", *args)
+        index.write_bytes(index.read_bytes() + b"changed")
+        with self.assertRaisesRegex(FINISH.Retain, "index"):
+            self.call("cancel", "--reason", "superseded", *args)
+        self.assertNotIn("cancelled_owners", self.call("status")[1][0])
+
+    def test_local_checkpoint_ref_drift_after_cancel_refuses_native_removal(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        self.call("cancel", "--reason", "superseded", "--keep-local-checkpoint", branch,
+                  "--expected-head", head, "--index-sha256", index_sha)
+        later = git(self.repo, "commit-tree", head + "^{tree}", "-p", head, "-m", "later")
+        git(self.repo, "update-ref", branch, later, head)
+        with mock.patch.object(FINISH, "remove_with_intent") as native:
+            with self.assertRaisesRegex(FINISH.Retain, "head-changed|registration-changed"):
+                self.call("remove", "--finalized", "--keep-local-checkpoint", branch)
+        native.assert_not_called()
+        self.assertTrue(self.admin.exists())
+
+    def test_local_checkpoint_index_drift_during_admission_refuses_native_removal(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index = self.admin / "index"
+        index_sha = hashlib.sha256(index.read_bytes()).hexdigest()
+        self.call("cancel", "--reason", "superseded", "--keep-local-checkpoint", branch,
+                  "--expected-head", head, "--index-sha256", index_sha)
+        calls = 0
+
+        def drift(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                index.write_bytes(index.read_bytes() + b"changed")
+
+        supervise = FINISH.safety().supervise
+        with mock.patch.object(FINISH, "manual_holders", side_effect=drift), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=supervise) as native:
+            result = self.call("remove", "--finalized", "--keep-local-checkpoint", branch)[1][0]
+        self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
+                             for call in native.call_args_list))
+        self.assertEqual(result["checkout"], "unknown", result)
+        with FINISH.ledger(self.state) as db:
+            item = FINISH.retirement(db, FINISH.get_row(db, self.wt))
+            self.assertEqual(item["state"], "incomplete")
+            self.assertFalse(json.loads(item["result"])["native_attempted"])
+
+    def test_local_checkpoint_post_native_ref_drift_stays_unknown(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        self.call("cancel", "--reason", "superseded", "--keep-local-checkpoint", branch,
+                  "--expected-head", head, "--index-sha256", index_sha)
+        later = git(self.repo, "commit-tree", head + "^{tree}", "-p", head, "-m", "later")
+        native = FINISH.safety().supervise
+
+        def drift(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                git(self.repo, "update-ref", branch, later, head)
+            return result
+
+        with mock.patch.object(FINISH, "manual_holders"), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=drift):
+            result = self.call("remove", "--finalized", "--keep-local-checkpoint", branch)[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        with FINISH.ledger(self.state) as db:
+            outcome = json.loads(FINISH.retirement(db, FINISH.get_row(db, self.wt))["result"])
+        self.assertTrue(outcome["native_attempted"])
+        self.assertFalse(outcome["branch_preserved"])
+        self.assertEqual(outcome["local_checkpoint_custody"]["head"], head)
+
+    def test_local_checkpoint_post_native_symbolic_branch_stays_unknown(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        git(self.repo, "update-ref", "refs/heads/alias", head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        self.call("cancel", "--reason", "superseded", "--keep-local-checkpoint", branch,
+                  "--expected-head", head, "--index-sha256", index_sha)
+        native = FINISH.safety().supervise
+
+        def replace(command, **kwargs):
+            result = native(command, **kwargs)
+            if "worktree" in command and "remove" in command:
+                git(self.repo, "symbolic-ref", branch, "refs/heads/alias")
+            return result
+
+        with mock.patch.object(FINISH, "manual_holders"), \
+                mock.patch.object(FINISH.safety(), "supervise", side_effect=replace):
+            result = self.call("remove", "--finalized", "--keep-local-checkpoint", branch)[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertEqual(git(self.repo, "rev-parse", branch), head)
+
+    def test_local_checkpoint_old_owner_update_clears_custody(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        self.call("cancel", "--reason", "superseded", "--keep-local-checkpoint", branch,
+                  "--expected-head", head, "--index-sha256", index_sha)
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("UPDATE owners SET completed=1 WHERE worktree_id=?", (self.original["id"],))
+            self.assertIsNone(FINISH.checkpoint_custody(db, self.original, "owner-1"))
+        with self.assertRaisesRegex(FINISH.Retain, "recorded-custody"):
+            self.call("remove", "--finalized", "--keep-local-checkpoint", branch)
+
+    def test_local_checkpoint_late_path_appearance_refuses_native_removal(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        self.call("cancel", "--reason", "superseded", "--keep-local-checkpoint", branch,
+                  "--expected-head", head, "--index-sha256", index_sha)
+        calls = 0
+
+        def appear(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                self.wt.mkdir()
+
+        supervise = FINISH.safety().supervise
+        with mock.patch.object(FINISH, "manual_holders", side_effect=appear), \
+                mock.patch.object(FINISH.safety(), "supervise", wraps=supervise) as native:
+            result = self.call("remove", "--finalized", "--keep-local-checkpoint", branch)[1][0]
+        self.assertEqual(result["checkout"], "unknown", result)
+        self.assertTrue(self.admin.exists())
+        self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
+                             for call in native.call_args_list))
+
+    def test_local_checkpoint_cancel_rollback_keeps_owner_unfinished(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        with FINISH.ledger(self.state) as db:
+            FINISH.ensure_cancellation_schema(db)
+            db.execute("CREATE TRIGGER reject_checkpoint BEFORE INSERT ON local_checkpoint_custody "
+                       "BEGIN SELECT RAISE(ABORT, 'proof-lost'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "proof-lost"):
+            self.call("cancel", "--reason", "superseded", "--keep-local-checkpoint", branch,
+                      "--expected-head", head, "--index-sha256", index_sha)
+        status = self.call("status")[1][0]
+        self.assertNotIn("cancelled_owners", status)
+        self.assertEqual(status["owners"], [{"owner": "owner-1", "completed": 0}])
+
+    def test_local_checkpoint_refuses_pending_recovery(self):
+        branch = "refs/heads/released-feature"
+        head = git(self.repo, "commit-tree", self.head + "^{tree}", "-p", self.head,
+                   "-m", "local checkpoint")
+        git(self.repo, "update-ref", branch, head, self.head)
+        index_sha = hashlib.sha256((self.admin / "index").read_bytes()).hexdigest()
+        args = ("--reason", "superseded", "--keep-local-checkpoint", branch,
+                "--expected-head", head, "--index-sha256", index_sha)
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("CREATE TABLE missing_recoveries (worktree_id TEXT PRIMARY KEY, fact TEXT)")
+            db.execute("INSERT INTO missing_recoveries VALUES (?, ?)",
+                       (self.original["id"], json.dumps({"result": None})))
+        with self.assertRaisesRegex(FINISH.Retain, "missing-recovery-intent-present"):
+            self.call("cancel", *args)
+        with FINISH.ledger(self.state) as db, db:
+            db.execute("DELETE FROM missing_recoveries")
+            db.execute("CREATE TABLE failed_creations (worktree_id TEXT, creation_token TEXT, "
+                       "intent TEXT, result TEXT)")
+            db.execute("INSERT INTO failed_creations VALUES (?, 'token', '{}', NULL)",
+                       (self.original["id"],))
+        with self.assertRaisesRegex(FINISH.Retain, "failed-creation-recovery-present"):
+            self.call("cancel", *args)
 
     def test_foreign_owner_appeared_directory_and_changed_registration_refuse(self):
         with mock.patch.dict(os.environ, {"GWT_OWNER_ID": "other-owner"}):
