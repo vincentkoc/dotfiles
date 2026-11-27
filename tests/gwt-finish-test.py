@@ -5541,6 +5541,8 @@ class FinalizedRemovalTests(unittest.TestCase):
 
     def test_preserve_ref_drift_after_intent_never_dispatches_removal(self):
         branch, _, _ = self.other_recovery_branch()
+        with mock.patch.object(FINISH, "evaluate_release", return_value="fixture-retained"):
+            self.finish("--release")
         admission = FINISH.finalized_admission
 
         def drift(db, row, *args, **kwargs):
@@ -5557,6 +5559,27 @@ class FinalizedRemovalTests(unittest.TestCase):
         self.assertFalse(any("worktree" in call.args[0] and "remove" in call.args[0]
                              for call in children.call_args_list))
         self.assert_incomplete_locked(code, rows)
+        receipt = self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]
+        self.assertIs(receipt["result"]["native_attempted"], False)
+        self.assertIs(receipt["result"]["native_lock_preserved"], True)
+        self.assertIsNone(receipt["result"]["child"])
+
+        with mock.patch.object(FINISH, "manual_holders"), \
+                mock.patch.object(FINISH, "remove_with_intent", side_effect=AssertionError("removal")):
+            code, rows = self.call("reconcile", "--unstarted-removal", "--intent-id", receipt["intent_id"],
+                                   "--generation", str(receipt["generation"]), "--intent-sha256",
+                                   receipt["intent_sha256"], "--result-sha256", receipt["result_sha256"])
+        self.assertEqual(code, 0)
+        self.assertEqual((rows[0]["checkout"], rows[0]["generation"], rows[0]["released_owners"]),
+                         ("retained", receipt["generation"] + 1, []))
+        self.assertTrue((self.admin / "locked").exists())
+        archived = self.call("status", "--read-only", "--removal-receipt")[1][0]["removal_receipt"]
+        self.assertIs(archived["reconciled"], True)
+        self.assertEqual((archived["intent_sha256"], archived["result_sha256"]),
+                         (receipt["intent_sha256"], receipt["result_sha256"]))
+        self.assertEqual(archived["ref_observation"]["changed_count"], 1)
+        self.assertEqual(archived["ref_observation"]["changes"][0]["ref"], branch)
+        self.assertEqual(archived["ref_observation"]["changes"][0]["head_observed"], self.head)
 
     def test_preserve_ref_drift_after_native_removal_keeps_outcome_unresolved(self):
         branch, _, _ = self.other_recovery_branch()
@@ -9518,6 +9541,13 @@ class UnstartedRemovalTests(unittest.TestCase):
         variants += [{**original, "child": value} for value in ({}, False, {"pid": 42, "reaped": True})]
         variants += [{k: v for k, v in original.items() if k != "child"},
                      {**original, "path_absent": False}, {**original, "reason": "removal-incomplete"}]
+        drift = {**original, "reason": "preserved-refs-changed"}
+        variants += [{k: v for k, v in drift.items() if k != key}
+                     for key in ("native_attempted", "native_lock_preserved", "child")]
+        variants += [{**drift, "native_attempted": value} for value in (True, 0)]
+        variants += [{**drift, "native_lock_preserved": value} for value in (False, 1)]
+        variants += [{**drift, "child": {}}, {**drift, "registration_absent": False},
+                     {**drift, "resolve_undo": None}]
         for result in variants:
             with self.subTest(result=result):
                 self.rewrite_result(result)

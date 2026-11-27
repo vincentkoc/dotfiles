@@ -1153,9 +1153,9 @@ Updated manual removal, prune, cleaner and quarantine consumers respect the
 ledger hold even after registration disappears. Never repeat removal to resolve
 an incomplete result.
 
-A foreground finalized attempt can expire during its repeated admission,
-before native unlock or removal begins. To reconcile this specific case,
-inspect the receipt, then bind the explicit recovery to those exact hashes:
+A foreground finalized attempt can reach its admission deadline or detect a
+changed custody ref after recording intent and before unlocking the checkout.
+Inspect the receipt, then bind recovery to its exact hashes:
 
 ```sh
 gwt finish-status --worktree /absolute/task/checkout --read-only --removal-receipt
@@ -1188,11 +1188,11 @@ and reflogs as custody roots; it does not require independent refs to retain
 their historical values. The checkout's HEAD, own branch reflog and complete
 source/admin proof remain exact. Historical OIDs are never added to current
 custody roots, so ref progress that loses required recovery data still refuses.
-It accepts only a pre-unlock `admission-deadline` result with explicit
-`child: null`. New receipts must record literal `native_attempted=false`;
-legacy receipts must match the known pre-dispatch shape with no postcheck
-fields. Missing child proof, attempted unlock, active owners and partial removal
-remain blocked.
+Both results require explicit `child: null` and exclude postcheck fields.
+A `preserved-refs-changed` receipt must also record `native_attempted=false`
+and `native_lock_preserved=true`. Only `admission-deadline` can qualify through
+the older pre-dispatch receipt shape that omitted the native-attempt field.
+Missing child proof, attempted unlock, active owners and partial removal still block recovery.
 
 Recovery archives the original text unchanged, advances the generation and
 clears releases atomically. It never removes files or unlocks the checkout.
