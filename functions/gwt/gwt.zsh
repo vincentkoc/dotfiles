@@ -1309,7 +1309,7 @@ Commands:
                                     Plan or restore an exact missing enrolled checkout
   gwt finish-reconcile --worktree <path> --intent-id <id> --generation <n>
       --intent-sha256 <hash> --result-sha256 <hash>  Reconcile removed target; preserve original proof
-      [--unstarted-removal]          Reconcile a proven pre-unlock deadline; never remove
+      [--unstarted-removal]          Reconcile a proven pre-unlock deadline or ref change without removal
   gwt finish-reconcile --external-removal --worktree <path> --worktree-id <id>
       --generation <n> --reason <text>           Record an already removed, finished checkout
   gwt finish-check [--all] [--policy <path>] [--apply]

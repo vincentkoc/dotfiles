@@ -2544,10 +2544,15 @@ def reconcile_unstarted(db, row, args):
     qualification = intent["qualification"]
     before = intent["before"]
     expected = {"checkout", "reason", "child", "native_attempted", "native_lock_preserved", "resolve_undo"}
-    # Historical receipts predate native_attempted. Only this exact pre-dispatch
-    # shape and deadline reason are known to precede unlock in that producer;
-    # git preparation failures were wrapped as git-failed, not admission-deadline.
-    if (outcome.get("checkout") != "unknown" or outcome.get("reason") != "admission-deadline"
+    # Ref drift can also be detected after unlock. Only modern receipts prove
+    # both that unlock was never attempted and that the enrollment lock survived.
+    pre_unlock_ref_change = (outcome.get("reason") == "preserved-refs-changed"
+                             and outcome.get("native_attempted") is False
+                             and outcome.get("native_lock_preserved") is True
+                             and ("resolve_undo" in outcome) == ("resolve_undo" in before["contents"]))
+    # Only the deadline producer had a known pre-dispatch legacy receipt shape.
+    if (outcome.get("checkout") != "unknown"
+            or (outcome.get("reason") != "admission-deadline" and not pre_unlock_ref_change)
             or "child" not in outcome or outcome["child"] is not None
             or not set(outcome) <= expected
             or ("native_attempted" in outcome and outcome["native_attempted"] is not False)
