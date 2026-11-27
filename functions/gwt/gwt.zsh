@@ -1272,6 +1272,8 @@ Commands:
                                     Manually close one finalized managed task
   gwt rm <absolute-path> --finalized [--preserve-ref refs/heads/<branch> ...]
                                     Bind additional local recovery branches
+  gwt rm <absolute-path> --finalized --keep-local-checkpoint refs/heads/<branch>
+                                    Close a cancelled, missing local checkpoint
   gwt rm <absolute-path> --finalized --acknowledge-device-renumbering
                                     Recorded owner: missing checkout after device-only renumbering
   gwt rm <absolute-path> --finalized --acknowledge-repository-rename <old>=<new>
@@ -1283,6 +1285,8 @@ Commands:
                                     End this owner's work without PR proof or removal
   gwt cancel --reason <text> --worktree <path> --acknowledge-device-renumbering
                                     Recorded owner: missing checkout after device-only renumbering
+  gwt cancel --reason <text> --worktree <path> --keep-local-checkpoint refs/heads/<branch> --expected-head <sha> --index-sha256 <sha>
+                                    Record a missing local-only checkpoint under its original owner
   gwt cancel --reason <text> --worktree <path> --acknowledge-repository-rename <old>=<new>
                                     Recorded owner: missing checkout after a GitHub repo rename
   gwt resume [--worktree <path>]    Resume an enrolled worktree
@@ -1874,7 +1878,7 @@ gwt() {
                         discard_args+=(--acknowledge-repository-rename "$2")
                         shift
                         ;;
-                    --discard-ignored|--preserve-ref)
+                    --discard-ignored|--preserve-ref|--keep-local-checkpoint)
                         [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || return 1
                         discard_args+=("$1" "$2")
                         shift
@@ -1893,7 +1897,7 @@ gwt() {
                     return 1
                 }
             elif (( ${#discard_args} )); then
-                echo "gwt: --discard-ignored, --preserve-ref and --acknowledge-* options require --finalized" >&2
+                echo "gwt: finalized removal options require --finalized" >&2
                 return 1
             fi
             if $sudo_holder_scan && ! $finalized_remove; then

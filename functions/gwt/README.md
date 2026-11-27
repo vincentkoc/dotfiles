@@ -132,6 +132,19 @@ every owner is completed or cancelled at that HEAD, the literal
 registration without PR or release proof; it rechecks the remote, owners and
 pins. Unpushed commits, an appeared directory or a changed registration refuse.
 
+For a missing, local-only checkpoint with one recorded owner, retain the
+enrolled branch instead of publishing an obsolete commit. The original owner
+can explicitly run `gwt cancel --worktree /absolute/task/path --reason <reason>
+--keep-local-checkpoint refs/heads/<branch> --expected-head <full-sha>
+--index-sha256 <raw-index-sha256>`, then `gwt rm /absolute/task/path --finalized
+--keep-local-checkpoint refs/heads/<branch>`. Both steps require the same owner,
+missing path, unchanged direct branch tip and index matching HEAD, no pins or
+pending removal, and recoverable admin commits. Native removal rechecks custody
+before and after its intent, retains the branch and reflog, and records the
+working tree as already absent and unaudited. Without this explicit option,
+local-only cancellation still refuses. Old GWT clients do not accept the option
+and cannot use this custody record as remote proof.
+
 After a reboot can renumber an APFS device, the recorded owner can add
 `--acknowledge-device-renumbering` to that missing-checkout `gwt cancel` and
 `gwt rm --finalized`. The surviving owner, common and admin directories must
