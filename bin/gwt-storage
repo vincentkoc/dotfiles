@@ -2,7 +2,10 @@
 """Local owner policy and self-contained, history-free Git snapshots."""
 
 import argparse
+import contextlib
+from collections import OrderedDict
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -11,6 +14,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -20,10 +24,15 @@ ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"}
 
 
 def git(repo, *args, check=True, input=None):
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], env=ENV, input=input,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+    # A file-backed input avoids full-duplex pipe stalls on large attribute batches.
+    with tempfile.TemporaryFile() if input is not None else contextlib.nullcontext() as stream:
+        if stream is not None:
+            stream.write(input)
+            stream.seek(0)
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args], env=ENV, stdin=stream,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
     if check and result.returncode:
         raise ValueError(result.stderr.decode(errors="replace").strip())
     return result
@@ -344,6 +353,172 @@ def cow(args):
     print(json.dumps(report))
 
 
+def agent_checkout(args):
+    """Seed a new checkout with verified, independently writable agent files."""
+    started = time.monotonic()
+    source, target = direct(args.source), direct(args.target)
+    if os.environ.get("GWT_NEW_WORKTREE") != str(target):
+        raise ValueError("agent checkout is internal to gwt new")
+    if source == target or not (target / ".git").is_file() or common(source) != common(target):
+        raise ValueError("agent checkout requires a new linked worktree of the source")
+    if any(path.name != ".git" for path in target.iterdir()) or git(target, "ls-files", "-z").stdout:
+        raise ValueError("agent checkout requires an empty worktree and index")
+    report = {"agent_checkout": "native", "cloned_files": 0, "cloned_logical_bytes": 0,
+              "skipped_files": 0, "physical_bytes_saved": None}
+
+    def finish(reason=None):
+        if reason:
+            report["fallback"] = reason
+        report["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        print(json.dumps(report))
+
+    if sys.platform not in ("darwin", "linux"):
+        finish("unsupported-platform")
+        return
+    autocrlf = git(target, "config", "--get", "core.autocrlf", check=False)
+    if autocrlf.returncode == 0 and autocrlf.stdout.strip().lower() not in (b"false", b"no", b"off", b"0", b"input"):
+        finish("checkout-conversion")
+        return
+    if git(target, "config", "--get", "core.eol", check=False).stdout.strip().lower() == b"crlf":
+        finish("checkout-conversion")
+        return
+    entries = []
+    for entry in git(target, "ls-tree", "-rz", "HEAD", "--", ".agents").stdout.split(b"\0"):
+        if not entry:
+            continue
+        info, name = entry.split(b"\t", 1)
+        mode, kind, oid = info.split()
+        if mode in (b"100644", b"100755") and kind == b"blob":
+            entries.append((mode, oid, name))
+    if not entries:
+        finish("no-agent-files")
+        return
+    # Populate only the index. Native checkout still owns sparse membership,
+    # filters, symlinks, and every file that cannot be shared safely.
+    git(target, "read-tree", "HEAD")
+    names = b"\0".join(entry[2] for entry in entries) + b"\0"
+    attrs = git(target, "check-attr", "--cached", "-z", "--stdin",
+                "filter", "ident", "working-tree-encoding", "eol", input=names).stdout.split(b"\0")
+    attributes = {}
+    for index in range(0, len(attrs) - 1, 3):
+        name, key, setting = attrs[index:index + 3]
+        attributes.setdefault(name, {})[key] = setting
+    algorithm = value(target, "rev-parse", "--show-object-format")
+    libc = ctypes.CDLL(None, use_errno=True) if sys.platform == "darwin" else None
+    if libc:
+        libc.fclonefileat.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        libc.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        libc.flistxattr.restype = ctypes.c_ssize_t
+        libc.fremovexattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    unsupported = {errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOTTY, errno.ENOSYS, errno.EINVAL}
+    shared = []
+    parent_cache = OrderedDict()
+    created_directories = set()
+    creation_mask = os.umask(0)
+    os.umask(creation_mask)
+    try:
+        root_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            def open_parent(parts):
+                if not parts:
+                    return root_fd
+                if parts in parent_cache:
+                    parent_cache.move_to_end(parts)
+                    return parent_cache[parts]
+                descriptor = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                     dir_fd=open_parent(parts[:-1]))
+                parent_cache[parts] = descriptor
+                if len(parent_cache) > 128:
+                    os.close(parent_cache.popitem(last=False)[1])
+                return descriptor
+
+            for mode, oid, name in entries:
+                settings = attributes[name]
+                if any(settings[key] not in (b"unspecified", b"unset") for key in
+                       (b"filter", b"ident", b"working-tree-encoding")) or settings[b"eol"] == b"crlf":
+                    report["skipped_files"] += 1
+                    continue
+                parts = Path(os.fsdecode(name)).parts
+                if not parts or parts[0] != ".agents" or any(part in (".", "..") for part in parts):
+                    raise ValueError("invalid agent path")
+                dst = target.joinpath(*parts)
+                source_fd = None
+                cloned = False
+                try:
+                    # Anchor every source component; never follow a donor symlink.
+                    parent_fd = open_parent(parts[:-1])
+                    source_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                    if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+                        report["skipped_files"] += 1
+                        continue
+                    if dst.parent not in created_directories:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        created_directories.add(dst.parent)
+                    if libc:
+                        # CLONE_NOOWNERCOPY; the new file inherits the target ACL.
+                        if libc.fclonefileat(source_fd, -2, os.fsencode(dst), 2):
+                            raise OSError(ctypes.get_errno(), "clone unavailable")
+                        cloned = True
+                        os.chflags(dst, 0)
+                        os.chmod(dst, (0o777 if mode == b"100755" else 0o666) & ~creation_mask)
+                        with dst.open("r+b") as output:
+                            size = libc.flistxattr(output.fileno(), None, 0, 0)
+                            if size < 0:
+                                raise OSError(ctypes.get_errno(), "cannot inspect clone attributes")
+                            if size:
+                                buffer = ctypes.create_string_buffer(size)
+                                if libc.flistxattr(output.fileno(), buffer, size, 0) != size:
+                                    raise OSError("clone attributes changed")
+                                for attribute in buffer.raw.rstrip(b"\0").split(b"\0"):
+                                    if libc.fremovexattr(output.fileno(), attribute, 0):
+                                        raise OSError(ctypes.get_errno(), "cannot clear clone attributes")
+                    else:
+                        import fcntl
+                        output_fd = os.open(dst, os.O_RDWR | os.O_CREAT | os.O_EXCL,
+                                            0o777 if mode == b"100755" else 0o666)
+                        cloned = True
+                        try:
+                            fcntl.ioctl(output_fd, 0x40049409, source_fd)  # FICLONE
+                        finally:
+                            os.close(output_fd)
+                    with dst.open("rb") as output:
+                        size = os.fstat(output.fileno()).st_size
+                        digest = hashlib.new(algorithm)
+                        digest.update(b"blob " + str(size).encode() + b"\0")
+                        while chunk := output.read(1024 * 1024):
+                            digest.update(chunk)
+                    if digest.hexdigest().encode() != oid:
+                        dst.unlink()
+                        cloned = False
+                        report["skipped_files"] += 1
+                        continue
+                    shared.append(name)
+                    report["cloned_files"] += 1
+                    report["cloned_logical_bytes"] += size
+                    report["agent_checkout"] = "copy-on-write"
+                except OSError as error:
+                    if cloned:
+                        dst.unlink()
+                    report["skipped_files"] += 1
+                    if error.errno in unsupported:
+                        report["fallback"] = "filesystem-does-not-support-cloning"
+                        break
+                    if error.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EACCES, errno.EPERM):
+                        raise
+                finally:
+                    if source_fd is not None:
+                        os.close(source_fd)
+        finally:
+            os.close(root_fd)
+    finally:
+        for descriptor in parent_cache.values():
+            os.close(descriptor)
+    if shared:
+        # Option order matters: --refresh runs when Git encounters it.
+        git(target, "update-index", "--ignore-missing", "--refresh")
+    finish()
+
+
 def dependency_inputs(repo):
     repo = direct(repo)
     if Path(value(repo, "rev-parse", "--show-toplevel")).resolve() != repo:
@@ -514,6 +689,9 @@ def main():
     prototype = commands.add_parser("cow", help="internal to gwt new --cow-from")
     prototype.add_argument("--source", required=True)
     prototype.add_argument("--target", required=True)
+    agents = commands.add_parser("agent-checkout", help="internal to gwt new")
+    agents.add_argument("--source", required=True)
+    agents.add_argument("--target", required=True)
     deps = commands.add_parser("dependencies", help="check or attest shared pnpm dependencies")
     deps.add_argument("action", choices=("check", "record"))
     deps.add_argument("--source", required=True)
@@ -528,7 +706,8 @@ def main():
                    "GIT_NAMESPACE", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
         if any(name in os.environ for name in routing):
             raise ValueError("unset repository-routing Git environment variables before using gwt-storage")
-        {"owner": select, "snapshot": snapshot, "cow": cow, "dependencies": dependencies}[args.command](args)
+        {"owner": select, "snapshot": snapshot, "cow": cow, "agent-checkout": agent_checkout,
+         "dependencies": dependencies}[args.command](args)
     except (ValueError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print(f"gwt-storage: {error}", file=sys.stderr)
         return 1

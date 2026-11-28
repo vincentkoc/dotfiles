@@ -489,7 +489,35 @@ Repository-native bounded source capsules and Testbox clones retain their own
 contracts. Temporary test fixtures may retain tool-required locations. Use this
 directory for durable agent-created proof repositories, not every temporary file.
 
-## Experimental APFS source sharing
+## Agent skill checkout sharing
+
+With `DOTFILES_GWT_AGENT_COW=1`, new worktrees try copy-on-write sharing for regular
+files under `.agents`, using the selected owning checkout as the source. Each cloned file
+must match the requested commit's blob before Git refreshes its index entry.
+Git then completes checkout, including sparse membership, symlinks, and files
+that cannot be shared. Skills remain ordinary, independently editable files;
+changing either checkout cannot change the other.
+
+This uses APFS cloning on macOS and `FICLONE` on supported Linux filesystems.
+Cross-filesystem, unsupported, missing, or modified source files fall back to
+native checkout. Checkout filters, ident expansion, working-tree encodings and
+CRLF conversion also use Git. Full checkouts with an executable `post-checkout`
+hook retain the original native creation path so hook arguments stay unchanged.
+Existing worktrees are never converted or rewritten.
+
+Native creation remains the default during qualification. Sharing output reports cloned
+file count and logical bytes; it does not measure exclusive physical savings.
+No additional persistent cache, symlinked skill directory, or immutable donor
+is required.
+
+Run `python3 tests/gwt-checkout-benchmark.py --source /path/to/repository` to
+compare native and shared creation of a bounded, isolated `.agents` fixture.
+The source revision is pinned before extraction. A local 356-file / 4.7 MB
+OpenClaw fixture shared every file and took 3.45 seconds versus 2.27 seconds
+native (three runs, median). This trades extra setup for shared storage; it is
+not a speed improvement. Broader checkout sharing needs separate qualification.
+
+## Experimental whole-checkout APFS source sharing
 
 `gwt new <branch> <commit> --cow-from <immutable-seed>` first creates a normal
 Git worktree. It then replaces identical regular files with `fclonefileat`
