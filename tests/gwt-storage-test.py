@@ -26,6 +26,7 @@ class StorageTest(unittest.TestCase):
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
                     "XDG_CONFIG_HOME": str(self.home / ".config"), "XDG_STATE_HOME": str(self.home / ".local/state"), "GWT_OWNER_ID": "fixture",
                     "DOTFILES_WORKTREES_ROOT": str(self.home / ".codex/worktrees"), "TMUX": ""}
+        self.env["DOTFILES_GWT_AGENT_COW"] = "1"
         self.env.pop("DOTFILES_GWT_LOADED", None)
         self.env.pop("DOTFILES_GIT_SPARSE_ROOT", None)
         self.repo = self.root / "source"
@@ -423,6 +424,139 @@ class StorageTest(unittest.TestCase):
         self.assertTrue((target / "executable").stat().st_mode & stat.S_IXUSR)
         self.assertTrue((target / "link").is_symlink())
         print("cow_fixture=" + json.dumps(report))
+
+    def prepare_agent_files(self):
+        agents = self.repo / ".agents/skills/example"
+        agents.mkdir(parents=True)
+        (agents / "SKILL.md").write_text("agent guidance\n")
+        (agents / "tool").write_text("#!/bin/sh\nexit 0\n")
+        (agents / "tool").chmod(0o755)
+        (agents / "link").symlink_to("SKILL.md")
+        (self.repo / ".gitattributes").write_text("* text=auto eol=lf\n")
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-qm", "agent guidance")
+        return agents
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS native sharing")
+    def test_agent_checkout_shares_before_native_checkout_and_isolates_edits(self):
+        agents = self.prepare_agent_files()
+        result = self.gwt("new", "agent-shared", "HEAD", "--full")
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
+        self.assertEqual(report["cloned_files"], 2)
+        target = self.home / ".codex/worktrees/example-project/agent-shared"
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+        self.assertTrue((target / ".agents/skills/example/link").is_symlink())
+        self.assertTrue((target / ".agents/skills/example/tool").stat().st_mode & stat.S_IXUSR)
+        file = target / ".agents/skills/example/SKILL.md"
+        before = file.stat()
+        self.git(target, "checkout", "-f")
+        self.assertEqual((file.stat().st_ino, file.stat().st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+        file.write_text("worktree edit\n")
+        self.assertEqual((agents / "SKILL.md").read_text(), "agent guidance\n")
+        (agents / "tool").write_text("source edit\n")
+        self.assertEqual((target / ".agents/skills/example/tool").read_text(), "#!/bin/sh\nexit 0\n")
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS native sharing")
+    def test_agent_checkout_uses_requested_revision_and_skips_dirty_donor(self):
+        agents = self.prepare_agent_files()
+        (agents / "SKILL.md").write_text("new committed guidance\n")
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-qm", "new guidance")
+        (agents / "tool").write_text("uncommitted source\n")
+        result = self.gwt("new", "agent-old", "HEAD~1", "--full")
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
+        self.assertEqual(report["cloned_files"], 0)
+        target = self.home / ".codex/worktrees/example-project/agent-old"
+        self.assertEqual((target / ".agents/skills/example/SKILL.md").read_text(), "agent guidance\n")
+        self.assertEqual((target / ".agents/skills/example/tool").read_text(), "#!/bin/sh\nexit 0\n")
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    def test_agent_checkout_preserves_full_post_checkout_hook(self):
+        self.prepare_agent_files()
+        hook = self.repo / ".git/hooks/post-checkout"
+        hook.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > hook-args\n')
+        hook.chmod(0o755)
+        self.gwt("new", "agent-hook", "HEAD", "--full")
+        target = self.home / ".codex/worktrees/example-project/agent-hook"
+        self.assertEqual((target / "hook-args").read_text().splitlines(),
+                         ["0" * 40, self.git(target, "rev-parse", "HEAD"), "1"])
+
+    def test_agent_checkout_large_attribute_batch_and_native_fallback(self):
+        agents = self.prepare_agent_files()
+        for index in range(400):
+            (agents / (f"guidance-{index:04}-" + "long-name-" * 5 + ".md")).write_text("guidance\n")
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-qm", "large attribute batch")
+        result = self.gwt("new", "agent-batch", "HEAD", "--full")
+        target = self.home / ".codex/worktrees/example-project/agent-batch"
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+        self.assertEqual(len(list((target / ".agents/skills/example").iterdir())), 403)
+        self.assertIn('"agent_checkout"', result.stdout)
+
+    def test_agent_checkout_conversion_and_disable_fallback(self):
+        self.prepare_agent_files()
+        self.git(self.repo, "config", "core.autocrlf", "yes")
+        result = self.gwt("new", "agent-crlf", "HEAD", "--full")
+        self.assertIn('"fallback": "checkout-conversion"', result.stdout)
+        target = self.home / ".codex/worktrees/example-project/agent-crlf"
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+        self.env["DOTFILES_GWT_AGENT_COW"] = "0"
+        result = self.gwt("new", "agent-disabled", "HEAD", "--full")
+        self.assertNotIn('"agent_checkout"', result.stdout)
+
+    def test_agent_checkout_preserves_relative_target_hook(self):
+        self.prepare_agent_files()
+        hooks = self.repo / ".githooks"
+        hooks.mkdir()
+        hook = hooks / "post-checkout"
+        hook.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > hook-args\n')
+        hook.chmod(0o755)
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-qm", "target hook")
+        self.git(self.repo, "branch", "target-with-hook")
+        self.git(self.repo, "checkout", "HEAD~1")
+        self.git(self.repo, "config", "core.hooksPath", ".githooks")
+        baseline = self.root / "native-hook"
+        self.git(self.repo, "worktree", "add", "--detach", str(baseline), "target-with-hook")
+        result = self.gwt("new", "agent-target-hook", "target-with-hook", "--full")
+        target = self.home / ".codex/worktrees/example-project/agent-target-hook"
+        self.assertNotIn('"agent_checkout"', result.stdout)
+        self.assertEqual((target / "hook-args").exists(), (baseline / "hook-args").exists())
+        if (baseline / "hook-args").exists():
+            self.assertEqual((target / "hook-args").read_bytes(), (baseline / "hook-args").read_bytes())
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS native sharing")
+    def test_agent_checkout_sparse_membership(self):
+        self.prepare_agent_files()
+        profiles = self.root / "profiles/example-project"
+        profiles.mkdir(parents=True)
+        (profiles / "agents.patterns").write_text("/*\n!/*/\n/.agents/\n")
+        (profiles / "no-agents.patterns").write_text("/*\n!/*/\n")
+        self.env["DOTFILES_GIT_SPARSE_ROOT"] = str(profiles.parent)
+        for profile, present in (("agents", True), ("no-agents", False)):
+            with self.subTest(profile=profile):
+                result = self.gwt("new", profile, "HEAD", "--profile", profile)
+                report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
+                self.assertEqual(report["cloned_files"], 2)
+                target = self.home / ".codex/worktrees/example-project" / profile
+                self.assertEqual((target / ".agents/skills/example/SKILL.md").exists(), present)
+                self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS native sharing")
+    def test_agent_checkout_uses_target_attributes_and_native_metadata(self):
+        agents = self.prepare_agent_files()
+        (self.repo / ".gitattributes").write_text("* text=auto eol=lf\n.agents/skills/example/SKILL.md ident\n")
+        (agents / "SKILL.md").write_text("$Id$\n")
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-qm", "expanded guidance")
+        self.run_command(["xattr", "-w", "com.example.donor", "private", str(agents / "tool")])
+        result = self.gwt("new", "agent-attrs", "HEAD", "--full")
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
+        self.assertEqual(report["cloned_files"], 1)
+        target = self.home / ".codex/worktrees/example-project/agent-attrs"
+        self.assertIn("$Id: ", (target / ".agents/skills/example/SKILL.md").read_text())
+        self.assertNotIn("com.example.donor", self.run_command(["xattr", str(target / ".agents/skills/example/tool")]).stdout)
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
 
     @unittest.skipUnless(sys.platform == "darwin", "APFS metadata")
     def test_cow_preserves_destination_xattrs(self):

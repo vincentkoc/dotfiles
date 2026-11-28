@@ -1616,6 +1616,7 @@ gwt() {
             local cow_source=""
             local root repo_slug branch_slug worktree_parent worktree_path repo_root
             local use_sparse=false
+            local share_agents=false
             local checkout_risk=""
             local created_worktree=false
             local finish_managed=false
@@ -1764,6 +1765,17 @@ gwt() {
                 fi
             fi
 
+            # Keep full-checkout hook semantics on the original native route.
+            # Sparse creation already performs its checkout as a separate step.
+            if [[ "${DOTFILES_GWT_AGENT_COW:-0}" == 1 && -z "$cow_source" && -d "$repo_root/.agents" && ! -L "$repo_root/.agents" ]]; then
+                local post_checkout_hook hooks_path
+                post_checkout_hook=$(_gwt_git_probe rev-parse --path-format=absolute --git-path hooks/post-checkout) || return 1
+                hooks_path=$(_gwt_git_probe config --get core.hooksPath 2>/dev/null || true)
+                if [[ "$use_sparse" == true || ( ! -x "$post_checkout_hook" && ( -z "$hooks_path" || "$hooks_path" == /* ) ) ]]; then
+                    share_agents=true
+                fi
+            fi
+
             if [[ -n "$dependency_source" ]]; then
                 binding_state=$(_gwt_explicit_dependency snapshot "$dependency_source" "$repo_root" "$worktree_path") || return 1
             fi
@@ -1780,7 +1792,7 @@ gwt() {
             fi
             if _gwt_git_probe show-ref --verify --quiet "refs/heads/$branch"; then
                 expected_head=$(_gwt_git_probe rev-parse --verify "refs/heads/$branch") || return 1
-                if [[ "$use_sparse" == true ]]; then
+                if [[ "$use_sparse" == true || "$share_agents" == true ]]; then
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" --no-checkout "$worktree_path" "$branch" ) || return 1
                 else
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" "$worktree_path" "$branch" ) || return 1
@@ -1789,7 +1801,7 @@ gwt() {
                 local resolved_start_point
                 resolved_start_point=$(_gwt_resolve_start_point "$start_point") || return 1
                 expected_head=$(_gwt_git_probe rev-parse --verify "$resolved_start_point^{commit}") || return 1
-                if [[ "$use_sparse" == true ]]; then
+                if [[ "$use_sparse" == true || "$share_agents" == true ]]; then
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" --no-checkout -b "$branch" "$worktree_path" "$resolved_start_point" ) || return 1
                 else
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" -b "$branch" "$worktree_path" "$resolved_start_point" ) || return 1
@@ -1797,11 +1809,18 @@ gwt() {
             fi
             created_worktree=true
 
+            if [[ "$share_agents" == true ]]; then
+                GWT_NEW_WORKTREE="$worktree_path" _gwt_storage agent-checkout --source "$repo_root" --target "$worktree_path" || {
+                    _gwt_preserve_failed_worktree "$worktree_path"
+                    return 1
+                }
+            fi
+
             _gwt_sparse_apply_default_profile "$worktree_path" "$profile" || {
                 [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                 return 1
             }
-            if [[ "$use_sparse" == true ]]; then
+            if [[ "$use_sparse" == true || "$share_agents" == true ]]; then
                 git -C "$worktree_path" checkout -f >/dev/null 2>&1 || git -C "$worktree_path" read-tree -mu HEAD || {
                     [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                     return 1
