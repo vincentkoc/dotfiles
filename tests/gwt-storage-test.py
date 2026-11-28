@@ -554,6 +554,9 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(report["cloned_files"], 5)
         target = self.home / ".codex/worktrees/example-project/all-files"
         self.assertEqual(self.git(target, "status", "--porcelain"), "")
+        self.assertNotEqual((target / "file").stat().st_ino, (self.repo / "file").stat().st_ino)
+        self.assertEqual((target / "file").stat().st_nlink, 1)
+        self.assertFalse(list(target.glob(".gwt-checkout-*")))
         self.assertTrue((target / "link").is_symlink())
         (target / "file").write_text("independent worktree edit\n")
         self.assertEqual((self.repo / "file").read_text(), "current\n")
@@ -594,11 +597,119 @@ class StorageTest(unittest.TestCase):
         library.fclonefileat.side_effect = unavailable
         with mock.patch.dict(os.environ, {**self.env, "GWT_NEW_WORKTREE": str(target)}, clear=True):
             namespace = runpy.run_path(str(HELPER))
-            with mock.patch("ctypes.CDLL", return_value=library):
+            with mock.patch("ctypes.CDLL", return_value=library), mock.patch.dict(
+                namespace["checkout_files"].__globals__, checkout_directory_fallback=lambda *args: None
+            ):
                 namespace["checkout_files"](SimpleNamespace(source=self.repo, target=target, scope="all"))
+        self.assertFalse(list(target.glob(".gwt-checkout-*")))
         self.git(target, "checkout", "-f")
         self.assertEqual((target / "file").read_text(), "current\n")
         self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS private publication")
+    def test_checkout_keeps_dirty_snapshot_private_until_verified(self):
+        agents = self.prepare_agent_files()
+        (agents / "SKILL.md").write_text("private dirty donor\n")
+        target = self.root / "private-publication"
+        self.git(self.repo, "worktree", "add", "--no-checkout", "--detach", str(target))
+        target.chmod(0o755)
+        namespace = runpy.run_path(str(HELPER))
+        original_hash = namespace["hashlib"].new
+        observed = []
+
+        def inspect_hash(*args, **kwargs):
+            stages = list(target.glob(".gwt-checkout-*"))
+            self.assertEqual(len(stages), 1)
+            self.assertEqual(stat.S_IMODE(stages[0].stat().st_mode), 0o700)
+            if (stages[0] / "file").read_text() == "private dirty donor\n":
+                self.assertFalse((target / ".agents/skills/example/SKILL.md").exists())
+                observed.append(True)
+            return original_hash(*args, **kwargs)
+
+        previous_mask = os.umask(0)
+        try:
+            with mock.patch.dict(os.environ, {**self.env, "GWT_NEW_WORKTREE": str(target)}, clear=True):
+                with mock.patch("hashlib.new", side_effect=inspect_hash):
+                    namespace["checkout_files"](SimpleNamespace(source=self.repo, target=target, scope="agents"))
+        finally:
+            os.umask(previous_mask)
+        self.assertEqual(observed, [True])
+        self.assertFalse(list(target.glob(".gwt-checkout-*")))
+        self.assertFalse((target / ".agents/skills/example/SKILL.md").exists())
+        self.git(target, "checkout", "-f")
+        self.assertEqual((target / ".agents/skills/example/SKILL.md").read_text(), "agent guidance\n")
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS private publication")
+    def test_checkout_does_not_replace_concurrently_created_file(self):
+        target = self.root / "publication-race"
+        self.git(self.repo, "worktree", "add", "--no-checkout", "--detach", str(target))
+        namespace = runpy.run_path(str(HELPER))
+        original_link = os.link
+
+        def raced_link(source, destination, **kwargs):
+            Path(destination).write_text("concurrent writer\n")
+            return original_link(source, destination, **kwargs)
+
+        with mock.patch.dict(os.environ, {**self.env, "GWT_NEW_WORKTREE": str(target)}, clear=True):
+            with mock.patch("os.link", side_effect=raced_link):
+                with self.assertRaises(FileExistsError):
+                    namespace["checkout_files"](SimpleNamespace(source=self.repo, target=target, scope="all"))
+        self.assertEqual((target / "executable").read_text(), "concurrent writer\n")
+        self.assertFalse(list(target.glob(".gwt-checkout-*")))
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS private publication")
+    def test_checkout_cleans_staging_after_hash_failure(self):
+        target = self.root / "hash-failure"
+        self.git(self.repo, "worktree", "add", "--no-checkout", "--detach", str(target))
+        namespace = runpy.run_path(str(HELPER))
+        with mock.patch.dict(os.environ, {**self.env, "GWT_NEW_WORKTREE": str(target)}, clear=True):
+            with mock.patch("hashlib.new", side_effect=RuntimeError("hash failed")):
+                with self.assertRaisesRegex(RuntimeError, "hash failed"):
+                    namespace["checkout_files"](SimpleNamespace(source=self.repo, target=target, scope="all"))
+        self.assertEqual([entry.name for entry in target.iterdir()], [".git"])
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS ACL inheritance")
+    def test_checkout_acl_fallback_preserves_native_inheritance(self):
+        target, baseline = self.root / "acl-target", self.root / "acl-native"
+        acl = "everyone allow read,readattr,readextattr,readsecurity,file_inherit,directory_inherit"
+        for directory in (target, baseline):
+            self.git(self.repo, "worktree", "add", "--no-checkout", "--detach", str(directory))
+            self.run_command(["chmod", "+a", acl, str(directory)])
+        self.env["GWT_NEW_WORKTREE"] = str(target)
+        result = self.helper("checkout", "--source", self.repo, "--target", target, "--scope", "all")
+        self.assertEqual(json.loads(result.stdout)["fallback"], "destination-acl")
+        self.assertEqual(self.git(target, "ls-files"), "")
+        self.assertFalse(list(target.glob(".gwt-checkout-*")))
+        for directory in (target, baseline):
+            self.git(directory, "checkout", "-f")
+        for name in ("file", "executable"):
+            actual = self.run_command(["ls", "-le", str(target / name)]).stdout.splitlines()[1:]
+            expected = self.run_command(["ls", "-le", str(baseline / name)]).stdout.splitlines()[1:]
+            self.assertTrue(actual)
+            self.assertEqual(actual, expected)
+            self.assertEqual(stat.S_IMODE((target / name).stat().st_mode), stat.S_IMODE((baseline / name).stat().st_mode))
+
+    def test_checkout_linux_acl_and_setgid_fallback(self):
+        namespace = runpy.run_path(str(HELPER))
+        import errno
+
+        def no_acl(descriptor, attribute):
+            raise OSError(errno.ENODATA, "no ACL")
+
+        for attribute in ("system.posix_acl_access", "system.posix_acl_default", None):
+            with self.subTest(attribute=attribute):
+                def get_acl(descriptor, requested):
+                    return b"acl" if requested == attribute else no_acl(descriptor, requested)
+
+                with mock.patch("os.getxattr", side_effect=get_acl, create=True):
+                    self.assertEqual(namespace["checkout_directory_fallback"](self.root, None),
+                                     "destination-acl" if attribute else None)
+        for error in (errno.EACCES, errno.ENOTSUP, errno.EOPNOTSUPP):
+            with self.subTest(error=error):
+                with mock.patch("os.getxattr", side_effect=OSError(error, "unavailable"), create=True):
+                    self.assertEqual(namespace["checkout_directory_fallback"](self.root, None), "destination-acl-unavailable")
+        self.root.chmod(0o2700)
+        self.assertEqual(namespace["checkout_directory_fallback"](self.root, None), "destination-setgid")
 
     def test_all_tracked_sharing_does_not_follow_source_directory_links(self):
         agents = self.prepare_agent_files()

@@ -494,6 +494,11 @@ directory for durable agent-created proof repositories, not every temporary file
 New worktrees try copy-on-write sharing for tracked regular files, including
 `.agents`, using the selected source checkout as the donor. Each cloned file
 must match the requested commit's blob before Git refreshes its index entry.
+Unverified donor snapshots stay in a temporary private directory (mode `0700`)
+and are published atomically only after validation, without replacing any file
+that appears concurrently. Staging is removed on success or failure. Destinations
+with ACLs or setgid inheritance retain native checkout so their permissions and
+group ownership are preserved.
 Git then completes checkout, including sparse membership, symlinks, and files
 that cannot be shared. Skills remain ordinary, independently editable files;
 changing either checkout cannot change the other.
