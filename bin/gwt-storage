@@ -353,9 +353,40 @@ def cow(args):
     print(json.dumps(report))
 
 
-def agent_checkout(args):
-    """Seed a new checkout with verified, independently writable agent files."""
+def same_filesystem_donor(source, target):
+    """Prefer existing registered code on the destination volume; never move it."""
+    device = target.stat().st_dev
+    if source.stat().st_dev == device:
+        return source
+    records, record = [], {}
+    for field in git(target, "worktree", "list", "--porcelain", "-z").stdout.split(b"\0"):
+        if not field:
+            if record:
+                records.append(record)
+                record = {}
+        else:
+            key, _, value_bytes = field.partition(b" ")
+            record[key] = value_bytes
+    head = value(target, "rev-parse", "HEAD").encode()
+    for record in sorted(records, key=lambda entry: entry.get(b"HEAD") != head):
+        if b"worktree" not in record or b"bare" in record:
+            continue
+        try:
+            candidate = direct(os.fsdecode(record[b"worktree"]))
+            info = candidate.stat()
+            if candidate in (source, target) or info.st_dev != device or info.st_uid != os.getuid():
+                continue
+            if common(candidate) == common(target):
+                return candidate
+        except (OSError, ValueError):
+            continue
+    return source
+
+
+def checkout_files(args):
+    """Seed a new checkout with verified, independently writable tracked files."""
     started = time.monotonic()
+    scope = getattr(args, "scope", "agents")
     source, target = direct(args.source), direct(args.target)
     if os.environ.get("GWT_NEW_WORKTREE") != str(target):
         raise ValueError("agent checkout is internal to gwt new")
@@ -363,7 +394,7 @@ def agent_checkout(args):
         raise ValueError("agent checkout requires a new linked worktree of the source")
     if any(path.name != ".git" for path in target.iterdir()) or git(target, "ls-files", "-z").stdout:
         raise ValueError("agent checkout requires an empty worktree and index")
-    report = {"agent_checkout": "native", "cloned_files": 0, "cloned_logical_bytes": 0,
+    report = {"checkout_sharing": "native", "scope": scope, "cloned_files": 0, "cloned_logical_bytes": 0,
               "skipped_files": 0, "physical_bytes_saved": None}
 
     def finish(reason=None):
@@ -375,6 +406,13 @@ def agent_checkout(args):
     if sys.platform not in ("darwin", "linux"):
         finish("unsupported-platform")
         return
+    original_source = source
+    source = same_filesystem_donor(source, target)
+    if source != original_source:
+        report["donor_selection"] = "registered-worktree-on-target-filesystem"
+    if source.stat().st_dev != target.stat().st_dev:
+        finish("no-same-filesystem-donor")
+        return
     autocrlf = git(target, "config", "--get", "core.autocrlf", check=False)
     if autocrlf.returncode == 0 and autocrlf.stdout.strip().lower() not in (b"false", b"no", b"off", b"0", b"input"):
         finish("checkout-conversion")
@@ -383,7 +421,8 @@ def agent_checkout(args):
         finish("checkout-conversion")
         return
     entries = []
-    for entry in git(target, "ls-tree", "-rz", "HEAD", "--", ".agents").stdout.split(b"\0"):
+    selection = ["--", ".agents"] if scope == "agents" else []
+    for entry in git(target, "ls-tree", "-rz", "HEAD", *selection).stdout.split(b"\0"):
         if not entry:
             continue
         info, name = entry.split(b"\t", 1)
@@ -391,12 +430,26 @@ def agent_checkout(args):
         if mode in (b"100644", b"100755") and kind == b"blob":
             entries.append((mode, oid, name))
     if not entries:
-        finish("no-agent-files")
+        finish("no-shareable-files")
         return
+    names = b"\0".join(entry[2] for entry in entries) + b"\0"
+    if getattr(args, "profile_file", None):
+        profile = Path(args.profile_file)
+        mode = "--cone" if profile.suffix == ".paths" else "--no-cone"
+        membership = git(target, "sparse-checkout", "check-rules", mode,
+                         "--rules-file", str(profile), "-z", input=names, check=False)
+        if membership.returncode:
+            finish("native-sparse-rule-query-unavailable")
+            return
+        included = set(membership.stdout.split(b"\0"))
+        entries = [entry for entry in entries if entry[2] in included]
+        if not entries:
+            finish("no-shareable-files-in-profile")
+            return
+        names = b"\0".join(entry[2] for entry in entries) + b"\0"
     # Populate only the index. Native checkout still owns sparse membership,
     # filters, symlinks, and every file that cannot be shared safely.
     git(target, "read-tree", "HEAD")
-    names = b"\0".join(entry[2] for entry in entries) + b"\0"
     attrs = git(target, "check-attr", "--cached", "-z", "--stdin",
                 "filter", "ident", "working-tree-encoding", "eol", input=names).stdout.split(b"\0")
     attributes = {}
@@ -439,8 +492,10 @@ def agent_checkout(args):
                     report["skipped_files"] += 1
                     continue
                 parts = Path(os.fsdecode(name)).parts
-                if not parts or parts[0] != ".agents" or any(part in (".", "..") for part in parts):
-                    raise ValueError("invalid agent path")
+                if (not parts or Path(os.fsdecode(name)).is_absolute()
+                        or any(part.lower() in (b"", b".", b"..", b".git") for part in name.split(b"/"))
+                        or (scope == "agents" and parts[0] != ".agents")):
+                    raise ValueError("invalid checkout path")
                 dst = target.joinpath(*parts)
                 source_fd = None
                 cloned = False
@@ -495,7 +550,7 @@ def agent_checkout(args):
                     shared.append(name)
                     report["cloned_files"] += 1
                     report["cloned_logical_bytes"] += size
-                    report["agent_checkout"] = "copy-on-write"
+                    report["checkout_sharing"] = "copy-on-write"
                 except OSError as error:
                     if cloned:
                         dst.unlink()
@@ -692,6 +747,11 @@ def main():
     agents = commands.add_parser("agent-checkout", help="internal to gwt new")
     agents.add_argument("--source", required=True)
     agents.add_argument("--target", required=True)
+    checkout = commands.add_parser("checkout", help="internal to gwt new")
+    checkout.add_argument("--source", required=True)
+    checkout.add_argument("--target", required=True)
+    checkout.add_argument("--scope", choices=("agents", "all"), default="all")
+    checkout.add_argument("--profile-file")
     deps = commands.add_parser("dependencies", help="check or attest shared pnpm dependencies")
     deps.add_argument("action", choices=("check", "record"))
     deps.add_argument("--source", required=True)
@@ -706,7 +766,8 @@ def main():
                    "GIT_NAMESPACE", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
         if any(name in os.environ for name in routing):
             raise ValueError("unset repository-routing Git environment variables before using gwt-storage")
-        {"owner": select, "snapshot": snapshot, "cow": cow, "agent-checkout": agent_checkout,
+        {"owner": select, "snapshot": snapshot, "cow": cow, "agent-checkout": checkout_files,
+         "checkout": checkout_files,
          "dependencies": dependencies}[args.command](args)
     except (ValueError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print(f"gwt-storage: {error}", file=sys.stderr)

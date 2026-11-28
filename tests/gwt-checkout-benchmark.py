@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare native and shared .agents creation using an isolated committed fixture."""
+"""Compare native and shared checkout creation using an isolated committed fixture."""
 import argparse
 import io
 import json
@@ -19,13 +19,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--runs", type=int, default=3, choices=range(1, 6))
+    parser.add_argument("--scope", choices=("agents", "all"), default="agents")
     args = parser.parse_args()
     source_head = subprocess.run(["git", "-C", str(args.source), "rev-parse", "HEAD"],
                                  check=True, capture_output=True, text=True).stdout.strip()
-    archive = subprocess.run(["git", "-C", str(args.source), "archive", source_head, ".agents"],
+    paths = [".agents"] if args.scope == "agents" else []
+    archive = subprocess.run(["git", "-C", str(args.source), "archive", source_head, *paths],
                              check=True, capture_output=True).stdout
     if len(archive) > 64 * 1024 * 1024:
-        raise SystemExit("agent fixture exceeds the 64 MiB benchmark bound")
+        raise SystemExit("fixture exceeds the 64 MiB benchmark bound")
     with tempfile.TemporaryDirectory(prefix="gwt-checkout-benchmark-") as temporary:
         root = Path(temporary).resolve()
         source = root / "source"
@@ -37,7 +39,7 @@ def main():
                    DOTFILES_WORKTREES_ROOT=str(root / "worktrees"),
                    XDG_CONFIG_HOME=str(root / "config"), XDG_STATE_HOME=str(root / "state"))
         for key in ("DOTFILES_GWT_LOADED", "DOTFILES_GIT_SPARSE_ROOT", "GIT_INDEX_FILE",
-                    "GIT_DIR", "GIT_WORK_TREE"):
+                    "GIT_DIR", "GIT_WORK_TREE", "DOTFILES_GWT_AGENT_COW"):
             env.pop(key, None)
 
         def run(command, cwd=source, **kwargs):
@@ -58,7 +60,7 @@ def main():
         results = {"native": [], "shared": []}
         for iteration in range(args.runs):
             for mode in (("native", "shared") if iteration % 2 == 0 else ("shared", "native")):
-                env["DOTFILES_GWT_AGENT_COW"] = "1" if mode == "shared" else "0"
+                env["DOTFILES_GWT_COW"] = args.scope if mode == "shared" else "0"
                 branch = f"{mode}-{iteration}"
                 started = time.monotonic()
                 result = run(["zsh", "-f", "-c", 'source "$1"; gwt new "$2" HEAD --full',
@@ -68,9 +70,10 @@ def main():
                 if run(["git", "status", "--porcelain"], cwd=target).stdout:
                     raise RuntimeError("benchmark checkout is dirty")
                 report = next((json.loads(line) for line in result.stdout.splitlines()
-                               if line.startswith('{"agent_checkout"')), {})
+                               if line.startswith('{"checkout_sharing"')), {})
                 results[mode].append({"seconds": round(elapsed, 4), **report})
-        print(json.dumps({"source_head": source_head, "results": results,
+                run(["git", "worktree", "remove", str(target)])
+        print(json.dumps({"source_head": source_head, "scope": args.scope, "results": results,
             "median_seconds": {mode: round(statistics.median(row["seconds"] for row in rows), 4)
                                for mode, rows in results.items()}}, indent=2))
 

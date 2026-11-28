@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -441,7 +442,7 @@ class StorageTest(unittest.TestCase):
     def test_agent_checkout_shares_before_native_checkout_and_isolates_edits(self):
         agents = self.prepare_agent_files()
         result = self.gwt("new", "agent-shared", "HEAD", "--full")
-        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"checkout_sharing"'))
         self.assertEqual(report["cloned_files"], 2)
         target = self.home / ".codex/worktrees/example-project/agent-shared"
         self.assertEqual(self.git(target, "status", "--porcelain"), "")
@@ -464,7 +465,7 @@ class StorageTest(unittest.TestCase):
         self.git(self.repo, "commit", "-qm", "new guidance")
         (agents / "tool").write_text("uncommitted source\n")
         result = self.gwt("new", "agent-old", "HEAD~1", "--full")
-        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"checkout_sharing"'))
         self.assertEqual(report["cloned_files"], 0)
         target = self.home / ".codex/worktrees/example-project/agent-old"
         self.assertEqual((target / ".agents/skills/example/SKILL.md").read_text(), "agent guidance\n")
@@ -491,7 +492,7 @@ class StorageTest(unittest.TestCase):
         target = self.home / ".codex/worktrees/example-project/agent-batch"
         self.assertEqual(self.git(target, "status", "--porcelain"), "")
         self.assertEqual(len(list((target / ".agents/skills/example").iterdir())), 403)
-        self.assertIn('"agent_checkout"', result.stdout)
+        self.assertIn('"checkout_sharing"', result.stdout)
 
     def test_agent_checkout_conversion_and_disable_fallback(self):
         self.prepare_agent_files()
@@ -502,7 +503,7 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(self.git(target, "status", "--porcelain"), "")
         self.env["DOTFILES_GWT_AGENT_COW"] = "0"
         result = self.gwt("new", "agent-disabled", "HEAD", "--full")
-        self.assertNotIn('"agent_checkout"', result.stdout)
+        self.assertNotIn('"checkout_sharing"', result.stdout)
 
     def test_agent_checkout_preserves_relative_target_hook(self):
         self.prepare_agent_files()
@@ -520,7 +521,7 @@ class StorageTest(unittest.TestCase):
         self.git(self.repo, "worktree", "add", "--detach", str(baseline), "target-with-hook")
         result = self.gwt("new", "agent-target-hook", "target-with-hook", "--full")
         target = self.home / ".codex/worktrees/example-project/agent-target-hook"
-        self.assertNotIn('"agent_checkout"', result.stdout)
+        self.assertNotIn('"checkout_sharing"', result.stdout)
         self.assertEqual((target / "hook-args").exists(), (baseline / "hook-args").exists())
         if (baseline / "hook-args").exists():
             self.assertEqual((target / "hook-args").read_bytes(), (baseline / "hook-args").read_bytes())
@@ -536,11 +537,122 @@ class StorageTest(unittest.TestCase):
         for profile, present in (("agents", True), ("no-agents", False)):
             with self.subTest(profile=profile):
                 result = self.gwt("new", profile, "HEAD", "--profile", profile)
-                report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
-                self.assertEqual(report["cloned_files"], 2)
+                report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"checkout_sharing"'))
+                self.assertEqual(report["cloned_files"], 2 if present else 0)
                 target = self.home / ".codex/worktrees/example-project" / profile
                 self.assertEqual((target / ".agents/skills/example/SKILL.md").exists(), present)
                 self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS native sharing")
+    def test_all_tracked_files_share_by_default_and_preserve_git(self):
+        self.prepare_agent_files()
+        self.env.pop("DOTFILES_GWT_AGENT_COW", None)
+        self.env.pop("DOTFILES_GWT_COW", None)
+        result = self.gwt("new", "all-files", "HEAD", "--full")
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"checkout_sharing"'))
+        self.assertEqual(report["scope"], "all")
+        self.assertEqual(report["cloned_files"], 5)
+        target = self.home / ".codex/worktrees/example-project/all-files"
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+        self.assertTrue((target / "link").is_symlink())
+        (target / "file").write_text("independent worktree edit\n")
+        self.assertEqual((self.repo / "file").read_text(), "current\n")
+        self.git(target, "add", "file")
+        self.git(target, "commit", "-qm", "edit shared clone")
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+        self.git(target, "checkout", "HEAD~1")
+        self.assertEqual((target / "file").read_text(), "current\n")
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS native sharing")
+    def test_all_tracked_sharing_obeys_sparse_patterns(self):
+        self.prepare_agent_files()
+        self.env["DOTFILES_GWT_COW"] = "all"
+        profiles = self.root / "profiles/example-project"
+        profiles.mkdir(parents=True)
+        (profiles / "selected.patterns").write_text("/*\n!/*/\n/.agents/\n!/.agents/skills/example/tool\n")
+        self.env["DOTFILES_GIT_SPARSE_ROOT"] = str(profiles.parent)
+        result = self.gwt("new", "selected", "HEAD", "--profile", "selected")
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"checkout_sharing"'))
+        self.assertEqual(report["cloned_files"], 4)
+        target = self.home / ".codex/worktrees/example-project/selected"
+        self.assertFalse((target / ".agents/skills/example/tool").exists())
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS fallback")
+    def test_all_tracked_sharing_falls_back_when_clone_is_unsupported(self):
+        self.prepare_agent_files()
+        target = self.root / "unsupported-clone"
+        self.git(self.repo, "worktree", "add", "--no-checkout", "-b", "unsupported", str(target))
+        library = mock.Mock()
+
+        def unavailable(*args):
+            import ctypes
+            import errno
+            ctypes.set_errno(errno.EXDEV)
+            return -1
+
+        library.fclonefileat.side_effect = unavailable
+        with mock.patch.dict(os.environ, {**self.env, "GWT_NEW_WORKTREE": str(target)}, clear=True):
+            namespace = runpy.run_path(str(HELPER))
+            with mock.patch("ctypes.CDLL", return_value=library):
+                namespace["checkout_files"](SimpleNamespace(source=self.repo, target=target, scope="all"))
+        self.git(target, "checkout", "-f")
+        self.assertEqual((target / "file").read_text(), "current\n")
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    def test_all_tracked_sharing_does_not_follow_source_directory_links(self):
+        agents = self.prepare_agent_files()
+        outside = self.root / "outside"
+        (self.repo / ".agents/skills").rename(outside)
+        (self.repo / ".agents/skills").symlink_to(outside, target_is_directory=True)
+        self.env["DOTFILES_GWT_COW"] = "all"
+        self.gwt("new", "no-follow", "HEAD", "--full")
+        target = self.home / ".codex/worktrees/example-project/no-follow"
+        self.assertEqual((target / ".agents/skills/example/SKILL.md").read_text(), "agent guidance\n")
+        self.assertFalse((target / ".agents/skills").is_symlink())
+        self.assertTrue((self.repo / ".agents/skills").is_symlink())
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    def test_all_tracked_sharing_supports_disabled_hooks(self):
+        self.prepare_agent_files()
+        self.git(self.repo, "config", "core.hooksPath", "/dev/null")
+        self.env["DOTFILES_GWT_COW"] = "all"
+        self.gwt("new", "disabled-hooks", "HEAD", "--full")
+        target = self.home / ".codex/worktrees/example-project/disabled-hooks"
+        self.assertEqual(self.git(target, "status", "--porcelain"), "")
+
+    def test_cross_volume_source_uses_registered_same_volume_donor(self):
+        candidate = self.root / "same-volume-donor"
+        target = self.root / "new-target"
+        self.git(self.repo, "worktree", "add", "--detach", str(candidate), "HEAD")
+        self.git(self.repo, "worktree", "add", "--no-checkout", "--detach", str(target), "HEAD")
+        namespace = runpy.run_path(str(HELPER))
+        original_stat = Path.stat
+
+        def different_source_device(path, *args, **kwargs):
+            info = original_stat(path, *args, **kwargs)
+            if path == self.repo:
+                fields = list(info)
+                fields[2] += 1
+                return os.stat_result(fields)
+            return info
+
+        with mock.patch.object(Path, "stat", different_source_device):
+            self.assertEqual(namespace["same_filesystem_donor"](self.repo, target), candidate)
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS managed permissions")
+    def test_all_tracked_sharing_keeps_managed_full_checkout_private_modes(self):
+        self.prepare_agent_files()
+        (self.repo / ".gitattributes").write_text("* text=auto eol=lf\nfile ident\n")
+        (self.repo / "file").write_text("$Id$\n")
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-qm", "native fallback mode")
+        self.env["DOTFILES_GWT_COW"] = "all"
+        self.gwt("new", "private-full", "HEAD", "--full", "--finish-managed")
+        target = self.home / ".codex/worktrees/example-project/private-full"
+        for name in ("file", ".agents/skills/example/SKILL.md"):
+            self.assertEqual(stat.S_IMODE((target / name).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((target / "executable").stat().st_mode), 0o700)
 
     @unittest.skipUnless(sys.platform == "darwin", "APFS native sharing")
     def test_agent_checkout_uses_target_attributes_and_native_metadata(self):
@@ -551,7 +663,7 @@ class StorageTest(unittest.TestCase):
         self.git(self.repo, "commit", "-qm", "expanded guidance")
         self.run_command(["xattr", "-w", "com.example.donor", "private", str(agents / "tool")])
         result = self.gwt("new", "agent-attrs", "HEAD", "--full")
-        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"agent_checkout"'))
+        report = next(json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"checkout_sharing"'))
         self.assertEqual(report["cloned_files"], 1)
         target = self.home / ".codex/worktrees/example-project/agent-attrs"
         self.assertIn("$Id: ", (target / ".agents/skills/example/SKILL.md").read_text())
