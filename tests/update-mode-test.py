@@ -9,7 +9,7 @@ import unittest
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "functions/system/update.zsh"
-COMMANDS = "sudo uname softwareupdate apt-get brew npm codex codex-standalone-install pnpm yarn corepack pip pip3 gem rustup cargo composer go deno bun flutter updatedb tldr mole rm killall dscacheutil sleep".split()
+COMMANDS = "sudo uname softwareupdate apt-get brew npm codex codex-standalone-install pnpm yarn corepack pip pip3 python3 gem rustup cargo composer go deno bun flutter updatedb tldr mole rm killall dscacheutil sleep".split()
 
 
 class UpdateModeTests(unittest.TestCase):
@@ -26,6 +26,7 @@ with open(os.environ['UPDATE_TEST_LOG'], 'a') as stream:
         ('HOMEBREW_NO_INSTALL_CLEANUP', 'NEEDRESTART_MODE')}]) + '\\n')
 if name == 'uname': print(os.environ['UPDATE_TEST_PLATFORM'])
 if name == 'yarn' and sys.argv[1:] == ['--version']: print('1.22.0')
+if name in {'pip', 'pip3'} and sys.argv[1:2] == ['list']: print('[]')
 if name == 'brew' and sys.argv[1:2] == ['--cellar']:
     print(str(pathlib.Path(os.environ['UPDATE_TEST_LOG']).parent / 'cellar' / sys.argv[2]))
 if name == 'brew' and sys.argv[1:2] in [['--cellar'], ['list']] and os.environ.get('UPDATE_TEST_FAIL') == 'brew-ownership': sys.exit(9)
@@ -50,19 +51,57 @@ if name == 'sudo' and sys.argv[1:] != ['-v']:
                                UPDATE_TEST_FAIL=failure, UPDATE_TEST_PLATFORM=platform,
                                VIRTUAL_ENV=str(root / "venv"),
                                CONDA_PREFIX=str(root / "conda"))
+            # Stop the legacy background keepalive without affecting foreground commands.
             result = subprocess.run(["/bin/zsh", "-f", "-c",
+                                     'setopt nonomatch; true() { (( ZSH_SUBSHELL == 0 )); }; '
                                      'source "$1"; shift; up "$@"', "update-test", str(SOURCE), *arguments],
                                     env=environment, cwd=root, text=True, capture_output=True, timeout=10)
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             return result, calls
 
     def test_help_and_bad_arguments_do_not_run_commands(self):
-        for arguments, status in [(["--help"], 0), (["--unknown"], 2),
-                                  (["--updates-only", "extra"], 2),
-                                  (["--system-only", "--updates-only"], 2)]:
+        for arguments, status in [(["--help"], 0), (["--skip-macos", "--help"], 0),
+                                  (["--unknown"], 2), (["--updates-only", "extra"], 2),
+                                  (["--skip-macos", "--unknown"], 2),
+                                  (["--system-only", "--updates-only"], 2),
+                                  (["--updates-only", "--system-only"], 2),
+                                  (["--system-only", "--skip-macos"], 2),
+                                  (["--skip-macos", "--system-only"], 2)]:
             result, calls = self.run_mode(arguments)
             self.assertEqual(result.returncode, status, result.stderr)
             self.assertEqual(calls, [])
+
+    def test_skip_macos_preserves_other_updates(self):
+        for arguments in (["--skip-macos"], ["--updates-only", "--skip-macos"],
+                          ["--skip-macos", "--updates-only"]):
+            with self.subTest(arguments=arguments):
+                result, calls = self.run_mode(arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Skipping macOS updates", result.stdout)
+                self.assertFalse(any(name == "sudo" and args[:1] == ["softwareupdate"]
+                                     for name, args, _ in calls))
+                self.assertTrue(any(name == "brew" and args == ["upgrade"]
+                                    for name, args, _ in calls))
+                self.assertTrue(any(name == "codex-standalone-install" for name, _, _ in calls))
+                self.assertEqual(any(name == "brew" and args == ["cleanup"]
+                                     for name, args, _ in calls), "--updates-only" not in arguments)
+
+    def test_macos_updates_run_by_default(self):
+        for arguments in ([], ["--updates-only"]):
+            with self.subTest(arguments=arguments):
+                result, calls = self.run_mode(arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(any(name == "sudo" and args == ["softwareupdate", "-i", "-a"]
+                                    for name, args, _ in calls))
+
+    def test_skip_macos_preserves_linux_updates(self):
+        result, calls = self.run_mode(["--updates-only", "--skip-macos"], platform="Linux")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(name == "apt-get" and args == ["update", "--error-on=any"]
+                            for name, args, _ in calls))
+        self.assertTrue(any(name == "apt-get" and args == ["upgrade", "--with-new-pkgs", "--no-remove"]
+                            for name, args, _ in calls))
+        self.assertFalse(any(name == "softwareupdate" for name, _, _ in calls))
 
     def test_updates_only_has_no_cleanup_project_changes_or_keepalive(self):
         for platform in ("Darwin", "Linux"):

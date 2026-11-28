@@ -21,3 +21,14 @@ services. A pending reboot is reported and must be scheduled separately.
 signals, project pip/Go/Flutter steps, locate rebuilding, and the sudo keepalive.
 The two flags are mutually exclusive. Bare `up` retains the legacy tool and
 cleanup workflow.
+
+Use `up --skip-macos` to skip macOS software updates. Combine it with
+`--updates-only` to update tools without cleanup or project dependency changes:
+
+```sh
+up --updates-only --skip-macos
+```
+
+Run `up --help` to see all options.
+`--skip-macos` does not skip Linux OS updates and cannot be combined with
+`--system-only`.

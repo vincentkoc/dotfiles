@@ -51,20 +51,29 @@ _up_system() {
 }
 
 up() {
-    local updates_only=false system_only=false
-    case "$#:${1:-}" in
-        0:) ;;
-        1:--updates-only) updates_only=true ;;
-        1:--system-only) system_only=true ;;
-        1:--help|1:-h)
-            printf '%s\n' 'usage: up [--system-only | --updates-only | --help]' \
-                '  --system-only   update only the operating system, without tools, cleanup, or a sudo keepalive' \
-                '  --updates-only  update the OS and tools without cleanup, DNS signals, project pip/Go/Flutter changes, or a sudo keepalive' \
-                '  no arguments    retain the legacy update and cleanup workflow'
-            return 0
-            ;;
-        *) printf '%s\n' 'usage: up [--system-only | --updates-only | --help]' >&2; return 2 ;;
-    esac
+    local updates_only=false system_only=false skip_macos=false show_help=false argument
+    local usage='usage: up [--system-only | --updates-only] [--skip-macos] [--help]'
+    for argument in "$@"; do
+        case "$argument" in
+            --updates-only) updates_only=true ;;
+            --system-only) system_only=true ;;
+            --skip-macos) skip_macos=true ;;
+            --help|-h) show_help=true ;;
+            *) printf '%s\n' "$usage" >&2; return 2 ;;
+        esac
+    done
+    if $system_only && { $updates_only || $skip_macos; }; then
+        printf '%s\n' '--system-only cannot be combined with --updates-only or --skip-macos' >&2
+        return 2
+    fi
+    if $show_help; then
+        printf '%s\n' "$usage" \
+            '  --system-only   update only the operating system; cannot combine with other update flags' \
+            '  --updates-only  update the OS and tools without cleanup, DNS signals, project pip/Go/Flutter changes, or a sudo keepalive' \
+            '  --skip-macos    skip macOS software updates' \
+            '  no arguments    retain the legacy update and cleanup workflow'
+        return 0
+    fi
     if $updates_only; then
         local -x HOMEBREW_NO_INSTALL_CLEANUP=1
     fi
@@ -84,7 +93,9 @@ up() {
 
     declare -a failed_updates=()
 
-    if ! _up_system; then
+    if $skip_macos && [ "$(uname)" = "Darwin" ]; then
+        echo "⏭️ Skipping macOS updates (--skip-macos)."
+    elif ! _up_system; then
         failed_updates+=("Operating system")
     fi
 
