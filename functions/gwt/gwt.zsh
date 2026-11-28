@@ -1616,7 +1616,7 @@ gwt() {
             local cow_source=""
             local root repo_slug branch_slug worktree_parent worktree_path repo_root
             local use_sparse=false
-            local share_agents=false
+            local share_files=false share_scope="${DOTFILES_GWT_COW:-}"
             local checkout_risk=""
             local created_worktree=false
             local finish_managed=false
@@ -1767,12 +1767,27 @@ gwt() {
 
             # Keep full-checkout hook semantics on the original native route.
             # Sparse creation already performs its checkout as a separate step.
-            if [[ "${DOTFILES_GWT_AGENT_COW:-0}" == 1 && -z "$cow_source" && -d "$repo_root/.agents" && ! -L "$repo_root/.agents" ]]; then
+            if [[ -z "$share_scope" ]]; then
+                if (( ${+DOTFILES_GWT_AGENT_COW} )); then
+                    [[ "$DOTFILES_GWT_AGENT_COW" == 1 ]] && share_scope=agents || share_scope=0
+                else
+                    share_scope=all
+                fi
+            fi
+            case "$share_scope" in
+                1) share_scope=all ;;
+                0|agents|all) ;;
+                *) echo 'gwt: DOTFILES_GWT_COW must be 0, agents, or all' >&2; return 1 ;;
+            esac
+            if [[ "$share_scope" != 0 && -z "$cow_source" && ( "$share_scope" == all || ( -d "$repo_root/.agents" && ! -L "$repo_root/.agents" ) ) ]]; then
                 local post_checkout_hook hooks_path
-                post_checkout_hook=$(_gwt_git_probe rev-parse --path-format=absolute --git-path hooks/post-checkout) || return 1
                 hooks_path=$(_gwt_git_probe config --get core.hooksPath 2>/dev/null || true)
-                if [[ "$use_sparse" == true || ( ! -x "$post_checkout_hook" && ( -z "$hooks_path" || "$hooks_path" == /* ) ) ]]; then
-                    share_agents=true
+                if [[ "$use_sparse" == true || "$hooks_path" == /dev/null ]]; then
+                    share_files=true
+                elif [[ -z "$hooks_path" || "$hooks_path" == /* ]]; then
+                    if post_checkout_hook=$(_gwt_git_probe rev-parse --path-format=absolute --git-path hooks/post-checkout 2>/dev/null) && [[ ! -x "$post_checkout_hook" ]]; then
+                        share_files=true
+                    fi
                 fi
             fi
 
@@ -1792,7 +1807,7 @@ gwt() {
             fi
             if _gwt_git_probe show-ref --verify --quiet "refs/heads/$branch"; then
                 expected_head=$(_gwt_git_probe rev-parse --verify "refs/heads/$branch") || return 1
-                if [[ "$use_sparse" == true || "$share_agents" == true ]]; then
+                if [[ "$use_sparse" == true || "$share_files" == true ]]; then
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" --no-checkout "$worktree_path" "$branch" ) || return 1
                 else
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" "$worktree_path" "$branch" ) || return 1
@@ -1801,7 +1816,7 @@ gwt() {
                 local resolved_start_point
                 resolved_start_point=$(_gwt_resolve_start_point "$start_point") || return 1
                 expected_head=$(_gwt_git_probe rev-parse --verify "$resolved_start_point^{commit}") || return 1
-                if [[ "$use_sparse" == true || "$share_agents" == true ]]; then
+                if [[ "$use_sparse" == true || "$share_files" == true ]]; then
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" --no-checkout -b "$branch" "$worktree_path" "$resolved_start_point" ) || return 1
                 else
                     ( [[ "$finish_managed" == true ]] && umask 077; git worktree add "${finish_add_args[@]}" -b "$branch" "$worktree_path" "$resolved_start_point" ) || return 1
@@ -1809,19 +1824,45 @@ gwt() {
             fi
             created_worktree=true
 
-            if [[ "$share_agents" == true ]]; then
-                GWT_NEW_WORKTREE="$worktree_path" _gwt_storage agent-checkout --source "$repo_root" --target "$worktree_path" || {
+            if [[ "$share_files" == true ]]; then
+                local -a share_args
+                share_args=(checkout --source "$repo_root" --target "$worktree_path" --scope "$share_scope")
+                if [[ "$use_sparse" == true ]]; then
+                    local share_profile="${profile:-$(_gwt_sparse_default_profile "$repo_root")}"
+                    local share_profile_file
+                    share_profile_file=$(_gwt_sparse_profile_file "$repo_root" "$share_profile") || {
+                        _gwt_preserve_failed_worktree "$worktree_path"
+                        return 1
+                    }
+                    share_args+=(--profile-file "$share_profile_file")
+                fi
+                (
+                    if [[ "$finish_managed" == true && "$use_sparse" == false ]]; then
+                        umask 077
+                    fi
+                    GWT_NEW_WORKTREE="$worktree_path" _gwt_storage "${share_args[@]}"
+                ) || {
                     _gwt_preserve_failed_worktree "$worktree_path"
                     return 1
                 }
             fi
 
-            _gwt_sparse_apply_default_profile "$worktree_path" "$profile" || {
+            (
+                if [[ "$finish_managed" == true && "$use_sparse" == false ]]; then
+                    umask 077
+                fi
+                _gwt_sparse_apply_default_profile "$worktree_path" "$profile"
+            ) || {
                 [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                 return 1
             }
-            if [[ "$use_sparse" == true || "$share_agents" == true ]]; then
-                git -C "$worktree_path" checkout -f >/dev/null 2>&1 || git -C "$worktree_path" read-tree -mu HEAD || {
+            if [[ "$use_sparse" == true || "$share_files" == true ]]; then
+                (
+                    if [[ "$finish_managed" == true && "$use_sparse" == false ]]; then
+                        umask 077
+                    fi
+                    git -C "$worktree_path" checkout -f >/dev/null 2>&1 || git -C "$worktree_path" read-tree -mu HEAD
+                ) || {
                     [[ "$created_worktree" == true ]] && _gwt_preserve_failed_worktree "$worktree_path"
                     return 1
                 }

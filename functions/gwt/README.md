@@ -489,33 +489,57 @@ Repository-native bounded source capsules and Testbox clones retain their own
 contracts. Temporary test fixtures may retain tool-required locations. Use this
 directory for durable agent-created proof repositories, not every temporary file.
 
-## Agent skill checkout sharing
+## Tracked-file checkout sharing
 
-With `DOTFILES_GWT_AGENT_COW=1`, new worktrees try copy-on-write sharing for regular
-files under `.agents`, using the selected owning checkout as the source. Each cloned file
+New worktrees try copy-on-write sharing for tracked regular files, including
+`.agents`, using the selected source checkout as the donor. Each cloned file
 must match the requested commit's blob before Git refreshes its index entry.
 Git then completes checkout, including sparse membership, symlinks, and files
 that cannot be shared. Skills remain ordinary, independently editable files;
 changing either checkout cannot change the other.
 
+When the source and destination are on different volumes, GWT first looks for
+an existing registered worktree on the destination volume, preferring the
+requested commit. Its files receive the same byte validation. If none is
+available, creation falls back to native copying; a later checkout can share
+from that first worktree. No existing checkout is relocated or modified.
+
 This uses APFS cloning on macOS and `FICLONE` on supported Linux filesystems.
 Cross-filesystem, unsupported, missing, or modified source files fall back to
 native checkout. Checkout filters, ident expansion, working-tree encodings and
-CRLF conversion also use Git. Full checkouts with an executable `post-checkout`
-hook retain the original native creation path so hook arguments stay unchanged.
+CRLF conversion also use Git. Sparse selection uses native
+`git sparse-checkout check-rules` before cloning; older Git versions without
+that command retain native checkout. Full checkouts with an executable
+`post-checkout` hook or relative `core.hooksPath` retain the original native
+creation path so hook behavior stays unchanged.
 Existing worktrees are never converted or rewritten.
 
-Native creation remains the default during qualification. Sharing output reports cloned
+Set `DOTFILES_GWT_COW=0` for native creation, `agents` to share only `.agents`,
+or `all` (the default) to share every eligible tracked file. The older
+`DOTFILES_GWT_AGENT_COW=0|1` override is respected when the new setting is absent.
+Sharing output reports cloned
 file count and logical bytes; it does not measure exclusive physical savings.
 No additional persistent cache, symlinked skill directory, or immutable donor
 is required.
 
 Run `python3 tests/gwt-checkout-benchmark.py --source /path/to/repository` to
 compare native and shared creation of a bounded, isolated `.agents` fixture.
+Add `--scope all` for the full source tree, within the same 64 MiB fixture bound.
 The source revision is pinned before extraction. A local 356-file / 4.7 MB
 OpenClaw fixture shared every file and took 3.45 seconds versus 2.27 seconds
 native (three runs, median). This trades extra setup for shared storage; it is
-not a speed improvement. Broader checkout sharing needs separate qualification.
+not a speed improvement. A 378-file / 6.6 MB full dotfiles fixture likewise
+shared all eligible files, taking 2.73 seconds versus 1.93 seconds native.
+Sharing saves repeated data storage; it still creates each file and validates
+its bytes. Small checkouts can cost more setup time. Existing worktrees and
+their files are not rewritten, and `du` is not an exclusive-block savings meter.
+
+A local OpenClaw core-profile canary at
+`4b752bd16f1d551a61824397af622d0cb213cfa4` shared 63,717 regular files and
+743,393,704 logical bytes. Its index entries matched the native checkout;
+independent source/target edits and restores passed. Total creation took
+166.82 seconds versus 86.38 seconds native in those runs, including bootstrap
+work. These are storage/correctness receipts, not controlled speed benchmarks.
 
 ## Experimental whole-checkout APFS source sharing
 
