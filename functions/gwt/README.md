@@ -534,6 +534,13 @@ Sharing saves repeated data storage; it still creates each file and validates
 its bytes. Small checkouts can cost more setup time. Existing worktrees and
 their files are not rewritten, and `du` is not an exclusive-block savings meter.
 
+A local OpenClaw core-profile canary at
+`4b752bd16f1d551a61824397af622d0cb213cfa4` shared 63,717 regular files and
+743,393,704 logical bytes. Its index entries matched the native checkout;
+independent source/target edits and restores passed. Total creation took
+166.82 seconds versus 86.38 seconds native in those runs, including bootstrap
+work. These are storage/correctness receipts, not controlled speed benchmarks.
+
 ## Experimental whole-checkout APFS source sharing
 
 `gwt new <branch> <commit> --cow-from <immutable-seed>` first creates a normal
