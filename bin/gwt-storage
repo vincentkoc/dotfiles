@@ -383,6 +383,37 @@ def same_filesystem_donor(source, target):
     return source
 
 
+def checkout_directory_fallback(path, libc, expected_gid=None):
+    """Keep native creation when private staging would change inherited metadata."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        details = os.fstat(descriptor)
+        if details.st_mode & stat.S_ISGID:
+            return "destination-setgid"
+        if libc:
+            if expected_gid is not None and details.st_gid != expected_gid:
+                return "destination-group"
+            # ACL_TYPE_EXTENDED. macOS reports ENOENT for an open file without
+            # an ACL; any returned ACL (even empty) conservatively uses Git.
+            acl = libc.acl_get_fd_np(descriptor, 0x100)
+            if acl:
+                libc.acl_free(acl)
+                return "destination-acl"
+            if ctypes.get_errno() != errno.ENOENT:
+                return "destination-acl-unavailable"
+        else:
+            for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
+                try:
+                    os.getxattr(descriptor, attribute)
+                    return "destination-acl"
+                except OSError as error:
+                    if error.errno != errno.ENODATA:
+                        return "destination-acl-unavailable"
+        return None
+    finally:
+        os.close(descriptor)
+
+
 def checkout_files(args):
     """Seed a new checkout with verified, independently writable tracked files."""
     started = time.monotonic()
@@ -412,6 +443,15 @@ def checkout_files(args):
         report["donor_selection"] = "registered-worktree-on-target-filesystem"
     if source.stat().st_dev != target.stat().st_dev:
         finish("no-same-filesystem-donor")
+        return
+    libc = ctypes.CDLL(None, use_errno=True) if sys.platform == "darwin" else None
+    if libc:
+        libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        libc.acl_get_fd_np.restype = ctypes.c_void_p
+        libc.acl_free.argtypes = [ctypes.c_void_p]
+    fallback = checkout_directory_fallback(target, libc)
+    if fallback:
+        finish(fallback)
         return
     autocrlf = git(target, "config", "--get", "core.autocrlf", check=False)
     if autocrlf.returncode == 0 and autocrlf.stdout.strip().lower() not in (b"false", b"no", b"off", b"0", b"input"):
@@ -457,7 +497,6 @@ def checkout_files(args):
         name, key, setting = attrs[index:index + 3]
         attributes.setdefault(name, {})[key] = setting
     algorithm = value(target, "rev-parse", "--show-object-format")
-    libc = ctypes.CDLL(None, use_errno=True) if sys.platform == "darwin" else None
     if libc:
         libc.fclonefileat.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
         libc.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
@@ -469,7 +508,14 @@ def checkout_files(args):
     created_directories = set()
     creation_mask = os.umask(0)
     os.umask(creation_mask)
+    staging = tempfile.TemporaryDirectory(prefix=".gwt-checkout-", dir=target)
+    staged = Path(staging.name) / "file"
     try:
+        os.chmod(staging.name, 0o700)
+        fallback = checkout_directory_fallback(staging.name, libc)
+        if fallback:
+            finish(fallback)
+            return
         root_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             def open_parent(parts):
@@ -498,7 +544,6 @@ def checkout_files(args):
                     raise ValueError("invalid checkout path")
                 dst = target.joinpath(*parts)
                 source_fd = None
-                cloned = False
                 try:
                     # Anchor every source component; never follow a donor symlink.
                     parent_fd = open_parent(parts[:-1])
@@ -510,13 +555,12 @@ def checkout_files(args):
                         dst.parent.mkdir(parents=True, exist_ok=True)
                         created_directories.add(dst.parent)
                     if libc:
-                        # CLONE_NOOWNERCOPY; the new file inherits the target ACL.
-                        if libc.fclonefileat(source_fd, -2, os.fsencode(dst), 2):
+                        # CLONE_NOOWNERCOPY. Unverified donor bytes remain private.
+                        if libc.fclonefileat(source_fd, -2, os.fsencode(staged), 2):
                             raise OSError(ctypes.get_errno(), "clone unavailable")
-                        cloned = True
-                        os.chflags(dst, 0)
-                        os.chmod(dst, (0o777 if mode == b"100755" else 0o666) & ~creation_mask)
-                        with dst.open("r+b") as output:
+                        os.chflags(staged, 0)
+                        os.chmod(staged, (0o777 if mode == b"100755" else 0o666) & ~creation_mask)
+                        with staged.open("r+b") as output:
                             size = libc.flistxattr(output.fileno(), None, 0, 0)
                             if size < 0:
                                 raise OSError(ctypes.get_errno(), "cannot inspect clone attributes")
@@ -529,31 +573,34 @@ def checkout_files(args):
                                         raise OSError(ctypes.get_errno(), "cannot clear clone attributes")
                     else:
                         import fcntl
-                        output_fd = os.open(dst, os.O_RDWR | os.O_CREAT | os.O_EXCL,
+                        output_fd = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL,
                                             0o777 if mode == b"100755" else 0o666)
-                        cloned = True
                         try:
                             fcntl.ioctl(output_fd, 0x40049409, source_fd)  # FICLONE
                         finally:
                             os.close(output_fd)
-                    with dst.open("rb") as output:
+                    with staged.open("rb") as output:
                         size = os.fstat(output.fileno()).st_size
                         digest = hashlib.new(algorithm)
                         digest.update(b"blob " + str(size).encode() + b"\0")
                         while chunk := output.read(1024 * 1024):
                             digest.update(chunk)
                     if digest.hexdigest().encode() != oid:
-                        dst.unlink()
-                        cloned = False
                         report["skipped_files"] += 1
                         continue
+                    fallback = checkout_directory_fallback(dst.parent, libc, staged.stat().st_gid)
+                    if fallback:
+                        report["fallback"] = fallback
+                        report["skipped_files"] += 1
+                        continue
+                    # Link only this independent snapshot, never the donor.
+                    # Unlike rename, link cannot replace a concurrently created file.
+                    os.link(staged, dst, follow_symlinks=False)
                     shared.append(name)
                     report["cloned_files"] += 1
                     report["cloned_logical_bytes"] += size
                     report["checkout_sharing"] = "copy-on-write"
                 except OSError as error:
-                    if cloned:
-                        dst.unlink()
                     report["skipped_files"] += 1
                     if error.errno in unsupported:
                         report["fallback"] = "filesystem-does-not-support-cloning"
@@ -563,11 +610,13 @@ def checkout_files(args):
                 finally:
                     if source_fd is not None:
                         os.close(source_fd)
+                    staged.unlink(missing_ok=True)
         finally:
             os.close(root_fd)
     finally:
         for descriptor in parent_cache.values():
             os.close(descriptor)
+        staging.cleanup()
     if shared:
         # Option order matters: --refresh runs when Git encounters it.
         git(target, "update-index", "--ignore-missing", "--refresh")
